@@ -46,12 +46,10 @@ pub fn execute(args: InboxArgs) -> Result<()> {
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir() {
-                if let Some(name) = path.file_name() {
-                    if let Some(name_str) = name.to_str() {
-                        team_names.push(name_str.to_string());
-                    }
-                }
+            if path.is_dir()
+                && let Some(name_str) = path.file_name().and_then(|n| n.to_str())
+            {
+                team_names.push(name_str.to_string());
             }
         }
 
