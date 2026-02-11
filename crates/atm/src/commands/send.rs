@@ -1,7 +1,7 @@
 //! Send command implementation
 
 use anyhow::Result;
-use atm_core::config::{resolve_config, ConfigOverrides};
+use atm_core::config::{resolve_config, Config, ConfigOverrides};
 use atm_core::io::inbox::{inbox_append, WriteOutcome};
 use atm_core::schema::{InboxMessage, TeamConfig};
 use chrono::Utc;
@@ -46,6 +46,10 @@ pub struct SendArgs {
     /// Show what would be written without actually writing
     #[arg(long)]
     dry_run: bool,
+
+    /// Custom call-to-action text for offline recipients
+    #[arg(long)]
+    offline_action: Option<String>,
 }
 
 /// Execute the send command
@@ -87,11 +91,29 @@ pub fn execute(args: SendArgs) -> Result<()> {
     let message_text = get_message_text(&args)?;
 
     // Process file reference if provided
-    let final_message_text = if let Some(ref file_path) = args.file {
+    let mut final_message_text = if let Some(ref file_path) = args.file {
         process_file_reference(file_path, &message_text, &team_name, &current_dir, &home_dir)?
     } else {
         message_text
     };
+
+    // Check if recipient is offline and prepend action text
+    let recipient_offline = team_config
+        .members
+        .iter()
+        .find(|m| m.name == agent_name)
+        .map(|m| !m.is_active.unwrap_or(false))
+        .unwrap_or(true); // Not found = offline
+
+    if recipient_offline {
+        let action_text = resolve_offline_action(&args, &config);
+        if !action_text.is_empty() {
+            eprintln!(
+                "Warning: Agent '{agent_name}' appears offline. Message will be queued with call-to-action."
+            );
+            final_message_text = format!("[{action_text}] {final_message_text}");
+        }
+    }
 
     // Generate summary
     let summary = args.summary.unwrap_or_else(|| generate_summary(&final_message_text));
@@ -225,6 +247,21 @@ fn process_file_reference(
     }
 }
 
+/// Resolve offline action text from CLI flag, config, or default
+///
+/// Priority: CLI flag > config > default
+fn resolve_offline_action(args: &SendArgs, config: &Config) -> String {
+    if let Some(ref action) = args.offline_action {
+        return action.clone();
+    }
+
+    if let Some(ref action) = config.messaging.offline_action {
+        return action.clone();
+    }
+
+    "PENDING ACTION - execute when online".to_string()
+}
+
 /// Generate summary from message text (first ~100 chars)
 fn generate_summary(text: &str) -> String {
     const MAX_LEN: usize = 100;
@@ -265,5 +302,59 @@ mod tests {
     fn test_generate_summary_whitespace() {
         let text = "   Message with whitespace   ";
         assert_eq!(generate_summary(text), "Message with whitespace");
+    }
+
+    fn make_send_args(offline_action: Option<String>) -> SendArgs {
+        SendArgs {
+            agent: "test-agent".to_string(),
+            message: Some("test".to_string()),
+            team: None,
+            file: None,
+            stdin: false,
+            summary: None,
+            json: false,
+            dry_run: false,
+            offline_action,
+        }
+    }
+
+    #[test]
+    fn test_resolve_offline_action_default() {
+        let args = make_send_args(None);
+        let config = Config::default();
+        assert_eq!(
+            resolve_offline_action(&args, &config),
+            "PENDING ACTION - execute when online"
+        );
+    }
+
+    #[test]
+    fn test_resolve_offline_action_cli_flag() {
+        let args = make_send_args(Some("DO THIS LATER".to_string()));
+        let config = Config::default();
+        assert_eq!(resolve_offline_action(&args, &config), "DO THIS LATER");
+    }
+
+    #[test]
+    fn test_resolve_offline_action_config() {
+        let args = make_send_args(None);
+        let mut config = Config::default();
+        config.messaging.offline_action = Some("QUEUED".to_string());
+        assert_eq!(resolve_offline_action(&args, &config), "QUEUED");
+    }
+
+    #[test]
+    fn test_resolve_offline_action_cli_overrides_config() {
+        let args = make_send_args(Some("CLI ACTION".to_string()));
+        let mut config = Config::default();
+        config.messaging.offline_action = Some("CONFIG ACTION".to_string());
+        assert_eq!(resolve_offline_action(&args, &config), "CLI ACTION");
+    }
+
+    #[test]
+    fn test_resolve_offline_action_empty_string_opt_out() {
+        let args = make_send_args(Some(String::new()));
+        let config = Config::default();
+        assert_eq!(resolve_offline_action(&args, &config), "");
     }
 }

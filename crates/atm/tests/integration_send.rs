@@ -249,6 +249,9 @@ fn test_send_with_file_reference() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
 
+    // Create .git directory so file policy recognizes a repo root
+    fs::create_dir_all(temp_dir.path().join(".git")).unwrap();
+
     // Create a test file in the temp directory
     let test_file = temp_dir.path().join("test-file.txt");
     fs::write(&test_file, "File content").unwrap();
@@ -358,4 +361,254 @@ fn test_send_multiple_messages_append() {
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0]["text"], "First message");
     assert_eq!(messages[1]["text"], "Second message");
+}
+
+// ============================================================================
+// Offline Recipient Detection Tests
+// ============================================================================
+
+/// Create a test team with mixed online/offline agents
+fn setup_team_with_offline_agents(temp_dir: &TempDir, team_name: &str) -> PathBuf {
+    let team_dir = temp_dir.path().join(".claude/teams").join(team_name);
+    let inboxes_dir = team_dir.join("inboxes");
+
+    fs::create_dir_all(&inboxes_dir).unwrap();
+
+    let config = serde_json::json!({
+        "name": team_name,
+        "description": "Test team with offline agents",
+        "createdAt": 1739284800000i64,
+        "leadAgentId": format!("team-lead@{}", team_name),
+        "leadSessionId": "test-session-id",
+        "members": [
+            {
+                "agentId": format!("team-lead@{}", team_name),
+                "name": "team-lead",
+                "agentType": "general-purpose",
+                "model": "claude-haiku-4-5-20251001",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": [],
+                "isActive": true
+            },
+            {
+                "agentId": format!("online-agent@{}", team_name),
+                "name": "online-agent",
+                "agentType": "general-purpose",
+                "model": "claude-opus-4-6",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "%1",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": [],
+                "isActive": true
+            },
+            {
+                "agentId": format!("offline-agent@{}", team_name),
+                "name": "offline-agent",
+                "agentType": "general-purpose",
+                "model": "claude-sonnet-4-5-20250929",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "%2",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": [],
+                "isActive": false
+            },
+            {
+                "agentId": format!("no-status-agent@{}", team_name),
+                "name": "no-status-agent",
+                "agentType": "general-purpose",
+                "model": "claude-sonnet-4-5-20250929",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "%3",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": []
+            }
+        ]
+    });
+
+    let config_path = team_dir.join("config.json");
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    team_dir
+}
+
+#[test]
+fn test_offline_recipient_detection_auto_tag() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_team_with_offline_agents(&temp_dir, "test-team");
+
+    // Send to offline-agent (isActive: false)
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("send")
+        .arg("offline-agent")
+        .arg("Please review this")
+        .assert()
+        .success();
+
+    // Verify message was prepended with default action text
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/offline-agent.json");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(messages.len(), 1);
+    let text = messages[0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("[PENDING ACTION - execute when online]"),
+        "Expected default action prefix, got: {text}"
+    );
+    assert!(text.contains("Please review this"));
+}
+
+#[test]
+fn test_offline_recipient_custom_flag() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_team_with_offline_agents(&temp_dir, "test-team");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("send")
+        .arg("offline-agent")
+        .arg("--offline-action")
+        .arg("DO THIS LATER")
+        .arg("Review when ready")
+        .assert()
+        .success();
+
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/offline-agent.json");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+
+    let text = messages[0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("[DO THIS LATER]"),
+        "Expected custom action prefix, got: {text}"
+    );
+    assert!(text.contains("Review when ready"));
+}
+
+#[test]
+fn test_offline_recipient_config_override() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_team_with_offline_agents(&temp_dir, "test-team");
+
+    // Create .atm.toml config with messaging.offline_action
+    let config_dir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join(".atm.toml"),
+        "[core]\ndefault_team = \"test-team\"\nidentity = \"human\"\n\n[messaging]\noffline_action = \"QUEUED\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .current_dir(&config_dir)
+        .arg("send")
+        .arg("offline-agent")
+        .arg("Queued message")
+        .assert()
+        .success();
+
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/offline-agent.json");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+
+    let text = messages[0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("[QUEUED]"),
+        "Expected config action prefix, got: {text}"
+    );
+}
+
+#[test]
+fn test_offline_recipient_empty_string_opt_out() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_team_with_offline_agents(&temp_dir, "test-team");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("send")
+        .arg("offline-agent")
+        .arg("--offline-action")
+        .arg("")
+        .arg("No prefix please")
+        .assert()
+        .success();
+
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/offline-agent.json");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+
+    let text = messages[0]["text"].as_str().unwrap();
+    assert_eq!(text, "No prefix please", "Empty opt-out should skip prepend");
+}
+
+#[test]
+fn test_online_recipient_no_tag() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_team_with_offline_agents(&temp_dir, "test-team");
+
+    // Send to online-agent (isActive: true)
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("send")
+        .arg("online-agent")
+        .arg("Hello online agent")
+        .assert()
+        .success();
+
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/online-agent.json");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+
+    let text = messages[0]["text"].as_str().unwrap();
+    assert_eq!(
+        text, "Hello online agent",
+        "Online agent should NOT get action prefix"
+    );
+}
+
+#[test]
+fn test_no_status_agent_treated_as_offline() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_team_with_offline_agents(&temp_dir, "test-team");
+
+    // Send to no-status-agent (no isActive field)
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("send")
+        .arg("no-status-agent")
+        .arg("Check status")
+        .assert()
+        .success();
+
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/no-status-agent.json");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+
+    let text = messages[0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("[PENDING ACTION - execute when online]"),
+        "Agent with no isActive should be treated as offline, got: {text}"
+    );
 }

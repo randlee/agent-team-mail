@@ -124,6 +124,11 @@ fn merge_config(base: &mut Config, file: Config) {
     base.display.format = file.display.format;
     base.display.color = file.display.color;
     base.display.timestamps = file.display.timestamps;
+
+    // Merge messaging config
+    if file.messaging.offline_action.is_some() {
+        base.messaging.offline_action = file.messaging.offline_action;
+    }
 }
 
 /// Apply environment variable overrides
