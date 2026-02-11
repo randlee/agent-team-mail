@@ -192,6 +192,7 @@ Phase 6: Additional Plugins
 - Round-trip tests: parse → serialize → parse produces identical output
 - Schema evolution tests: unknown fields preserved, missing optionals handled
 - Tests cover all schemas documented in `docs/agent-team-api.md`
+- GitHub CI workflow that runs unit tests on PRs (and updates) targeting `develop` or `main`
 
 **Acceptance criteria**:
 - `cargo build` succeeds for workspace
@@ -199,6 +200,7 @@ Phase 6: Additional Plugins
 - Unknown fields round-trip without loss
 - `cargo clippy -- -D warnings` clean
 - `cargo test` 100% pass
+- CI triggers on PRs to `develop` and `main` and runs tests
 
 ### Sprint 1.2: Schema Version Detection
 
