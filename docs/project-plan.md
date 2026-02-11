@@ -69,7 +69,26 @@ Each sprint gets a **fresh scrum-master** with clean context:
 
 ### 0.5 Parallel Sprints
 
-When the dependency graph allows parallel sprints (e.g., 1.2, 1.3, 1.5 after 1.1), ARCH-ATM may run them sequentially with fresh scrum-masters, or the user may spawn multiple ARCH-ATM instances. Parallel execution is optional and user-directed.
+When the dependency graph allows parallel sprints (e.g., 1.2, 1.3, 1.5 after 1.1), a single scrum-master can manage multiple sprints concurrently:
+
+- Each parallel sprint gets its own worktree (branched from `develop`)
+- Parallel sprints MUST be non-intersecting — different files/modules, no shared modifications
+- The scrum-master spawns separate rust-dev and rust-qa background agents per sprint
+- Each sprint produces its own PR targeting `develop`
+
+**Merge sprint**: After all parallel sprints in a group complete and their PRs are merged, a small **integration sprint** follows to:
+- Verify all parallel branches integrate cleanly on `develop`
+- Run the full test suite across combined changes
+- Resolve any unexpected interactions between parallel work
+- This is a lightweight sprint — no new features, just validation and conflict resolution
+
+```
+Example: Phase 1 after Sprint 1.1
+
+  Sprint 1.2 (worktree A) ──► PR → develop ──┐
+  Sprint 1.3 (worktree B) ──► PR → develop ──┼──► Integration sprint
+  Sprint 1.5 (worktree C) ──► PR → develop ──┘    (verify + resolve)
+```
 
 ---
 
