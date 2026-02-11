@@ -365,7 +365,9 @@ atm send <agent> --stdin             # message from stdin
 - `--file <path>` is always treated as a reference (never embed file content in inbox JSON).
 - The path must be inside the current repo root by default.
 - Cross-repo file passing is not allowed unless explicitly permitted by repo settings.
-- If a repo-local `.claude/settings.json` exists, honor its file access rules.
+- File access rules must be resolved from Claude Code settings with the same precedence used by Claude Code:
+  managed policy → CLI args → `.claude/settings.local.json` → `.claude/settings.json` → `~/.claude/settings.json`.
+- If a repo-local `.claude/settings.local.json` or `.claude/settings.json` exists, honor its file access rules.
 - If the destination repo does not permit the source path, `atm` must copy the file to a local share folder and update the message to reference the new path, with an explicit note that the path was rewritten and is a copy.
 
 **Example message (path rewritten to share copy)**:

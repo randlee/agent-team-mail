@@ -186,10 +186,12 @@ Phase 6: Additional Plugins
 **Deliverables**:
 - Cargo workspace with `atm-core` and `atm` crates (atm-daemon placeholder)
 - Schema types: `TeamConfig`, `AgentMember`, `InboxMessage`, `TaskItem`
+- Schema types for Claude Code settings (`SettingsJson`, `Permissions`, `Env`) based on documented `settings.json`
 - `#[serde(flatten)]` for unknown field preservation
 - `message_id: Option<String>` on `InboxMessage` for dedup
 - Round-trip tests: parse → serialize → parse produces identical output
 - Schema evolution tests: unknown fields preserved, missing optionals handled
+- Tests cover all schemas documented in `docs/agent-team-api.md`
 
 **Acceptance criteria**:
 - `cargo build` succeeds for workspace
@@ -242,6 +244,11 @@ Phase 6: Additional Plugins
 - No data loss in any scenario
 - `cargo clippy` clean, `cargo test` 100% pass
 
+**Windows fallback guidance (for devs)**:
+- No `RENAME_SWAP` equivalent; use temp-file write + fsync + atomic replace on same volume.
+- Keep conflict detection and merge logic identical to macOS/Linux.
+- Use a platform-appropriate file lock implementation on Windows (do not rely on `flock`).
+
 ### Sprint 1.4: Outbound Spool + Guaranteed Delivery
 
 **Branch**: `feature/p1-s4-spool`
@@ -276,14 +283,16 @@ Phase 6: Additional Plugins
 - Config resolution: flags → env → repo `.atm.toml` → global `~/.config/atm/config.toml` → defaults
 - Config file parsing with serde + toml
 - Environment variable support (`ATM_TEAM`, `ATM_IDENTITY`, `ATM_CONFIG`, `ATM_NO_COLOR`)
-- Repo-local `.claude/settings.json` discovery for file access policy (if present)
+- Claude Code settings discovery for file access policy:
+  managed policy → CLI args → `.claude/settings.local.json` → `.claude/settings.json` → `~/.claude/settings.json`
 
 **Acceptance criteria**:
 - All git providers detected correctly from URLs
 - Config resolution follows priority order
 - Missing config files handled gracefully (use defaults)
 - Tests cover all providers, config priority, missing files
-- `.claude/settings.json` handled gracefully when absent or malformed
+- `.claude/settings.local.json` and `.claude/settings.json` handled gracefully when absent or malformed
+- Settings precedence is enforced with tests for each layer
 
 ### Phase 1 Dependency Graph
 
@@ -337,6 +346,12 @@ Sprint 1.1 (Workspace + Schema)
 - All flags functional
 - File reference policy enforced (including copy + rewrite notice)
 - Integration tests with temp fixtures
+
+**Implementation checklist (file references + settings)**:
+- Resolve settings precedence in this order: managed → CLI args → `.claude/settings.local.json` → `.claude/settings.json` → `~/.claude/settings.json`
+- Enforce repo-root path constraint by default
+- If path not permitted for destination repo, copy to `~/.config/atm/share/<team>/` and rewrite the message with an explicit copy notice
+- Never embed file contents in inbox JSON
 
 ### Sprint 2.2: Read + Inbox Commands
 
@@ -453,6 +468,7 @@ Phase 1 Complete
 - Malformed JSON recovery tests
 - Large inbox performance tests (10K+ messages)
 - Missing file / empty file / permission denied scenarios
+- Settings schema parse/round-trip tests for `.claude/settings.json`
 
 **Acceptance criteria**:
 - No data loss in any concurrent scenario
