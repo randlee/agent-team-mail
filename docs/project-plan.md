@@ -716,6 +716,20 @@ Phase 1 Complete
 - Offline recipients are detected and messages auto-tagged on send
 - File policy denies + copies when destination repo is unknown
 
+**Status**: ✅ Complete
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 1 (passed first QA review)
+**Implementation**:
+- New test file: `crates/atm/tests/integration_conflict_tests.rs` (19 conflict/edge case tests)
+- File policy repo root fix: walks up to `.git` from subdirectories
+- Offline recipient detection: auto-tags with configurable action text (CLI flag > config > default)
+- Config schema extension: `MessagingConfig` with `offline_action` field
+- Label fixes: "Online"/"Offline" in members and status commands
+- 223 tests passing (188 baseline + 35 new), 0 failures
+- Clippy clean, 0 warnings
+- Cross-platform compliant (ATM_HOME pattern, no violations)
+- Parallel sprint compliance: no modifications to Sprint 3.3/3.4 files
+
 ### Sprint 3.3: Documentation & Polish
 
 **Branch**: `feature/p3-s3-docs-polish`

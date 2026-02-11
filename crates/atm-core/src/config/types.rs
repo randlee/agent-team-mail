@@ -11,6 +11,9 @@ pub struct Config {
     /// Display configuration
     #[serde(default)]
     pub display: DisplayConfig,
+    /// Messaging configuration
+    #[serde(default)]
+    pub messaging: MessagingConfig,
     /// Retention configuration
     #[serde(default)]
     pub retention: RetentionConfig,
@@ -63,6 +66,15 @@ pub enum OutputFormat {
     Text,
     /// JSON output
     Json,
+}
+
+/// Messaging configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessagingConfig {
+    /// Custom call-to-action text for offline recipients.
+    /// If set to empty string, disables prepend entirely.
+    #[serde(default)]
+    pub offline_action: Option<String>,
 }
 
 /// Timestamp display format

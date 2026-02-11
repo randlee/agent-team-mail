@@ -94,7 +94,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         let member_count = team_config.members.len();
         println!("Members ({member_count}):");
         for member in &team_config.members {
-            let active_str = if member.is_active.unwrap_or(false) { "Active" } else { "Idle  " };
+            let active_str = if member.is_active.unwrap_or(false) { "Online " } else { "Offline" };
             let unread = inbox_counts.get(&member.name).copied().unwrap_or(0);
             let name = &member.name;
             let agent_type = &member.agent_type;
