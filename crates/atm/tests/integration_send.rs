@@ -5,6 +5,14 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+/// Helper to set home directory env vars for cross-platform test compatibility.
+/// On macOS/Linux, `dirs::home_dir()` reads `HOME`.
+/// On Windows, it reads `USERPROFILE`.
+fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
+    cmd.env("HOME", temp_dir.path())
+        .env("USERPROFILE", temp_dir.path());
+}
+
 /// Create a test team structure
 fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
     let team_dir = temp_dir.path().join(".claude/teams").join(team_name);
@@ -60,8 +68,8 @@ fn test_send_basic_message() {
     let _team_dir = setup_test_team(&temp_dir, "test-team");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "test-team")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .arg("send")
         .arg("test-agent")
         .arg("Hello, test agent!")
@@ -93,8 +101,8 @@ fn test_send_cross_team_addressing() {
     let _team_dir2 = setup_test_team(&temp_dir, "team-b");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "team-a")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "team-a")
         .arg("send")
         .arg("test-agent@team-b")
         .arg("Cross-team message")
@@ -122,8 +130,8 @@ fn test_send_with_team_flag() {
     let _team_dir = setup_test_team(&temp_dir, "override-team");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "default-team")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "default-team")
         .arg("send")
         .arg("--team")
         .arg("override-team")
@@ -146,8 +154,8 @@ fn test_send_with_summary() {
     let _team_dir = setup_test_team(&temp_dir, "test-team");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "test-team")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .arg("send")
         .arg("test-agent")
         .arg("--summary")
@@ -173,8 +181,8 @@ fn test_send_json_output() {
     let _team_dir = setup_test_team(&temp_dir, "test-team");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "test-team")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .arg("send")
         .arg("test-agent")
         .arg("--json")
@@ -193,8 +201,8 @@ fn test_send_dry_run() {
     let _team_dir = setup_test_team(&temp_dir, "test-team");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "test-team")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .arg("send")
         .arg("test-agent")
         .arg("--dry-run")
@@ -216,8 +224,8 @@ fn test_send_with_stdin() {
     let _team_dir = setup_test_team(&temp_dir, "test-team");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "test-team")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .arg("send")
         .arg("test-agent")
         .arg("--stdin")
@@ -246,8 +254,8 @@ fn test_send_with_file_reference() {
     fs::write(&test_file, "File content").unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "test-team")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .current_dir(temp_dir.path())
         .arg("send")
         .arg("test-agent")
@@ -275,8 +283,8 @@ fn test_send_agent_not_found() {
     let _team_dir = setup_test_team(&temp_dir, "test-team");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "test-team")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .arg("send")
         .arg("nonexistent-agent")
         .arg("Test message")
@@ -289,8 +297,8 @@ fn test_send_team_not_found() {
     let temp_dir = TempDir::new().unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "nonexistent-team")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "nonexistent-team")
         .arg("send")
         .arg("test-agent")
         .arg("Test message")
@@ -304,8 +312,8 @@ fn test_send_file_not_found() {
     let _team_dir = setup_test_team(&temp_dir, "test-team");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "test-team")
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .arg("send")
         .arg("test-agent")
         .arg("--file")
@@ -321,8 +329,8 @@ fn test_send_multiple_messages_append() {
 
     // Send first message
     let mut cmd1 = cargo::cargo_bin_cmd!("atm");
-    cmd1.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "test-team")
+    set_home_env(&mut cmd1, &temp_dir);
+    cmd1.env("ATM_TEAM", "test-team")
         .arg("send")
         .arg("test-agent")
         .arg("First message")
@@ -331,8 +339,8 @@ fn test_send_multiple_messages_append() {
 
     // Send second message
     let mut cmd2 = cargo::cargo_bin_cmd!("atm");
-    cmd2.env("HOME", temp_dir.path())
-        .env("ATM_TEAM", "test-team")
+    set_home_env(&mut cmd2, &temp_dir);
+    cmd2.env("ATM_TEAM", "test-team")
         .arg("send")
         .arg("test-agent")
         .arg("Second message")
