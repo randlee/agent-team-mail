@@ -26,44 +26,41 @@
 
 ## Project Overview
 
-**agent-team-mail** is a CLI for interfacing with Claude agents via email with plugin-based expansion:
-- Routes email requests to appropriate Claude agents
-- Supports multiple agent types for specialized task handling
-- Extensible plugin architecture for adding new agent integrations
-- Multi-agent coordination for complex workflows
-- Email-driven development and management interface
+**agent-team-mail** (`atm`) is a Rust CLI and daemon for mail-like messaging with Claude agent teams:
+- Thin CLI over `~/.claude/teams/` file-based API (send, read, broadcast, inbox)
+- Three-crate workspace: `atm-core` (library), `atm` (CLI), `atm-daemon` (plugin host)
+- Atomic file I/O with conflict detection and guaranteed delivery
+- Trait-based plugin system in daemon for extensibility (Issues, CI Monitor, Bridge, Chat, Beads, MCP)
+- Provider-agnostic (GitHub, Azure DevOps, GitLab, Bitbucket)
 
-**Goal**: Build a flexible, extensible agent-mail CLI system with plugin-based expansion.
+**Goal**: Build a well-tested Rust CLI for agent team messaging, with a plugin-ready daemon.
 
 ---
 
-## Implementation Plan
+## Project Plan
 
-**Current Plan**: [`pm/2026-02-08-implementation-plan.md`](./pm/2026-02-08-implementation-plan.md)
+**Current Plan**: [`docs/project-plan.md`](./docs/project-plan.md)
 
-- 6 phases, 26 sprints
-- Aggressive parallelization with worktree isolation
-- CI/CD integration (Python tests in Phase 1, Go tests in Phase 4)
-- Target: MVP capable of building post-MVP features
+- 5 phases, 18 sprints (Phase 6 open-ended for additional plugins)
+- Parallel sprint tracks identified per phase
+- Agent team execution: Scrum Master → Dev(s) + QA(s), Opus Architect on escalation
+- All work on dedicated worktrees via `sc-git-worktree`
 
-**Current Status**: Phase 1 in progress - 3 of 26 sprints complete
-- ✅ Sprint 1.1: Core Schema Validation Script (PR #4 merged)
-- ✅ Sprint 1.2a: Example Work Bead (PR #8 pending review)
-- ✅ Sprint 1.2b: Example Merge Bead (PR #9 pending review)
-- **Next**: Sprint 1.3 - Integration & Documentation
+**Current Status**: Pre-development — requirements and plan under review
 
 ---
 
 ## Key Documentation
 
-**For reference only - read when information is needed:**
+**Primary references — read as needed:**
 
-- [`docs/README.md`](./docs/README.md) - System overview and quick reference
-- [`docs/schema.md`](./docs/schema.md) - Extended bead schema with validation rules
-- [`docs/numbering.md`](./docs/numbering.md) - Phase/sprint numbering scheme
-- [`docs/architecture.md`](./docs/architecture.md) - System architecture and data flow
-- [`docs/corner-cases.md`](./docs/corner-cases.md) - Failure scenarios and mitigations
-- [`docs/DESIGN-SUMMARY.md`](./docs/DESIGN-SUMMARY.md) - High-level implementation roadmap
+- [`docs/requirements.md`](./docs/requirements.md) - System requirements, architecture, plugin design
+- [`docs/project-plan.md`](./docs/project-plan.md) - Phased sprint plan with dependency graphs
+- [`docs/agent-team-api.md`](./docs/agent-team-api.md) - Claude agent team API reference (schema baseline: Claude Code 2.1.39)
+
+**Rust development reference — read only when implementation decisions are needed:**
+
+- [`.claude/skills/rust-development/guidelines.txt`](./.claude/skills/rust-development/guidelines.txt) - Pragmatic Rust Guidelines (Microsoft)
 
 ---
 
@@ -104,8 +101,8 @@ Every sprint follows this pattern:
 ---
 
 ## Initialization Process
-- Read Implementation Plan
-- Quick verification plan is up to date (i.e. commits/worktrees exist for next step, plan is not up to date)
+- Read project plan (`docs/project-plan.md`)
+- Check current status (branches, PRs, worktrees)
 - Output concise project summary and status to user
-- Output a detailed plan for the next sprint using background parallel agents on dedicated sc-git-worktree(s)
-- Be prepared to begin the next sprint upon the users approval
+- Identify the next sprint(s) ready to execute
+- Be prepared to begin the next sprint upon user approval
