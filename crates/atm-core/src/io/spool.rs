@@ -21,7 +21,7 @@
 //! 5. On failure: retry_count incremented
 //! 6. After max_retries: message moved to failed/
 
-use crate::io::{error::InboxError, inbox::inbox_append};
+use crate::io::{error::InboxError, inbox::{inbox_append, WriteOutcome}};
 use crate::schema::InboxMessage;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -225,7 +225,7 @@ fn process_spooled_message(
         .join(format!("{}.json", spooled.target_agent));
 
     // Attempt delivery (including directory creation and inbox append)
-    let delivery_result = (|| -> Result<(), InboxError> {
+    let delivery_result = (|| -> Result<WriteOutcome, InboxError> {
         // Ensure inbox directory exists
         if let Some(parent) = inbox_path.parent() {
             fs::create_dir_all(parent).map_err(|e| InboxError::Io {
@@ -234,60 +234,66 @@ fn process_spooled_message(
             })?;
         }
 
-        inbox_append(&inbox_path, &spooled.message, &spooled.target_team, &spooled.target_agent)?;
-        Ok(())
+        inbox_append(&inbox_path, &spooled.message, &spooled.target_team, &spooled.target_agent)
     })();
 
     match delivery_result {
-        Ok(()) => {
-            // Success - message delivered
-            Ok(true)
+        Ok(WriteOutcome::Success | WriteOutcome::ConflictResolved { .. }) => {
+            // Message delivered successfully
+            return Ok(true);
+        }
+        Ok(WriteOutcome::Queued { spool_path: new_spool_path }) => {
+            // Lock contention - inbox_append re-spooled the message.
+            // Delete the redundant spool file since we keep the original.
+            let _ = fs::remove_file(&new_spool_path);
         }
         Err(_) => {
-            // Delivery failed - increment retry count
-            spooled.retry_count += 1;
-            spooled.last_attempt = chrono::Utc::now().to_rfc3339();
-
-            if spooled.retry_count >= spooled.max_retries {
-                // Move to failed directory
-                let failed_path = failed_dir.join(
-                    spool_path
-                        .file_name()
-                        .ok_or_else(|| InboxError::SpoolError {
-                            message: format!("Invalid spool path: {spool_path:?}"),
-                        })?,
-                );
-
-                let failed_content =
-                    serde_json::to_vec_pretty(&spooled).map_err(|e| InboxError::Json {
-                        path: failed_path.clone(),
-                        source: e,
-                    })?;
-
-                fs::write(&failed_path, failed_content).map_err(|e| InboxError::Io {
-                    path: failed_path.clone(),
-                    source: e,
-                })?;
-
-                // Delete from pending
-                let _ = fs::remove_file(spool_path);
-            } else {
-                // Write back with updated retry count
-                let updated_content =
-                    serde_json::to_vec_pretty(&spooled).map_err(|e| InboxError::Json {
-                        path: spool_path.to_path_buf(),
-                        source: e,
-                    })?;
-
-                fs::write(spool_path, updated_content).map_err(|e| InboxError::Io {
-                    path: spool_path.to_path_buf(),
-                    source: e,
-                })?;
-            }
-
-            Ok(false)
+            // Delivery error - fall through to retry logic
         }
     }
+
+    // Delivery failed or queued - increment retry count
+    spooled.retry_count += 1;
+    spooled.last_attempt = chrono::Utc::now().to_rfc3339();
+
+    if spooled.retry_count >= spooled.max_retries {
+        // Move to failed directory
+        let failed_path = failed_dir.join(
+            spool_path
+                .file_name()
+                .ok_or_else(|| InboxError::SpoolError {
+                    message: format!("Invalid spool path: {spool_path:?}"),
+                })?,
+        );
+
+        let failed_content =
+            serde_json::to_vec_pretty(&spooled).map_err(|e| InboxError::Json {
+                path: failed_path.clone(),
+                source: e,
+            })?;
+
+        fs::write(&failed_path, failed_content).map_err(|e| InboxError::Io {
+            path: failed_path.clone(),
+            source: e,
+        })?;
+
+        // Delete from pending
+        let _ = fs::remove_file(spool_path);
+    } else {
+        // Write back with updated retry count
+        let updated_content =
+            serde_json::to_vec_pretty(&spooled).map_err(|e| InboxError::Json {
+                path: spool_path.to_path_buf(),
+                source: e,
+            })?;
+
+        fs::write(spool_path, updated_content).map_err(|e| InboxError::Io {
+            path: spool_path.to_path_buf(),
+            source: e,
+        })?;
+    }
+
+    Ok(false)
 }
 
 /// Get spool directory path (pending/ or failed/)
@@ -514,6 +520,54 @@ mod tests {
         let _ = spool_drain_with_base(&inbox_base, Some(temp_dir.path())).unwrap();
         let failed_dir = get_spool_dir_with_base("failed", Some(temp_dir.path())).unwrap();
         assert!(failed_dir.exists());
+    }
+
+    #[test]
+    fn test_spool_drain_keeps_pending_on_queued_outcome() {
+        use crate::io::lock::acquire_lock;
+
+        let temp_dir = TempDir::new().unwrap();
+        let inbox_base = temp_dir.path().join("teams");
+        fs::create_dir_all(&inbox_base).unwrap();
+
+        // Create a spooled message
+        let message = create_test_message("team-lead", "Test message", Some("msg-001".to_string()));
+        let spool_path =
+            spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path()))
+                .unwrap();
+        assert!(spool_path.exists());
+
+        // Verify initial retry_count is 0
+        let content = fs::read_to_string(&spool_path).unwrap();
+        let initial: SpooledMessage = serde_json::from_str(&content).unwrap();
+        assert_eq!(initial.retry_count, 0);
+
+        // Create inbox directory structure and a valid inbox file
+        let inbox_path = inbox_base
+            .join("test-team")
+            .join("inboxes")
+            .join("test-agent.json");
+        fs::create_dir_all(inbox_path.parent().unwrap()).unwrap();
+        fs::write(&inbox_path, "[]").unwrap();
+
+        // Hold the lock on inbox to force inbox_append to timeout → return Queued
+        let lock_path = inbox_path.with_extension("lock");
+        let _held_lock = acquire_lock(&lock_path, 0).unwrap();
+
+        // Drain spool - should fail to deliver due to held lock
+        let status = spool_drain_with_base(&inbox_base, Some(temp_dir.path())).unwrap();
+        assert_eq!(status.delivered, 0, "Should not deliver when lock is held");
+        assert_eq!(status.pending, 1, "Spool file should remain in pending");
+
+        // Verify spool file still exists with incremented retry_count
+        assert!(spool_path.exists(), "Spool file should not be deleted");
+        let content = fs::read_to_string(&spool_path).unwrap();
+        let updated: SpooledMessage = serde_json::from_str(&content).unwrap();
+        assert_eq!(updated.retry_count, 1, "retry_count should be incremented");
+        assert_ne!(
+            updated.last_attempt, initial.last_attempt,
+            "last_attempt should be updated"
+        );
     }
 
     #[test]
