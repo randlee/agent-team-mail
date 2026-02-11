@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod broadcast;
 mod error;
 mod send;
 
@@ -23,6 +24,9 @@ pub struct Cli {
 enum Commands {
     /// Send a message to a specific agent
     Send(send::SendArgs),
+
+    /// Broadcast a message to all agents in a team
+    Broadcast(broadcast::BroadcastArgs),
 }
 
 impl Cli {
@@ -30,6 +34,7 @@ impl Cli {
     pub fn execute(self) -> Result<()> {
         match self.command {
             Commands::Send(args) => send::execute(args),
+            Commands::Broadcast(args) => broadcast::execute(args),
         }
     }
 }
