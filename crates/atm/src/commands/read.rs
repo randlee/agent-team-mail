@@ -9,7 +9,10 @@ use clap::Args;
 use crate::util::addressing::parse_address;
 use crate::util::settings::get_home_dir;
 
-/// Read messages from an agent's inbox
+/// Read messages from an inbox
+///
+/// By default, shows unread messages from your own inbox and marks them as read.
+/// Use --no-mark to read without marking, or --all to include already-read messages.
 #[derive(Args, Debug)]
 pub struct ReadArgs {
     /// Target agent (name or name@team), omit to read own inbox
