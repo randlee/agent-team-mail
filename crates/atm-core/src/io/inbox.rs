@@ -81,14 +81,13 @@ pub fn inbox_append(inbox_path: &Path, message: &InboxMessage) -> Result<WriteOu
     };
 
     // Step 3: Append message (with deduplication)
-    if let Some(ref msg_id) = message.message_id {
-        if messages
+    if let Some(ref msg_id) = message.message_id
+        && messages
             .iter()
             .any(|m| m.message_id.as_ref() == Some(msg_id))
-        {
-            // Duplicate message - skip insertion
-            return Ok(WriteOutcome::Success);
-        }
+    {
+        // Duplicate message - skip insertion
+        return Ok(WriteOutcome::Success);
     }
     messages.push(message.clone());
 
