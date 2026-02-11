@@ -668,6 +668,15 @@ Phase 1 Complete
   - If destination repo is unknown, fall back to **deny + copy with notice** (safest behavior)
   - Add test for subdirectory file reference validation
   - Add test for unknown-destination fallback (deny + copy)
+- **[NEW] Offline recipient detection on `atm send`** (`crates/atm/src/commands/send.rs`):
+  - Before sending, check `config.json` for recipient: if member not found or `isActive == false`, recipient is offline
+  - Warn sender: "Agent X appears offline. Message will be queued."
+  - Auto-tag message with `[PENDING ACTION - queued while offline at {timestamp}]` prefix
+  - Still deliver the message (write to inbox file) — warning is informational, not a hard block
+  - Add test for offline detection and auto-tagging
+- **[NEW] Fix `members`/`status` active label** (`crates/atm/src/commands/members.rs`, `status.rs`):
+  - Rename display from "Active"/"Idle" and "Yes"/"No" to "Online"/"Offline"
+  - `isActive: false` means shut down, not idle — current labels are misleading
 
 **Acceptance criteria**:
 - No data loss in any concurrent scenario
@@ -675,6 +684,7 @@ Phase 1 Complete
 - Performance acceptable for large inboxes
 - All edge cases handled gracefully
 - File policy correctly resolves from subdirectories
+- Offline recipients are detected and messages auto-tagged on send
 - File policy denies + copies when destination repo is unknown
 
 ### Sprint 3.3: Documentation & Polish
