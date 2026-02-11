@@ -147,14 +147,17 @@ fn count_tasks(tasks_dir: &std::path::Path) -> Result<(usize, usize)> {
     if let Ok(entries) = fs::read_dir(tasks_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    // Simple heuristic: check if file contains "completed": true
-                    if content.contains(r#""completed":true"#) || content.contains(r#""completed": true"#) {
-                        completed += 1;
-                    } else {
-                        pending += 1;
-                    }
+            if path.is_file()
+                && path.extension().and_then(|s| s.to_str()) == Some("json")
+                && let Ok(content) = fs::read_to_string(&path)
+            {
+                // Simple heuristic: check if file contains "completed": true
+                if content.contains(r#""completed":true"#)
+                    || content.contains(r#""completed": true"#)
+                {
+                    completed += 1;
+                } else {
+                    pending += 1;
                 }
             }
         }
