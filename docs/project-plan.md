@@ -657,6 +657,22 @@ Phase 1 Complete
 - All workflows pass end-to-end
 - Tests run in isolation (temp directories, no side effects)
 
+**Status**: ✅ Complete
+**PR**: [#16](https://github.com/randlee/agent-team-mail/pull/16)
+**Commit**: `f2b2005`
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 1 (passed first QA review)
+**Implementation**:
+- New test file: `crates/atm/tests/integration_e2e_workflows.rs` (20 E2E workflow tests)
+- Send → Read → Mark-as-read → Verify workflows (7 tests)
+- Broadcast → Read all inboxes workflows (4 tests)
+- Config resolution integration tests (5 tests)
+- Complex multi-step workflows (4 tests: conversation, team discussion, cross-team relay, inbox summary)
+- 188 tests passing (168 baseline + 20 new), 0 failures
+- Clippy clean, 0 warnings
+- Cross-platform compliant (ATM_HOME pattern, no HOME/USERPROFILE)
+- All tests run in isolation with temp directories
+
 ### Sprint 3.2: Conflict & Edge Case Testing
 
 **Branch**: `feature/p3-s2-conflict-tests`
