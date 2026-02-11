@@ -149,14 +149,20 @@ TeamDelete:
 ```
 
 **Removes**:
-- `~/.claude/teams/{team_name}/` (entire directory)
-- `~/.claude/tasks/{team_name}/` (entire directory)
-- All associated inboxes and state
+- `~/.claude/teams/{team_name}/` (entire directory tree)
+- `~/.claude/tasks/{team_name}/` (entire directory tree)
+- All associated inboxes, agent state, message history, and task records
+
+**Destructive behavior**: `TeamDelete` is a full teardown — ALL team data is permanently deleted. This includes inbox files, task history, and team configuration. There is no partial cleanup or archive option. Any data not committed or copied elsewhere is lost.
 
 **Constraints**:
 - Team must exist
-- All agents should be shut down first (warning if not)
+- Will fail if active members still running — shut down all agents first
 - Cannot be undone
+
+**When to use vs. agent shutdown**:
+- To shut down a **single agent** without destroying the team, use `SendMessage` with `type: "shutdown_request"`. The team, task list, inboxes, and remaining agents are preserved.
+- Use `TeamDelete` only when the **entire team** is no longer needed and all data has been preserved elsewhere.
 
 ---
 
@@ -1070,20 +1076,34 @@ SendMessage:
 
 ### 5. Graceful Shutdown
 
-Always shut down agents properly:
+Shut down individual agents vs. entire teams:
 
 ```bash
-# ✅ GOOD - Graceful shutdown
+# ✅ Shut down ONE agent (team stays alive)
 SendMessage:
   type: "shutdown_request"
-  recipient: "agent-name"
-  content: "Task complete, preparing to shut down"
-# Wait for response
-# Then TeamDelete
+  recipient: "sprint-1-dev"
+  content: "Sprint complete, shutting you down"
+# Wait for shutdown_response
+# Team, tasks, inboxes all preserved — spawn new agents as needed
 
-# ❌ AVOID - Force terminating
-TeamDelete  # Without shutting down agents first
+# ✅ Shut down ENTIRE team (all data removed)
+# First: shutdown all remaining agents
+SendMessage:
+  type: "shutdown_request"
+  recipient: "agent-1"
+SendMessage:
+  type: "shutdown_request"
+  recipient: "agent-2"
+# Wait for all shutdown_responses
+# Then: destroy team (removes ALL files — config, tasks, inboxes)
+TeamDelete
+
+# ❌ AVOID - TeamDelete with active agents
+TeamDelete  # Fails if agents still running
 ```
+
+**Important**: `TeamDelete` permanently removes all team data. Only use it when the team is fully done and all valuable data (task history, messages) has been preserved elsewhere.
 
 ### 6. State Tracking
 

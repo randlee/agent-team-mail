@@ -8,7 +8,7 @@
 
 ## 0. Team Lead Execution Loop (ARCH-ATM)
 
-The project is driven by the main conversation agent acting as team lead (**ARCH-ATM**). ARCH-ATM creates a team named `atm-sprint`, spawns scrum-master teammates for sprints, and orchestrates the full lifecycle. ARCH-ATM auto-advances across phase boundaries as long as dependencies are met and CI passes.
+The project is driven by the main conversation agent acting as team lead (**ARCH-ATM**). ARCH-ATM creates a team named `atm-sprint` at the start of each phase, spawns scrum-master teammates per sprint, and orchestrates the full lifecycle. The team persists across sprints within a phase — only individual scrum-masters are shut down between sprints. `TeamDelete` is called only at phase end (after user review).
 
 ### 0.1 Sprint Loop
 
@@ -25,8 +25,8 @@ The project is driven by the main conversation agent acting as team lead (**ARCH
 │    5. ARCH-ATM verifies:                            │
 │       - PR created and CI passes                    │
 │       - docs/project-plan.md updated                │
-│    6. If CI passes → shutdown scrum-master           │
-│       → advance to next sprint                      │
+│    6. If CI passes → shutdown scrum-master            │
+│       (team stays alive) → advance to next sprint   │
 │    7. If CI fails → scrum-master addresses failures  │
 │       on the same worktree (do not restart)         │
 │    8. If unresolvable → escalate to user, stop      │
@@ -52,6 +52,8 @@ Each sprint gets a **fresh scrum-master** with clean context:
 | Unresolvable issue | Scrum-master escalates to architect → user; ARCH-ATM stops |
 
 **Why restart between sprints**: Fresh context prevents prompt bloat and cross-sprint confusion. Each scrum-master sees only its sprint's requirements, not the accumulated history of prior sprints.
+
+**Team lifecycle**: The `atm-sprint` team is created once per phase and persists across all sprints in that phase. Individual scrum-masters are shut down via `shutdown_request` (not `TeamDelete`), preserving the team's task list and inbox history. `TeamDelete` is called only at phase end after user review.
 
 ### 0.3 PR and Merge Policy
 
