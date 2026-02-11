@@ -28,7 +28,7 @@
 //!     unknown_fields: HashMap::new(),
 //! };
 //!
-//! match inbox_append(inbox_path, &message).unwrap() {
+//! match inbox_append(inbox_path, &message, "my-team", "agent").unwrap() {
 //!     WriteOutcome::Success => println!("Message delivered"),
 //!     WriteOutcome::ConflictResolved { merged_messages } => {
 //!         println!("Conflict resolved, merged {} messages", merged_messages)
@@ -44,7 +44,9 @@ pub mod error;
 pub mod hash;
 pub mod inbox;
 pub mod lock;
+pub mod spool;
 
 // Re-export primary API
 pub use error::InboxError;
 pub use inbox::{inbox_append, WriteOutcome};
+pub use spool::{spool_drain, SpoolStatus};

@@ -382,6 +382,20 @@ Phase 6: Additional Plugins
 - Failed messages moved after max retries
 - Tests simulate: write failure → spool → drain → delivery
 
+**Status**: ✅ Complete
+**PR**: [#8](https://github.com/randlee/agent-team-mail/pull/8)
+**Commit**: `e169b1d`
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 1 (clean implementation, QA passed on first review)
+**Implementation**:
+- New spool.rs module (551 lines) with SpooledMessage, spool_drain(), 7 tests
+- Updated inbox.rs with team/agent parameters for inbox_append()
+- 56 tests pass, 0 failures
+- Clippy clean, 0 warnings
+- Comprehensive test coverage covering all critical paths
+
+---
+
 ### Sprint 1.5: System Context + Config
 
 **Branch**: `feature/p1-s5-context-config`
