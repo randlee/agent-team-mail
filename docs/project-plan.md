@@ -6,6 +6,73 @@
 
 ---
 
+## 0. Team Lead Execution Loop (ARCH-ATM)
+
+The project is driven by a single team lead agent (**ARCH-ATM**) that runs in a loop across sprints. ARCH-ATM creates a team named `atm-sprint`, spawns a scrum-master teammate for each sprint, and orchestrates the full lifecycle.
+
+### 0.1 Sprint Loop
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  ARCH-ATM Loop                      │
+│                                                     │
+│  for each sprint in dependency order:               │
+│                                                     │
+│    1. Spawn scrum-master teammate                   │
+│    2. Assign sprint (deliverables, branch, refs)    │
+│    3. Scrum-master runs dev-qa loop                 │
+│    4. Scrum-master creates PR → develop             │
+│    5. ARCH-ATM verifies:                            │
+│       - PR created and CI passes                    │
+│       - docs/project-plan.md updated                │
+│    6. If CI passes → shutdown scrum-master           │
+│       → advance to next sprint                      │
+│    7. If CI fails → scrum-master addresses failures  │
+│       on the same worktree (do not restart)         │
+│    8. If unresolvable → escalate to user, stop      │
+│                                                     │
+│  Stop conditions:                                   │
+│    - Architect escalation requiring user decision   │
+│    - Issue that can't be resolved autonomously      │
+│    - Reality doesn't match requirements             │
+│    - All sprints in current phase complete           │
+└─────────────────────────────────────────────────────┘
+```
+
+### 0.2 Scrum-Master Lifecycle
+
+Each sprint gets a **fresh scrum-master** with clean context:
+
+| Event | Action |
+|-------|--------|
+| Sprint start | ARCH-ATM spawns scrum-master with sprint assignment |
+| PR created, CI green | ARCH-ATM shuts down scrum-master, advances |
+| CI failure | Same scrum-master iterates on existing worktree |
+| QA rejection (dev loop) | Same scrum-master continues dev-qa loop |
+| Unresolvable issue | Scrum-master escalates to architect → user; ARCH-ATM stops |
+
+**Why restart between sprints**: Fresh context prevents prompt bloat and cross-sprint confusion. Each scrum-master sees only its sprint's requirements, not the accumulated history of prior sprints.
+
+### 0.3 PR and Merge Policy
+
+- **PRs target `develop`** — created by the scrum-master at sprint completion
+- **Only the user (randlee) merges PRs** — ARCH-ATM does not merge
+- **Auto-advance**: ARCH-ATM advances to the next sprint once CI passes on the PR, without waiting for the merge. The next sprint's worktree branches from `develop` HEAD.
+- **PR rejection by user**: If the user requests changes on a PR, ARCH-ATM spawns a new scrum-master pointed at the existing worktree with the rejection context to address feedback.
+
+### 0.4 Worktree Continuity
+
+- **New sprint** → new worktree (via `sc-git-worktree` from `develop`)
+- **CI failure on existing PR** → same worktree, same scrum-master
+- **User-requested changes on merged PR** → new worktree for follow-up sprint
+- **User-requested changes on open PR** → new scrum-master, same worktree
+
+### 0.5 Parallel Sprints
+
+When the dependency graph allows parallel sprints (e.g., 1.2, 1.3, 1.5 after 1.1), ARCH-ATM may run them sequentially with fresh scrum-masters, or the user may spawn multiple ARCH-ATM instances. Parallel execution is optional and user-directed.
+
+---
+
 ## 1. Execution Model
 
 ### 1.1 Agent Team Structure
