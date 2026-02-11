@@ -349,6 +349,18 @@ Phase 6: Additional Plugins
 - Keep conflict detection and merge logic identical to macOS/Linux.
 - Use a platform-appropriate file lock implementation on Windows (do not rely on `flock`).
 
+**Status**: ✅ Complete
+**PR**: [#7](https://github.com/randlee/agent-team-mail/pull/7)
+**Commit**: `eefeeda`
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 3 (analysis paralysis → tool access issue → successful implementation)
+**Implementation**:
+- 6 new modules in src/io/ (error, hash, atomic, lock, inbox, mod)
+- BLAKE3 content hashing (not xxhash as originally specified)
+- 49 tests pass, 0 failures
+- Clippy clean, 0 warnings
+- ~80-85% test coverage
+
 ### Sprint 1.4: Outbound Spool + Guaranteed Delivery
 
 **Branch**: `feature/p1-s4-spool`
@@ -369,6 +381,20 @@ Phase 6: Additional Plugins
 - Duplicates detected and skipped
 - Failed messages moved after max retries
 - Tests simulate: write failure → spool → drain → delivery
+
+**Status**: ✅ Complete
+**PR**: [#8](https://github.com/randlee/agent-team-mail/pull/8)
+**Commit**: `e169b1d`
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 1 (clean implementation, QA passed on first review)
+**Implementation**:
+- New spool.rs module (551 lines) with SpooledMessage, spool_drain(), 7 tests
+- Updated inbox.rs with team/agent parameters for inbox_append()
+- 56 tests pass, 0 failures
+- Clippy clean, 0 warnings
+- Comprehensive test coverage covering all critical paths
+
+---
 
 ### Sprint 1.5: System Context + Config
 

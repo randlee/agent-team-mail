@@ -8,6 +8,9 @@
 //! - Use proper serde configuration for camelCase ↔ snake_case
 //! - Support round-trip serialization without data loss
 
+pub mod config;
+pub mod context;
+pub mod io;
 pub mod schema;
 
 pub use schema::{
