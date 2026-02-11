@@ -338,7 +338,7 @@ Send a message to a specific agent on a team.
 ```
 atm send <agent> <message>
 atm send <agent>@<team> <message>
-atm send <agent> --file <path>       # message from file
+atm send <agent> --file <path>       # message from file (reference-only)
 atm send <agent> --stdin             # message from stdin
 ```
 
@@ -360,6 +360,20 @@ atm send <agent> --stdin             # message from stdin
 | `--summary <text>` | Explicit summary instead of auto-generated |
 | `--json` | Output result as JSON |
 | `--dry-run` | Show what would be written without writing |
+
+**File path policy**:
+- `--file <path>` is always treated as a reference (never embed file content in inbox JSON).
+- The path must be inside the current repo root by default.
+- Cross-repo file passing is not allowed unless explicitly permitted by repo settings.
+- If a repo-local `.claude/settings.json` exists, honor its file access rules.
+- If the destination repo does not permit the source path, `atm` must copy the file to a local share folder and update the message to reference the new path, with an explicit note that the path was rewritten and is a copy.
+
+**Example message (path rewritten to share copy)**:
+```
+[atm] File path rewritten to a local share copy for destination access.
+Original: /Users/randlee/project/secrets/trace.txt
+Copy: ~/.config/atm/share/backend-ci-team/trace.txt
+```
 
 #### `atm broadcast`
 
@@ -786,7 +800,24 @@ The core has no awareness of whether a team member is local or remote.
 |----------|------|-------------|-------|
 | macOS | Primary | `renamex_np(RENAME_SWAP)` | Development machine |
 | Linux | Secondary | `renameat2(RENAME_EXCHANGE)` | CI, servers |
-| Windows | Future | Plugin-delivered (bridge) | Via cross-computer bridge |
+| Windows | Secondary | Best-effort | CI coverage required |
+
+**CI requirement**: Tests must run on macOS, Linux, and Windows.
+
+### 8.6 Inbox Retention and Cleanup
+
+- `atm` should prevent unbounded inbox growth by applying a configurable retention policy.
+- Default behavior for non-Claude-managed members: archive or delete old messages automatically.
+- If Claude does not perform cleanup for its own agents, `atm` should optionally apply retention there as well.
+- Retention policies must be configurable by max message count and/or max age.
+
+### 8.7 Large Payloads and File References
+
+- File paths are always treated as references; inbox JSON must never embed file contents.
+- File references are allowed only when the path is permitted by the destination repo settings.
+- If a path is not permitted for the destination repo, `atm` must copy the file to a local share folder and rewrite the message to reference that copy, explicitly noting the rewrite.
+- Default share folder: `~/.config/atm/share/<team>/` (configurable).
+- Cross-computer transfer remains a plugin responsibility; the core only guarantees safe local references.
 
 ---
 

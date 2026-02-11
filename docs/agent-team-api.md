@@ -4,6 +4,12 @@
 **Date**: 2026-02-11
 **Status**: Pre-Release (Experimental)
 
+> **Reference Scope**
+>
+> This document mirrors the current Anthropic Agent Teams API/schema as observed today.
+> It is a reference baseline for design, even if some content is not directly used in the
+> current MVP scope.
+
 > **Schema Baseline: Claude Code 2.1.39**
 >
 > All JSON schemas in this document were captured from Claude Code **v2.1.39**.

@@ -105,6 +105,7 @@ Every sprint follows this cycle:
 - 100% tests pass (`cargo test`)
 - Clippy clean (`cargo clippy -- -D warnings`)
 - Code follows Pragmatic Rust Guidelines
+- CI matrix covers macOS, Linux, and Windows
 
 **Escalation path:**
 - QA failures → Dev fixes (normal loop)
@@ -224,6 +225,7 @@ Phase 6: Additional Plugins
 
 **Deliverables**:
 - Platform-specific atomic swap (`renamex_np` on macOS, `renameat2` on Linux)
+- Windows fallback strategy (best-effort replace + fsync where supported)
 - `flock` advisory locking (non-blocking with `LOCK_NB`)
 - Content hashing for conflict detection (xxhash or similar)
 - Conflict detection: hash before/after swap, merge if mismatch
@@ -233,6 +235,7 @@ Phase 6: Additional Plugins
 
 **Acceptance criteria**:
 - Atomic swap works on macOS (primary platform)
+- Windows build passes and uses the documented fallback path
 - Lock contention detected and handled (EWOULDBLOCK)
 - Conflict detection catches simulated concurrent writes
 - Tests simulate: clean write, lock contention, conflict merge, malformed JSON
@@ -273,12 +276,14 @@ Phase 6: Additional Plugins
 - Config resolution: flags → env → repo `.atm.toml` → global `~/.config/atm/config.toml` → defaults
 - Config file parsing with serde + toml
 - Environment variable support (`ATM_TEAM`, `ATM_IDENTITY`, `ATM_CONFIG`, `ATM_NO_COLOR`)
+- Repo-local `.claude/settings.json` discovery for file access policy (if present)
 
 **Acceptance criteria**:
 - All git providers detected correctly from URLs
 - Config resolution follows priority order
 - Missing config files handled gracefully (use defaults)
 - Tests cover all providers, config priority, missing files
+- `.claude/settings.json` handled gracefully when absent or malformed
 
 ### Phase 1 Dependency Graph
 
@@ -320,6 +325,9 @@ Sprint 1.1 (Workspace + Schema)
 - `atm send <agent>@<team> <message>` cross-team addressing
 - `--team`, `--summary`, `--json`, `--dry-run` flags
 - `--file` and `--stdin` message input
+- `--file` is reference-only; never embeds file content in inbox JSON
+- Enforce repo-root and `.claude/settings.json` file access policy
+- If access not permitted for destination repo, copy to share folder and rewrite message with explicit “copy” notice
 - Integration with `atm-core::inbox_append()`
 - Error reporting (agent not found, team not found, write failure)
 
@@ -327,6 +335,7 @@ Sprint 1.1 (Workspace + Schema)
 - `atm send` writes message to correct inbox file
 - Cross-team addressing works
 - All flags functional
+- File reference policy enforced (including copy + rewrite notice)
 - Integration tests with temp fixtures
 
 ### Sprint 2.2: Read + Inbox Commands
@@ -424,6 +433,7 @@ Phase 1 Complete
 - Cross-team messaging tests
 - Broadcast → read all inboxes tests
 - Config resolution integration tests
+- CI matrix for macOS, Linux, and Windows
 - Tests against real `~/.claude/teams/` structure (with temp directory)
 
 **Acceptance criteria**:
@@ -468,6 +478,23 @@ Phase 1 Complete
 - Error messages are actionable
 - `cargo doc` produces no warnings
 
+### Sprint 3.4: Inbox Retention and Cleanup
+
+**Branch**: `feature/p3-s4-retention`
+**Depends on**: Sprint 3.1
+**Parallel**: Can run alongside Sprint 3.2 or 3.3
+
+**Deliverables**:
+- Configurable retention policy (max age and/or max message count)
+- Default cleanup for non-Claude-managed inboxes
+- Optional cleanup for Claude-managed inboxes (configurable)
+- Archive or delete strategy with tests
+
+**Acceptance criteria**:
+- Inboxes are bounded by configured policy
+- Non-Claude inbox cleanup runs without data loss outside policy
+- Tests cover retention by age and by count
+
 ### Phase 3 Dependency Graph
 
 ```
@@ -476,8 +503,10 @@ Phase 2 Complete
     └── Sprint 3.1 (E2E Tests)
             │
             ├── Sprint 3.2 (Conflict Tests) ───────┐
-            │                                       │
-            └── Sprint 3.3 (Docs + Polish) ─────────┘
+            │                                      │
+            ├── Sprint 3.3 (Docs + Polish) ────────┤
+            │                                      │
+            └── Sprint 3.4 (Retention) ────────────┘
                                                     │
                                     MVP Complete ────┘
 ```
@@ -643,6 +672,7 @@ infrastructure is proven.
 | **3** | 3.1 | E2E Integration Tests | Phase 2 | — |
 | **3** | 3.2 | Conflict & Edge Cases | 3.1 | 3.3 |
 | **3** | 3.3 | Docs & Polish | 3.1 | 3.2 |
+| **3** | 3.4 | Inbox Retention & Cleanup | 3.1 | 3.2, 3.3 |
 | **4** | 4.1 | Plugin Trait + Registry | Phase 3 | — |
 | **4** | 4.2 | Daemon Event Loop | 4.1 | 4.3 |
 | **4** | 4.3 | Roster Service | 4.1 | 4.2 |
@@ -652,7 +682,7 @@ infrastructure is proven.
 
 **Total**: 18 sprints across 5 planned phases (Phase 6 is open-ended)
 
-**Critical path**: 1.1 → 1.3 → 1.4 → 2.1 → 2.2 → 3.1 → 3.2 → MVP
+**Critical path**: 1.1 → 1.3 → 1.4 → 2.1 → 2.2 → 3.1 → 3.2 → 3.4 → MVP
 
 **Maximum parallelism**:
 - Phase 1: 3 concurrent sprints (1.2, 1.3, 1.5 after 1.1)
