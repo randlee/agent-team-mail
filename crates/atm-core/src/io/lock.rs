@@ -66,7 +66,10 @@ pub fn acquire_lock(path: &Path, max_retries: u32) -> Result<FileLock, InboxErro
                 // Lock acquired successfully
                 return Ok(FileLock { file });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::PermissionDenied
+                || e.raw_os_error() == Some(33) /* ERROR_LOCK_VIOLATION on Windows */ =>
+            {
                 // Someone else has the lock, retry with backoff
                 if attempt < max_retries {
                     // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
