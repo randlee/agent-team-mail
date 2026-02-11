@@ -232,9 +232,11 @@ fn try_load_settings(path: &Path) -> Option<SettingsJson> {
 mod tests {
     use super::*;
     use super::super::types::TimestampFormat;
+    use serial_test::serial;
     use std::env;
 
     #[test]
+    #[serial]
     fn test_config_defaults() {
         // Clean up environment variables from other tests
         unsafe {
@@ -255,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_env_overrides() {
         let temp_dir = std::env::temp_dir();
         let overrides = ConfigOverrides::default();
@@ -295,6 +298,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_no_color_env() {
         let temp_dir = std::env::temp_dir();
         let overrides = ConfigOverrides::default();
