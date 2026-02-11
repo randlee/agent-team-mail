@@ -1,30 +1,21 @@
 //! File locking with backoff retry
 
 use crate::io::error::InboxError;
+use fs2::FileExt;
 use std::fs::File;
 use std::path::Path;
 use std::time::Duration;
 
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
-
 /// File lock guard that automatically releases on drop
 pub struct FileLock {
-    #[allow(dead_code)]
     file: File,
-    #[cfg(unix)]
-    fd: i32,
 }
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            // Release the lock
-            unsafe {
-                libc::flock(self.fd, libc::LOCK_UN);
-            }
-        }
+        // Release the lock - fs2 handles platform-specific unlock
+        // Use fully qualified syntax to avoid unstable name collision warning
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -47,20 +38,13 @@ impl Drop for FileLock {
 ///
 /// Returns a `FileLock` guard that automatically releases the lock on drop.
 /// Returns `InboxError::LockTimeout` if unable to acquire lock after all retries.
+///
+/// # Implementation
+///
+/// Uses the `fs2` crate for cross-platform file locking:
+/// - Unix: flock()
+/// - Windows: LockFileEx()
 pub fn acquire_lock(path: &Path, max_retries: u32) -> Result<FileLock, InboxError> {
-    #[cfg(unix)]
-    {
-        unix_acquire_lock(path, max_retries)
-    }
-
-    #[cfg(not(unix))]
-    {
-        windows_acquire_lock(path, max_retries)
-    }
-}
-
-#[cfg(unix)]
-fn unix_acquire_lock(path: &Path, max_retries: u32) -> Result<FileLock, InboxError> {
     use std::fs::OpenOptions;
 
     // Open (or create) the lock file
@@ -75,67 +59,23 @@ fn unix_acquire_lock(path: &Path, max_retries: u32) -> Result<FileLock, InboxErr
             source: e,
         })?;
 
-    let fd = file.as_raw_fd();
-
     // Try to acquire lock with exponential backoff
     for attempt in 0..=max_retries {
-        let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-
-        if result == 0 {
-            // Lock acquired successfully
-            return Ok(FileLock { file, fd });
-        }
-
-        let err = std::io::Error::last_os_error();
-        let would_block = err.raw_os_error() == Some(libc::EWOULDBLOCK)
-            || err.raw_os_error() == Some(libc::EAGAIN);
-
-        if !would_block {
-            // Some other error occurred
-            return Err(InboxError::Io {
-                path: path.to_path_buf(),
-                source: err,
-            });
-        }
-
-        // EWOULDBLOCK - someone else has the lock
-        if attempt < max_retries {
-            // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
-            let wait_ms = 50u64 * (1 << attempt);
-            std::thread::sleep(Duration::from_millis(wait_ms));
-        }
-    }
-
-    Err(InboxError::LockTimeout {
-        path: path.to_path_buf(),
-        retries: max_retries,
-    })
-}
-
-#[cfg(not(unix))]
-fn windows_acquire_lock(path: &Path, max_retries: u32) -> Result<FileLock, InboxError> {
-    use std::fs::OpenOptions;
-
-    // Windows doesn't have flock, so we use file creation as a lock mechanism
-    // This is a simplified implementation
-    for attempt in 0..=max_retries {
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)
-        {
-            Ok(file) => {
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                // Lock acquired successfully
                 return Ok(FileLock { file });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Lock file exists, retry with backoff
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Someone else has the lock, retry with backoff
                 if attempt < max_retries {
+                    // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
                     let wait_ms = 50u64 * (1 << attempt);
                     std::thread::sleep(Duration::from_millis(wait_ms));
                 }
             }
             Err(e) => {
+                // Some other error occurred
                 return Err(InboxError::Io {
                     path: path.to_path_buf(),
                     source: e,
