@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod broadcast;
 mod error;
 mod inbox;
 mod read;
@@ -26,6 +27,9 @@ enum Commands {
     /// Send a message to a specific agent
     Send(send::SendArgs),
 
+    /// Broadcast a message to all agents in a team
+    Broadcast(broadcast::BroadcastArgs),
+
     /// Read messages from an inbox
     Read(read::ReadArgs),
 
@@ -38,6 +42,7 @@ impl Cli {
     pub fn execute(self) -> Result<()> {
         match self.command {
             Commands::Send(args) => send::execute(args),
+            Commands::Broadcast(args) => broadcast::execute(args),
             Commands::Read(args) => read::execute(args),
             Commands::Inbox(args) => inbox::execute(args),
         }
