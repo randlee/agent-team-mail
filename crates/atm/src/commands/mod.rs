@@ -4,6 +4,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod error;
+mod inbox;
+mod read;
 mod send;
 mod teams;
 mod members;
@@ -27,12 +29,22 @@ pub struct Cli {
 enum Commands {
     /// Send a message to a specific agent
     Send(send::SendArgs),
+
+    /// Read messages from an inbox
+    Read(read::ReadArgs),
+
+    /// Show inbox summary for team members
+    Inbox(inbox::InboxArgs),
+
     /// List all teams on this machine
     Teams(teams::TeamsArgs),
+
     /// List agents in a team
     Members(members::MembersArgs),
+
     /// Show team status overview
     Status(status::StatusArgs),
+
     /// Show effective configuration
     Config(config_cmd::ConfigArgs),
 }
@@ -42,6 +54,8 @@ impl Cli {
     pub fn execute(self) -> Result<()> {
         match self.command {
             Commands::Send(args) => send::execute(args),
+            Commands::Read(args) => read::execute(args),
+            Commands::Inbox(args) => inbox::execute(args),
             Commands::Teams(args) => teams::execute(args),
             Commands::Members(args) => members::execute(args),
             Commands::Status(args) => status::execute(args),
