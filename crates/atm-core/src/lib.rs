@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod context;
+pub mod io;
 pub mod schema;
 
 pub use schema::{
