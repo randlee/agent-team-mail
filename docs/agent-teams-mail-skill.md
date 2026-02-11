@@ -33,25 +33,29 @@ When an agent respawns, all historical inbox messages (including those queued wh
 
 The root cause is disambiguation — without a signal, the agent cannot distinguish "new task waiting for me" from "old task that was already handled by a previous instance."
 
-### 5. No Online/Offline Detection Mechanism
+### 5. Online/Offline Detection via `isActive`
 
-The Claude Code Agent Teams API provides no reliable way to determine if an agent is currently active:
+The `isActive` field in `config.json` member entries provides a usable (if imperfect) signal:
 
-- `isActive` in `config.json` is inconsistently maintained (sometimes agents are removed from members on shutdown, sometimes they remain with `isActive: false`)
-- `tmuxPaneId` could be checked for liveness (is the pane still running?), but this is backend-specific and fragile
-- There is no API call like "is agent X online?" or "list active agents"
+| State | `isActive` | In members? | Meaning |
+|-------|-----------|-------------|---------|
+| Running | `true` | Yes | Agent process is alive (running or idle-waiting) |
+| Shut down (retained) | `false` | Yes | Agent terminated, entry remains |
+| Shut down (removed) | N/A | No | Agent terminated, entry cleaned up |
+| Never existed | N/A | No | No inbox file either |
 
-**This is the hard problem for `atm`**: To warn senders about offline recipients or auto-tag messages for deferred delivery, `atm` needs to detect online/offline state. Possible approaches:
+**Detection logic for `atm send`**:
+```
+if member not found OR member.isActive == false → offline
+```
 
-- **tmux pane check**: `tmux has-session` / `tmux list-panes` to verify the paneId is alive. Backend-specific, fragile.
-- **Heartbeat convention**: Active agents periodically write a timestamp to a known location. Stale timestamp = offline. Requires agent cooperation.
-- **isActive field**: Read `config.json` and check `isActive`. Unreliable due to inconsistent cleanup.
-- **Process check**: Verify the agent's process is running. Platform-specific.
-- **Accept uncertainty**: Don't detect — always queue, always tag. Let the recipient sort it out on respawn.
+This is simpler than tmux pane checks or heartbeat conventions. The `isActive` field is set by Claude Code's team infrastructure and doesn't require agent cooperation.
 
-### 6. Shutdown Removes Agent from Members (Usually)
+**Caveat**: Shutdown behavior is inconsistent — some agents are removed from the members array on shutdown, others remain with `isActive: false`. Both cases are handled by the detection logic above. The field could also be stale if a process crashes without clean shutdown, but this is an acceptable edge case for MVP.
 
-Agent shutdown via `shutdown_request` → `shutdown_response(approve: true)` typically removes the agent from `config.json` members array. However, this behavior was inconsistent in testing — some agents remained with `isActive: false`. The inconsistency may relate to timing, concurrent operations, or the respawn happening before cleanup completes.
+### 6. Shutdown Removes Agent from Members (Inconsistently)
+
+Agent shutdown via `shutdown_request` → `shutdown_response(approve: true)` sometimes removes the agent from `config.json` members array entirely, and sometimes leaves the entry with `isActive: false`. Both patterns were observed in the same team during testing. The inconsistency may relate to timing, concurrent operations, or whether a respawn occurred before cleanup completed.
 
 ## Recommendations for `atm`
 
@@ -63,11 +67,11 @@ Agent shutdown via `shutdown_request` → `shutdown_response(approve: true)` typ
 
 ### Medium-term (Skill Enhancement)
 
-1. **Auto-detect offline recipients**: Best-effort check of `isActive` + `tmuxPaneId` liveness before sending
-2. **Warn sender**: "Agent X appears offline. Message will be queued." (not a hard block — still deliver)
-3. **Auto-tag queued messages**: If recipient is detected offline, automatically prefix with `[PENDING ACTION - queued while offline at {timestamp}]`
-4. **Delivery status field**: Add `delivery_status: "delivered" | "queued"` to inbox message schema
-5. **`atm inbox --pending`**: Command to list messages that were queued while offline and may not have been processed
+1. **`atm send` offline detection**: Before sending, check `config.json` for recipient — if member not found or `isActive == false`, warn sender: "Agent X appears offline. Message will be queued."
+2. **Auto-tag queued messages**: If recipient is detected offline, automatically prefix with `[PENDING ACTION - queued while offline at {timestamp}]`
+3. **Delivery status field**: Add `delivery_status: "delivered" | "queued"` to inbox message schema
+4. **`atm inbox --pending`**: Command to list messages that were queued while offline and may not have been processed
+5. **`atm members` / `atm status` improvements**: Both commands already show `isActive` status. Ensure the labels are accurate — `isActive: false` means "offline/shut down", not "idle". Consider renaming display from "Active/Idle" to "Online/Offline" to avoid confusion with the agent's idle-but-alive state.
 
 ### Long-term (Daemon/Plugin)
 
