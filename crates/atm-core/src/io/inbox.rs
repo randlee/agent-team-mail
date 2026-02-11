@@ -37,6 +37,8 @@ pub enum WriteOutcome {
 ///
 /// * `inbox_path` - Full path to inbox.json file
 /// * `message` - Message to append
+/// * `team` - Target team name (for spooling)
+/// * `agent` - Target agent name (for spooling)
 ///
 /// # Returns
 ///
@@ -47,7 +49,12 @@ pub enum WriteOutcome {
 /// # Errors
 ///
 /// Returns `InboxError` for I/O errors, JSON parse errors, or merge failures.
-pub fn inbox_append(inbox_path: &Path, message: &InboxMessage) -> Result<WriteOutcome, InboxError> {
+pub fn inbox_append(
+    inbox_path: &Path,
+    message: &InboxMessage,
+    team: &str,
+    agent: &str,
+) -> Result<WriteOutcome, InboxError> {
     let lock_path = inbox_path.with_extension("lock");
     let tmp_path = inbox_path.with_extension("tmp");
 
@@ -56,7 +63,7 @@ pub fn inbox_append(inbox_path: &Path, message: &InboxMessage) -> Result<WriteOu
         Ok(lock) => lock,
         Err(InboxError::LockTimeout { .. }) => {
             // Could not acquire lock - spool for later delivery
-            let spool_path = spool_message(message)?;
+            let spool_path = crate::io::spool::spool_message(team, agent, message)?;
             return Ok(WriteOutcome::Queued { spool_path });
         }
         Err(e) => return Err(e),
@@ -209,44 +216,6 @@ fn merge_messages(
     merged
 }
 
-/// Spool a message for later delivery
-///
-/// Writes the message to `~/.config/atm/spool/pending/` for retry.
-/// Returns the path to the spooled message file.
-fn spool_message(message: &InboxMessage) -> Result<PathBuf, InboxError> {
-    // For MVP, we'll use a simple spool directory
-    // In production, this would use proper config resolution
-    let spool_dir = dirs::config_dir()
-        .ok_or_else(|| InboxError::SpoolError {
-            message: "Could not determine config directory".to_string(),
-        })?
-        .join("atm")
-        .join("spool")
-        .join("pending");
-
-    fs::create_dir_all(&spool_dir).map_err(|e| InboxError::Io {
-        path: spool_dir.clone(),
-        source: e,
-    })?;
-
-    // Generate unique filename: timestamp-from-messageid.json
-    let timestamp = chrono::Utc::now().timestamp();
-    let msg_id = message.message_id.as_deref().unwrap_or("unknown");
-    let filename = format!("{timestamp}-{msg_id}.json");
-    let spool_path = spool_dir.join(filename);
-
-    let content = serde_json::to_vec_pretty(message).map_err(|e| InboxError::Json {
-        path: spool_path.clone(),
-        source: e,
-    })?;
-
-    fs::write(&spool_path, content).map_err(|e| InboxError::Io {
-        path: spool_path.clone(),
-        source: e,
-    })?;
-
-    Ok(spool_path)
-}
 
 #[cfg(test)]
 mod tests {
@@ -273,7 +242,7 @@ mod tests {
 
         let message = create_test_message("team-lead", "Test message", Some("msg-001".to_string()));
 
-        let outcome = inbox_append(&inbox_path, &message).unwrap();
+        let outcome = inbox_append(&inbox_path, &message, "test-team", "test-agent").unwrap();
         assert_eq!(outcome, WriteOutcome::Success);
 
         // Verify file was created and contains message
@@ -291,11 +260,11 @@ mod tests {
 
         // Create initial message
         let msg1 = create_test_message("team-lead", "Message 1", Some("msg-001".to_string()));
-        inbox_append(&inbox_path, &msg1).unwrap();
+        inbox_append(&inbox_path, &msg1, "test-team", "test-agent").unwrap();
 
         // Append second message
         let msg2 = create_test_message("ci-agent", "Message 2", Some("msg-002".to_string()));
-        let outcome = inbox_append(&inbox_path, &msg2).unwrap();
+        let outcome = inbox_append(&inbox_path, &msg2, "test-team", "test-agent").unwrap();
         assert_eq!(outcome, WriteOutcome::Success);
 
         // Verify both messages present
@@ -314,10 +283,10 @@ mod tests {
         let message = create_test_message("team-lead", "Test message", Some("msg-001".to_string()));
 
         // First append
-        inbox_append(&inbox_path, &message).unwrap();
+        inbox_append(&inbox_path, &message, "test-team", "test-agent").unwrap();
 
         // Second append with same message_id - should be deduplicated
-        let outcome = inbox_append(&inbox_path, &message).unwrap();
+        let outcome = inbox_append(&inbox_path, &message, "test-team", "test-agent").unwrap();
         assert_eq!(outcome, WriteOutcome::Success);
 
         // Verify only one message present
@@ -401,7 +370,7 @@ mod tests {
 
         // Append new message
         let new_message = create_test_message("ci-agent", "New message", Some("msg-002".to_string()));
-        inbox_append(&inbox_path, &new_message).unwrap();
+        inbox_append(&inbox_path, &new_message, "test-team", "test-agent").unwrap();
 
         // Verify unknown fields preserved
         let content = fs::read_to_string(&inbox_path).unwrap();
