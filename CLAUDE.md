@@ -1,14 +1,14 @@
-# Claude Instructions for beads-ralph
+# Claude Instructions for agent-team-mail
 
 ## ⚠️ CRITICAL: Branch Management Rules
 
 **NEVER switch the main repository branch on disk from `develop`.**
 
-- Main repo at `/Users/randlee/Documents/github/beads-ralph/` MUST remain on `develop` at all times
+- Main repo at `/Users/randlee/Documents/github/agent-team-mail/` MUST remain on `develop` at all times
 - **ALWAYS use `sc-git-worktree` skill** to create worktrees for all development work
 - **ALWAYS create worktrees FROM `develop` branch** (not from `main`)
 - Do NOT use `git checkout` or `git switch` in the main repository
-- All sprint work happens in worktrees at `../beads-ralph-worktrees/<branch-name>`
+- All sprint work happens in worktrees at `../agent-team-mail-worktrees/<branch-name>`
 - **All PRs target `develop` branch** (integration branch, not `main`)
 
 **Why**: Switching branches in the main repo breaks worktree references and destabilizes the development environment.
@@ -26,14 +26,14 @@
 
 ## Project Overview
 
-**beads-ralph** is an autonomous multi-agent development orchestration system that:
-- Converts complete plans into executable beads (work items)
-- Executes work autonomously in parallel using isolated git worktrees
-- Coordinates multiple Claude Code agents via Go orchestration loop
-- Implements built-in QA validation with dev/QA retry loops
-- Outputs unmerged PRs for human review with complete audit trail
+**agent-team-mail** is a CLI for interfacing with Claude agents via email with plugin-based expansion:
+- Routes email requests to appropriate Claude agents
+- Supports multiple agent types for specialized task handling
+- Extensible plugin architecture for adding new agent integrations
+- Multi-agent coordination for complex workflows
+- Email-driven development and management interface
 
-**Goal**: Build beads-ralph MVP using the system itself (dogfooding).
+**Goal**: Build a flexible, extensible agent-mail CLI system with plugin-based expansion.
 
 ---
 
@@ -98,7 +98,7 @@ Every sprint follows this pattern:
 
 ## Environment
 
-**Task List**: `beads-ralph` (configured in `.env`)
+**Task List**: `agent-team-mail` (configured in `.env`)
 **Agent Teams**: Enabled (experimental feature)
 
 ---
