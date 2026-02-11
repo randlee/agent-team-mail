@@ -479,6 +479,20 @@ Sprint 1.1 (Workspace + Schema)
 - If path not permitted for destination repo, copy to `~/.config/atm/share/<team>/` and rewrite the message with an explicit copy notice
 - Never embed file contents in inbox JSON
 
+**Status**: ✅ Complete
+**PR**: [#10](https://github.com/randlee/agent-team-mail/pull/10)
+**Commit**: `6850207`
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 2 (initial implementation + clippy error fixes)
+**Implementation**:
+- 8 new source files (1295 insertions: main, commands, util modules)
+- 1 test file (12 integration test cases)
+- 26 total tests pass (14 unit + 12 integration)
+- Clippy clean, 0 warnings
+- Full integration with atm-core Phase 1 APIs
+
+---
+
 ### Sprint 2.2: Read + Inbox Commands
 
 **Branch**: `feature/p2-s2-read-inbox`
