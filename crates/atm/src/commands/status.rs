@@ -141,6 +141,8 @@ fn count_inbox_messages(team_dir: &std::path::Path, team_config: &TeamConfig) ->
 
 /// Count pending and completed tasks
 fn count_tasks(tasks_dir: &std::path::Path) -> Result<(usize, usize)> {
+    use atm_core::{TaskItem, TaskStatus};
+
     let mut pending = 0;
     let mut completed = 0;
 
@@ -150,14 +152,12 @@ fn count_tasks(tasks_dir: &std::path::Path) -> Result<(usize, usize)> {
             if path.is_file()
                 && path.extension().and_then(|s| s.to_str()) == Some("json")
                 && let Ok(content) = fs::read_to_string(&path)
+                && let Ok(task) = serde_json::from_str::<TaskItem>(&content)
             {
-                // Simple heuristic: check if file contains "completed": true
-                if content.contains(r#""completed":true"#)
-                    || content.contains(r#""completed": true"#)
-                {
-                    completed += 1;
-                } else {
-                    pending += 1;
+                match task.status {
+                    TaskStatus::Completed => completed += 1,
+                    TaskStatus::Pending | TaskStatus::InProgress => pending += 1,
+                    TaskStatus::Deleted => { /* don't count */ }
                 }
             }
         }

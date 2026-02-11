@@ -631,6 +631,15 @@ Phase 1 Complete
 - Task status counts match actual task file schema
 - All existing tests pass, new tests cover the fixed scenarios
 
+**Status**: ✅ Complete (PR pending)
+**Dev-QA iterations**: 1 (passed first QA review)
+**Implementation notes**:
+- Created `inbox_update()` with atomic write infrastructure, extracted shared helper `atomic_write_with_conflict_check()`
+- Fixed spool drain to handle `WriteOutcome::Queued` properly - keeps spool file pending, no message loss
+- Replaced task status string matching with proper `TaskItem` JSON parsing
+- Added 3 new tests: concurrent inbox updates, spool drain queued handling, proper coverage
+- 168 tests passing, clippy clean, cross-platform compliant
+
 ### Sprint 3.1: End-to-End Integration Tests
 
 **Branch**: `feature/p3-s1-e2e-tests`
