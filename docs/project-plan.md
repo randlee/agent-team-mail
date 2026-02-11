@@ -549,6 +549,18 @@ Sprint 1.1 (Workspace + Schema)
 - Handles empty teams, missing teams, no teams gracefully
 - Integration tests
 
+**Status**: ✅ Complete
+**PR**: [#13](https://github.com/randlee/agent-team-mail/pull/13)
+**Commit**: `64a54f5`
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 1 (clippy formatting fixes on first pass)
+**Implementation**:
+- 4 new command modules (teams, members, status, config_cmd)
+- 14 integration tests (integration_discovery.rs)
+- 41 total tests pass (15 unit + 14 discovery + 12 send)
+- Clippy clean, 0 warnings
+- Parallel sprint compliance: Perfect (no modifications to send.rs or atm-core)
+
 ### Phase 2 Dependency Graph
 
 ```
