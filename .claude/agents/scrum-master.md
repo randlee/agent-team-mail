@@ -24,7 +24,8 @@ Before any dev work begins:
 - Read the sprint deliverables from `docs/project-plan.md`
 - Cross-reference against `docs/requirements.md` to verify scope and acceptance criteria
 - Identify files to create/modify, testing strategy, and integration points
-- Prepare a clear, specific prompt for the rust-dev agent with concrete deliverables
+- If the sprint involves complex architecture, unfamiliar patterns, or ambiguous design choices, spawn an **opus rust-architect** agent to produce a design brief before writing the dev prompt
+- Prepare a clear, specific prompt for the rust-dev agent with concrete deliverables (incorporating the architect's design brief when available)
 
 ### 2. Dev-QA Loop Execution
 
