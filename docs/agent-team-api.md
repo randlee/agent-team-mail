@@ -1,8 +1,16 @@
 # Agent Team API - Complete Reference
 
-**Version**: 1.0
+**API Version**: 0.1
 **Date**: 2026-02-11
-**Status**: Documentation
+**Status**: Pre-Release (Experimental)
+
+> **Schema Baseline: Claude Code 2.1.39**
+>
+> All JSON schemas in this document were captured from Claude Code **v2.1.39**.
+> The Agent Teams feature is **experimental and pre-release** — schemas may change
+> without notice in future Claude Code versions. Any tool consuming these schemas
+> should version-check against `claude --version` and handle unknown fields gracefully.
+> See [`requirements.md`](./requirements.md) Section 3.1 for the versioning strategy.
 
 ---
 
