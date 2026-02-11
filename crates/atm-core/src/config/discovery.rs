@@ -177,10 +177,10 @@ pub fn resolve_settings(
     home_dir: &Path,
 ) -> Option<SettingsJson> {
     // 2. CLI args override
-    if let Some(path) = settings_path_override {
-        if let Some(settings) = try_load_settings(path) {
-            return Some(settings);
-        }
+    if let Some(path) = settings_path_override
+        && let Some(settings) = try_load_settings(path)
+    {
+        return Some(settings);
     }
 
     // 3. Repo-local settings.local.json

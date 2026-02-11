@@ -79,12 +79,12 @@ impl GitProvider {
         }
 
         // Fallback: extract host from URL
-        if let Ok(parsed) = url::Url::parse(url) {
-            if let Some(host) = parsed.host_str() {
-                return GitProvider::Unknown {
-                    host: host.to_string(),
-                };
-            }
+        if let Ok(parsed) = url::Url::parse(url)
+            && let Some(host) = parsed.host_str()
+        {
+            return GitProvider::Unknown {
+                host: host.to_string(),
+            };
         }
 
         // Last resort: try to extract from SSH URL manually
@@ -223,11 +223,11 @@ impl GitProvider {
 
     /// Extract host from malformed SSH URL
     fn extract_host_from_ssh(url: &str) -> Option<String> {
-        if let Some(at_pos) = url.find('@') {
-            if let Some(colon_pos) = url[at_pos..].find(':') {
-                let host = &url[at_pos + 1..at_pos + colon_pos];
-                return Some(host.to_string());
-            }
+        if let Some(at_pos) = url.find('@')
+            && let Some(colon_pos) = url[at_pos..].find(':')
+        {
+            let host = &url[at_pos + 1..at_pos + colon_pos];
+            return Some(host.to_string());
         }
         None
     }
