@@ -8,7 +8,7 @@
 
 ## 0. Team Lead Execution Loop (ARCH-ATM)
 
-The project is driven by a single team lead agent (**ARCH-ATM**) that runs in a loop across sprints. ARCH-ATM creates a team named `atm-sprint`, spawns a scrum-master teammate for each sprint, and orchestrates the full lifecycle.
+The project is driven by the main conversation agent acting as team lead (**ARCH-ATM**). ARCH-ATM creates a team named `atm-sprint`, spawns scrum-master teammates for sprints, and orchestrates the full lifecycle. ARCH-ATM auto-advances across phase boundaries as long as dependencies are met and CI passes.
 
 ### 0.1 Sprint Loop
 
@@ -35,7 +35,7 @@ The project is driven by a single team lead agent (**ARCH-ATM**) that runs in a 
 │    - Architect escalation requiring user decision   │
 │    - Issue that can't be resolved autonomously      │
 │    - Reality doesn't match requirements             │
-│    - All sprints in current phase complete           │
+│    - All project sprints complete                    │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -57,24 +57,28 @@ Each sprint gets a **fresh scrum-master** with clean context:
 
 - **PRs target `develop`** — created by the scrum-master at sprint completion
 - **Only the user (randlee) merges PRs** — ARCH-ATM does not merge
-- **Auto-advance**: ARCH-ATM advances to the next sprint once CI passes on the PR, without waiting for the merge. The next sprint's worktree branches from `develop` HEAD.
+- **Auto-advance**: ARCH-ATM advances to the next sprint once CI passes on the PR, without waiting for the merge — including across phase boundaries.
+- **Dependent sprints**: When the next sprint depends on a previous sprint's code (e.g., 1.3 → 1.4), ARCH-ATM branches the new worktree from the predecessor's PR branch (not `develop`). This avoids waiting for merge while preserving the dependency chain.
+- **Independent sprints**: When the next sprint has no code dependency on the previous one, the worktree branches from `develop` HEAD as normal.
 - **PR rejection by user**: If the user requests changes on a PR, ARCH-ATM spawns a new scrum-master pointed at the existing worktree with the rejection context to address feedback.
 
 ### 0.4 Worktree Continuity
 
-- **New sprint** → new worktree (via `sc-git-worktree` from `develop`)
+- **Independent sprint** → new worktree branched from `develop`
+- **Dependent sprint** → new worktree branched from predecessor's PR branch
 - **CI failure on existing PR** → same worktree, same scrum-master
 - **User-requested changes on merged PR** → new worktree for follow-up sprint
 - **User-requested changes on open PR** → new scrum-master, same worktree
 
 ### 0.5 Parallel Sprints
 
-When the dependency graph allows parallel sprints (e.g., 1.2, 1.3, 1.5 after 1.1), a single scrum-master can manage multiple sprints concurrently:
+When the dependency graph allows parallel sprints (e.g., 1.2, 1.3, 1.5 after 1.1), ARCH-ATM spawns **one scrum-master per parallel sprint**:
 
-- Each parallel sprint gets its own worktree (branched from `develop`)
+- Each parallel sprint gets its own worktree and its own scrum-master teammate
 - Parallel sprints MUST be non-intersecting — different files/modules, no shared modifications
-- The scrum-master spawns separate rust-dev and rust-qa background agents per sprint
+- Each scrum-master independently runs its dev-qa loop with its own background agents
 - Each sprint produces its own PR targeting `develop`
+- ARCH-ATM manages multiple scrum-master teammates concurrently
 
 **Merge sprint**: After all parallel sprints in a group complete and their PRs are merged, a small **integration sprint** follows to:
 - Verify all parallel branches integrate cleanly on `develop`
