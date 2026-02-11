@@ -8,6 +8,12 @@ use serde_json::json;
 use crate::util::settings::get_home_dir;
 
 /// Show effective configuration
+///
+/// Displays the resolved configuration values and their sources.
+///
+/// Note: The reported source is a best-effort heuristic based on which
+/// config files exist. It does not account for environment variables or
+/// command-line overrides that may have been applied at runtime.
 #[derive(Args, Debug)]
 pub struct ConfigArgs {
     /// Output as JSON
