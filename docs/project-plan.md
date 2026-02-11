@@ -631,6 +631,15 @@ Phase 1 Complete
 - Task status counts match actual task file schema
 - All existing tests pass, new tests cover the fixed scenarios
 
+**Status**: ✅ Complete (PR pending)
+**Dev-QA iterations**: 1 (passed first QA review)
+**Implementation notes**:
+- Created `inbox_update()` with atomic write infrastructure, extracted shared helper `atomic_write_with_conflict_check()`
+- Fixed spool drain to handle `WriteOutcome::Queued` properly - keeps spool file pending, no message loss
+- Replaced task status string matching with proper `TaskItem` JSON parsing
+- Added 3 new tests: concurrent inbox updates, spool drain queued handling, proper coverage
+- 168 tests passing, clippy clean, cross-platform compliant
+
 ### Sprint 3.1: End-to-End Integration Tests
 
 **Branch**: `feature/p3-s1-e2e-tests`
@@ -647,6 +656,22 @@ Phase 1 Complete
 **Acceptance criteria**:
 - All workflows pass end-to-end
 - Tests run in isolation (temp directories, no side effects)
+
+**Status**: ✅ Complete
+**PR**: [#16](https://github.com/randlee/agent-team-mail/pull/16)
+**Commit**: `f2b2005`
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 1 (passed first QA review)
+**Implementation**:
+- New test file: `crates/atm/tests/integration_e2e_workflows.rs` (20 E2E workflow tests)
+- Send → Read → Mark-as-read → Verify workflows (7 tests)
+- Broadcast → Read all inboxes workflows (4 tests)
+- Config resolution integration tests (5 tests)
+- Complex multi-step workflows (4 tests: conversation, team discussion, cross-team relay, inbox summary)
+- 188 tests passing (168 baseline + 20 new), 0 failures
+- Clippy clean, 0 warnings
+- Cross-platform compliant (ATM_HOME pattern, no HOME/USERPROFILE)
+- All tests run in isolation with temp directories
 
 ### Sprint 3.2: Conflict & Edge Case Testing
 
@@ -691,11 +716,26 @@ Phase 1 Complete
 - Offline recipients are detected and messages auto-tagged on send
 - File policy denies + copies when destination repo is unknown
 
+**Status**: ✅ Complete
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 1 (passed first QA review)
+**Implementation**:
+- New test file: `crates/atm/tests/integration_conflict_tests.rs` (19 conflict/edge case tests)
+- File policy repo root fix: walks up to `.git` from subdirectories
+- Offline recipient detection: auto-tags with configurable action text (CLI flag > config > default)
+- Config schema extension: `MessagingConfig` with `offline_action` field
+- Label fixes: "Online"/"Offline" in members and status commands
+- 223 tests passing (188 baseline + 35 new), 0 failures
+- Clippy clean, 0 warnings
+- Cross-platform compliant (ATM_HOME pattern, no violations)
+- Parallel sprint compliance: no modifications to Sprint 3.3/3.4 files
+
 ### Sprint 3.3: Documentation & Polish
 
 **Branch**: `feature/p3-s3-docs-polish`
 **Depends on**: Sprint 3.1
 **Parallel**: Can run alongside Sprint 3.2
+**Status**: ✅ Complete
 
 **Deliverables**:
 - `--help` text polished for all commands
@@ -716,22 +756,42 @@ Phase 1 Complete
 - `cargo doc` produces no warnings
 - Settings resolution works from any subdirectory within a repo
 
+**Implementation**:
+- README.md created with quickstart, command reference, configuration, architecture sections
+- Settings traversal fix: `find_repo_local_settings()` walks from CWD to git root, checks settings.local.json then settings.json at each level
+- Config command: Added doc comment noting source reporting limitation (heuristic, doesn't reflect env/CLI overrides)
+- Help text: Polished doc comments on ReadArgs and ConfigArgs
+- Tests: Added `test_settings_resolution_from_subdirectory` and `test_settings_local_takes_precedence`
+- Validation: 94 tests pass, clippy clean, cargo doc clean (no warnings)
+
+**PR**: TBD
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 0 (implemented directly by scrum master)
+
 ### Sprint 3.4: Inbox Retention and Cleanup
 
+**Status**: ✅ Complete
 **Branch**: `feature/p3-s4-retention`
 **Depends on**: Sprint 3.1
 **Parallel**: Can run alongside Sprint 3.2 or 3.3
 
 **Deliverables**:
-- Configurable retention policy (max age and/or max message count)
-- Default cleanup for non-Claude-managed inboxes
-- Optional cleanup for Claude-managed inboxes (configurable)
-- Archive or delete strategy with tests
+- Configurable retention policy (max age and/or max message count) — ✅ DONE
+- Default cleanup for non-Claude-managed inboxes — ✅ DONE
+- Optional cleanup for Claude-managed inboxes (configurable) — ✅ DONE
+- Archive or delete strategy with tests — ✅ DONE
 
 **Acceptance criteria**:
-- Inboxes are bounded by configured policy
-- Non-Claude inbox cleanup runs without data loss outside policy
-- Tests cover retention by age and by count
+- Inboxes are bounded by configured policy — ✅ VERIFIED
+- Non-Claude inbox cleanup runs without data loss outside policy — ✅ VERIFIED
+- Tests cover retention by age and by count — ✅ VERIFIED (11 integration tests)
+
+**Implementation**:
+- `crates/atm-core/src/retention.rs` — Core retention logic (318 lines)
+- `crates/atm/src/commands/cleanup.rs` — CLI command (161 lines)
+- `crates/atm-core/tests/retention_tests.rs` — 11 integration tests (443 lines)
+- `crates/atm-core/src/config/types.rs` — RetentionConfig and CleanupStrategy types
+- All 205 tests pass, clippy clean, cross-platform compliant
 
 ### Phase 3 Dependency Graph
 

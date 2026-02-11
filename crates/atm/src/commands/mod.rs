@@ -4,14 +4,15 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod broadcast;
+mod cleanup;
+mod config_cmd;
 mod error;
 mod inbox;
+mod members;
 mod read;
 mod send;
-mod teams;
-mod members;
 mod status;
-mod config_cmd;
+mod teams;
 
 /// atm - Mail-like messaging for Claude agent teams
 #[derive(Parser, Debug)]
@@ -51,6 +52,9 @@ enum Commands {
 
     /// Show effective configuration
     Config(config_cmd::ConfigArgs),
+
+    /// Apply retention policies to clean up old messages
+    Cleanup(cleanup::CleanupArgs),
 }
 
 impl Cli {
@@ -65,6 +69,7 @@ impl Cli {
             Commands::Members(args) => members::execute(args),
             Commands::Status(args) => status::execute(args),
             Commands::Config(args) => config_cmd::execute(args),
+            Commands::Cleanup(args) => cleanup::execute(args),
         }
     }
 }

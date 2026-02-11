@@ -65,11 +65,11 @@ pub fn execute(args: MembersArgs) -> Result<()> {
         if team_config.members.is_empty() {
             println!("  No members");
         } else {
-            println!("  {:<20} {:<20} {:<25} Active", "Name", "Type", "Model");
+            println!("  {:<20} {:<20} {:<25} Status", "Name", "Type", "Model");
             println!("  {}", "─".repeat(72));
 
             for member in &team_config.members {
-                let active = if member.is_active.unwrap_or(false) { "Yes" } else { "No" };
+                let active = if member.is_active.unwrap_or(false) { "Online" } else { "Offline" };
                 let name = &member.name;
                 let agent_type = &member.agent_type;
                 let model = &member.model;

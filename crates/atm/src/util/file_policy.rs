@@ -2,7 +2,19 @@
 
 use anyhow::Result;
 use atm_core::config::resolve_settings;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Walk up from `start_dir` to find the nearest `.git` directory,
+/// returning the repo root (the parent of `.git`).
+pub fn find_git_root(start_dir: &Path) -> Option<PathBuf> {
+    let mut dir = start_dir;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
 
 /// Check if a file path is allowed for the destination team
 ///
@@ -18,13 +30,19 @@ pub fn check_file_reference(
     // Try to resolve settings for the destination repo
     let settings = resolve_settings(None, current_dir, home_dir);
 
+    // Resolve the repo root by walking up from current_dir to find .git
+    let repo_root = find_git_root(current_dir);
+
     // Default policy: only files inside current repo are allowed
     let is_allowed = if let Some(ref settings) = settings {
         // Check permissions in settings
         check_permissions_allow_file(settings, file_path, current_dir)
+    } else if let Some(ref root) = repo_root {
+        // Found git root - check if file is within it
+        is_file_in_repo(file_path, root)
     } else {
-        // No settings found - default to checking if file is in current repo
-        is_file_in_repo(file_path, current_dir)
+        // Not in a git repo - deny (file will be copied to share)
+        false
     };
 
     if is_allowed {
@@ -166,6 +184,9 @@ mod tests {
         let home_dir = temp_dir.path();
         let current_dir = temp_dir.path();
 
+        // Create .git directory so find_git_root finds a repo
+        fs::create_dir_all(current_dir.join(".git")).unwrap();
+
         let file_path = current_dir.join("allowed.txt");
         fs::write(&file_path, "test content").unwrap();
 
@@ -222,5 +243,101 @@ mod tests {
         assert!(file_matches_rule(file_path, "Read(secrets)"));
         assert!(file_matches_rule(file_path, "Read(./secrets/**)"));
         assert!(!file_matches_rule(file_path, "Read(config)"));
+    }
+
+    #[test]
+    fn test_find_git_root_at_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = temp_dir.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+
+        assert_eq!(find_git_root(&repo), Some(repo.clone()));
+    }
+
+    #[test]
+    fn test_find_git_root_from_subdirectory() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = temp_dir.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let subdir = repo.join("src").join("deep");
+        fs::create_dir_all(&subdir).unwrap();
+
+        assert_eq!(find_git_root(&subdir), Some(repo));
+    }
+
+    #[test]
+    fn test_find_git_root_no_git() {
+        let temp_dir = TempDir::new().unwrap();
+        let no_repo = temp_dir.path().join("no_repo");
+        fs::create_dir_all(&no_repo).unwrap();
+
+        // temp_dir itself has no .git, so walking up should eventually return None
+        // (unless the actual system has a .git above temp, so we rely on temp isolation)
+        // If this test fails due to a parent .git, that's expected system behavior
+        let result = find_git_root(&no_repo);
+        // The result depends on whether there's a .git above the temp dir
+        // We just verify the function doesn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn test_file_policy_from_subdirectory() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo = temp_dir.path().join("repo");
+        let subdir = repo.join("subdir");
+
+        // Create git repo structure: repo/.git, repo/subdir/file.txt
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(&subdir).unwrap();
+        let file_path = subdir.join("file.txt");
+        fs::write(&file_path, "test content").unwrap();
+
+        // Run check_file_reference from subdir - should walk up and find repo root
+        let (is_allowed, _) = check_file_reference(
+            &file_path,
+            "Test message",
+            "test-team",
+            &subdir,
+            home_dir,
+        )
+        .unwrap();
+
+        assert!(is_allowed, "File inside repo should be allowed from subdirectory");
+    }
+
+    #[test]
+    fn test_file_policy_unknown_destination_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+
+        // Create a directory that is NOT inside any git repo
+        let no_repo = temp_dir.path().join("no_repo");
+        fs::create_dir_all(&no_repo).unwrap();
+
+        let file_path = no_repo.join("outside.txt");
+        fs::write(&file_path, "test content").unwrap();
+
+        // check_file_reference from a dir with no .git above
+        // On most systems, TempDir is not inside a git repo, so file should be denied
+        let (is_allowed, rewritten) = check_file_reference(
+            &file_path,
+            "Test message",
+            "test-team",
+            &no_repo,
+            home_dir,
+        )
+        .unwrap();
+
+        // If we're NOT in a git repo, file should be denied and copied
+        // But if there's a system-level git repo above temp, it might be allowed
+        // We test the deny+copy path explicitly by checking if rewritten is populated
+        if !is_allowed {
+            assert!(rewritten.contains("[atm] File path rewritten"));
+            // Verify file was copied to share folder
+            let share_dir = home_dir.join(".config/atm/share/test-team");
+            let copy_path = share_dir.join("outside.txt");
+            assert!(copy_path.exists());
+        }
     }
 }

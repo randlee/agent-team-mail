@@ -21,17 +21,9 @@ pub enum WriteOutcome {
 
 /// Atomically append a message to an inbox with conflict detection
 ///
-/// This implements the 11-step atomic write strategy:
-///
-/// 1. Acquire exclusive lock with retry (flock with backoff)
-/// 2. Read current inbox.json and compute hash
-/// 3. Append message to in-memory array
-/// 4. Write new version to inbox.tmp with fsync
-/// 5. Atomic swap inbox.json ↔ inbox.tmp
-/// 6. Read displaced file (now at inbox.tmp) and compute hash
-/// 7. If hash differs: merge messages and re-swap
-/// 8. Release lock
-/// 9. Delete inbox.tmp
+/// This implements the atomic write strategy with lock, hash, swap, and
+/// conflict merge. If the lock cannot be acquired, the message is spooled
+/// for later delivery.
 ///
 /// # Arguments
 ///
@@ -55,19 +47,81 @@ pub fn inbox_append(
     team: &str,
     agent: &str,
 ) -> Result<WriteOutcome, InboxError> {
+    let msg_clone = message.clone();
+    match atomic_write_with_conflict_check(inbox_path, |messages| {
+        // Deduplication check
+        if let Some(ref msg_id) = msg_clone.message_id
+            && messages
+                .iter()
+                .any(|m| m.message_id.as_ref() == Some(msg_id))
+        {
+            return false;
+        }
+        messages.push(msg_clone);
+        true
+    }) {
+        Ok(outcome) => Ok(outcome),
+        Err(InboxError::LockTimeout { .. }) => {
+            // Could not acquire lock - spool for later delivery
+            let spool_path = crate::io::spool::spool_message(team, agent, message)?;
+            Ok(WriteOutcome::Queued { spool_path })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Atomically update messages in an inbox using a closure
+///
+/// Acquires the inbox lock, reads current messages, applies the update
+/// closure, and writes back atomically with conflict detection.
+///
+/// # Arguments
+///
+/// * `inbox_path` - Full path to inbox.json file
+/// * `team` - Target team name (reserved for future use)
+/// * `agent` - Target agent name (reserved for future use)
+/// * `update_fn` - Closure that modifies the message vector in place
+///
+/// # Errors
+///
+/// Returns `InboxError` for I/O errors, JSON parse errors, lock timeout,
+/// or merge failures.
+pub fn inbox_update<F>(
+    inbox_path: &Path,
+    _team: &str,
+    _agent: &str,
+    update_fn: F,
+) -> Result<(), InboxError>
+where
+    F: FnOnce(&mut Vec<InboxMessage>),
+{
+    atomic_write_with_conflict_check(inbox_path, |messages| {
+        update_fn(messages);
+        true
+    })?;
+    Ok(())
+}
+
+/// Shared atomic write logic for inbox operations
+///
+/// Acquires lock, reads current file, applies modification via closure,
+/// writes atomically with conflict detection and merge.
+///
+/// The `modify_fn` closure receives the current messages and returns `true`
+/// if modifications were made (triggering a write), or `false` to skip
+/// the write (e.g., duplicate detection).
+fn atomic_write_with_conflict_check<F>(
+    inbox_path: &Path,
+    modify_fn: F,
+) -> Result<WriteOutcome, InboxError>
+where
+    F: FnOnce(&mut Vec<InboxMessage>) -> bool,
+{
     let lock_path = inbox_path.with_extension("lock");
     let tmp_path = inbox_path.with_extension("tmp");
 
     // Step 1: Acquire lock with retry
-    let _lock = match acquire_lock(&lock_path, 5) {
-        Ok(lock) => lock,
-        Err(InboxError::LockTimeout { .. }) => {
-            // Could not acquire lock - spool for later delivery
-            let spool_path = crate::io::spool::spool_message(team, agent, message)?;
-            return Ok(WriteOutcome::Queued { spool_path });
-        }
-        Err(e) => return Err(e),
-    };
+    let _lock = acquire_lock(&lock_path, 5)?;
 
     // Step 2: Read current inbox and compute hash
     let (mut messages, original_hash) = if inbox_path.exists() {
@@ -87,16 +141,11 @@ pub fn inbox_append(
         (Vec::new(), compute_hash(b"[]"))
     };
 
-    // Step 3: Append message (with deduplication)
-    if let Some(ref msg_id) = message.message_id
-        && messages
-            .iter()
-            .any(|m| m.message_id.as_ref() == Some(msg_id))
-    {
-        // Duplicate message - skip insertion
+    // Step 3: Apply modification
+    if !modify_fn(&mut messages) {
+        // No changes needed (e.g., duplicate message)
         return Ok(WriteOutcome::Success);
     }
-    messages.push(message.clone());
 
     // Step 4: Write to tmp file with fsync
     let new_content =
@@ -378,5 +427,92 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(messages[0].unknown_fields.contains_key("unknownField"));
         assert!(messages[0].unknown_fields.contains_key("futureFeature"));
+    }
+
+    #[test]
+    fn test_inbox_update_marks_read() {
+        let temp_dir = TempDir::new().unwrap();
+        let inbox_path = temp_dir.path().join("agent.json");
+
+        // Seed inbox with unread messages
+        let msg1 = create_test_message("user-a", "Message 1", Some("msg-001".to_string()));
+        let msg2 = create_test_message("user-b", "Message 2", Some("msg-002".to_string()));
+        inbox_append(&inbox_path, &msg1, "test-team", "test-agent").unwrap();
+        inbox_append(&inbox_path, &msg2, "test-team", "test-agent").unwrap();
+
+        // Mark all as read via inbox_update
+        inbox_update(&inbox_path, "test-team", "test-agent", |messages| {
+            for msg in messages.iter_mut() {
+                msg.read = true;
+            }
+        })
+        .unwrap();
+
+        // Verify all marked as read
+        let content = fs::read_to_string(&inbox_path).unwrap();
+        let messages: Vec<InboxMessage> = serde_json::from_str(&content).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].read);
+        assert!(messages[1].read);
+    }
+
+    #[test]
+    fn test_inbox_update_concurrent_writes() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let temp_dir = TempDir::new().unwrap();
+        let inbox_path = temp_dir.path().join("agent.json");
+
+        // Seed inbox with messages to update
+        let msg1 = create_test_message("user-a", "Message 1", Some("msg-001".to_string()));
+        let msg2 = create_test_message("user-b", "Message 2", Some("msg-002".to_string()));
+        inbox_append(&inbox_path, &msg1, "test-team", "test-agent").unwrap();
+        inbox_append(&inbox_path, &msg2, "test-team", "test-agent").unwrap();
+
+        let inbox_path = Arc::new(inbox_path);
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Thread 1: Mark messages as read via inbox_update
+        let path1 = Arc::clone(&inbox_path);
+        let barrier1 = Arc::clone(&barrier);
+        let handle1 = thread::spawn(move || {
+            barrier1.wait();
+            inbox_update(&path1, "test-team", "test-agent", |messages| {
+                for msg in messages.iter_mut() {
+                    msg.read = true;
+                }
+            })
+            .unwrap();
+        });
+
+        // Thread 2: Append a new message via inbox_append
+        let path2 = Arc::clone(&inbox_path);
+        let barrier2 = Arc::clone(&barrier);
+        let handle2 = thread::spawn(move || {
+            barrier2.wait();
+            let msg3 = create_test_message("user-c", "Message 3", Some("msg-003".to_string()));
+            inbox_append(&path2, &msg3, "test-team", "test-agent").unwrap();
+        });
+
+        handle1.join().unwrap();
+        handle2.join().unwrap();
+
+        // Verify: all messages present (no data loss)
+        let content = fs::read_to_string(&*inbox_path).unwrap();
+        let messages: Vec<InboxMessage> = serde_json::from_str(&content).unwrap();
+        assert_eq!(messages.len(), 3, "No messages should be lost");
+        assert!(
+            messages.iter().any(|m| m.message_id == Some("msg-001".to_string())),
+            "msg-001 should be present"
+        );
+        assert!(
+            messages.iter().any(|m| m.message_id == Some("msg-002".to_string())),
+            "msg-002 should be present"
+        );
+        assert!(
+            messages.iter().any(|m| m.message_id == Some("msg-003".to_string())),
+            "msg-003 should be present"
+        );
     }
 }
