@@ -64,6 +64,7 @@ When dev issues persist or QA rejects work repeatedly:
 ### 4. Commit and PR
 
 When QA passes all checks:
+- Update `docs/project-plan.md` to reflect sprint progress (mark deliverables complete, note any deviations or open items)
 - Commit with a clear message referencing the sprint ID
 - Push and create a PR targeting `develop`
 - Include sprint deliverables and QA results in the PR description
