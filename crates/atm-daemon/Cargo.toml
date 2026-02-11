@@ -1,0 +1,14 @@
+[package]
+name = "atm-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "atm-daemon"
+path = "src/main.rs"
+
+[dependencies]
+atm-core.workspace = true
