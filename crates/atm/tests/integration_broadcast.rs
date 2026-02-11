@@ -5,12 +5,11 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-/// Helper to set home directory env vars for cross-platform test compatibility.
-/// On macOS/Linux, `dirs::home_dir()` reads `HOME`.
-/// On Windows, it reads `USERPROFILE`.
+/// Helper to set home directory for cross-platform test compatibility.
+/// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
+/// platform-specific differences in how `dirs::home_dir()` resolves.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
-    cmd.env("HOME", temp_dir.path())
-        .env("USERPROFILE", temp_dir.path());
+    cmd.env("ATM_HOME", temp_dir.path());
 }
 
 /// Create a test team structure with multiple agents
