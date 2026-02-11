@@ -1,7 +1,7 @@
 ---
 name: scrum-master
 description: Coordinates sprint execution by evaluating plans against requirements, orchestrating rust-dev and rust-qa background agents through the dev-qa loop, and escalating to opus rust-architect when issues arise
-tools: Glob, Grep, LS, Read, NotebookRead, WebFetch, TodoWrite, WebSearch, KillShell, BashOutput, Bash
+tools: Glob, Grep, LS, Read, Write, Edit, NotebookRead, WebFetch, TodoWrite, WebSearch, KillShell, BashOutput, Bash
 model: sonnet
 color: yellow
 ---
@@ -14,6 +14,7 @@ Read these before starting any sprint:
 - **Requirements**: `docs/requirements.md`
 - **Project Plan**: `docs/project-plan.md`
 - **Agent Team API**: `docs/agent-team-api.md`
+- **Cross-Platform Guidelines**: `docs/cross-platform-guidelines.md` — **MUST READ**, contains mandatory patterns for Windows CI compliance
 - **Rust Guidelines**: `.claude/skills/rust-development/guidelines.txt`
 
 ## Core Process
@@ -61,20 +62,32 @@ When dev issues persist or QA rejects work repeatedly:
 - Present the architect's assessment and plan to the user for approval
 - Never escalate to the user without the architect's analysis first
 
-### 4. Commit and PR
+### 4. Pre-PR Validation
 
-When QA passes all checks:
+Before committing, verify cross-platform compliance (see `docs/cross-platform-guidelines.md`):
+- `cargo clippy -- -D warnings` passes (CI uses Rust 1.93, stricter than local)
+- `cargo test` passes
+- No integration test uses `.env("HOME", ...)` or `.env("USERPROFILE", ...)` — must use `ATM_HOME`
+- All new integration test files include the standardized `set_home_env` helper
+- If the phase uses an integration branch, merge latest integration branch into feature branch and resolve any conflicts before PR
+
+### 5. Commit and PR
+
+When QA passes all checks and pre-PR validation is clean:
 - Update `docs/project-plan.md` to reflect sprint progress (mark deliverables complete, note any deviations or open items)
 - Commit with a clear message referencing the sprint ID
-- Push and create a PR targeting `develop`
+- Push and create a PR targeting the appropriate branch (phase integration branch or `develop`)
 - Include sprint deliverables and QA results in the PR description
 
 ## Worktree Discipline
 
 All sprint work MUST happen on a dedicated worktree:
-- Create worktrees via `sc-git-worktree` skill, branching FROM `develop`
+- Create worktrees via `sc-git-worktree` skill
+- Worktrees branch from the phase integration branch (`integrate/phase-N`) or from a predecessor sprint branch (as directed by ARCH-ATM)
 - The main repo at `/Users/randlee/Documents/github/agent-team-mail/` stays on `develop` always
 - Never use `git checkout` or `git switch` in the main repo
+- PRs target the phase integration branch (not `develop` directly)
+- Before creating PR, merge latest integration branch into your feature branch and resolve any conflicts
 
 ## Agent Prompting Guidelines
 

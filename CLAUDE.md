@@ -57,6 +57,7 @@
 - [`docs/requirements.md`](./docs/requirements.md) - System requirements, architecture, plugin design
 - [`docs/project-plan.md`](./docs/project-plan.md) - Phased sprint plan with dependency graphs
 - [`docs/agent-team-api.md`](./docs/agent-team-api.md) - Claude agent team API reference (schema baseline: Claude Code 2.1.39)
+- [`docs/cross-platform-guidelines.md`](./docs/cross-platform-guidelines.md) - Mandatory Windows CI compliance patterns
 
 **Rust development reference — read only when implementation decisions are needed:**
 
@@ -74,14 +75,40 @@ Every sprint follows this pattern:
 2. **Dev work** by assigned dev agent(s)
 3. **QA validation** by assigned QA agent(s)
 4. **Retry loop** if QA fails (max attempts configurable)
-5. **Commit/Push/PR** to `develop` branch
+5. **Commit/Push/PR** to phase integration branch
 6. **Agent-teams review** documenting what worked/didn't
 
-### Integration Branch
+### Phase Integration Branch Strategy
 
-- All PRs target `develop` branch
-- Merge to `main` after review/approval
-- Post-merge CI runs as safety net
+Each phase gets a dedicated integration branch off `develop`:
+
+```
+main
+  └── develop
+        └── integrate/phase-N              ← created at phase start
+              ├── feature/pN-s1-...        ← PR targets integrate/phase-N
+              ├── feature/pN-s2-...        ← PR targets integrate/phase-N
+              └── feature/pN-s3-...        ← PR targets integrate/phase-N
+
+        After all sprints merge → one PR: integrate/phase-N → develop
+```
+
+**Rules:**
+- Sprint PRs target `integrate/phase-N` (not `develop` directly)
+- After each sprint merges to the integration branch, subsequent sprints merge latest `integrate/phase-N` into their feature branch before creating their PR
+- When all phase sprints are complete, one final PR merges `integrate/phase-N → develop`
+- Phase integration branch is then cleaned up
+
+### Worktree Cleanup Policy
+
+**Do NOT clean up worktrees until the user has reviewed them.** The user reviews each sprint's worktree separately to check for design divergence before approving cleanup. Worktree cleanup is only performed when explicitly requested.
+
+### Branch Flow
+
+- Sprint PRs → `integrate/phase-N` (phase integration branch)
+- Phase completion PR → `develop` (integration branch)
+- Release PR → `main` (after user review/approval)
+- Post-merge CI runs as safety net at each level
 
 ---
 

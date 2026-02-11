@@ -55,20 +55,28 @@ Each sprint gets a **fresh scrum-master** with clean context:
 
 ### 0.3 PR and Merge Policy
 
-- **PRs target `develop`** — created by the scrum-master at sprint completion
+- **Phase integration branches**: Each phase gets an `integrate/phase-N` branch off `develop`. Sprint PRs target this integration branch, not `develop` directly.
+- **Sprint PRs target `integrate/phase-N`** — created by the scrum-master at sprint completion
+- **Phase completion PR targets `develop`** — one PR merging `integrate/phase-N → develop` after all phase sprints are complete
 - **Only the user (randlee) merges PRs** — ARCH-ATM does not merge
 - **Auto-advance**: ARCH-ATM advances to the next sprint once CI passes on the PR, without waiting for the merge — including across phase boundaries.
-- **Dependent sprints**: When the next sprint depends on a previous sprint's code (e.g., 1.3 → 1.4), ARCH-ATM branches the new worktree from the predecessor's PR branch (not `develop`). This avoids waiting for merge while preserving the dependency chain.
-- **Independent sprints**: When the next sprint has no code dependency on the previous one, the worktree branches from `develop` HEAD as normal.
+- **Dependent sprints**: When the next sprint depends on a previous sprint's code, ARCH-ATM branches the new worktree from the predecessor's PR branch (or the integration branch if the predecessor is already merged).
+- **Independent sprints**: Worktree branches from `integrate/phase-N` HEAD.
+- **After each sprint merges to integration branch**: Subsequent sprint branches must merge latest `integrate/phase-N` into their feature branch before creating their PR. This prevents merge conflicts.
 - **PR rejection by user**: If the user requests changes on a PR, ARCH-ATM spawns a new scrum-master pointed at the existing worktree with the rejection context to address feedback.
 
 ### 0.4 Worktree Continuity
 
-- **Independent sprint** → new worktree branched from `develop`
-- **Dependent sprint** → new worktree branched from predecessor's PR branch
+- **First sprint in phase** → new worktree branched from `integrate/phase-N`
+- **Independent sprint** → new worktree branched from `integrate/phase-N`
+- **Dependent sprint** → new worktree branched from predecessor's PR branch (or integration branch if predecessor merged)
 - **CI failure on existing PR** → same worktree, same scrum-master
 - **User-requested changes on merged PR** → new worktree for follow-up sprint
 - **User-requested changes on open PR** → new scrum-master, same worktree
+
+### 0.4a Worktree Cleanup Policy
+
+**Worktrees are NOT cleaned up automatically.** The user reviews each sprint's worktree to check for design divergence before approving cleanup. ARCH-ATM only cleans up worktrees when explicitly requested by the user.
 
 ### 0.5 Parallel Sprints
 
@@ -77,21 +85,21 @@ When the dependency graph allows parallel sprints (e.g., 1.2, 1.3, 1.5 after 1.1
 - Each parallel sprint gets its own worktree and its own scrum-master teammate
 - Parallel sprints MUST be non-intersecting — different files/modules, no shared modifications
 - Each scrum-master independently runs its dev-qa loop with its own background agents
-- Each sprint produces its own PR targeting `develop`
+- Each sprint produces its own PR targeting `integrate/phase-N`
 - ARCH-ATM manages multiple scrum-master teammates concurrently
-
-**Merge sprint**: After all parallel sprints in a group complete and their PRs are merged, a small **integration sprint** follows to:
-- Verify all parallel branches integrate cleanly on `develop`
-- Run the full test suite across combined changes
-- Resolve any unexpected interactions between parallel work
-- This is a lightweight sprint — no new features, just validation and conflict resolution
+- After each sprint merges to `integrate/phase-N`, remaining sprints merge the integration branch into their feature branches before creating their PRs
 
 ```
-Example: Phase 1 after Sprint 1.1
+Example: Phase 3 with integration branch
 
-  Sprint 1.2 (worktree A) ──► PR → develop ──┐
-  Sprint 1.3 (worktree B) ──► PR → develop ──┼──► Integration sprint
-  Sprint 1.5 (worktree C) ──► PR → develop ──┘    (verify + resolve)
+  integrate/phase-3 ◄── created from develop at phase start
+    │
+    ├── Sprint 3.1 (worktree A) ──► PR → integrate/phase-3 ──► merge
+    │     (after merge, remaining sprints pull integrate/phase-3)
+    ├── Sprint 3.2 (worktree B) ──► PR → integrate/phase-3 ──► merge
+    └── Sprint 3.3 (worktree C) ──► PR → integrate/phase-3 ──► merge
+
+  integrate/phase-3 ──► PR → develop (phase completion)
 ```
 
 ---
@@ -586,15 +594,44 @@ Phase 1 Complete
 
 ## 5. Phase 3: Integration & Hardening
 
-**Goal**: End-to-end validation, conflict scenarios, polish.
+**Goal**: End-to-end validation, conflict scenarios, fix design review findings, polish.
 
 **Branch prefix**: `feature/p3-*`
 **Depends on**: Phase 2 complete
+**Integration branch**: `integrate/phase-3` (created from `develop` at phase start)
+
+### Sprint 3.0: ARCH-CTM Design Review Fixes (Hotfix)
+
+**Branch**: `feature/p3-s0-design-fixes`
+**Depends on**: Phase 2 complete
+**Priority**: Must complete before Sprint 3.1
+
+**Background**: External architecture review (ARCH-CTM) identified correctness issues in Phase 1-2 code. These fixes address data integrity bugs that would undermine Phase 3 testing.
+
+**Deliverables**:
+- **[CRITICAL] Fix non-atomic read marking** (`crates/atm/src/commands/read.rs`):
+  - Create `inbox_update()` function in `atm-core/src/io/inbox.rs` for atomic read-modify-write
+  - Refactor lock/hash/swap logic from `inbox_append` into shared helper
+  - Replace bare `std::fs::write` in `read.rs` with `inbox_update()` call
+  - Add concurrent read/write test
+- **[HIGH] Fix spool drain Queued handling** (`crates/atm-core/src/io/spool.rs`):
+  - Capture `WriteOutcome` from `inbox_append` in `process_spooled_message`
+  - Treat `Queued` as retry failure (delete duplicate spool file, increment retry count)
+  - Add test for `Queued` outcome during drain
+- **[LOW] Fix task status counting** (`crates/atm/src/commands/status.rs`):
+  - Replace string matching with `serde_json::from_str::<TaskItem>()` parsing
+  - Handle `TaskStatus::Completed`, `Deleted`, and pending states properly
+
+**Acceptance criteria**:
+- `inbox_update()` uses full atomic write infrastructure (lock, hash, swap, conflict detection)
+- Spool drain correctly handles `Queued` outcomes without double-spooling
+- Task status counts match actual task file schema
+- All existing tests pass, new tests cover the fixed scenarios
 
 ### Sprint 3.1: End-to-End Integration Tests
 
 **Branch**: `feature/p3-s1-e2e-tests`
-**Depends on**: Phase 2 complete
+**Depends on**: Sprint 3.0
 
 **Deliverables**:
 - Full CLI workflow tests (send → read → mark-as-read → verify)
@@ -622,12 +659,16 @@ Phase 1 Complete
 - Large inbox performance tests (10K+ messages)
 - Missing file / empty file / permission denied scenarios
 - Settings schema parse/round-trip tests for `.claude/settings.json`
+- **[ARCH-CTM Fix] File policy repo root** (`crates/atm/src/util/file_policy.rs`):
+  - Use repo root (walk up to `.git`) instead of CWD for `is_file_in_repo` checks
+  - Add test for subdirectory file reference validation
 
 **Acceptance criteria**:
 - No data loss in any concurrent scenario
 - Spool delivery works end-to-end
 - Performance acceptable for large inboxes
 - All edge cases handled gracefully
+- File policy correctly resolves from subdirectories
 
 ### Sprint 3.3: Documentation & Polish
 
@@ -641,11 +682,17 @@ Phase 1 Complete
 - README.md with quickstart
 - `cargo doc` generates clean documentation
 - Version info in `atm --version`
+- **[ARCH-CTM Fix] Settings repo-root traversal** (`crates/atm-core/src/config/discovery.rs`):
+  - `resolve_settings` walks from CWD up to git root to find `.claude/settings*.json`
+  - Add test for settings discovery from subdirectory
+- **[ARCH-CTM Note] Config command source reporting** (`crates/atm/src/commands/config_cmd.rs`):
+  - Document that source is heuristic (ignores env/CLI overrides) or fix if straightforward
 
 **Acceptance criteria**:
 - All `--help` text is clear and complete
 - Error messages are actionable
 - `cargo doc` produces no warnings
+- Settings resolution works from any subdirectory within a repo
 
 ### Sprint 3.4: Inbox Retention and Cleanup
 
@@ -669,16 +716,24 @@ Phase 1 Complete
 ```
 Phase 2 Complete
     │
-    └── Sprint 3.1 (E2E Tests)
+    └── Sprint 3.0 (Design Review Fixes - HOTFIX)
             │
-            ├── Sprint 3.2 (Conflict Tests) ───────┐
-            │                                      │
-            ├── Sprint 3.3 (Docs + Polish) ────────┤
-            │                                      │
-            └── Sprint 3.4 (Retention) ────────────┘
-                                                    │
-                                    MVP Complete ────┘
+            └── Sprint 3.1 (E2E Tests)
+                    │
+                    ├── Sprint 3.2 (Conflict Tests + file policy fix) ──┐
+                    │                                                    │
+                    ├── Sprint 3.3 (Docs + Polish + settings fix) ──────┤
+                    │                                                    │
+                    └── Sprint 3.4 (Retention) ─────────────────────────┘
+                                                                         │
+                                                         MVP Complete ───┘
 ```
+
+### Deferred to Phase 4+
+
+- **Managed settings policy paths** (Finding 3b): Platform-specific managed policy directories (`/Library/Application Support/ClaudeCode/`, `/etc/claude-code/`, `%PROGRAMDATA%\ClaudeCode\`). Uncommon in practice; defer until daemon or enterprise features.
+- **Destination repo file policy resolution** (Finding 4b): Resolve file permissions against destination team's repo, not sender's. Requires schema extension to `TeamConfig` for repo path. Defer until cross-repo use cases are implemented.
+- **Windows atomic swap fsync** (ARCH-CTM note): Current best-effort behavior is documented. Full fsync would require `FlushFileBuffers` on Windows. Low priority.
 
 ---
 
