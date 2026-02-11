@@ -269,6 +269,75 @@ Adds to team config at `~/.claude/teams/{team_name}/config.json`:
 
 ---
 
+## Agent Lifecycle & Message Delivery
+
+### Shutdown Behavior
+
+When an agent receives a `shutdown_request` and approves it:
+- The agent process terminates (tmux pane destroyed)
+- The agent **may or may not** be removed from `config.json` members array (behavior is inconsistent)
+- If removed: the member entry is deleted entirely
+- If retained: `isActive` is set to `false`, `tmuxPaneId` becomes stale (points to dead pane)
+- **Inbox files persist** on disk — both the agent's own inbox (`{name}.json`) and messages it sent to others
+
+### Respawn Behavior
+
+Spawning a new agent with the same `name` into the same team:
+- Produces the same `agentId` (format: `{name}@{team_name}`, deterministic)
+- Gets a **new `tmuxPaneId`** (new process handle)
+- The member entry in `config.json` is updated (not duplicated)
+- `joinedAt` and `prompt` are updated to reflect the new spawn
+- The agent starts with **fresh context** — no memory of previous sessions
+- The **spawn prompt** is the primary driver of initial behavior
+
+### Routing Architecture
+
+Message delivery is entirely **name-based**:
+
+| Layer | Keyed by | Persists across respawn? |
+|-------|----------|------------------------|
+| Inbox file | `name` (`{name}.json`) | Yes — accumulates across lifetimes |
+| Message fields | `from`/`to` names | Yes — no agentId in messages |
+| Team membership | `agentId` (`name@team`) | Re-created with same value |
+| Process handle | `tmuxPaneId` (`%4`, `%5`...) | No — new each spawn |
+
+The `agentId` is an internal bookkeeping field. It does not appear in inbox files or message routing. All routing uses agent `name`.
+
+### Message Delivery to Offline Agents
+
+`SendMessage` to a shut-down agent **succeeds silently**:
+- The message is written to the agent's inbox file (`{name}.json`) with `read: false`
+- No error or warning is returned to the sender
+- Messages accumulate in the inbox file indefinitely
+
+### Queued Message Processing on Respawn
+
+When an agent is respawned (same name), it inherits the full inbox history:
+- All prior messages (from all previous lifetimes) are visible in the agent's conversation context
+- Messages are marked `read: true` by the system
+- **The agent may or may not act on queued messages** — behavior depends on:
+  - **Inbox noise**: With few messages, plain instructions are acted on. With many old messages (prior prompts, shutdowns, old requests), plain instructions blend into history and are ignored.
+  - **Spawn prompt**: The spawn prompt takes priority. If it gives a specific task, queued messages may be ignored even if noticed.
+  - **Call-to-action tags**: Prefixing queued messages with a tag like `[PENDING ACTION]` or `[OFFLINE MESSAGE - Acknowledge and respond]` reliably causes agents to act on them, even in noisy inboxes.
+
+### Reliable Offline Queuing Pattern
+
+To ensure queued messages are acted on after respawn, use a call-to-action prefix:
+
+```
+[PENDING ACTION - execute when online] <instruction here>
+```
+
+or:
+
+```
+[OFFLINE MESSAGE - Acknowledge and respond] <instruction here>
+```
+
+Without a tag, success depends on inbox history depth. With a tag, the pattern has been 100% reliable in testing.
+
+---
+
 ## Task Management
 
 ### TaskCreate
