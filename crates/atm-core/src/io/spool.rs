@@ -485,10 +485,10 @@ mod tests {
         for i in 0..3 {
             let message = create_test_message(
                 "team-lead",
-                &format!("Message {}", i),
-                Some(format!("msg-{:03}", i)),
+                &format!("Message {i}"),
+                Some(format!("msg-{i:03}")),
             );
-            spool_message_with_base("test-team", &format!("agent-{}", i), &message, Some(temp_dir.path())).unwrap();
+            spool_message_with_base("test-team", &format!("agent-{i}"), &message, Some(temp_dir.path())).unwrap();
         }
 
         // Drain - all should be delivered
