@@ -549,8 +549,8 @@ Sprint 1.1 (Workspace + Schema)
 - Integration tests
 
 **Status**: ✅ Complete
-**PR**: TBD
-**Commit**: TBD
+**PR**: [#13](https://github.com/randlee/agent-team-mail/pull/13)
+**Commit**: `64a54f5`
 **Completed**: 2026-02-11
 **Dev-QA iterations**: 1 (clippy formatting fixes on first pass)
 **Implementation**:
