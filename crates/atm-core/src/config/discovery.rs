@@ -124,6 +124,9 @@ fn merge_config(base: &mut Config, file: Config) {
     base.display.format = file.display.format;
     base.display.color = file.display.color;
     base.display.timestamps = file.display.timestamps;
+
+    // Merge retention config
+    base.retention = file.retention;
 }
 
 /// Apply environment variable overrides

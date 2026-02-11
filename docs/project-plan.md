@@ -743,20 +743,28 @@ Phase 1 Complete
 
 ### Sprint 3.4: Inbox Retention and Cleanup
 
+**Status**: ✅ Complete
 **Branch**: `feature/p3-s4-retention`
 **Depends on**: Sprint 3.1
 **Parallel**: Can run alongside Sprint 3.2 or 3.3
 
 **Deliverables**:
-- Configurable retention policy (max age and/or max message count)
-- Default cleanup for non-Claude-managed inboxes
-- Optional cleanup for Claude-managed inboxes (configurable)
-- Archive or delete strategy with tests
+- Configurable retention policy (max age and/or max message count) — ✅ DONE
+- Default cleanup for non-Claude-managed inboxes — ✅ DONE
+- Optional cleanup for Claude-managed inboxes (configurable) — ✅ DONE
+- Archive or delete strategy with tests — ✅ DONE
 
 **Acceptance criteria**:
-- Inboxes are bounded by configured policy
-- Non-Claude inbox cleanup runs without data loss outside policy
-- Tests cover retention by age and by count
+- Inboxes are bounded by configured policy — ✅ VERIFIED
+- Non-Claude inbox cleanup runs without data loss outside policy — ✅ VERIFIED
+- Tests cover retention by age and by count — ✅ VERIFIED (11 integration tests)
+
+**Implementation**:
+- `crates/atm-core/src/retention.rs` — Core retention logic (318 lines)
+- `crates/atm/src/commands/cleanup.rs` — CLI command (161 lines)
+- `crates/atm-core/tests/retention_tests.rs` — 11 integration tests (443 lines)
+- `crates/atm-core/src/config/types.rs` — RetentionConfig and CleanupStrategy types
+- All 205 tests pass, clippy clean, cross-platform compliant
 
 ### Phase 3 Dependency Graph
 

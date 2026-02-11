@@ -11,6 +11,9 @@ pub struct Config {
     /// Display configuration
     #[serde(default)]
     pub display: DisplayConfig,
+    /// Retention configuration
+    #[serde(default)]
+    pub retention: RetentionConfig,
 }
 
 /// Core configuration
@@ -72,6 +75,48 @@ pub enum TimestampFormat {
     Absolute,
     /// ISO 8601 (e.g., "2026-02-10T14:30:00Z")
     Iso8601,
+}
+
+/// Retention configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionConfig {
+    /// Maximum message age (duration string: "7d", "24h", "30d")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<String>,
+    /// Maximum message count per inbox
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_count: Option<usize>,
+    /// Cleanup strategy: "delete" or "archive"
+    #[serde(default = "default_strategy")]
+    pub strategy: CleanupStrategy,
+    /// Archive directory path (default: ~/.config/atm/archive/)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_dir: Option<String>,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            max_age: None,
+            max_count: None,
+            strategy: CleanupStrategy::Delete,
+            archive_dir: None,
+        }
+    }
+}
+
+/// Cleanup strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CleanupStrategy {
+    /// Delete old messages without archiving
+    Delete,
+    /// Archive old messages before removing from inbox
+    Archive,
+}
+
+fn default_strategy() -> CleanupStrategy {
+    CleanupStrategy::Delete
 }
 
 #[cfg(test)]
