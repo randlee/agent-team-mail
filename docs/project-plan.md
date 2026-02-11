@@ -614,17 +614,18 @@ Phase 1 Complete
   - Refactor lock/hash/swap logic from `inbox_append` into shared helper
   - Replace bare `std::fs::write` in `read.rs` with `inbox_update()` call
   - Add concurrent read/write test
-- **[HIGH] Fix spool drain Queued handling** (`crates/atm-core/src/io/spool.rs`):
+- **[HIGH] Fix spool drain message loss** (`crates/atm-core/src/io/spool.rs`):
   - Capture `WriteOutcome` from `inbox_append` in `process_spooled_message`
-  - Treat `Queued` as retry failure (delete duplicate spool file, increment retry count)
-  - Add test for `Queued` outcome during drain
+  - Treat `WriteOutcome::Queued` as NOT delivered — keep original spool file pending, update retry metadata (increment `retry_count`, update `last_attempt`)
+  - Do NOT delete spool file on `Queued` (current behavior permanently drops the message)
+  - Add test: force `inbox_append` to return `Queued`, verify spool file remains in `pending/` with incremented retry count
 - **[LOW] Fix task status counting** (`crates/atm/src/commands/status.rs`):
   - Replace string matching with `serde_json::from_str::<TaskItem>()` parsing
   - Handle `TaskStatus::Completed`, `Deleted`, and pending states properly
 
 **Acceptance criteria**:
 - `inbox_update()` uses full atomic write infrastructure (lock, hash, swap, conflict detection)
-- Spool drain correctly handles `Queued` outcomes without double-spooling
+- Spool drain keeps spool file pending on `Queued` outcome (no message loss)
 - Task status counts match actual task file schema
 - All existing tests pass, new tests cover the fixed scenarios
 
@@ -659,9 +660,12 @@ Phase 1 Complete
 - Large inbox performance tests (10K+ messages)
 - Missing file / empty file / permission denied scenarios
 - Settings schema parse/round-trip tests for `.claude/settings.json`
-- **[ARCH-CTM Fix] File policy repo root** (`crates/atm/src/util/file_policy.rs`):
+- **[ARCH-CTM Fix] File policy repo root + destination fallback** (`crates/atm/src/util/file_policy.rs`):
   - Use repo root (walk up to `.git`) instead of CWD for `is_file_in_repo` checks
+  - Resolve file policy against **destination repo context** when available
+  - If destination repo is unknown, fall back to **deny + copy with notice** (safest behavior)
   - Add test for subdirectory file reference validation
+  - Add test for unknown-destination fallback (deny + copy)
 
 **Acceptance criteria**:
 - No data loss in any concurrent scenario
@@ -669,6 +673,7 @@ Phase 1 Complete
 - Performance acceptable for large inboxes
 - All edge cases handled gracefully
 - File policy correctly resolves from subdirectories
+- File policy denies + copies when destination repo is unknown
 
 ### Sprint 3.3: Documentation & Polish
 
@@ -684,6 +689,7 @@ Phase 1 Complete
 - Version info in `atm --version`
 - **[ARCH-CTM Fix] Settings repo-root traversal** (`crates/atm-core/src/config/discovery.rs`):
   - `resolve_settings` walks from CWD up to git root to find `.claude/settings*.json`
+  - Use **override semantics** (not merge): highest-precedence file wins, matching Claude Code behavior
   - Add test for settings discovery from subdirectory
 - **[ARCH-CTM Note] Config command source reporting** (`crates/atm/src/commands/config_cmd.rs`):
   - Document that source is heuristic (ignores env/CLI overrides) or fix if straightforward
@@ -732,7 +738,7 @@ Phase 2 Complete
 ### Deferred to Phase 4+
 
 - **Managed settings policy paths** (Finding 3b): Platform-specific managed policy directories (`/Library/Application Support/ClaudeCode/`, `/etc/claude-code/`, `%PROGRAMDATA%\ClaudeCode\`). Uncommon in practice; defer until daemon or enterprise features.
-- **Destination repo file policy resolution** (Finding 4b): Resolve file permissions against destination team's repo, not sender's. Requires schema extension to `TeamConfig` for repo path. Defer until cross-repo use cases are implemented.
+- **Destination repo file policy — full resolution** (Finding 4b): Full resolution of destination team's repo context requires schema extension to `TeamConfig` for repo path. Sprint 3.2 adds safe fallback (deny + copy when destination unknown). Full schema extension deferred until cross-repo use cases are implemented.
 - **Windows atomic swap fsync** (ARCH-CTM note): Current best-effort behavior is documented. Full fsync would require `FlushFileBuffers` on Windows. Low priority.
 
 ---
