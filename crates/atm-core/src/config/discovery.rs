@@ -188,10 +188,10 @@ pub fn resolve_settings(
 
     // 3-4. Repo-local settings (walks up to git root)
     // Check settings.local.json first, then settings.json at each level
-    if let Some(settings_path) = find_repo_local_settings(current_dir) {
-        if let Some(settings) = try_load_settings(&settings_path) {
-            return Some(settings);
-        }
+    if let Some(settings_path) = find_repo_local_settings(current_dir)
+        && let Some(settings) = try_load_settings(&settings_path)
+    {
+        return Some(settings);
     }
 
     // 5. Global settings.json
