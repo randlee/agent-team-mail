@@ -4,6 +4,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod error;
+mod inbox;
+mod read;
 mod send;
 
 /// atm - Mail-like messaging for Claude agent teams
@@ -23,6 +25,12 @@ pub struct Cli {
 enum Commands {
     /// Send a message to a specific agent
     Send(send::SendArgs),
+
+    /// Read messages from an inbox
+    Read(read::ReadArgs),
+
+    /// Show inbox summary for team members
+    Inbox(inbox::InboxArgs),
 }
 
 impl Cli {
@@ -30,6 +38,8 @@ impl Cli {
     pub fn execute(self) -> Result<()> {
         match self.command {
             Commands::Send(args) => send::execute(args),
+            Commands::Read(args) => read::execute(args),
+            Commands::Inbox(args) => inbox::execute(args),
         }
     }
 }
