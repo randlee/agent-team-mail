@@ -1,0 +1,35 @@
+//! CLI command dispatch and execution
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+mod error;
+mod send;
+
+/// atm - Mail-like messaging for Claude agent teams
+#[derive(Parser, Debug)]
+#[command(
+    name = "atm",
+    version,
+    about = "Mail-like messaging for Claude agent teams",
+    long_about = "A thin CLI over the ~/.claude/teams/ file-based API for agent team messaging"
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Send a message to a specific agent
+    Send(send::SendArgs),
+}
+
+impl Cli {
+    /// Execute the CLI command
+    pub fn execute(self) -> Result<()> {
+        match self.command {
+            Commands::Send(args) => send::execute(args),
+        }
+    }
+}
