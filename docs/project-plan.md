@@ -670,10 +670,14 @@ Phase 1 Complete
   - Add test for unknown-destination fallback (deny + copy)
 - **[NEW] Offline recipient detection on `atm send`** (`crates/atm/src/commands/send.rs`):
   - Before sending, check `config.json` for recipient: if member not found or `isActive == false`, recipient is offline
-  - Warn sender: "Agent X appears offline. Message will be queued."
-  - Auto-tag message with `[PENDING ACTION - queued while offline at {timestamp}]` prefix
+  - Warn sender: "Agent X appears offline. Message will be queued with call-to-action."
+  - Prepend `[{action_text}] ` to message body. Action text resolved from (highest priority first):
+    1. `--offline-action "custom text"` CLI flag
+    2. `offline_action` property in config (`.atm.toml` `[messaging]` section)
+    3. Hardcoded default: `PENDING ACTION - execute when online`
+  - If resolved action text is empty string (`""`): skip prepend entirely (explicit opt-out)
   - Still deliver the message (write to inbox file) — warning is informational, not a hard block
-  - Add test for offline detection and auto-tagging
+  - Add tests: offline detection, auto-tagging, custom flag, config override, empty-string opt-out
 - **[NEW] Fix `members`/`status` active label** (`crates/atm/src/commands/members.rs`, `status.rs`):
   - Rename display from "Active"/"Idle" and "Yes"/"No" to "Online"/"Offline"
   - `isActive: false` means shut down, not idle — current labels are misleading

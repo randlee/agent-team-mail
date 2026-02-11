@@ -358,8 +358,24 @@ atm send <agent> --stdin             # message from stdin
 |------|-------------|
 | `--team <name>` | Override default team (alternative to `@team` syntax) |
 | `--summary <text>` | Explicit summary instead of auto-generated |
+| `--offline-action <text>` | Custom call-to-action text for offline recipients (see below) |
 | `--json` | Output result as JSON |
 | `--dry-run` | Show what would be written without writing |
+
+**Offline recipient detection**:
+
+Before writing to the inbox, `atm send` checks the recipient's status in `config.json`:
+- If the recipient is **not in the members array** or has **`isActive: false`**, the recipient is considered offline.
+- When offline, `atm` prepends a call-to-action tag to the message body: `[{action_text}] {original_message}`
+- The sender receives a warning: `Warning: Agent X appears offline. Message will be queued with call-to-action.`
+- The message is still delivered (written to inbox file) — the warning is informational, not a hard block.
+
+**Call-to-action text precedence** (highest to lowest):
+1. `--offline-action "custom text"` CLI flag
+2. `offline_action` property in config file (`.atm.toml` or `settings.json`)
+3. Hardcoded default: `PENDING ACTION - execute when online`
+
+**Special case**: If the resolved action text is an empty string (property exists but value is `""`), the call-to-action is skipped entirely — no brackets prepended, message sent as-is. This allows users to explicitly opt out of auto-tagging.
 
 **File path policy**:
 - `--file <path>` is always treated as a reference (never embed file content in inbox JSON).
@@ -490,6 +506,10 @@ atm status <team>                # specific team
 [core]
 default_team = "backend-ci-team"    # default team for commands
 identity = "human"                  # from field on sent messages
+
+[messaging]
+offline_action = "PENDING ACTION - execute when online"  # call-to-action prepended for offline recipients
+                                                         # set to "" to disable auto-tagging
 
 [display]
 format = "text"                     # text | json
