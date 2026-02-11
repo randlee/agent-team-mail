@@ -1,0 +1,414 @@
+//! Inbox file operations with atomic writes and conflict detection
+
+use crate::io::{atomic::atomic_swap, error::InboxError, hash::compute_hash, lock::acquire_lock};
+use crate::schema::InboxMessage;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// Outcome of an inbox write operation
+#[derive(Debug, Clone, PartialEq)]
+pub enum WriteOutcome {
+    /// Clean write with no conflicts detected
+    Success,
+
+    /// Concurrent write detected and merged automatically
+    ConflictResolved { merged_messages: usize },
+
+    /// Could not write immediately, message queued for later delivery
+    Queued { spool_path: PathBuf },
+}
+
+/// Atomically append a message to an inbox with conflict detection
+///
+/// This implements the 11-step atomic write strategy:
+///
+/// 1. Acquire exclusive lock with retry (flock with backoff)
+/// 2. Read current inbox.json and compute hash
+/// 3. Append message to in-memory array
+/// 4. Write new version to inbox.tmp with fsync
+/// 5. Atomic swap inbox.json ↔ inbox.tmp
+/// 6. Read displaced file (now at inbox.tmp) and compute hash
+/// 7. If hash differs: merge messages and re-swap
+/// 8. Release lock
+/// 9. Delete inbox.tmp
+///
+/// # Arguments
+///
+/// * `inbox_path` - Full path to inbox.json file
+/// * `message` - Message to append
+///
+/// # Returns
+///
+/// * `Success` - Message written cleanly
+/// * `ConflictResolved` - Concurrent write detected and merged
+/// * `Queued` - Lock timeout, message spooled for retry
+///
+/// # Errors
+///
+/// Returns `InboxError` for I/O errors, JSON parse errors, or merge failures.
+pub fn inbox_append(inbox_path: &Path, message: &InboxMessage) -> Result<WriteOutcome, InboxError> {
+    let lock_path = inbox_path.with_extension("lock");
+    let tmp_path = inbox_path.with_extension("tmp");
+
+    // Step 1: Acquire lock with retry
+    let _lock = match acquire_lock(&lock_path, 5) {
+        Ok(lock) => lock,
+        Err(InboxError::LockTimeout { .. }) => {
+            // Could not acquire lock - spool for later delivery
+            let spool_path = spool_message(message)?;
+            return Ok(WriteOutcome::Queued { spool_path });
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Step 2: Read current inbox and compute hash
+    let (mut messages, original_hash) = if inbox_path.exists() {
+        let content = fs::read(inbox_path).map_err(|e| InboxError::Io {
+            path: inbox_path.to_path_buf(),
+            source: e,
+        })?;
+        let hash = compute_hash(&content);
+        let msgs: Vec<InboxMessage> =
+            serde_json::from_slice(&content).map_err(|e| InboxError::Json {
+                path: inbox_path.to_path_buf(),
+                source: e,
+            })?;
+        (msgs, hash)
+    } else {
+        // New inbox file
+        (Vec::new(), compute_hash(b"[]"))
+    };
+
+    // Step 3: Append message (with deduplication)
+    if let Some(ref msg_id) = message.message_id {
+        if messages
+            .iter()
+            .any(|m| m.message_id.as_ref() == Some(msg_id))
+        {
+            // Duplicate message - skip insertion
+            return Ok(WriteOutcome::Success);
+        }
+    }
+    messages.push(message.clone());
+
+    // Step 4: Write to tmp file with fsync
+    let new_content =
+        serde_json::to_vec_pretty(&messages).map_err(|e| InboxError::Json {
+            path: tmp_path.clone(),
+            source: e,
+        })?;
+
+    {
+        let mut tmp_file = fs::File::create(&tmp_path).map_err(|e| InboxError::Io {
+            path: tmp_path.clone(),
+            source: e,
+        })?;
+
+        tmp_file
+            .write_all(&new_content)
+            .map_err(|e| InboxError::Io {
+                path: tmp_path.clone(),
+                source: e,
+            })?;
+
+        tmp_file.sync_all().map_err(|e| InboxError::Io {
+            path: tmp_path.clone(),
+            source: e,
+        })?;
+    }
+
+    // Step 5: Atomic swap
+    if !inbox_path.exists() {
+        // First time creating inbox - just rename
+        fs::rename(&tmp_path, inbox_path).map_err(|e| InboxError::Io {
+            path: inbox_path.to_path_buf(),
+            source: e,
+        })?;
+        return Ok(WriteOutcome::Success);
+    }
+
+    atomic_swap(inbox_path, &tmp_path)?;
+
+    // Step 6: Check for concurrent writes
+    let displaced_content = fs::read(&tmp_path).map_err(|e| InboxError::Io {
+        path: tmp_path.clone(),
+        source: e,
+    })?;
+    let displaced_hash = compute_hash(&displaced_content);
+
+    let outcome = if displaced_hash != original_hash {
+        // Step 7: Conflict detected - merge and re-swap
+        let displaced_messages: Vec<InboxMessage> =
+            serde_json::from_slice(&displaced_content).map_err(|e| InboxError::Json {
+                path: tmp_path.clone(),
+                source: e,
+            })?;
+
+        // Merge: add messages from displaced that aren't in our version
+        let merged = merge_messages(&messages, &displaced_messages);
+        let merge_count = merged.len() - messages.len();
+
+        // Write merged version back
+        let merged_content =
+            serde_json::to_vec_pretty(&merged).map_err(|e| InboxError::Json {
+                path: tmp_path.clone(),
+                source: e,
+            })?;
+
+        fs::write(&tmp_path, &merged_content).map_err(|e| InboxError::Io {
+            path: tmp_path.clone(),
+            source: e,
+        })?;
+
+        // Re-swap
+        atomic_swap(inbox_path, &tmp_path)?;
+
+        WriteOutcome::ConflictResolved {
+            merged_messages: merge_count,
+        }
+    } else {
+        WriteOutcome::Success
+    };
+
+    // Step 8: Lock released automatically on drop
+    // Step 9: Delete tmp file
+    let _ = fs::remove_file(&tmp_path); // Ignore errors on cleanup
+
+    Ok(outcome)
+}
+
+/// Merge two message arrays, preserving order and deduplicating by message_id
+fn merge_messages(
+    our_messages: &[InboxMessage],
+    their_messages: &[InboxMessage],
+) -> Vec<InboxMessage> {
+    let mut merged = our_messages.to_vec();
+    let our_ids: std::collections::HashSet<_> = our_messages
+        .iter()
+        .filter_map(|m| m.message_id.as_ref())
+        .collect();
+
+    // Add messages from their version that we don't have
+    for msg in their_messages {
+        let already_present = if let Some(ref msg_id) = msg.message_id {
+            our_ids.contains(msg_id)
+        } else {
+            // No message_id - check by content (less reliable)
+            our_messages
+                .iter()
+                .any(|m| m.from == msg.from && m.text == msg.text && m.timestamp == msg.timestamp)
+        };
+
+        if !already_present {
+            merged.push(msg.clone());
+        }
+    }
+
+    // Sort by timestamp to maintain chronological order
+    merged.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    merged
+}
+
+/// Spool a message for later delivery
+///
+/// Writes the message to `~/.config/atm/spool/pending/` for retry.
+/// Returns the path to the spooled message file.
+fn spool_message(message: &InboxMessage) -> Result<PathBuf, InboxError> {
+    // For MVP, we'll use a simple spool directory
+    // In production, this would use proper config resolution
+    let spool_dir = dirs::config_dir()
+        .ok_or_else(|| InboxError::SpoolError {
+            message: "Could not determine config directory".to_string(),
+        })?
+        .join("atm")
+        .join("spool")
+        .join("pending");
+
+    fs::create_dir_all(&spool_dir).map_err(|e| InboxError::Io {
+        path: spool_dir.clone(),
+        source: e,
+    })?;
+
+    // Generate unique filename: timestamp-from-messageid.json
+    let timestamp = chrono::Utc::now().timestamp();
+    let msg_id = message.message_id.as_deref().unwrap_or("unknown");
+    let filename = format!("{timestamp}-{msg_id}.json");
+    let spool_path = spool_dir.join(filename);
+
+    let content = serde_json::to_vec_pretty(message).map_err(|e| InboxError::Json {
+        path: spool_path.clone(),
+        source: e,
+    })?;
+
+    fs::write(&spool_path, content).map_err(|e| InboxError::Io {
+        path: spool_path.clone(),
+        source: e,
+    })?;
+
+    Ok(spool_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    fn create_test_message(from: &str, text: &str, message_id: Option<String>) -> InboxMessage {
+        InboxMessage {
+            from: from.to_string(),
+            text: text.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: None,
+            message_id,
+            unknown_fields: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_inbox_append_new_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let inbox_path = temp_dir.path().join("agent.json");
+
+        let message = create_test_message("team-lead", "Test message", Some("msg-001".to_string()));
+
+        let outcome = inbox_append(&inbox_path, &message).unwrap();
+        assert_eq!(outcome, WriteOutcome::Success);
+
+        // Verify file was created and contains message
+        let content = fs::read_to_string(&inbox_path).unwrap();
+        let messages: Vec<InboxMessage> = serde_json::from_str(&content).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "team-lead");
+        assert_eq!(messages[0].text, "Test message");
+    }
+
+    #[test]
+    fn test_inbox_append_existing_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let inbox_path = temp_dir.path().join("agent.json");
+
+        // Create initial message
+        let msg1 = create_test_message("team-lead", "Message 1", Some("msg-001".to_string()));
+        inbox_append(&inbox_path, &msg1).unwrap();
+
+        // Append second message
+        let msg2 = create_test_message("ci-agent", "Message 2", Some("msg-002".to_string()));
+        let outcome = inbox_append(&inbox_path, &msg2).unwrap();
+        assert_eq!(outcome, WriteOutcome::Success);
+
+        // Verify both messages present
+        let content = fs::read_to_string(&inbox_path).unwrap();
+        let messages: Vec<InboxMessage> = serde_json::from_str(&content).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "Message 1");
+        assert_eq!(messages[1].text, "Message 2");
+    }
+
+    #[test]
+    fn test_inbox_append_deduplication() {
+        let temp_dir = TempDir::new().unwrap();
+        let inbox_path = temp_dir.path().join("agent.json");
+
+        let message = create_test_message("team-lead", "Test message", Some("msg-001".to_string()));
+
+        // First append
+        inbox_append(&inbox_path, &message).unwrap();
+
+        // Second append with same message_id - should be deduplicated
+        let outcome = inbox_append(&inbox_path, &message).unwrap();
+        assert_eq!(outcome, WriteOutcome::Success);
+
+        // Verify only one message present
+        let content = fs::read_to_string(&inbox_path).unwrap();
+        let messages: Vec<InboxMessage> = serde_json::from_str(&content).unwrap();
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_messages_no_duplicates() {
+        let msg1 = create_test_message("team-lead", "Message 1", Some("msg-001".to_string()));
+        let msg2 = create_test_message("ci-agent", "Message 2", Some("msg-002".to_string()));
+        let msg3 = create_test_message("qa-agent", "Message 3", Some("msg-003".to_string()));
+
+        let our_messages = vec![msg1.clone(), msg2.clone()];
+        let their_messages = vec![msg1.clone(), msg3.clone()];
+
+        let merged = merge_messages(&our_messages, &their_messages);
+
+        assert_eq!(merged.len(), 3);
+        assert!(merged.iter().any(|m| m.message_id == Some("msg-001".to_string())));
+        assert!(merged.iter().any(|m| m.message_id == Some("msg-002".to_string())));
+        assert!(merged.iter().any(|m| m.message_id == Some("msg-003".to_string())));
+    }
+
+    #[test]
+    fn test_merge_messages_preserves_order() {
+        let mut msg1 = create_test_message("team-lead", "Message 1", Some("msg-001".to_string()));
+        msg1.timestamp = "2026-02-11T10:00:00Z".to_string();
+
+        let mut msg2 = create_test_message("ci-agent", "Message 2", Some("msg-002".to_string()));
+        msg2.timestamp = "2026-02-11T11:00:00Z".to_string();
+
+        let mut msg3 = create_test_message("qa-agent", "Message 3", Some("msg-003".to_string()));
+        msg3.timestamp = "2026-02-11T10:30:00Z".to_string();
+
+        let our_messages = vec![msg1.clone(), msg2.clone()];
+        let their_messages = vec![msg3.clone()];
+
+        let merged = merge_messages(&our_messages, &their_messages);
+
+        // Should be sorted by timestamp: msg1, msg3, msg2
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].timestamp, "2026-02-11T10:00:00Z");
+        assert_eq!(merged[1].timestamp, "2026-02-11T10:30:00Z");
+        assert_eq!(merged[2].timestamp, "2026-02-11T11:00:00Z");
+    }
+
+    #[test]
+    fn test_merge_messages_without_message_id() {
+        let mut msg1 = create_test_message("team-lead", "Unique message", None);
+        msg1.timestamp = "2026-02-11T10:00:00Z".to_string();
+
+        let mut msg2 = create_test_message("team-lead", "Unique message", None);
+        msg2.timestamp = "2026-02-11T10:00:00Z".to_string(); // Exact same timestamp
+
+        let our_messages = vec![msg1.clone()];
+        let their_messages = vec![msg2.clone()];
+
+        let merged = merge_messages(&our_messages, &their_messages);
+
+        // Should deduplicate by content (from, text, timestamp match)
+        assert_eq!(merged.len(), 1);
+    }
+
+    #[test]
+    fn test_inbox_append_preserves_unknown_fields() {
+        let temp_dir = TempDir::new().unwrap();
+        let inbox_path = temp_dir.path().join("agent.json");
+
+        // Create inbox with unknown fields
+        let json = r#"[{
+            "from": "team-lead",
+            "text": "Existing message",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": false,
+            "unknownField": "should be preserved",
+            "futureFeature": {"nested": "data"}
+        }]"#;
+        fs::write(&inbox_path, json).unwrap();
+
+        // Append new message
+        let new_message = create_test_message("ci-agent", "New message", Some("msg-002".to_string()));
+        inbox_append(&inbox_path, &new_message).unwrap();
+
+        // Verify unknown fields preserved
+        let content = fs::read_to_string(&inbox_path).unwrap();
+        let messages: Vec<InboxMessage> = serde_json::from_str(&content).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].unknown_fields.contains_key("unknownField"));
+        assert!(messages[0].unknown_fields.contains_key("futureFeature"));
+    }
+}
