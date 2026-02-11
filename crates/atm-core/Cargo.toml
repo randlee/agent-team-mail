@@ -11,3 +11,16 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing = "0.1"
+
+# For config parsing
+toml = { version = "0.8", features = ["parse"] }
+
+# For hostname detection
+hostname = "0.4"
+
+# For URL parsing (git remote URL parsing)
+url = "2.5"
+
+[dev-dependencies]
+tempfile = "3"
+serial_test = "3.0"
