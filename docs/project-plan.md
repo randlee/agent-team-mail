@@ -721,6 +721,7 @@ Phase 1 Complete
 **Branch**: `feature/p3-s3-docs-polish`
 **Depends on**: Sprint 3.1
 **Parallel**: Can run alongside Sprint 3.2
+**Status**: ✅ Complete
 
 **Deliverables**:
 - `--help` text polished for all commands
@@ -740,6 +741,18 @@ Phase 1 Complete
 - Error messages are actionable
 - `cargo doc` produces no warnings
 - Settings resolution works from any subdirectory within a repo
+
+**Implementation**:
+- README.md created with quickstart, command reference, configuration, architecture sections
+- Settings traversal fix: `find_repo_local_settings()` walks from CWD to git root, checks settings.local.json then settings.json at each level
+- Config command: Added doc comment noting source reporting limitation (heuristic, doesn't reflect env/CLI overrides)
+- Help text: Polished doc comments on ReadArgs and ConfigArgs
+- Tests: Added `test_settings_resolution_from_subdirectory` and `test_settings_local_takes_precedence`
+- Validation: 94 tests pass, clippy clean, cargo doc clean (no warnings)
+
+**PR**: TBD
+**Completed**: 2026-02-11
+**Dev-QA iterations**: 0 (implemented directly by scrum master)
 
 ### Sprint 3.4: Inbox Retention and Cleanup
 
