@@ -149,14 +149,20 @@ TeamDelete:
 ```
 
 **Removes**:
-- `~/.claude/teams/{team_name}/` (entire directory)
-- `~/.claude/tasks/{team_name}/` (entire directory)
-- All associated inboxes and state
+- `~/.claude/teams/{team_name}/` (entire directory tree)
+- `~/.claude/tasks/{team_name}/` (entire directory tree)
+- All associated inboxes, agent state, message history, and task records
+
+**Destructive behavior**: `TeamDelete` is a full teardown — ALL team data is permanently deleted. This includes inbox files, task history, and team configuration. There is no partial cleanup or archive option. Any data not committed or copied elsewhere is lost.
 
 **Constraints**:
 - Team must exist
-- All agents should be shut down first (warning if not)
+- Will fail if active members still running — shut down all agents first
 - Cannot be undone
+
+**When to use vs. agent shutdown**:
+- To shut down a **single agent** without destroying the team, use `SendMessage` with `type: "shutdown_request"`. The team, task list, inboxes, and remaining agents are preserved.
+- Use `TeamDelete` only when the **entire team** is no longer needed and all data has been preserved elsewhere.
 
 ---
 
@@ -260,6 +266,75 @@ Adds to team config at `~/.claude/teams/{team_name}/config.json`:
 - Agent name must be unique within team
 - Maximum 50 agents per team
 - Agents are long-lived (until shutdown)
+
+---
+
+## Agent Lifecycle & Message Delivery
+
+### Shutdown Behavior
+
+When an agent receives a `shutdown_request` and approves it:
+- The agent process terminates (tmux pane destroyed)
+- The agent **may or may not** be removed from `config.json` members array (behavior is inconsistent)
+- If removed: the member entry is deleted entirely
+- If retained: `isActive` is set to `false`, `tmuxPaneId` becomes stale (points to dead pane)
+- **Inbox files persist** on disk — both the agent's own inbox (`{name}.json`) and messages it sent to others
+
+### Respawn Behavior
+
+Spawning a new agent with the same `name` into the same team:
+- Produces the same `agentId` (format: `{name}@{team_name}`, deterministic)
+- Gets a **new `tmuxPaneId`** (new process handle)
+- The member entry in `config.json` is updated (not duplicated)
+- `joinedAt` and `prompt` are updated to reflect the new spawn
+- The agent starts with **fresh context** — no memory of previous sessions
+- The **spawn prompt** is the primary driver of initial behavior
+
+### Routing Architecture
+
+Message delivery is entirely **name-based**:
+
+| Layer | Keyed by | Persists across respawn? |
+|-------|----------|------------------------|
+| Inbox file | `name` (`{name}.json`) | Yes — accumulates across lifetimes |
+| Message fields | `from`/`to` names | Yes — no agentId in messages |
+| Team membership | `agentId` (`name@team`) | Re-created with same value |
+| Process handle | `tmuxPaneId` (`%4`, `%5`...) | No — new each spawn |
+
+The `agentId` is an internal bookkeeping field. It does not appear in inbox files or message routing. All routing uses agent `name`.
+
+### Message Delivery to Offline Agents
+
+`SendMessage` to a shut-down agent **succeeds silently**:
+- The message is written to the agent's inbox file (`{name}.json`) with `read: false`
+- No error or warning is returned to the sender
+- Messages accumulate in the inbox file indefinitely
+
+### Queued Message Processing on Respawn
+
+When an agent is respawned (same name), it inherits the full inbox history:
+- All prior messages (from all previous lifetimes) are visible in the agent's conversation context
+- Messages are marked `read: true` by the system
+- **The agent may or may not act on queued messages** — behavior depends on:
+  - **Inbox noise**: With few messages, plain instructions are acted on. With many old messages (prior prompts, shutdowns, old requests), plain instructions blend into history and are ignored.
+  - **Spawn prompt**: The spawn prompt takes priority. If it gives a specific task, queued messages may be ignored even if noticed.
+  - **Call-to-action tags**: Prefixing queued messages with a tag like `[PENDING ACTION]` or `[OFFLINE MESSAGE - Acknowledge and respond]` reliably causes agents to act on them, even in noisy inboxes.
+
+### Reliable Offline Queuing Pattern
+
+To ensure queued messages are acted on after respawn, use a call-to-action prefix:
+
+```
+[PENDING ACTION - execute when online] <instruction here>
+```
+
+or:
+
+```
+[OFFLINE MESSAGE - Acknowledge and respond] <instruction here>
+```
+
+Without a tag, success depends on inbox history depth. With a tag, the pattern has been 100% reliable in testing.
 
 ---
 
@@ -1070,20 +1145,34 @@ SendMessage:
 
 ### 5. Graceful Shutdown
 
-Always shut down agents properly:
+Shut down individual agents vs. entire teams:
 
 ```bash
-# ✅ GOOD - Graceful shutdown
+# ✅ Shut down ONE agent (team stays alive)
 SendMessage:
   type: "shutdown_request"
-  recipient: "agent-name"
-  content: "Task complete, preparing to shut down"
-# Wait for response
-# Then TeamDelete
+  recipient: "sprint-1-dev"
+  content: "Sprint complete, shutting you down"
+# Wait for shutdown_response
+# Team, tasks, inboxes all preserved — spawn new agents as needed
 
-# ❌ AVOID - Force terminating
-TeamDelete  # Without shutting down agents first
+# ✅ Shut down ENTIRE team (all data removed)
+# First: shutdown all remaining agents
+SendMessage:
+  type: "shutdown_request"
+  recipient: "agent-1"
+SendMessage:
+  type: "shutdown_request"
+  recipient: "agent-2"
+# Wait for all shutdown_responses
+# Then: destroy team (removes ALL files — config, tasks, inboxes)
+TeamDelete
+
+# ❌ AVOID - TeamDelete with active agents
+TeamDelete  # Fails if agents still running
 ```
+
+**Important**: `TeamDelete` permanently removes all team data. Only use it when the team is fully done and all valuable data (task history, messages) has been preserved elsewhere.
 
 ### 6. State Tracking
 
