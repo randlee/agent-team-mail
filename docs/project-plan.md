@@ -889,6 +889,18 @@ Phase 2 Complete
 - Members cleaned up on plugin shutdown
 - Tests cover add/remove/cleanup
 
+**Status**: ✅ Complete (PR pending)
+**Dev-QA iterations**: 1 (passed first QA review with 1 minor clippy fix)
+**Implementation notes**:
+- New module `crates/atm-daemon/src/roster/` with `RosterService`, `MembershipTracker`, `RosterError`, `CleanupMode`
+- Atomic config.json updates via lock → read → modify → write → rename pattern (reuses `atm_core::io::lock::acquire_lock`)
+- `MembershipTracker` maps plugin_name → Vec<(team, agent_name)> for ownership tracking
+- `CleanupMode::Soft` sets isActive=false, `CleanupMode::Hard` removes members entirely (both idempotent)
+- Synthetic members use `agentType: "plugin:<plugin-name>"` convention
+- `PluginContext` updated with `roster: Arc<RosterService>` field
+- 22 new tests (8 unit + 14 integration): add/remove, cleanup modes, concurrent access (4 threads), plugin isolation, unknown field preservation
+- 33 total atm-daemon tests passing, clippy clean
+
 ### Phase 4 Dependency Graph
 
 ```
