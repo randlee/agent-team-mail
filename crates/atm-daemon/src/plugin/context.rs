@@ -1,3 +1,4 @@
+use crate::roster::RosterService;
 use super::MailService;
 use atm_core::config::Config;
 use atm_core::context::SystemContext;
@@ -12,14 +13,22 @@ pub struct PluginContext {
     pub mail: Arc<MailService>,
     /// Application configuration
     pub config: Arc<Config>,
+    /// Roster service for managing synthetic team members
+    pub roster: Arc<RosterService>,
 }
 
 impl PluginContext {
-    pub fn new(system: Arc<SystemContext>, mail: Arc<MailService>, config: Arc<Config>) -> Self {
+    pub fn new(
+        system: Arc<SystemContext>,
+        mail: Arc<MailService>,
+        config: Arc<Config>,
+        roster: Arc<RosterService>,
+    ) -> Self {
         Self {
             system,
             mail,
             config,
+            roster,
         }
     }
 }
