@@ -13,6 +13,11 @@ impl MailService {
         Self { teams_root }
     }
 
+    /// Get the teams root directory path
+    pub fn teams_root(&self) -> &PathBuf {
+        &self.teams_root
+    }
+
     /// Send a message to an agent's inbox
     pub fn send(
         &self,
