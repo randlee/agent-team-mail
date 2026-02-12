@@ -826,22 +826,30 @@ Phase 2 Complete
 **Branch prefix**: `feature/p4-*`
 **Depends on**: Phase 3 complete (MVP)
 
-### Sprint 4.1: Plugin Trait + Registry
+### Sprint 4.1: Plugin Trait + Registry ✅
 
 **Branch**: `feature/p4-s1-plugin-trait`
 **Depends on**: Phase 3 complete
+**Status**: COMPLETE — PR targeting `integrate/phase-4`
 
 **Deliverables**:
-- `Plugin` async trait definition
-- `PluginMetadata`, `Capability`, `PluginError` types
-- `PluginContext` with `SystemContext`, `MailService`, `RosterService`
-- `inventory`-based plugin registration
-- Plugin factory and lifecycle management
+- ✅ `Plugin` async trait definition (edition 2024 native async, ErasedPlugin type-erasure for object safety)
+- ✅ `PluginMetadata`, `Capability`, `PluginError`, `PluginState` types
+- ✅ `PluginContext` with `SystemContext`, `MailService`, `Config` (RosterService deferred to Sprint 4.3)
+- ✅ Vec-based `PluginRegistry` with register, init_all, get_by_name, get_by_capability
+- ✅ `MailService` wrapping atm-core inbox_append/read
+- ✅ 11 integration tests (MockPlugin + EchoPlugin proving trait implementability)
+
+**Deviations from original plan**:
+- Used Vec-based registry instead of `inventory` crate (simpler, sufficient for current needs)
+- RosterService not included in PluginContext (Sprint 4.3 will add it)
 
 **Acceptance criteria**:
-- Trait compiles and is implementable
-- Mock plugin can be registered and discovered
-- Plugin context provides access to atm-core services
+- ✅ Trait compiles and is implementable
+- ✅ Mock plugin can be registered and discovered
+- ✅ Plugin context provides access to atm-core services
+- ✅ 253 total workspace tests, all passing
+- ✅ Clippy clean, cross-platform compliant
 
 ### Sprint 4.2: Daemon Event Loop
 
