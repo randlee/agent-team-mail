@@ -5,6 +5,7 @@ use atm_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
     PluginState,
 };
+use atm_daemon::roster::RosterService;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -114,9 +115,10 @@ fn create_test_context(teams_root: std::path::PathBuf) -> PluginContext {
         "2.1.39".to_string(),
         "test-team".to_string(),
     ));
-    let mail = Arc::new(MailService::new(teams_root));
+    let mail = Arc::new(MailService::new(teams_root.clone()));
     let config = Arc::new(Config::default());
-    PluginContext::new(system, mail, config)
+    let roster = Arc::new(RosterService::new(teams_root));
+    PluginContext::new(system, mail, config, roster)
 }
 
 fn create_test_message(from: &str, text: &str) -> InboxMessage {
