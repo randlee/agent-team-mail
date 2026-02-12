@@ -6,6 +6,7 @@ use atm_daemon::daemon;
 use atm_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
+use atm_daemon::roster::RosterService;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -104,13 +105,15 @@ fn create_test_context() -> (PluginContext, TempDir) {
         "test-team".to_string(),
     );
 
-    let mail_service = MailService::new(teams_root);
+    let mail_service = MailService::new(teams_root.clone());
+    let roster_service = RosterService::new(teams_root);
     let config = Config::default();
 
     let ctx = PluginContext::new(
         Arc::new(system_ctx),
         Arc::new(mail_service),
         Arc::new(config),
+        Arc::new(roster_service),
     );
 
     (ctx, temp_dir)

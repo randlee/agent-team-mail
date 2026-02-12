@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use atm_daemon::daemon;
 use atm_daemon::plugin::{MailService, PluginContext, PluginRegistry};
+use atm_daemon::roster::RosterService;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -101,14 +102,16 @@ async fn main() -> Result<()> {
 
     info!("Teams root: {}", teams_root.display());
 
-    // Create mail service
+    // Create mail service and roster service
     let mail_service = MailService::new(teams_root.clone());
+    let roster_service = RosterService::new(teams_root.clone());
 
     // Build plugin context
     let plugin_ctx = PluginContext::new(
         Arc::new(system_ctx),
         Arc::new(mail_service),
         Arc::new(config),
+        Arc::new(roster_service),
     );
 
     // Create plugin registry
