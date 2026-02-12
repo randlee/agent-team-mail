@@ -866,10 +866,25 @@ Phase 2 Complete
 - Graceful shutdown with timeout
 
 **Acceptance criteria**:
-- Daemon starts, loads plugins, runs event loop
-- SIGINT triggers graceful shutdown
-- Spool is drained on interval
-- Mock plugin receives init/run/shutdown calls
+- ✅ Daemon starts, loads plugins, runs event loop
+- ✅ SIGINT triggers graceful shutdown
+- ✅ Spool is drained on interval
+- ✅ Mock plugin receives init/run/shutdown calls
+- ✅ 260 total workspace tests, all passing
+- ✅ Clippy clean (including tests), cross-platform compliant
+
+**Status**: ✅ Complete
+**Completed**: 2026-02-12
+**Dev-QA iterations**: 1 (passed first QA review)
+**Implementation**:
+- 5 new daemon modules: event_loop.rs, shutdown.rs, spool_task.rs, watcher.rs, mod.rs
+- Full daemon binary with clap CLI (--config, --team, --verbose, --daemon)
+- Plugin lifecycle: init → run (per-task) → shutdown with timeout
+- CancellationToken propagation (SIGINT/SIGTERM on Unix, Ctrl-C on Windows)
+- Spool drain loop (10s interval), file system watcher (notify crate)
+- Graceful shutdown with per-plugin timeout enforcement
+- 7 new daemon integration tests, 18 total daemon crate tests
+- ATM_HOME compliance throughout
 
 ### Sprint 4.3: Roster Service
 

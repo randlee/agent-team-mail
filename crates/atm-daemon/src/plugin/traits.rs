@@ -41,8 +41,7 @@ pub trait Plugin: Send + Sync {
 ///
 /// This trait is implemented automatically for all types that implement Plugin.
 /// The registry stores Box<dyn ErasedPlugin> internally.
-#[allow(dead_code)]
-pub(crate) trait ErasedPlugin: Send + Sync {
+pub trait ErasedPlugin: Send + Sync {
     fn metadata(&self) -> PluginMetadata;
     fn init<'a>(
         &'a mut self,

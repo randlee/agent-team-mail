@@ -1,5 +1,10 @@
 use super::traits::ErasedPlugin;
 use super::{Capability, Plugin, PluginContext, PluginError, PluginMetadata, PluginState};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Type alias for a plugin wrapped in Arc<Mutex<>> for concurrent access
+pub type SharedPlugin = Arc<Mutex<Box<dyn ErasedPlugin>>>;
 
 /// Entry in the registry tracking a plugin and its state
 struct PluginEntry {
@@ -68,6 +73,30 @@ impl PluginRegistry {
             .iter()
             .find(|e| e.plugin.metadata().name == name)
             .map(|e| e.state)
+    }
+
+    /// Update the state of a plugin by name
+    pub fn set_state(&mut self, name: &str, state: PluginState) -> bool {
+        if let Some(entry) = self.plugins.iter_mut().find(|e| e.plugin.metadata().name == name) {
+            entry.state = state;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Take all plugins out of the registry for task spawning.
+    /// Each plugin is wrapped in Arc<Mutex<>> for safe concurrent access.
+    /// Transitions all plugins to Running state.
+    pub fn take_plugins(&mut self) -> Vec<(PluginMetadata, SharedPlugin)> {
+        self.plugins
+            .drain(..)
+            .map(|mut entry| {
+                entry.state = PluginState::Running;
+                let metadata = entry.plugin.metadata();
+                (metadata, Arc::new(Mutex::new(entry.plugin)))
+            })
+            .collect()
     }
 }
 
