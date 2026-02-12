@@ -80,8 +80,8 @@ pub async fn watch_inboxes(
                 break;
             }
 
-            // Use try_recv to avoid blocking indefinitely
-            match rx.try_recv() {
+            // Use recv_timeout to avoid busy-wait polling
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(event) => {
                     debug!("File system event: {:?}", event);
 
@@ -95,11 +95,11 @@ pub async fn watch_inboxes(
                         }
                     }
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // No events, sleep briefly to avoid busy loop
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Timeout - check cancellation and continue
+                    continue;
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     warn!("Watcher channel disconnected");
                     break;
                 }
