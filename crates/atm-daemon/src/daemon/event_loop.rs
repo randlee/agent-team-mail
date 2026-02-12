@@ -1,12 +1,13 @@
 //! Main daemon event loop
 
-use crate::daemon::{graceful_shutdown, spool_drain_loop, watch_inboxes};
-use crate::plugin::{PluginContext, PluginRegistry};
+use crate::daemon::{graceful_shutdown, spool_drain_loop, watch_inboxes, InboxEvent, InboxEventKind};
+use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use anyhow::{Context, Result};
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 /// Run the main daemon event loop.
 ///
@@ -80,13 +81,74 @@ pub async fn run(
         }
     });
 
+    // Create event channel for watcher → dispatch communication
+    let (event_tx, mut event_rx) = mpsc::channel::<InboxEvent>(100);
+
     // Start file system watcher
     let watcher_root = ctx.mail.teams_root().clone();
     let watcher_cancel = cancel.clone();
     let watcher_task = tokio::spawn(async move {
-        if let Err(e) = watch_inboxes(watcher_root, watcher_cancel).await {
+        if let Err(e) = watch_inboxes(watcher_root, event_tx, watcher_cancel).await {
             error!("Inbox watcher failed: {}", e);
         }
+    });
+
+    // Start event dispatch loop for EventListener plugins
+    let dispatch_plugins = plugins.clone();
+    let dispatch_cancel = cancel.clone();
+    let dispatch_task = tokio::spawn(async move {
+        info!("Starting event dispatch loop");
+        loop {
+            tokio::select! {
+                _ = dispatch_cancel.cancelled() => {
+                    info!("Event dispatch cancelled");
+                    break;
+                }
+                Some(event) = event_rx.recv() => {
+                    debug!("Dispatching event: team={}, agent={}, kind={:?}",
+                           event.team, event.agent, event.kind);
+
+                    // Only dispatch MessageReceived events
+                    if event.kind != InboxEventKind::MessageReceived {
+                        continue;
+                    }
+
+                    // Read the inbox message from the file
+                    let inbox_msg = match tokio::fs::read_to_string(&event.path).await {
+                        Ok(content) => match serde_json::from_str(&content) {
+                            Ok(msg) => msg,
+                            Err(e) => {
+                                warn!("Failed to parse inbox message at {}: {}",
+                                      event.path.display(), e);
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            // File might be transiently locked or deleted
+                            debug!("Failed to read inbox file at {}: {}",
+                                   event.path.display(), e);
+                            continue;
+                        }
+                    };
+
+                    // Dispatch to all plugins with EventListener capability
+                    for (metadata, plugin_arc) in &dispatch_plugins {
+                        if metadata.capabilities.contains(&Capability::EventListener) {
+                            // Try to acquire lock without blocking
+                            if let Ok(mut plugin) = plugin_arc.try_lock() {
+                                debug!("Dispatching to plugin: {}", metadata.name);
+                                if let Err(e) = plugin.handle_message(&inbox_msg).await {
+                                    error!("Plugin {} handle_message error: {}", metadata.name, e);
+                                }
+                            } else {
+                                debug!("Plugin {} is busy, skipping event dispatch", metadata.name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        info!("Event dispatch loop stopped");
     });
 
     info!("Daemon event loop running. Waiting for cancellation signal...");
@@ -102,6 +164,10 @@ pub async fn run(
 
     if let Err(e) = tokio::time::timeout(Duration::from_secs(5), watcher_task).await {
         error!("Watcher task did not complete in time: {}", e);
+    }
+
+    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), dispatch_task).await {
+        error!("Dispatch task did not complete in time: {}", e);
     }
 
     // Graceful shutdown of all plugins

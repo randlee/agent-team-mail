@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         atm_core::context::Platform::detect(),
         claude_root.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
-        "default-team".to_string(), // TODO: Read from config
+        config.core.default_team.clone(),
     );
 
     let teams_root = claude_root.join("teams");

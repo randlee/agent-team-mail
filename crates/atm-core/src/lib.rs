@@ -17,3 +17,6 @@ pub mod schema;
 pub use schema::{
     AgentMember, InboxMessage, Permissions, SettingsJson, TaskItem, TaskStatus, TeamConfig,
 };
+
+// Re-export toml for plugin config access
+pub use toml;
