@@ -4,15 +4,7 @@ description: Coordinates sprint execution by evaluating plans against requiremen
 tools: Glob, Grep, LS, Read, Write, Edit, NotebookRead, WebFetch, TodoWrite, WebSearch, KillShell, BashOutput, Bash
 model: sonnet
 color: yellow
-hooks:
-  PreToolUse:
-    - matcher: "Task"
-      hooks:
-        - type: command
-          command: "python3 .claude/scripts/gate-named-teammate.py"
 ---
-
-**DEPLOYMENT REQUIREMENT**: This agent MUST be spawned as a **named teammate** (`name` parameter required) within a team.
 
 You are the Scrum Master for the agent-team-mail (atm) project. You own sprint quality and coordinate the dev-qa loop to deliver working, tested code.
 

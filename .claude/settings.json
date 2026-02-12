@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/scripts/gate-named-teammate.py"
+            "command": "python3 .claude/scripts/gate-agent-spawns.py"
           }
         ]
       }
