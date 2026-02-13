@@ -25,6 +25,8 @@ pub struct IssuesPlugin {
     config: IssuesConfig,
     /// Provider registry for runtime provider selection
     registry: Option<ProviderRegistry>,
+    /// Provider loader (kept alive to hold dynamic libraries)
+    loader: Option<ProviderLoader>,
     /// Cached context for runtime use
     ctx: Option<PluginContext>,
     /// Tracking: last poll timestamp for incremental fetching
@@ -38,6 +40,7 @@ impl IssuesPlugin {
             provider: None,
             config: IssuesConfig::default(),
             registry: None,
+            loader: None,
             ctx: None,
             last_poll: None,
         }
@@ -62,7 +65,7 @@ impl IssuesPlugin {
     }
 
     /// Build the provider registry with built-in and external providers
-    fn build_registry(&self, atm_home: &std::path::Path) -> ProviderRegistry {
+    fn build_registry(&mut self, atm_home: &std::path::Path) -> ProviderRegistry {
         let mut registry = ProviderRegistry::new();
 
         // Register built-in GitHub provider
@@ -102,6 +105,9 @@ impl IssuesPlugin {
                 registry.register(factory);
             }
         }
+
+        // Keep loader alive so dynamic libraries stay loaded
+        self.loader = Some(loader);
 
         registry
     }
@@ -213,13 +219,19 @@ impl IssuesPlugin {
             issue.url,
         );
 
+        let message_id = if issue.updated_at.is_empty() {
+            format!("issue-{}", issue.number)
+        } else {
+            format!("issue-{}-{}", issue.number, issue.updated_at)
+        };
+
         InboxMessage {
             from: self.config.agent.clone(),
             text: content,
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,
             summary: Some(format!("Issue #{}: {}", issue.number, issue.title)),
-            message_id: Some(format!("issue-{}", issue.number)),
+            message_id: Some(message_id),
             unknown_fields: HashMap::new(),
         }
     }
@@ -436,6 +448,11 @@ impl Plugin for IssuesPlugin {
     }
 
     async fn handle_message(&mut self, msg: &InboxMessage) -> Result<(), PluginError> {
+        // Ignore messages originating from the synthetic agent to avoid self-loop
+        if msg.from == self.config.agent {
+            return Ok(());
+        }
+
         // Check if the message is a reply to an issue (has [issue:NUMBER] prefix)
         if let Some(issue_number) = Self::parse_issue_reference(&msg.text)
             && let Some(provider) = &self.provider
@@ -543,7 +560,11 @@ mod tests {
         assert!(msg.text.contains("https://github.com/owner/repo/issues/42"));
         assert!(!msg.read);
         assert_eq!(msg.summary, Some("Issue #42: Test issue".to_string()));
-        assert_eq!(msg.message_id, Some("issue-42".to_string()));
+        assert!(msg
+            .message_id
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("issue-42-"));
     }
 
     #[test]
@@ -574,10 +595,116 @@ mod tests {
     }
 
     #[test]
+    fn test_issue_message_id_empty_updated_at() {
+        let plugin = IssuesPlugin::new();
+
+        let issue = Issue {
+            id: "100".to_string(),
+            number: 100,
+            title: "No updated_at".to_string(),
+            body: None,
+            state: IssueState::Open,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            author: "tester".to_string(),
+            created_at: "2026-02-11T10:00:00Z".to_string(),
+            updated_at: "".to_string(),
+            url: "https://example.com/issues/100".to_string(),
+        };
+
+        let msg = plugin.issue_to_message(&issue);
+        assert_eq!(msg.message_id, Some("issue-100".to_string()));
+    }
+
+    #[test]
+    fn test_issue_update_generates_distinct_message_ids() {
+        use atm_core::io::inbox::inbox_append;
+        use tempfile::TempDir;
+
+        let plugin = IssuesPlugin::new();
+        let temp_dir = TempDir::new().unwrap();
+        let inbox_path = temp_dir.path().join("agent.json");
+
+        let issue_v1 = Issue {
+            id: "200".to_string(),
+            number: 200,
+            title: "Issue update".to_string(),
+            body: Some("First version".to_string()),
+            state: IssueState::Open,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            author: "tester".to_string(),
+            created_at: "2026-02-11T10:00:00Z".to_string(),
+            updated_at: "2026-02-11T12:00:00Z".to_string(),
+            url: "https://example.com/issues/200".to_string(),
+        };
+
+        let issue_v2 = Issue {
+            updated_at: "2026-02-11T12:30:00Z".to_string(),
+            body: Some("Second version".to_string()),
+            ..issue_v1.clone()
+        };
+
+        let msg1 = plugin.issue_to_message(&issue_v1);
+        let msg2 = plugin.issue_to_message(&issue_v2);
+
+        assert_ne!(msg1.message_id, msg2.message_id);
+
+        inbox_append(&inbox_path, &msg1, "test-team", "issues-bot").unwrap();
+        inbox_append(&inbox_path, &msg2, "test-team", "issues-bot").unwrap();
+
+        let content = std::fs::read_to_string(&inbox_path).unwrap();
+        let messages: Vec<InboxMessage> = serde_json::from_str(&content).unwrap();
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
     fn test_plugin_default() {
         let plugin = IssuesPlugin::default();
         assert!(plugin.provider.is_none());
         assert!(plugin.ctx.is_none());
         assert!(plugin.last_poll.is_none());
+    }
+
+    #[test]
+    fn test_build_registry_keeps_loader_alive() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut plugin = IssuesPlugin::new();
+
+        let _registry = plugin.build_registry(temp_dir.path());
+        assert!(plugin.loader.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_ignores_self_messages() {
+        use crate::plugins::issues::mock_provider::{MockCall, MockProvider};
+
+        let provider = MockProvider::new();
+        let provider_clone = provider.clone();
+
+        let mut plugin = IssuesPlugin::new()
+            .with_provider(Box::new(provider))
+            .with_config(IssuesConfig {
+                agent: "issues-bot".to_string(),
+                ..IssuesConfig::default()
+            });
+
+        let msg = InboxMessage {
+            from: "issues-bot".to_string(),
+            text: "[issue:42]\nThis should be ignored".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: None,
+            message_id: None,
+            unknown_fields: HashMap::new(),
+        };
+
+        plugin.handle_message(&msg).await.unwrap();
+
+        // No AddComment should be called
+        let calls = provider_clone.get_calls();
+        assert!(calls
+            .iter()
+            .all(|c| !matches!(c, MockCall::AddComment { .. })));
     }
 }

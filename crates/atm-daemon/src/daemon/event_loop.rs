@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Run the main daemon event loop.
 ///
@@ -113,34 +113,18 @@ pub async fn run(
                         continue;
                     }
 
-                    // Read inbox messages (array) and dispatch the newest message
-                    let inbox_msgs: Vec<atm_core::schema::InboxMessage> =
-                        match tokio::fs::read_to_string(&event.path).await {
-                            Ok(content) => match serde_json::from_str(&content) {
-                                Ok(msgs) => msgs,
-                                Err(e) => {
-                                    warn!(
-                                        "Failed to parse inbox at {}: {}",
-                                        event.path.display(),
-                                        e
-                                    );
-                                    continue;
-                                }
-                            },
-                            Err(e) => {
-                                // File might be transiently locked or deleted
-                                debug!(
-                                    "Failed to read inbox file at {}: {}",
-                                    event.path.display(),
-                                    e
-                                );
-                                continue;
-                            }
-                        };
-
-                    let inbox_msg = match inbox_msgs.last() {
-                        Some(msg) => msg,
-                        None => continue,
+                    let inbox_msg = match read_latest_inbox_message(&event.path).await {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            // File might be transiently locked, deleted, or malformed
+                            debug!(
+                                "Failed to read latest inbox message at {}: {}",
+                                event.path.display(),
+                                e
+                            );
+                            continue;
+                        }
                     };
 
                     // Dispatch to all plugins with EventListener capability
@@ -149,7 +133,7 @@ pub async fn run(
                             // Try to acquire lock without blocking
                             if let Ok(mut plugin) = plugin_arc.try_lock() {
                                 debug!("Dispatching to plugin: {}", metadata.name);
-                                if let Err(e) = plugin.handle_message(inbox_msg).await {
+                                if let Err(e) = plugin.handle_message(&inbox_msg).await {
                                     error!("Plugin {} handle_message error: {}", metadata.name, e);
                                 }
                             } else {
@@ -196,4 +180,62 @@ pub async fn run(
 
     info!("Daemon event loop shutdown complete");
     Ok(())
+}
+
+async fn read_latest_inbox_message(
+    path: &std::path::Path,
+) -> Result<Option<atm_core::schema::InboxMessage>> {
+    let content = tokio::fs::read_to_string(path).await?;
+    let inbox_msgs: Vec<atm_core::schema::InboxMessage> = serde_json::from_str(&content)?;
+    Ok(inbox_msgs.last().cloned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_latest_inbox_message;
+    use atm_core::schema::InboxMessage;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_read_latest_inbox_message_returns_last() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("inbox.json");
+
+        let msg1 = InboxMessage {
+            from: "a".to_string(),
+            text: "first".to_string(),
+            timestamp: "2026-02-11T10:00:00Z".to_string(),
+            read: false,
+            summary: None,
+            message_id: Some("msg-1".to_string()),
+            unknown_fields: HashMap::new(),
+        };
+
+        let msg2 = InboxMessage {
+            from: "b".to_string(),
+            text: "second".to_string(),
+            timestamp: "2026-02-11T10:05:00Z".to_string(),
+            read: false,
+            summary: None,
+            message_id: Some("msg-2".to_string()),
+            unknown_fields: HashMap::new(),
+        };
+
+        let content = serde_json::to_string_pretty(&vec![msg1.clone(), msg2.clone()]).unwrap();
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let latest = read_latest_inbox_message(&path).await.unwrap();
+        assert_eq!(latest.unwrap().message_id, msg2.message_id);
+    }
+
+    #[tokio::test]
+    async fn test_read_latest_inbox_message_empty_returns_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("inbox.json");
+        tokio::fs::write(&path, "[]").await.unwrap();
+
+        let latest = read_latest_inbox_message(&path).await.unwrap();
+        assert!(latest.is_none());
+    }
 }

@@ -300,6 +300,8 @@ fn process_spooled_message(
 fn get_spool_dir_with_base(subdir: &str, base_dir: Option<&Path>) -> Result<PathBuf, InboxError> {
     let spool_dir = if let Some(base) = base_dir {
         base.join("spool").join(subdir)
+    } else if let Ok(atm_home) = std::env::var("ATM_HOME") {
+        PathBuf::from(atm_home).join("spool").join(subdir)
     } else {
         dirs::config_dir()
             .ok_or_else(|| InboxError::SpoolError {
