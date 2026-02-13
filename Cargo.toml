@@ -5,6 +5,9 @@ members = [
     "crates/atm",
     "crates/atm-daemon",
 ]
+exclude = [
+    "examples/provider-stub",
+]
 
 [workspace.package]
 version = "0.1.0"
