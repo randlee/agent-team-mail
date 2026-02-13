@@ -312,6 +312,73 @@ async fn test_issue_filter_applies_labels() {
 }
 
 #[tokio::test]
+async fn test_issue_updates_deliver_multiple_messages() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // First poll: initial issue
+    let issue_v1 = create_test_issue(101, "Update issue", vec!["bug"]);
+    let mock_provider_v1 = MockProvider::with_issues(vec![issue_v1.clone()]);
+
+    // Second poll: same issue, updated timestamp
+    let mut issue_v2 = issue_v1.clone();
+    issue_v2.updated_at = "2026-02-11T12:30:00Z".to_string();
+    let mock_provider_v2 = MockProvider::with_issues(vec![issue_v2.clone()]);
+
+    let git_provider = GitProvider::GitHub {
+        owner: "test".to_string(),
+        repo: "repo".to_string(),
+    };
+    let mut ctx = create_test_context(&temp_dir, Some(git_provider));
+
+    // Add plugin config to context
+    let mut plugin_config = toml::Table::new();
+    plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
+    plugin_config.insert("poll_interval".to_string(), toml::Value::Integer(1));
+    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
+    plugin_config.insert("agent".to_string(), toml::Value::String("issues-bot".to_string()));
+
+    let mut config = (*ctx.config).clone();
+    config.plugins.insert("issues".to_string(), plugin_config);
+    ctx = PluginContext::new(ctx.system.clone(), ctx.mail.clone(), Arc::new(config), ctx.roster.clone());
+
+    // Create team structure
+    create_team_config(ctx.mail.teams_root(), "test-team");
+
+    // Run plugin with initial issue
+    let mut plugin1 = IssuesPlugin::new().with_provider(Box::new(mock_provider_v1));
+    plugin1.init(&ctx).await.unwrap();
+
+    let cancel1 = CancellationToken::new();
+    let cancel1_clone = cancel1.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        cancel1_clone.cancel();
+    });
+    let _ = plugin1.run(cancel1).await;
+
+    // Remove synthetic member before re-init to avoid duplicate member error
+    ctx.roster
+        .cleanup_plugin("test-team", "issues", atm_daemon::roster::CleanupMode::Hard)
+        .unwrap();
+
+    // Run plugin again with updated issue
+    let mut plugin2 = IssuesPlugin::new().with_provider(Box::new(mock_provider_v2));
+    plugin2.init(&ctx).await.unwrap();
+
+    let cancel2 = CancellationToken::new();
+    let cancel2_clone = cancel2.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        cancel2_clone.cancel();
+    });
+    let _ = plugin2.run(cancel2).await;
+
+    // Verify two messages for the same issue were delivered
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "issues-bot");
+    assert_eq!(messages.len(), 2, "Should deliver updated issue twice");
+}
+
+#[tokio::test]
 async fn test_synthetic_member_lifecycle() {
     let temp_dir = TempDir::new().unwrap();
 
