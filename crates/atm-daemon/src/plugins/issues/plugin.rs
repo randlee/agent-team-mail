@@ -25,6 +25,8 @@ pub struct IssuesPlugin {
     config: IssuesConfig,
     /// Provider registry for runtime provider selection
     registry: Option<ProviderRegistry>,
+    /// Provider loader (kept alive to hold dynamic libraries)
+    loader: Option<ProviderLoader>,
     /// Cached context for runtime use
     ctx: Option<PluginContext>,
     /// Tracking: last poll timestamp for incremental fetching
@@ -38,6 +40,7 @@ impl IssuesPlugin {
             provider: None,
             config: IssuesConfig::default(),
             registry: None,
+            loader: None,
             ctx: None,
             last_poll: None,
         }
@@ -62,7 +65,7 @@ impl IssuesPlugin {
     }
 
     /// Build the provider registry with built-in and external providers
-    fn build_registry(&self, atm_home: &std::path::Path) -> ProviderRegistry {
+    fn build_registry(&mut self, atm_home: &std::path::Path) -> ProviderRegistry {
         let mut registry = ProviderRegistry::new();
 
         // Register built-in GitHub provider
@@ -102,6 +105,9 @@ impl IssuesPlugin {
                 registry.register(factory);
             }
         }
+
+        // Keep loader alive so dynamic libraries stay loaded
+        self.loader = Some(loader);
 
         registry
     }
@@ -213,13 +219,19 @@ impl IssuesPlugin {
             issue.url,
         );
 
+        let message_id = if issue.updated_at.is_empty() {
+            format!("issue-{}", issue.number)
+        } else {
+            format!("issue-{}-{}", issue.number, issue.updated_at)
+        };
+
         InboxMessage {
             from: self.config.agent.clone(),
             text: content,
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,
             summary: Some(format!("Issue #{}: {}", issue.number, issue.title)),
-            message_id: Some(format!("issue-{}", issue.number)),
+            message_id: Some(message_id),
             unknown_fields: HashMap::new(),
         }
     }
@@ -436,6 +448,11 @@ impl Plugin for IssuesPlugin {
     }
 
     async fn handle_message(&mut self, msg: &InboxMessage) -> Result<(), PluginError> {
+        // Ignore messages originating from the synthetic agent to avoid self-loop
+        if msg.from == self.config.agent {
+            return Ok(());
+        }
+
         // Check if the message is a reply to an issue (has [issue:NUMBER] prefix)
         if let Some(issue_number) = Self::parse_issue_reference(&msg.text)
             && let Some(provider) = &self.provider
@@ -543,7 +560,11 @@ mod tests {
         assert!(msg.text.contains("https://github.com/owner/repo/issues/42"));
         assert!(!msg.read);
         assert_eq!(msg.summary, Some("Issue #42: Test issue".to_string()));
-        assert_eq!(msg.message_id, Some("issue-42".to_string()));
+        assert!(msg
+            .message_id
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("issue-42-"));
     }
 
     #[test]
@@ -579,5 +600,38 @@ mod tests {
         assert!(plugin.provider.is_none());
         assert!(plugin.ctx.is_none());
         assert!(plugin.last_poll.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_ignores_self_messages() {
+        use crate::plugins::issues::mock_provider::{MockCall, MockProvider};
+
+        let provider = MockProvider::new();
+        let provider_clone = provider.clone();
+
+        let mut plugin = IssuesPlugin::new()
+            .with_provider(Box::new(provider))
+            .with_config(IssuesConfig {
+                agent: "issues-bot".to_string(),
+                ..IssuesConfig::default()
+            });
+
+        let msg = InboxMessage {
+            from: "issues-bot".to_string(),
+            text: "[issue:42]\nThis should be ignored".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: None,
+            message_id: None,
+            unknown_fields: HashMap::new(),
+        };
+
+        plugin.handle_message(&msg).await.unwrap();
+
+        // No AddComment should be called
+        let calls = provider_clone.get_calls();
+        assert!(calls
+            .iter()
+            .all(|c| !matches!(c, MockCall::AddComment { .. })));
     }
 }
