@@ -1,12 +1,16 @@
 //! Issues plugin — provider abstraction for issue tracking
 
 mod azure_devops;
+mod config;
 mod github;
+mod plugin;
 mod provider;
 mod types;
 
 pub use azure_devops::AzureDevOpsProvider;
+pub use config::IssuesConfig;
 pub use github::GitHubProvider;
+pub use plugin::IssuesPlugin;
 pub use provider::{ErasedIssueProvider, IssueProvider};
 pub use types::{Issue, IssueComment, IssueFilter, IssueLabel, IssueState};
 
