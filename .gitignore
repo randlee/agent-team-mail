@@ -28,6 +28,9 @@ target
 # Temporary/archived documentation
 temp/
 
+# Sprint prompt staging (not committed)
+.tmp/
+
 # macOS system files
 .DS_Store
 .AppleDouble

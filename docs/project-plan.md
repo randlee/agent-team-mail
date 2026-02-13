@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
-**Version**: 0.1
-**Date**: 2026-02-11
-**Status**: Draft
+**Version**: 0.2
+**Date**: 2026-02-13
+**Status**: Phase 5 Complete — Phase 6 Next
 
 ---
 
@@ -260,13 +260,13 @@ Phase 4: Daemon Foundation (atm-daemon)
   └─ Plugin trait, registry, daemon loop
   └─ 3 sprints, ~2 parallel tracks
 
-Phase 5: First Plugin (Issues)
-  └─ Provider abstraction, GitHub/Azure impl
-  └─ 3 sprints, sequential
+Phase 5: First Plugin (Issues) ✅
+  └─ Provider abstraction, pluggable architecture, testing
+  └─ 5 sprints (3 core + pluggable providers + ARCH-CTM review)
 
 Phase 6: Additional Plugins
-  └─ CI Monitor, Bridge, others
-  └─ Open-ended, parallel per plugin
+  └─ CI Monitor (GitHub built-in + Azure external), Bridge
+  └─ Sprint planning below
 ```
 
 ---
@@ -819,18 +819,22 @@ Phase 2 Complete
 
 ---
 
-## 6. Phase 4: Daemon Foundation (`atm-daemon`)
+## 6. Phase 4: Daemon Foundation (`atm-daemon`) ✅
 
 **Goal**: Daemon binary with plugin infrastructure, no concrete plugins yet.
 
 **Branch prefix**: `feature/p4-*`
 **Depends on**: Phase 3 complete (MVP)
+**Status**: ✅ Complete — All sprints merged. PR [#25](https://github.com/randlee/agent-team-mail/pull/25) merged `integrate/phase-4 → develop`.
+**Completed**: 2026-02-12
 
 ### Sprint 4.1: Plugin Trait + Registry ✅
 
 **Branch**: `feature/p4-s1-plugin-trait`
 **Depends on**: Phase 3 complete
-**Status**: COMPLETE — PR targeting `integrate/phase-4`
+**Status**: ✅ Complete
+**PR**: [#22](https://github.com/randlee/agent-team-mail/pull/22)
+**Completed**: 2026-02-12
 
 **Deliverables**:
 - ✅ `Plugin` async trait definition (edition 2024 native async, ErasedPlugin type-erasure for object safety)
@@ -851,11 +855,12 @@ Phase 2 Complete
 - ✅ 253 total workspace tests, all passing
 - ✅ Clippy clean, cross-platform compliant
 
-### Sprint 4.2: Daemon Event Loop
+### Sprint 4.2: Daemon Event Loop ✅
 
 **Branch**: `feature/p4-s2-daemon-loop`
 **Depends on**: Sprint 4.1
 **Parallel**: Can run alongside Sprint 4.3
+**PR**: [#24](https://github.com/randlee/agent-team-mail/pull/24)
 
 **Deliverables**:
 - `atm-daemon` binary crate with tokio runtime
@@ -886,11 +891,12 @@ Phase 2 Complete
 - 7 new daemon integration tests, 18 total daemon crate tests
 - ATM_HOME compliance throughout
 
-### Sprint 4.3: Roster Service
+### Sprint 4.3: Roster Service ✅
 
 **Branch**: `feature/p4-s3-roster`
 **Depends on**: Sprint 4.1
 **Parallel**: Can run alongside Sprint 4.2
+**PR**: [#23](https://github.com/randlee/agent-team-mail/pull/23)
 
 **Deliverables**:
 - `RosterService`: add/remove synthetic members in team config
@@ -904,7 +910,8 @@ Phase 2 Complete
 - Members cleaned up on plugin shutdown
 - Tests cover add/remove/cleanup
 
-**Status**: ✅ Complete (PR pending)
+**Status**: ✅ Complete
+**Completed**: 2026-02-12
 **Dev-QA iterations**: 1 (passed first QA review with 1 minor clippy fix)
 **Implementation notes**:
 - New module `crates/atm-daemon/src/roster/` with `RosterService`, `MembershipTracker`, `RosterError`, `CleanupMode`
@@ -971,8 +978,10 @@ Phase 2 Complete
 - `cargo test` 100% pass
 - Cross-platform compliant (ATM_HOME pattern)
 
-**Status**: ✅ Complete (PR pending)
-**Dev-QA iterations**: 1 (single-pass implementation and validation)
+**Status**: ✅ Complete
+**PR**: [#26](https://github.com/randlee/agent-team-mail/pull/26)
+**Completed**: 2026-02-12
+**Dev-QA iterations**: 1 + 2 review fix rounds
 **Implementation notes**:
 - Added 4 behavioral Capability variants (`AdvertiseMembers`, `InterceptSend`, `InjectMessages`, `EventListener`) to `Capability` enum
 - Added `plugins: HashMap<String, toml::Table>` field to `Config` with `plugin_config()` helper method
@@ -983,6 +992,10 @@ Phase 2 Complete
 - 10 new tests in watcher (path parsing, event types, filtering), 5 new tests for plugin config (round-trip, accessor, missing, empty)
 - All atm-core and atm-daemon tests pass (104 passed), clippy clean
 - Re-exported `toml` from atm-core for plugin config type access in daemon
+- **Review fix 1**: Added `plugins` HashMap merge to `merge_config()` (was silently dropped)
+- **Review fix 2**: Replaced `try_recv + sleep` with `recv_timeout` in watcher (eliminated busy-wait)
+- **Review fix 3 (ARCH-CTM)**: Fixed watcher path from `inbox` to `inboxes` matching actual Claude teams layout
+- **Review fix 4 (ARCH-CTM)**: Fixed event dispatch to parse inbox as `Vec<InboxMessage>` (JSON array), dispatch newest
 
 ### Phase 4 Dependency Graph
 
@@ -1010,33 +1023,40 @@ MVP Complete (Phase 3)
 
 ---
 
-## 7. Phase 5: First Plugin (Issues)
+## 7. Phase 5: First Plugin (Issues) ✅
 
-**Goal**: Working Issues plugin with at least one provider (GitHub or Azure DevOps).
+**Goal**: Working Issues plugin with pluggable provider architecture.
 
 **Branch prefix**: `feature/p5-*`
 **Depends on**: Phase 4 complete
+**Status**: ✅ Complete — All sprints merged. PRs #27-#29, #31, #32 merged to `integrate/phase-5`. PR #30 merged `integrate/phase-5 → develop`. PR #33 merges remaining ARCH-CTM fixes to develop.
+**Completed**: 2026-02-13
 
 ### Sprint 5.1: Provider Abstraction ✅
 
 **Branch**: `feature/p5-s1-provider-abstraction`
 **Depends on**: Phase 4 complete
-**Status**: COMPLETE (2026-02-12)
+**Status**: ✅ Complete
+**PR**: [#27](https://github.com/randlee/agent-team-mail/pull/27)
+**Completed**: 2026-02-12
 
 **Deliverables**:
 - ✅ Provider trait for issue operations (list, get, comment) — `provider.rs` with RPITIT + ErasedIssueProvider
 - ✅ GitHub provider implementation using `gh` CLI subprocess — `github.rs`
-- ✅ Azure DevOps provider stub — `azure_devops.rs`
+- ✅ Azure DevOps provider stub — `azure_devops.rs` (later removed in Sprint 5.4)
 - ✅ Provider factory function from GitProvider — `create_provider()` in `mod.rs`
 - ✅ Issue types (Issue, IssueComment, IssueLabel, IssueFilter, IssueState) — `types.rs`
 - ✅ Module structure: `crates/atm-daemon/src/plugins/issues/`
 - ✅ All tests pass (293 total), clippy clean with `-D warnings`
 
-### Sprint 5.2: Issues Plugin Core
+### Sprint 5.2: Issues Plugin Core ✅
 
 **Branch**: `feature/p5-s2-issues-plugin`
 **Depends on**: Sprint 5.1
 **Status**: ✅ Complete
+**PR**: [#28](https://github.com/randlee/agent-team-mail/pull/28)
+**Completed**: 2026-02-12
+**Dev-QA iterations**: 1 + CI fix (collapsible_if clippy lint on rust-1.93.0)
 
 **Deliverables**:
 - ✅ IssuesPlugin struct implementing `Plugin` trait — `plugin.rs`
@@ -1049,92 +1069,244 @@ MVP Complete (Phase 3)
 - ✅ Graceful init error handling (missing provider/repo)
 - ✅ All tests pass (317 total, +24 new), clippy clean with `-D warnings`
 
-### Sprint 5.3: Issues Plugin Testing
+### Sprint 5.3: Issues Plugin Testing ✅
 
 **Branch**: `feature/p5-s3-issues-tests`
 **Depends on**: Sprint 5.2
+**Status**: ✅ Complete
+**PR**: [#29](https://github.com/randlee/agent-team-mail/pull/29)
+**Completed**: 2026-02-12
+**Dev-QA iterations**: 1 (Scrum Master handled both dev and QA directly)
 
 **Deliverables**:
-- Mock provider for testing (no real API calls)
-- End-to-end: issue created → message delivered → reply → comment posted
-- Error scenarios: API failure, auth failure, rate limit
-- Configuration validation
+- ✅ New module `mock_provider.rs` with configurable MockProvider (issues, comments, error injection, call tracking)
+- ✅ `IssueFilter` derive for PartialEq (required for MockCall equality checks)
+- ✅ Plugin test helpers: `with_provider()` and `with_config()` for dependency injection
+- ✅ Modified plugin init() to skip provider creation if already injected (enables mock testing)
+- ✅ 16 new integration tests in `tests/issues_integration.rs` and `tests/issues_error_tests.rs`
+- ✅ Test coverage: inbox delivery, reply handling, label filtering, synthetic member lifecycle, disabled plugin, error scenarios, config validation
+- ✅ All tests pass (342 total workspace tests), clippy clean, cross-platform compliant
 
-**Status**: ✅ Complete (PR pending)
-**Dev-QA iterations**: 1 (Scrum Master handled both dev and QA directly)
-**Implementation notes**:
-- New module `mock_provider.rs` with configurable MockProvider (issues, comments, error injection, call tracking)
-- Added `IssueFilter` derive for PartialEq (required for MockCall equality checks)
-- Plugin test helpers: `with_provider()` and `with_config()` for dependency injection
-- Modified plugin init() to skip provider creation if already injected (enables mock testing)
-- 16 new integration tests in `tests/issues_integration.rs` and `tests/issues_error_tests.rs`
-- Test coverage: inbox message delivery, reply handling, label filtering, synthetic member lifecycle, disabled plugin, error scenarios, config validation
-- All tests pass (342 total workspace tests, up from 317 baseline)
-- Clippy clean with no warnings
-- Cross-platform compliant (ATM_HOME in all test helpers)
+### Sprint 5.4: Pluggable Provider Architecture ✅
+
+**Branch**: `feature/p5-s4-pluggable-providers`
+**Depends on**: Sprint 5.3
+**Status**: ✅ Complete
+**PR**: [#31](https://github.com/randlee/agent-team-mail/pull/31)
+**Completed**: 2026-02-13
+**Dev-QA iterations**: 1
+
+**Background**: User review of Sprint 5.1 identified that providers were hard-coded in the daemon crate. External providers must be registerable without modifying daemon source code.
+
+**Deliverables**:
+- ✅ `ProviderRegistry` with runtime registration — `registry.rs` (HashMap<String, ProviderFactory>)
+- ✅ `ProviderLoader` using `libloading` for dynamic `.dylib`/`.so`/`.dll` loading — `loader.rs`
+- ✅ C-ABI convention: libraries export `atm_create_provider_factory() -> *mut ProviderFactory`
+- ✅ Config-based provider override via `[plugins.issues] provider = "name"` and `provider_libraries = ["/path/to/lib"]`
+- ✅ Provider directory scanning for auto-discovery
+- ✅ Removed hard-coded Azure DevOps stub from daemon crate
+- ✅ Example external provider crate: `examples/provider-stub/` (cdylib with README)
+- ✅ Integration test: build stub → load dynamically → verify factory and provider methods
+- ✅ All tests pass (351 total), clippy clean, cross-platform compliant
+
+### Sprint 5.5: ARCH-CTM Review Fixes ✅
+
+**Branch**: `review/arch-ctm-phase-5`
+**Depends on**: Sprint 5.4
+**Status**: ✅ Complete
+**PR**: [#32](https://github.com/randlee/agent-team-mail/pull/32), [#33](https://github.com/randlee/agent-team-mail/pull/33)
+**Completed**: 2026-02-13
+
+**Background**: External architecture review (ARCH-CTM) of Phase 5 code identified 3 correctness bugs and test coverage gaps. Fixes and tests were applied, followed by a Windows CI fix.
+
+**Fixes**:
+- ✅ **Self-loop guard**: Plugin commenting on its own notifications — added `if msg.from == self.config.agent { return; }` in `handle_message()`
+- ✅ **Library unload prevention**: `ProviderLoader` stored in plugin struct to keep dynamic libraries alive (was being dropped after `build_registry()`)
+- ✅ **Message dedup improvement**: `message_id` now includes `updated_at` — `format!("issue-{}-{}", issue.number, issue.updated_at)` — so issue updates aren't suppressed
+- ✅ **Windows CI fix**: Added `ATM_HOME` env var support to `get_spool_dir_with_base()` — `dirs::config_dir()` ignores HOME/USERPROFILE on Windows
+
+**Test additions**:
+- ✅ Provider loader integration test (build stub, load, verify)
+- ✅ Issue update delivery test (updated_at in message_id)
+- ✅ Event loop `read_latest_inbox_message` tests
+- ✅ Self-loop guard test
+- ✅ Spool test isolation fix (ATM_HOME instead of platform-specific env vars)
+- ✅ All tests pass (363 total), CI green on all 3 platforms (Ubuntu, macOS, Windows)
+
+### Phase 5 Dependency Graph
+
+```
+Phase 4 Complete
+    │
+    └── Sprint 5.1 (Provider Abstraction)
+            │
+            └── Sprint 5.2 (Issues Plugin Core)
+                    │
+                    └── Sprint 5.3 (Issues Plugin Testing)
+                            │
+                            └── Sprint 5.4 (Pluggable Provider Architecture)
+                                    │
+                                    └── Sprint 5.5 (ARCH-CTM Review Fixes)
+                                            │
+                                         Phase 5 Complete
+```
 
 ---
 
-## 8. Phase 6: Additional Plugins
+## 8. Phase 6: CI Monitor Plugin
 
-**Goal**: Expand plugin ecosystem. Sprints are independent and parallel per plugin.
+**Goal**: CI Monitor plugin with GitHub Actions built-in provider and Azure DevOps as external provider (demonstrating the pluggable provider architecture from Phase 5).
 
 **Branch prefix**: `feature/p6-*`
-**Depends on**: Phase 4 complete (daemon infrastructure)
+**Depends on**: Phase 5 complete
+**Integration branch**: `integrate/phase-6` (created from `develop` at phase start)
+**Reference**: Existing CI Monitor design doc at `agent-teams-test/docs/ci-monitor-design.md` (Go-based; adapted to ATM's Rust plugin system)
+**Status**: Not started
 
-Planned plugins (each is a self-contained sprint series):
+### Sprint 6.1: CI Provider Abstraction
+
+**Branch**: `feature/p6-s1-ci-provider`
+**Depends on**: Phase 5 complete
+**Parallel**: None (foundation sprint)
+
+**Deliverables**:
+- `CiProvider` async trait for CI operations (list runs, get run details, get job logs)
+- CI types: `CiRun`, `CiJob`, `CiStep`, `CiRunStatus`, `CiRunConclusion`, `CiFilter`
+- `CiProviderRegistry` (same pattern as Issues `ProviderRegistry`)
+- GitHub Actions built-in provider using `gh` CLI
+- Module structure: `crates/atm-daemon/src/plugins/ci_monitor/`
+- Unit tests for types and registry
+
+**Acceptance criteria**:
+- CiProvider trait compiles and is implementable
+- GitHub provider can list/get workflow runs via `gh` CLI
+- Registry supports registration and lookup
+- All tests pass, clippy clean
+
+### Sprint 6.2: CI Monitor Plugin Core
+
+**Branch**: `feature/p6-s2-ci-monitor-plugin`
+**Depends on**: Sprint 6.1
+
+**Deliverables**:
+- `CiMonitorPlugin` struct implementing `Plugin` trait
+- `CiMonitorConfig` parsing from `[plugins.ci_monitor]` TOML section
+- Poll loop: detect new workflow runs, monitor status, detect failures
+- Failure → InboxMessage transformation with `[ci:RUN_ID]` prefix
+- Deduplication: per-commit or per-run (configurable)
+- Configurable: poll interval, repo, team, agent, watched branches
+- Synthetic member registration via RosterService
+
+**Acceptance criteria**:
+- Plugin polls GitHub Actions and detects failures
+- Failure reports delivered as inbox messages
+- No duplicate notifications for same failure
+- Configurable via `.atm.toml` `[plugins.ci_monitor]` section
+- All tests pass, clippy clean
+
+### Sprint 6.3: CI Monitor Testing + Azure External Provider
+
+**Branch**: `feature/p6-s3-ci-monitor-tests`
+**Depends on**: Sprint 6.2
+
+**Deliverables**:
+- Mock CI provider for testing (no real API calls)
+- End-to-end: CI failure → message delivered → acknowledgment
+- Error scenarios: API failure, auth failure, timeout
+- Azure DevOps external provider example crate (`examples/ci-provider-azdo/`)
+  - cdylib using same C-ABI convention as provider-stub
+  - Demonstrates external CI provider registration
+  - Uses Azure DevOps REST API via `az` CLI or direct HTTP
+- Integration test: build Azure provider stub → load dynamically → verify
+
+**Acceptance criteria**:
+- Mock tests cover full failure detection lifecycle
+- Azure DevOps provider builds as external cdylib
+- Dynamic loading works (same pattern as issues provider-stub)
+- All tests pass on Ubuntu, macOS, Windows
+
+### Phase 6 Dependency Graph
+
+```
+Phase 5 Complete
+    │
+    └── Sprint 6.1 (CI Provider Abstraction)
+            │
+            └── Sprint 6.2 (CI Monitor Plugin Core)
+                    │
+                    └── Sprint 6.3 (CI Monitor Testing + Azure External)
+                                    │
+                              Phase 6 Complete
+```
+
+---
+
+## 9. Phase 7: Cross-Computer Bridge Plugin
+
+**Goal**: Bridge plugin enabling multi-machine agent teams.
+
+**Branch prefix**: `feature/p7-*`
+**Depends on**: Phase 6 complete (or Phase 5 — independent of CI Monitor)
+**Status**: Not planned (sprint details TBD)
+
+---
+
+## 10. Future Plugins
+
+Additional plugins planned (each is a self-contained sprint series):
 
 | Plugin | Priority | Depends On | Notes |
 |--------|----------|------------|-------|
-| CI Monitor | High | Phase 4 | Existing design doc available |
-| Cross-Computer Bridge | High | Phase 4 | Enables multi-machine teams |
-| Human Chat Interface | Medium | Phase 4 | Slack/Discord integration |
-| Beads Mail | Medium | Phase 4 | [steveyegge/beads](https://github.com/steveyegge/beads) — Gastown integration |
-| MCP Agent Mail | Medium | Phase 4 | [Dicklesworthstone/mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail) — MCP interop |
-
-Sprint planning for Phase 6 plugins will be done when Phase 4 is complete and the plugin
-infrastructure is proven.
+| Human Chat Interface | Medium | Phase 5 | Slack/Discord integration |
+| Beads Mail | Medium | Phase 5 | [steveyegge/beads](https://github.com/steveyegge/beads) — Gastown integration |
+| MCP Agent Mail | Medium | Phase 5 | [Dicklesworthstone/mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail) — MCP interop |
 
 ---
 
-## 9. Sprint Summary
+## 11. Sprint Summary
 
-| Phase | Sprint | Name | Depends On | Parallel With |
-|-------|--------|------|------------|---------------|
-| **1** | 1.1 | Workspace + Schema Types | — | — |
-| **1** | 1.2 | Schema Version Detection | 1.1 | 1.3, 1.5 |
-| **1** | 1.3 | Atomic File I/O | 1.1 | 1.2, 1.5 |
-| **1** | 1.4 | Outbound Spool | 1.3 | 1.5 |
-| **1** | 1.5 | System Context + Config | 1.1 | 1.2, 1.3 |
-| **2** | 2.1 | CLI Skeleton + Send | Phase 1 | — |
-| **2** | 2.2 | Read + Inbox | 2.1 | 2.3, 2.4 |
-| **2** | 2.3 | Broadcast | 2.1 | 2.2, 2.4 |
-| **2** | 2.4 | Discovery Commands | 2.1 | 2.2, 2.3 |
-| **3** | 3.1 | E2E Integration Tests | Phase 2 | — |
-| **3** | 3.2 | Conflict & Edge Cases | 3.1 | 3.3 |
-| **3** | 3.3 | Docs & Polish | 3.1 | 3.2 |
-| **3** | 3.4 | Inbox Retention & Cleanup | 3.1 | 3.2, 3.3 |
-| **4** | 4.1 | Plugin Trait + Registry | Phase 3 | — |
-| **4** | 4.2 | Daemon Event Loop | 4.1 | 4.3 |
-| **4** | 4.3 | Roster Service | 4.1 | 4.2 |
-| **4** | 4.4 | Arch Gap Hotfix (ARCH-CTM) | 4.1-4.3 | — |
-| **5** | 5.1 | Provider Abstraction | Phase 4 | — |
-| **5** | 5.2 | Issues Plugin Core | 5.1 | — |
-| **5** | 5.3 | Issues Plugin Testing | 5.2 | — |
+| Phase | Sprint | Name | Status | PR |
+|-------|--------|------|--------|-----|
+| **1** | 1.1 | Workspace + Schema Types | ✅ | [#3](https://github.com/randlee/agent-team-mail/pull/3) |
+| **1** | 1.2 | Schema Version Detection | ✅ | [#5](https://github.com/randlee/agent-team-mail/pull/5) |
+| **1** | 1.3 | Atomic File I/O | ✅ | [#7](https://github.com/randlee/agent-team-mail/pull/7) |
+| **1** | 1.4 | Outbound Spool | ✅ | [#8](https://github.com/randlee/agent-team-mail/pull/8) |
+| **1** | 1.5 | System Context + Config | ✅ | [#6](https://github.com/randlee/agent-team-mail/pull/6) |
+| **2** | 2.1 | CLI Skeleton + Send | ✅ | [#10](https://github.com/randlee/agent-team-mail/pull/10) |
+| **2** | 2.2 | Read + Inbox | ✅ | [#11](https://github.com/randlee/agent-team-mail/pull/11) |
+| **2** | 2.3 | Broadcast | ✅ | [#12](https://github.com/randlee/agent-team-mail/pull/12) |
+| **2** | 2.4 | Discovery Commands | ✅ | [#13](https://github.com/randlee/agent-team-mail/pull/13) |
+| **3** | 3.0 | Design Review Fixes | ✅ | [#15](https://github.com/randlee/agent-team-mail/pull/15) |
+| **3** | 3.1 | E2E Integration Tests | ✅ | [#16](https://github.com/randlee/agent-team-mail/pull/16) |
+| **3** | 3.2 | Conflict & Edge Cases | ✅ | [#17](https://github.com/randlee/agent-team-mail/pull/17) |
+| **3** | 3.3 | Docs & Polish | ✅ | [#18](https://github.com/randlee/agent-team-mail/pull/18) |
+| **3** | 3.4 | Inbox Retention & Cleanup | ✅ | [#19](https://github.com/randlee/agent-team-mail/pull/19) |
+| **4** | 4.1 | Plugin Trait + Registry | ✅ | [#22](https://github.com/randlee/agent-team-mail/pull/22) |
+| **4** | 4.2 | Daemon Event Loop | ✅ | [#24](https://github.com/randlee/agent-team-mail/pull/24) |
+| **4** | 4.3 | Roster Service | ✅ | [#23](https://github.com/randlee/agent-team-mail/pull/23) |
+| **4** | 4.4 | Arch Gap Hotfix (ARCH-CTM) | ✅ | [#26](https://github.com/randlee/agent-team-mail/pull/26) |
+| **5** | 5.1 | Provider Abstraction | ✅ | [#27](https://github.com/randlee/agent-team-mail/pull/27) |
+| **5** | 5.2 | Issues Plugin Core | ✅ | [#28](https://github.com/randlee/agent-team-mail/pull/28) |
+| **5** | 5.3 | Issues Plugin Testing | ✅ | [#29](https://github.com/randlee/agent-team-mail/pull/29) |
+| **5** | 5.4 | Pluggable Provider Architecture | ✅ | [#31](https://github.com/randlee/agent-team-mail/pull/31) |
+| **5** | 5.5 | ARCH-CTM Review Fixes | ✅ | [#32](https://github.com/randlee/agent-team-mail/pull/32), [#33](https://github.com/randlee/agent-team-mail/pull/33) |
+| **6** | 6.1 | CI Provider Abstraction | — | — |
+| **6** | 6.2 | CI Monitor Plugin Core | — | — |
+| **6** | 6.3 | CI Monitor Testing + Azure External | — | — |
 
-**Total**: 19 sprints across 5 planned phases (Phase 6 is open-ended)
+**Completed**: 23 sprints across 5 phases (363 tests, all CI green)
+**Next**: Phase 6 — CI Monitor Plugin (3 sprints)
 
-**Critical path**: 1.1 → 1.3 → 1.4 → 2.1 → 2.2 → 3.1 → 3.2 → 3.4 → MVP
-
-**Maximum parallelism**:
-- Phase 1: 3 concurrent sprints (1.2, 1.3, 1.5 after 1.1)
-- Phase 2: 3 concurrent sprints (2.2, 2.3, 2.4 after 2.1)
-- Phase 3: 2 concurrent sprints (3.2, 3.3 after 3.1)
-- Phase 4: 2 concurrent sprints (4.2, 4.3 after 4.1)
+**Phase integration PRs**:
+| Phase | Integration PR | Status |
+|-------|---------------|--------|
+| Phase 3 | [#20](https://github.com/randlee/agent-team-mail/pull/20) | ✅ Merged |
+| Phase 4 | [#25](https://github.com/randlee/agent-team-mail/pull/25) | ✅ Merged |
+| Phase 5 | [#30](https://github.com/randlee/agent-team-mail/pull/30), [#33](https://github.com/randlee/agent-team-mail/pull/33) | ✅ Merged / Pending |
 
 ---
 
-## 10. Scrum Master Agent Prompt
+## 12. Scrum Master Agent Prompt
 
 The following prompt is used when spawning the scrum master agent for a sprint:
 
@@ -1192,6 +1364,6 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 
 ---
 
-**Document Version**: 0.1
-**Last Updated**: 2026-02-11
-**Maintained By**: Claude
+**Document Version**: 0.2
+**Last Updated**: 2026-02-13
+**Maintained By**: Claude (ARCH-ATM)
