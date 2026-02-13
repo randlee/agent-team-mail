@@ -36,6 +36,24 @@ impl IssuesPlugin {
         }
     }
 
+    /// Inject a provider for testing (replaces normal init provider creation)
+    ///
+    /// NOTE: This is intended for testing only. Production code should use init()
+    /// which creates the provider from the PluginContext.
+    pub fn with_provider(mut self, provider: Box<dyn ErasedIssueProvider>) -> Self {
+        self.provider = Some(provider);
+        self
+    }
+
+    /// Inject config for testing
+    ///
+    /// NOTE: This is intended for testing only. Production code should use init()
+    /// which parses config from the PluginContext.
+    pub fn with_config(mut self, config: IssuesConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     /// Transform an Issue into an InboxMessage for delivery
     fn issue_to_message(&self, issue: &Issue) -> InboxMessage {
         let state_display = match issue.state {
@@ -128,19 +146,22 @@ impl Plugin for IssuesPlugin {
             return Ok(());
         }
 
-        // Get git provider from system context
+        // Get repo info for synthetic member registration (needed even if provider injected)
         let repo = ctx.system.repo.as_ref().ok_or_else(|| PluginError::Init {
             message: "No repository information available".to_string(),
             source: None,
         })?;
 
-        let git_provider = repo.provider.as_ref().ok_or_else(|| PluginError::Init {
-            message: "No git provider configured".to_string(),
-            source: None,
-        })?;
+        // Create provider if not already injected (for testing)
+        if self.provider.is_none() {
+            let git_provider = repo.provider.as_ref().ok_or_else(|| PluginError::Init {
+                message: "No git provider configured".to_string(),
+                source: None,
+            })?;
 
-        // Create the issue provider
-        self.provider = Some(create_provider(git_provider, config_table)?);
+            // Create the issue provider
+            self.provider = Some(create_provider(git_provider, config_table)?);
+        }
 
         // Determine target team (use default_team from config if not specified)
         let target_team = if self.config.team.is_empty() {

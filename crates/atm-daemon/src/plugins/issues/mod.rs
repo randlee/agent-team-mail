@@ -3,6 +3,7 @@
 mod azure_devops;
 mod config;
 mod github;
+mod mock_provider;
 mod plugin;
 mod provider;
 mod types;
@@ -10,6 +11,7 @@ mod types;
 pub use azure_devops::AzureDevOpsProvider;
 pub use config::IssuesConfig;
 pub use github::GitHubProvider;
+pub use mock_provider::{MockCall, MockProvider};
 pub use plugin::IssuesPlugin;
 pub use provider::{ErasedIssueProvider, IssueProvider};
 pub use types::{Issue, IssueComment, IssueFilter, IssueLabel, IssueState};
