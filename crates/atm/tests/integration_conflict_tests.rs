@@ -262,6 +262,7 @@ fn test_lock_contention_queues_to_spool() {
 // ============================================================================
 
 #[test]
+#[serial_test::serial]
 fn test_spool_drain_delivery_cycle() {
     // This test uses the library API directly since spool_drain is not yet
     // exposed via CLI command.
@@ -271,6 +272,17 @@ fn test_spool_drain_delivery_cycle() {
     use std::collections::HashMap;
 
     let temp_dir = TempDir::new().unwrap();
+    // Redirect config directory into temp to avoid interference with user spool
+    let prev_home = std::env::var("HOME").ok();
+    let prev_userprofile = std::env::var("USERPROFILE").ok();
+    let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+    let prev_appdata = std::env::var("APPDATA").ok();
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path());
+        std::env::set_var("USERPROFILE", temp_dir.path());
+        std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+        std::env::set_var("APPDATA", temp_dir.path());
+    }
     let teams_dir = temp_dir.path().join("teams");
     let team_dir = teams_dir.join("test-team");
     let inboxes_dir = team_dir.join("inboxes");
@@ -323,6 +335,26 @@ fn test_spool_drain_delivery_cycle() {
             .any(|m| m["text"] == "Spooled message"),
         "Delivered message should be in inbox"
     );
+
+    // Restore environment
+    unsafe {
+        match prev_home {
+            Some(val) => std::env::set_var("HOME", val),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_userprofile {
+            Some(val) => std::env::set_var("USERPROFILE", val),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        match prev_xdg {
+            Some(val) => std::env::set_var("XDG_CONFIG_HOME", val),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match prev_appdata {
+            Some(val) => std::env::set_var("APPDATA", val),
+            None => std::env::remove_var("APPDATA"),
+        }
+    }
 }
 
 // ============================================================================

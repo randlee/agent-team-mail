@@ -595,11 +595,84 @@ mod tests {
     }
 
     #[test]
+    fn test_issue_message_id_empty_updated_at() {
+        let plugin = IssuesPlugin::new();
+
+        let issue = Issue {
+            id: "100".to_string(),
+            number: 100,
+            title: "No updated_at".to_string(),
+            body: None,
+            state: IssueState::Open,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            author: "tester".to_string(),
+            created_at: "2026-02-11T10:00:00Z".to_string(),
+            updated_at: "".to_string(),
+            url: "https://example.com/issues/100".to_string(),
+        };
+
+        let msg = plugin.issue_to_message(&issue);
+        assert_eq!(msg.message_id, Some("issue-100".to_string()));
+    }
+
+    #[test]
+    fn test_issue_update_generates_distinct_message_ids() {
+        use atm_core::io::inbox::inbox_append;
+        use tempfile::TempDir;
+
+        let plugin = IssuesPlugin::new();
+        let temp_dir = TempDir::new().unwrap();
+        let inbox_path = temp_dir.path().join("agent.json");
+
+        let issue_v1 = Issue {
+            id: "200".to_string(),
+            number: 200,
+            title: "Issue update".to_string(),
+            body: Some("First version".to_string()),
+            state: IssueState::Open,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            author: "tester".to_string(),
+            created_at: "2026-02-11T10:00:00Z".to_string(),
+            updated_at: "2026-02-11T12:00:00Z".to_string(),
+            url: "https://example.com/issues/200".to_string(),
+        };
+
+        let issue_v2 = Issue {
+            updated_at: "2026-02-11T12:30:00Z".to_string(),
+            body: Some("Second version".to_string()),
+            ..issue_v1.clone()
+        };
+
+        let msg1 = plugin.issue_to_message(&issue_v1);
+        let msg2 = plugin.issue_to_message(&issue_v2);
+
+        assert_ne!(msg1.message_id, msg2.message_id);
+
+        inbox_append(&inbox_path, &msg1, "test-team", "issues-bot").unwrap();
+        inbox_append(&inbox_path, &msg2, "test-team", "issues-bot").unwrap();
+
+        let content = std::fs::read_to_string(&inbox_path).unwrap();
+        let messages: Vec<InboxMessage> = serde_json::from_str(&content).unwrap();
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
     fn test_plugin_default() {
         let plugin = IssuesPlugin::default();
         assert!(plugin.provider.is_none());
         assert!(plugin.ctx.is_none());
         assert!(plugin.last_poll.is_none());
+    }
+
+    #[test]
+    fn test_build_registry_keeps_loader_alive() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut plugin = IssuesPlugin::new();
+
+        let _registry = plugin.build_registry(temp_dir.path());
+        assert!(plugin.loader.is_some());
     }
 
     #[tokio::test]
