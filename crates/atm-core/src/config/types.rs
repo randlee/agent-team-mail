@@ -1,6 +1,7 @@
 //! Configuration types
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Complete configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -17,6 +18,9 @@ pub struct Config {
     /// Retention configuration
     #[serde(default)]
     pub retention: RetentionConfig,
+    /// Plugin-specific configuration sections: [plugins.<name>]
+    #[serde(default)]
+    pub plugins: HashMap<String, toml::Table>,
 }
 
 /// Core configuration
@@ -131,6 +135,14 @@ fn default_strategy() -> CleanupStrategy {
     CleanupStrategy::Delete
 }
 
+impl Config {
+    /// Get a plugin's configuration section by name.
+    /// Returns None if the plugin has no config section.
+    pub fn plugin_config(&self, name: &str) -> Option<&toml::Table> {
+        self.plugins.get(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +166,80 @@ mod tests {
         assert_eq!(config.core.default_team, deserialized.core.default_team);
         assert_eq!(config.core.identity, deserialized.core.identity);
         assert_eq!(config.display.format, deserialized.display.format);
+    }
+
+    #[test]
+    fn test_plugin_config_round_trip() {
+        let toml_str = r#"
+[core]
+default_team = "test-team"
+identity = "test-user"
+
+[plugins.issues]
+enabled = true
+poll_interval = 60
+labels = ["bug", "enhancement"]
+
+[plugins.ci-monitor]
+enabled = true
+workflow = "ci.yml"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+
+        // Verify plugins were deserialized
+        assert!(config.plugins.contains_key("issues"));
+        assert!(config.plugins.contains_key("ci-monitor"));
+
+        // Round-trip through serialization
+        let reserialized = toml::to_string(&config).unwrap();
+        let config2: Config = toml::from_str(&reserialized).unwrap();
+
+        assert_eq!(config.plugins.len(), config2.plugins.len());
+    }
+
+    #[test]
+    fn test_plugin_config_accessor() {
+        let toml_str = r#"
+[core]
+default_team = "test-team"
+identity = "test-user"
+
+[plugins.issues]
+enabled = true
+poll_interval = 60
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+
+        // Test successful lookup
+        let issues_config = config.plugin_config("issues");
+        assert!(issues_config.is_some());
+
+        let table = issues_config.unwrap();
+        assert!(table.contains_key("enabled"));
+        assert!(table.contains_key("poll_interval"));
+    }
+
+    #[test]
+    fn test_plugin_config_missing() {
+        let config = Config::default();
+
+        // Test lookup of non-existent plugin
+        assert!(config.plugin_config("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_plugin_config_empty() {
+        let toml_str = r#"
+[core]
+default_team = "test-team"
+identity = "test-user"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+
+        // Config without [plugins] section should have empty HashMap
+        assert!(config.plugins.is_empty());
     }
 }

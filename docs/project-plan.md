@@ -826,22 +826,30 @@ Phase 2 Complete
 **Branch prefix**: `feature/p4-*`
 **Depends on**: Phase 3 complete (MVP)
 
-### Sprint 4.1: Plugin Trait + Registry
+### Sprint 4.1: Plugin Trait + Registry ✅
 
 **Branch**: `feature/p4-s1-plugin-trait`
 **Depends on**: Phase 3 complete
+**Status**: COMPLETE — PR targeting `integrate/phase-4`
 
 **Deliverables**:
-- `Plugin` async trait definition
-- `PluginMetadata`, `Capability`, `PluginError` types
-- `PluginContext` with `SystemContext`, `MailService`, `RosterService`
-- `inventory`-based plugin registration
-- Plugin factory and lifecycle management
+- ✅ `Plugin` async trait definition (edition 2024 native async, ErasedPlugin type-erasure for object safety)
+- ✅ `PluginMetadata`, `Capability`, `PluginError`, `PluginState` types
+- ✅ `PluginContext` with `SystemContext`, `MailService`, `Config` (RosterService deferred to Sprint 4.3)
+- ✅ Vec-based `PluginRegistry` with register, init_all, get_by_name, get_by_capability
+- ✅ `MailService` wrapping atm-core inbox_append/read
+- ✅ 11 integration tests (MockPlugin + EchoPlugin proving trait implementability)
+
+**Deviations from original plan**:
+- Used Vec-based registry instead of `inventory` crate (simpler, sufficient for current needs)
+- RosterService not included in PluginContext (Sprint 4.3 will add it)
 
 **Acceptance criteria**:
-- Trait compiles and is implementable
-- Mock plugin can be registered and discovered
-- Plugin context provides access to atm-core services
+- ✅ Trait compiles and is implementable
+- ✅ Mock plugin can be registered and discovered
+- ✅ Plugin context provides access to atm-core services
+- ✅ 253 total workspace tests, all passing
+- ✅ Clippy clean, cross-platform compliant
 
 ### Sprint 4.2: Daemon Event Loop
 
@@ -858,10 +866,25 @@ Phase 2 Complete
 - Graceful shutdown with timeout
 
 **Acceptance criteria**:
-- Daemon starts, loads plugins, runs event loop
-- SIGINT triggers graceful shutdown
-- Spool is drained on interval
-- Mock plugin receives init/run/shutdown calls
+- ✅ Daemon starts, loads plugins, runs event loop
+- ✅ SIGINT triggers graceful shutdown
+- ✅ Spool is drained on interval
+- ✅ Mock plugin receives init/run/shutdown calls
+- ✅ 260 total workspace tests, all passing
+- ✅ Clippy clean (including tests), cross-platform compliant
+
+**Status**: ✅ Complete
+**Completed**: 2026-02-12
+**Dev-QA iterations**: 1 (passed first QA review)
+**Implementation**:
+- 5 new daemon modules: event_loop.rs, shutdown.rs, spool_task.rs, watcher.rs, mod.rs
+- Full daemon binary with clap CLI (--config, --team, --verbose, --daemon)
+- Plugin lifecycle: init → run (per-task) → shutdown with timeout
+- CancellationToken propagation (SIGINT/SIGTERM on Unix, Ctrl-C on Windows)
+- Spool drain loop (10s interval), file system watcher (notify crate)
+- Graceful shutdown with per-plugin timeout enforcement
+- 7 new daemon integration tests, 18 total daemon crate tests
+- ATM_HOME compliance throughout
 
 ### Sprint 4.3: Roster Service
 
@@ -881,6 +904,86 @@ Phase 2 Complete
 - Members cleaned up on plugin shutdown
 - Tests cover add/remove/cleanup
 
+**Status**: ✅ Complete (PR pending)
+**Dev-QA iterations**: 1 (passed first QA review with 1 minor clippy fix)
+**Implementation notes**:
+- New module `crates/atm-daemon/src/roster/` with `RosterService`, `MembershipTracker`, `RosterError`, `CleanupMode`
+- Atomic config.json updates via lock → read → modify → write → rename pattern (reuses `atm_core::io::lock::acquire_lock`)
+- `MembershipTracker` maps plugin_name → Vec<(team, agent_name)> for ownership tracking
+- `CleanupMode::Soft` sets isActive=false, `CleanupMode::Hard` removes members entirely (both idempotent)
+- Synthetic members use `agentType: "plugin:<plugin-name>"` convention
+- `PluginContext` updated with `roster: Arc<RosterService>` field
+- 22 new tests (8 unit + 14 integration): add/remove, cleanup modes, concurrent access (4 threads), plugin isolation, unknown field preservation
+- 33 total atm-daemon tests passing, clippy clean
+
+### Sprint 4.4: Architecture Gap Hotfix (ARCH-CTM Review)
+
+**Branch**: `feature/p4-hotfix-arch-gaps`
+**Depends on**: Sprints 4.1, 4.2, 4.3
+**Worktree**: `/Users/randlee/Documents/github/agent-team-mail-worktrees/feature/p4-hotfix-arch-gaps/` (already created from `integrate/phase-4`)
+**PR target**: `integrate/phase-4`
+**Design prompt**: `.tmp/sprint-4.4-design.md`
+
+**Background**: External architecture review (ARCH-CTM) identified gaps between requirements and Phase 4 implementation. This hotfix addresses findings that would block Phase 5 (Issues plugin).
+
+**Deliverables**:
+
+1. **[HIGH] Add behavioral Capability variants** (`crates/atm-daemon/src/plugin/types.rs`):
+   - Add `AdvertiseMembers`, `InterceptSend`, `InjectMessages`, `EventListener` to `Capability` enum
+   - Keep existing domain variants (`IssueTracking`, `CiMonitor`, `Bridge`, `Chat`, `Retention`, `Custom`)
+   - Behavioral variants describe what a plugin *does* (routing); domain variants describe what it *is about* (metadata)
+   - Update any tests that enumerate capabilities
+
+2. **[HIGH] Add plugin config sections** (`crates/atm-core/src/config/types.rs`):
+   - Add `plugins: HashMap<String, toml::Table>` field to `Config` struct
+   - Each plugin gets `[plugins.<name>]` section in `.atm.toml`
+   - Add helper `Config::plugin_config(&self, name: &str) -> Option<&toml::Table>`
+   - Add round-trip serialization test for plugin config sections
+   - Add `PluginContext::plugin_config(&self, name: &str) -> Option<&toml::Table>` convenience method
+
+3. **[MEDIUM] Fix SystemContext default_team** (`crates/atm-daemon/src/main.rs`):
+   - Replace hardcoded `"default-team"` (line 98) with `config.core.default_team.clone()`
+   - One-line fix
+
+4. **[MEDIUM] Wire watcher event dispatch to plugins** (`crates/atm-daemon/src/daemon/watcher.rs`, `event_loop.rs`):
+   - Change watcher to accept a channel sender for dispatching events
+   - In event loop, receive watcher events and route to plugins with `EventListener` capability
+   - Call `plugin.handle_message()` for inbox file changes (new/modified files in team inbox dirs)
+   - Use `tokio::sync::mpsc` instead of `std::sync::mpsc` for async-native channel
+
+**Deferred (documented, not blocking Phase 5)**:
+
+- **Managed settings policy** (Finding 5): Platform-specific managed policy dirs. Uncommon in practice; deferred to Phase 6+.
+- **Destination-repo file policy** (Finding 6): Sprint 3.2 added safe fallback (deny + copy). Full schema extension deferred.
+- **SchemaVersion wiring** (Finding 7): `SchemaVersion::detect()` exists but `SystemContext.schema_version` is `Option<()>`. Low priority — no consumer needs it yet. Wire when a consumer exists.
+- **Inventory-based registration** (Finding 9): Manual registration is fine for <5 plugins. Defer to Phase 6.
+- **Plugin temp_dir** (Finding 8): Add when Issues plugin needs cache storage (Phase 5).
+- **Roster atomic swap** (Finding 10): Lock-protected rename is sufficient for config.json contention levels.
+
+**Acceptance criteria**:
+- Capability enum includes all 4 behavioral variants from requirements
+- `.atm.toml` with `[plugins.issues]` section parses correctly
+- `Config::plugin_config("issues")` returns the section
+- SystemContext uses config-derived default_team
+- Watcher dispatches file events to EventListener plugins
+- All existing tests pass + new tests for added functionality
+- `cargo clippy -- -D warnings` clean
+- `cargo test` 100% pass
+- Cross-platform compliant (ATM_HOME pattern)
+
+**Status**: ✅ Complete (PR pending)
+**Dev-QA iterations**: 1 (single-pass implementation and validation)
+**Implementation notes**:
+- Added 4 behavioral Capability variants (`AdvertiseMembers`, `InterceptSend`, `InjectMessages`, `EventListener`) to `Capability` enum
+- Added `plugins: HashMap<String, toml::Table>` field to `Config` with `plugin_config()` helper method
+- Added `PluginContext::plugin_config()` convenience accessor
+- Fixed SystemContext `default_team` to use `config.core.default_team` instead of hardcoded string
+- Refactored watcher to use `tokio::sync::mpsc` with `InboxEvent`/`InboxEventKind` types for async dispatch
+- Added event dispatch loop in `event_loop.rs` that routes to `EventListener` plugins via `handle_message()`
+- 10 new tests in watcher (path parsing, event types, filtering), 5 new tests for plugin config (round-trip, accessor, missing, empty)
+- All atm-core and atm-daemon tests pass (104 passed), clippy clean
+- Re-exported `toml` from atm-core for plugin config type access in daemon
+
 ### Phase 4 Dependency Graph
 
 ```
@@ -890,10 +993,20 @@ MVP Complete (Phase 3)
             │
             ├── Sprint 4.2 (Daemon Loop) ──────────┐
             │                                       │
-            └── Sprint 4.3 (Roster Service) ────────┘
+            └── Sprint 4.3 (Roster Service) ────────┤
+                                                    │
+            Sprint 4.4 (Arch Gap Hotfix) ───────────┘
                                                     │
                                      Phase 4 Complete
 ```
+
+### Deferred to Phase 5+
+
+- **Managed settings policy** (ARCH-CTM Finding 5): Platform-specific managed policy directories. Uncommon in practice.
+- **Destination-repo file policy** (ARCH-CTM Finding 6): Full resolution requires `TeamConfig` schema extension. Sprint 3.2 fallback is safe.
+- **SchemaVersion wiring** (ARCH-CTM Finding 7): Detection exists, no consumer yet.
+- **Inventory-based registration** (ARCH-CTM Finding 9): Manual registration is fine for current plugin count.
+- **Plugin temp_dir** (ARCH-CTM Finding 8): Add when first plugin needs cache.
 
 ---
 
@@ -982,11 +1095,12 @@ infrastructure is proven.
 | **4** | 4.1 | Plugin Trait + Registry | Phase 3 | — |
 | **4** | 4.2 | Daemon Event Loop | 4.1 | 4.3 |
 | **4** | 4.3 | Roster Service | 4.1 | 4.2 |
+| **4** | 4.4 | Arch Gap Hotfix (ARCH-CTM) | 4.1-4.3 | — |
 | **5** | 5.1 | Provider Abstraction | Phase 4 | — |
 | **5** | 5.2 | Issues Plugin Core | 5.1 | — |
 | **5** | 5.3 | Issues Plugin Testing | 5.2 | — |
 
-**Total**: 18 sprints across 5 planned phases (Phase 6 is open-ended)
+**Total**: 19 sprints across 5 planned phases (Phase 6 is open-ended)
 
 **Critical path**: 1.1 → 1.3 → 1.4 → 2.1 → 2.2 → 3.1 → 3.2 → 3.4 → MVP
 
