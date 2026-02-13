@@ -262,28 +262,28 @@ impl Plugin for IssuesPlugin {
 
     async fn handle_message(&mut self, msg: &InboxMessage) -> Result<(), PluginError> {
         // Check if the message is a reply to an issue (has [issue:NUMBER] prefix)
-        if let Some(issue_number) = Self::parse_issue_reference(&msg.text) {
-            if let Some(provider) = &self.provider {
-                // Extract the reply body (everything after the [issue:NUMBER] line)
-                let reply_body = msg
-                    .text
-                    .lines()
-                    .skip(1) // Skip the [issue:NUMBER] line
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    .trim()
-                    .to_string();
+        if let Some(issue_number) = Self::parse_issue_reference(&msg.text)
+            && let Some(provider) = &self.provider
+        {
+            // Extract the reply body (everything after the [issue:NUMBER] line)
+            let reply_body = msg
+                .text
+                .lines()
+                .skip(1) // Skip the [issue:NUMBER] line
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string();
 
-                if !reply_body.is_empty() {
-                    match provider.add_comment(issue_number, &reply_body).await {
-                        Ok(_) => {
-                            // Successfully posted comment
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "Issues plugin: Failed to post comment on issue #{issue_number}: {e}"
-                            );
-                        }
+            if !reply_body.is_empty() {
+                match provider.add_comment(issue_number, &reply_body).await {
+                    Ok(_) => {
+                        // Successfully posted comment
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Issues plugin: Failed to post comment on issue #{issue_number}: {e}"
+                        );
                     }
                 }
             }
