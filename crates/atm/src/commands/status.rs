@@ -94,7 +94,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         let member_count = team_config.members.len();
         println!("Members ({member_count}):");
         for member in &team_config.members {
-            let active_str = if member.is_active.unwrap_or(false) { "Active" } else { "Idle  " };
+            let active_str = if member.is_active.unwrap_or(false) { "Online " } else { "Offline" };
             let unread = inbox_counts.get(&member.name).copied().unwrap_or(0);
             let name = &member.name;
             let agent_type = &member.agent_type;
@@ -141,6 +141,8 @@ fn count_inbox_messages(team_dir: &std::path::Path, team_config: &TeamConfig) ->
 
 /// Count pending and completed tasks
 fn count_tasks(tasks_dir: &std::path::Path) -> Result<(usize, usize)> {
+    use atm_core::{TaskItem, TaskStatus};
+
     let mut pending = 0;
     let mut completed = 0;
 
@@ -150,14 +152,12 @@ fn count_tasks(tasks_dir: &std::path::Path) -> Result<(usize, usize)> {
             if path.is_file()
                 && path.extension().and_then(|s| s.to_str()) == Some("json")
                 && let Ok(content) = fs::read_to_string(&path)
+                && let Ok(task) = serde_json::from_str::<TaskItem>(&content)
             {
-                // Simple heuristic: check if file contains "completed": true
-                if content.contains(r#""completed":true"#)
-                    || content.contains(r#""completed": true"#)
-                {
-                    completed += 1;
-                } else {
-                    pending += 1;
+                match task.status {
+                    TaskStatus::Completed => completed += 1,
+                    TaskStatus::Pending | TaskStatus::InProgress => pending += 1,
+                    TaskStatus::Deleted => { /* don't count */ }
                 }
             }
         }

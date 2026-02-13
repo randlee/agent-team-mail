@@ -48,5 +48,5 @@ pub mod spool;
 
 // Re-export primary API
 pub use error::InboxError;
-pub use inbox::{inbox_append, WriteOutcome};
+pub use inbox::{inbox_append, inbox_update, WriteOutcome};
 pub use spool::{spool_drain, SpoolStatus};

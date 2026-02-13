@@ -9,7 +9,10 @@ use clap::Args;
 use crate::util::addressing::parse_address;
 use crate::util::settings::get_home_dir;
 
-/// Read messages from an agent's inbox
+/// Read messages from an inbox
+///
+/// By default, shows unread messages from your own inbox and marks them as read.
+/// Use --no-mark to read without marking, or --all to include already-read messages.
 #[derive(Args, Debug)]
 pub struct ReadArgs {
     /// Target agent (name or name@team), omit to read own inbox
@@ -86,7 +89,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
 
     // Read inbox messages
     let inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
-    let mut messages: Vec<InboxMessage> = if inbox_path.exists() {
+    let messages: Vec<InboxMessage> = if inbox_path.exists() {
         let content = std::fs::read_to_string(&inbox_path)?;
         serde_json::from_str(&content)?
     } else {
@@ -139,26 +142,22 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             .map(|m| m.timestamp.clone())
             .collect();
 
-        // Mark messages in original array
-        let mut changed = false;
-        for msg in &mut messages {
-            let should_mark = if let Some(ref msg_id) = msg.message_id {
-                filtered_ids.contains(msg_id) && !msg.read
-            } else {
-                // Fallback: match by timestamp
-                filtered_timestamps.contains(&msg.timestamp) && !msg.read
-            };
+        // Atomically update inbox to mark messages as read
+        if inbox_path.exists() {
+            atm_core::io::inbox::inbox_update(&inbox_path, &team_name, &agent_name, |msgs| {
+                for msg in msgs.iter_mut() {
+                    let should_mark = if let Some(ref msg_id) = msg.message_id {
+                        filtered_ids.contains(msg_id) && !msg.read
+                    } else {
+                        // Fallback: match by timestamp
+                        filtered_timestamps.contains(&msg.timestamp) && !msg.read
+                    };
 
-            if should_mark {
-                msg.read = true;
-                changed = true;
-            }
-        }
-
-        // Write back atomically if any changes
-        if changed && inbox_path.exists() {
-            let updated_content = serde_json::to_vec_pretty(&messages)?;
-            std::fs::write(&inbox_path, updated_content)?;
+                    if should_mark {
+                        msg.read = true;
+                    }
+                }
+            })?;
         }
     }
 

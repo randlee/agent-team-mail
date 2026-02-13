@@ -36,7 +36,7 @@ Run this loop until all QA checks pass:
 Dev Phase:
   - Spawn rust-developer background agent with sprint-specific prompt
   - Prompt includes: deliverables, files to create/modify, acceptance criteria, coding standards
-  - Wait for dev completion
+  - Wait for dev completion (use TaskOutput to retrieve results)
 
 QA Phase:
   - Spawn rust-qa-agent background agent to validate the dev output
@@ -52,6 +52,14 @@ QA Phase:
 
 Max loop iterations: 3. If dev cannot resolve after 3 QA rejections → escalate.
 ```
+
+**CRITICAL — Agent Spawning Rules:**
+- Spawn dev/QA agents with `run_in_background: true`
+- Do **NOT** pass the `name` parameter — this is what creates a full teammate with a tmux pane
+- Do **NOT** pass `team_name` either
+- Without `name`, the agent runs as a lightweight sidechain background agent (no tmux pane, no team membership)
+- Use `TaskOutput` tool with the returned task ID to retrieve the agent's results
+- If spawning fails for any reason, do the work yourself directly (you have full tool access)
 
 ### 3. Escalation Protocol
 
