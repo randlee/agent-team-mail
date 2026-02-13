@@ -1017,16 +1017,20 @@ MVP Complete (Phase 3)
 **Branch prefix**: `feature/p5-*`
 **Depends on**: Phase 4 complete
 
-### Sprint 5.1: Provider Abstraction
+### Sprint 5.1: Provider Abstraction ✅
 
 **Branch**: `feature/p5-s1-provider-abstraction`
 **Depends on**: Phase 4 complete
+**Status**: COMPLETE (2026-02-12)
 
 **Deliverables**:
-- Provider trait for issue operations (list, get, comment)
-- GitHub provider implementation (using `gh` CLI or API)
-- Azure DevOps provider stub (or implementation if straightforward)
-- Provider selection from `ctx.system.repo.provider`
+- ✅ Provider trait for issue operations (list, get, comment) — `provider.rs` with RPITIT + ErasedIssueProvider
+- ✅ GitHub provider implementation using `gh` CLI subprocess — `github.rs`
+- ✅ Azure DevOps provider stub — `azure_devops.rs`
+- ✅ Provider factory function from GitProvider — `create_provider()` in `mod.rs`
+- ✅ Issue types (Issue, IssueComment, IssueLabel, IssueFilter, IssueState) — `types.rs`
+- ✅ Module structure: `crates/atm-daemon/src/plugins/issues/`
+- ✅ All tests pass (293 total), clippy clean with `-D warnings`
 
 ### Sprint 5.2: Issues Plugin Core
 
