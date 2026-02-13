@@ -117,8 +117,27 @@ async fn main() -> Result<()> {
     // Create plugin registry
     let mut registry = PluginRegistry::new();
 
-    // TODO: Register plugins here
-    // For now, the registry is empty but the daemon will still run
+    // Register CI Monitor plugin if configured
+    if let Some(ci_config) = plugin_ctx.plugin_config("ci_monitor")
+        && ci_config
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    {
+        registry.register(atm_daemon::plugins::ci_monitor::CiMonitorPlugin::new());
+        info!("Registered CI Monitor plugin");
+    }
+
+    // Register Issues plugin if configured
+    if let Some(issues_config) = plugin_ctx.plugin_config("issues")
+        && issues_config
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    {
+        registry.register(atm_daemon::plugins::issues::IssuesPlugin::new());
+        info!("Registered Issues plugin");
+    }
 
     info!("Registered {} plugin(s)", registry.len());
 
