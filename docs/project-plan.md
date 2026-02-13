@@ -1017,28 +1017,37 @@ MVP Complete (Phase 3)
 **Branch prefix**: `feature/p5-*`
 **Depends on**: Phase 4 complete
 
-### Sprint 5.1: Provider Abstraction
+### Sprint 5.1: Provider Abstraction ✅
 
 **Branch**: `feature/p5-s1-provider-abstraction`
 **Depends on**: Phase 4 complete
+**Status**: COMPLETE (2026-02-12)
 
 **Deliverables**:
-- Provider trait for issue operations (list, get, comment)
-- GitHub provider implementation (using `gh` CLI or API)
-- Azure DevOps provider stub (or implementation if straightforward)
-- Provider selection from `ctx.system.repo.provider`
+- ✅ Provider trait for issue operations (list, get, comment) — `provider.rs` with RPITIT + ErasedIssueProvider
+- ✅ GitHub provider implementation using `gh` CLI subprocess — `github.rs`
+- ✅ Azure DevOps provider stub — `azure_devops.rs`
+- ✅ Provider factory function from GitProvider — `create_provider()` in `mod.rs`
+- ✅ Issue types (Issue, IssueComment, IssueLabel, IssueFilter, IssueState) — `types.rs`
+- ✅ Module structure: `crates/atm-daemon/src/plugins/issues/`
+- ✅ All tests pass (293 total), clippy clean with `-D warnings`
 
 ### Sprint 5.2: Issues Plugin Core
 
 **Branch**: `feature/p5-s2-issues-plugin`
 **Depends on**: Sprint 5.1
+**Status**: ✅ Complete
 
 **Deliverables**:
-- Issues plugin implementing `Plugin` trait
-- Poll loop watching for new/updated issues
-- Issue → inbox message transformation
-- Inbox reply → issue comment flow
-- Configurable filters (labels, assignees)
+- ✅ IssuesPlugin struct implementing `Plugin` trait — `plugin.rs`
+- ✅ IssuesConfig parsing from `[plugins.issues]` — `config.rs`
+- ✅ Poll loop with configurable interval, respects cancellation
+- ✅ Issue → InboxMessage transformation with `[issue:NUMBER]` prefix
+- ✅ Inbox reply → issue comment flow (parses `[issue:NUMBER]` prefix)
+- ✅ Configurable filters (labels, assignees, poll_interval, team, agent)
+- ✅ Synthetic member registration via RosterService
+- ✅ Graceful init error handling (missing provider/repo)
+- ✅ All tests pass (317 total, +24 new), clippy clean with `-D warnings`
 
 ### Sprint 5.3: Issues Plugin Testing
 
@@ -1050,6 +1059,19 @@ MVP Complete (Phase 3)
 - End-to-end: issue created → message delivered → reply → comment posted
 - Error scenarios: API failure, auth failure, rate limit
 - Configuration validation
+
+**Status**: ✅ Complete (PR pending)
+**Dev-QA iterations**: 1 (Scrum Master handled both dev and QA directly)
+**Implementation notes**:
+- New module `mock_provider.rs` with configurable MockProvider (issues, comments, error injection, call tracking)
+- Added `IssueFilter` derive for PartialEq (required for MockCall equality checks)
+- Plugin test helpers: `with_provider()` and `with_config()` for dependency injection
+- Modified plugin init() to skip provider creation if already injected (enables mock testing)
+- 16 new integration tests in `tests/issues_integration.rs` and `tests/issues_error_tests.rs`
+- Test coverage: inbox message delivery, reply handling, label filtering, synthetic member lifecycle, disabled plugin, error scenarios, config validation
+- All tests pass (342 total workspace tests, up from 317 baseline)
+- Clippy clean with no warnings
+- Cross-platform compliant (ATM_HOME in all test helpers)
 
 ---
 
