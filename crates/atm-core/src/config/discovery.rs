@@ -132,6 +132,11 @@ fn merge_config(base: &mut Config, file: Config) {
 
     // Merge retention config
     base.retention = file.retention;
+
+    // Merge plugin config sections
+    for (name, table) in file.plugins {
+        base.plugins.insert(name, table);
+    }
 }
 
 /// Apply environment variable overrides
@@ -469,5 +474,41 @@ timestamps = "iso8601"
         assert!(settings.is_some());
         let settings = settings.unwrap();
         assert_eq!(settings.env.get("SOURCE").map(String::as_str), Some("settings_local"));
+    }
+
+    #[test]
+    fn test_plugin_config_merge_via_resolve() {
+        use tempfile::TempDir;
+
+        // Create temp directory with config file containing plugin sections
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join(".atm.toml");
+
+        let toml_content = r#"
+[core]
+default_team = "test-team"
+identity = "test-user"
+
+[plugins.issues]
+enabled = true
+poll_interval = 60
+
+[plugins.ci-monitor]
+enabled = false
+"#;
+
+        std::fs::write(&config_path, toml_content).unwrap();
+
+        // Resolve config from directory with .atm.toml
+        let overrides = ConfigOverrides::default();
+        let config = resolve_config(&overrides, temp_dir.path(), temp_dir.path()).unwrap();
+
+        // Verify plugin config was merged
+        assert!(config.plugin_config("issues").is_some());
+        assert!(config.plugin_config("ci-monitor").is_some());
+
+        let issues = config.plugin_config("issues").unwrap();
+        assert_eq!(issues.get("enabled").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(issues.get("poll_interval").and_then(|v| v.as_integer()), Some(60));
     }
 }

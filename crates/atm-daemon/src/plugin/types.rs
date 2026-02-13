@@ -12,6 +12,17 @@ pub struct PluginMetadata {
 /// What a plugin can do
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Capability {
+    // --- Behavioral capabilities (routing/dispatch) ---
+    /// Plugin can add synthetic members to teams via RosterService
+    AdvertiseMembers,
+    /// Plugin can intercept outbound messages before delivery
+    InterceptSend,
+    /// Plugin can inject inbound messages into agent inboxes
+    InjectMessages,
+    /// Plugin reacts to events (new message, team change, file watch)
+    EventListener,
+
+    // --- Domain capabilities (metadata/categorization) ---
     /// Plugin tracks external issues
     IssueTracking,
     /// Plugin monitors CI pipelines
