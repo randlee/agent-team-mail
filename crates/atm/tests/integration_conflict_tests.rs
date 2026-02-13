@@ -262,6 +262,7 @@ fn test_lock_contention_queues_to_spool() {
 // ============================================================================
 
 #[test]
+#[serial_test::serial]
 fn test_spool_drain_delivery_cycle() {
     // This test uses the library API directly since spool_drain is not yet
     // exposed via CLI command.
@@ -271,6 +272,12 @@ fn test_spool_drain_delivery_cycle() {
     use std::collections::HashMap;
 
     let temp_dir = TempDir::new().unwrap();
+    // Use ATM_HOME to redirect spool dir — works cross-platform (dirs::config_dir()
+    // ignores HOME/USERPROFILE on Windows)
+    let prev_atm_home = std::env::var("ATM_HOME").ok();
+    unsafe {
+        std::env::set_var("ATM_HOME", temp_dir.path());
+    }
     let teams_dir = temp_dir.path().join("teams");
     let team_dir = teams_dir.join("test-team");
     let inboxes_dir = team_dir.join("inboxes");
@@ -323,6 +330,14 @@ fn test_spool_drain_delivery_cycle() {
             .any(|m| m["text"] == "Spooled message"),
         "Delivered message should be in inbox"
     );
+
+    // Restore environment
+    unsafe {
+        match prev_atm_home {
+            Some(val) => std::env::set_var("ATM_HOME", val),
+            None => std::env::remove_var("ATM_HOME"),
+        }
+    }
 }
 
 // ============================================================================
