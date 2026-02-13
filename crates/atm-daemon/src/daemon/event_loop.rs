@@ -113,22 +113,34 @@ pub async fn run(
                         continue;
                     }
 
-                    // Read the inbox message from the file
-                    let inbox_msg = match tokio::fs::read_to_string(&event.path).await {
-                        Ok(content) => match serde_json::from_str(&content) {
-                            Ok(msg) => msg,
+                    // Read inbox messages (array) and dispatch the newest message
+                    let inbox_msgs: Vec<atm_core::schema::InboxMessage> =
+                        match tokio::fs::read_to_string(&event.path).await {
+                            Ok(content) => match serde_json::from_str(&content) {
+                                Ok(msgs) => msgs,
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to parse inbox at {}: {}",
+                                        event.path.display(),
+                                        e
+                                    );
+                                    continue;
+                                }
+                            },
                             Err(e) => {
-                                warn!("Failed to parse inbox message at {}: {}",
-                                      event.path.display(), e);
+                                // File might be transiently locked or deleted
+                                debug!(
+                                    "Failed to read inbox file at {}: {}",
+                                    event.path.display(),
+                                    e
+                                );
                                 continue;
                             }
-                        },
-                        Err(e) => {
-                            // File might be transiently locked or deleted
-                            debug!("Failed to read inbox file at {}: {}",
-                                   event.path.display(), e);
-                            continue;
-                        }
+                        };
+
+                    let inbox_msg = match inbox_msgs.last() {
+                        Some(msg) => msg,
+                        None => continue,
                     };
 
                     // Dispatch to all plugins with EventListener capability
@@ -137,7 +149,7 @@ pub async fn run(
                             // Try to acquire lock without blocking
                             if let Ok(mut plugin) = plugin_arc.try_lock() {
                                 debug!("Dispatching to plugin: {}", metadata.name);
-                                if let Err(e) = plugin.handle_message(&inbox_msg).await {
+                                if let Err(e) = plugin.handle_message(inbox_msg).await {
                                     error!("Plugin {} handle_message error: {}", metadata.name, e);
                                 }
                             } else {

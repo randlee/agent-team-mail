@@ -117,7 +117,7 @@ pub async fn watch_inboxes(
 /// Returns None if the event is not relevant (non-inbox file, config.json, etc).
 /// Returns Some(vec) with InboxEvent(s) if the event is for an inbox file.
 ///
-/// Path pattern: <teams_root>/<team>/inbox/<agent>.json
+/// Path pattern: <teams_root>/<team>/inboxes/<agent>.json
 fn parse_event(teams_root: &PathBuf, event: Event) -> Option<Vec<InboxEvent>> {
     let mut events = Vec::new();
 
@@ -155,8 +155,8 @@ fn parse_event(teams_root: &PathBuf, event: Event) -> Option<Vec<InboxEvent>> {
             None => continue,
         };
 
-        // Check if second component is "inbox"
-        if components[1].as_os_str().to_str() != Some("inbox") {
+        // Check if second component is "inboxes"
+        if components[1].as_os_str().to_str() != Some("inboxes") {
             continue;
         }
 
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn test_parse_event_inbox_create() {
         let teams_root = PathBuf::from("/tmp/teams");
-        let inbox_path = teams_root.join("my-team/inbox/agent-1.json");
+        let inbox_path = teams_root.join("my-team/inboxes/agent-1.json");
 
         let event = Event {
             kind: EventKind::Create(notify::event::CreateKind::File),
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn test_parse_event_inbox_modify() {
         let teams_root = PathBuf::from("/tmp/teams");
-        let inbox_path = teams_root.join("team-2/inbox/agent-x.json");
+        let inbox_path = teams_root.join("team-2/inboxes/agent-x.json");
 
         let event = Event {
             kind: EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Any)),
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn test_parse_event_inbox_remove() {
         let teams_root = PathBuf::from("/tmp/teams");
-        let inbox_path = teams_root.join("team-3/inbox/agent-y.json");
+        let inbox_path = teams_root.join("team-3/inboxes/agent-y.json");
 
         let event = Event {
             kind: EventKind::Remove(notify::event::RemoveKind::File),
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn test_parse_event_non_json_file() {
         let teams_root = PathBuf::from("/tmp/teams");
-        let txt_path = teams_root.join("my-team/inbox/agent-1.txt");
+        let txt_path = teams_root.join("my-team/inboxes/agent-1.txt");
 
         let event = Event {
             kind: EventKind::Create(notify::event::CreateKind::File),
@@ -286,8 +286,8 @@ mod tests {
     #[test]
     fn test_parse_event_multiple_paths() {
         let teams_root = PathBuf::from("/tmp/teams");
-        let inbox_path1 = teams_root.join("team-1/inbox/agent-a.json");
-        let inbox_path2 = teams_root.join("team-1/inbox/agent-b.json");
+        let inbox_path1 = teams_root.join("team-1/inboxes/agent-a.json");
+        let inbox_path2 = teams_root.join("team-1/inboxes/agent-b.json");
 
         let event = Event {
             kind: EventKind::Create(notify::event::CreateKind::File),
