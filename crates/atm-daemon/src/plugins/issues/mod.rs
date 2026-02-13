@@ -1,31 +1,35 @@
 //! Issues plugin — provider abstraction for issue tracking
 
-mod azure_devops;
 mod config;
 mod github;
+mod loader;
 mod mock_provider;
 mod plugin;
 mod provider;
+mod registry;
 mod types;
 
-pub use azure_devops::AzureDevOpsProvider;
 pub use config::IssuesConfig;
 pub use github::GitHubProvider;
+pub use loader::ProviderLoader;
 pub use mock_provider::{MockCall, MockProvider};
 pub use plugin::IssuesPlugin;
 pub use provider::{ErasedIssueProvider, IssueProvider};
+pub use registry::{ProviderFactory, ProviderRegistry};
 pub use types::{Issue, IssueComment, IssueFilter, IssueLabel, IssueState};
 
 use atm_core::context::GitProvider;
 use crate::plugin::PluginError;
 
-/// Create an issue provider for the given git provider
+/// Create an issue provider for the given git provider (legacy function)
+///
+/// This function provides backward compatibility. New code should use `ProviderRegistry` instead.
 ///
 /// Returns a boxed trait object that implements ErasedIssueProvider.
 ///
 /// # Arguments
 ///
-/// * `provider` - The git provider (GitHub, Azure DevOps, etc.)
+/// * `provider` - The git provider (GitHub, etc.)
 /// * `_config` - Optional plugin config (reserved for future use)
 ///
 /// # Errors
@@ -40,11 +44,12 @@ pub fn create_provider(
             owner.clone(),
             repo.clone(),
         ))),
-        GitProvider::AzureDevOps { org, project, repo } => Ok(Box::new(AzureDevOpsProvider::new(
-            org.clone(),
-            project.clone(),
-            repo.clone(),
-        ))),
+        GitProvider::AzureDevOps { org, project, repo } => Err(PluginError::Provider {
+            message: format!(
+                "Azure DevOps provider moved to external plugin (org: {org}, project: {project}, repo: {repo})"
+            ),
+            source: None,
+        }),
         GitProvider::GitLab { namespace, repo } => Err(PluginError::Provider {
             message: format!("GitLab issue provider not yet implemented (namespace: {namespace}, repo: {repo})"),
             source: None,
@@ -77,16 +82,18 @@ mod tests {
     }
 
     #[test]
-    fn test_create_provider_azure_devops() {
+    fn test_create_provider_azure_devops_moved_to_external() {
         let provider = GitProvider::AzureDevOps {
             org: "org".to_string(),
             project: "project".to_string(),
             repo: "repo".to_string(),
         };
         let result = create_provider(&provider, None);
-        assert!(result.is_ok());
-        let provider = result.unwrap();
-        assert_eq!(provider.provider_name(), "Azure DevOps");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("moved to external plugin"));
     }
 
     #[test]
