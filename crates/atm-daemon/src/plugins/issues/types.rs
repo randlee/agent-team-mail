@@ -61,7 +61,7 @@ pub struct IssueComment {
 }
 
 /// Filter for querying issues
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct IssueFilter {
     /// Filter by labels (all must match)
     pub labels: Vec<String>,

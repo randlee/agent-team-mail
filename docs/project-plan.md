@@ -1060,6 +1060,19 @@ MVP Complete (Phase 3)
 - Error scenarios: API failure, auth failure, rate limit
 - Configuration validation
 
+**Status**: ✅ Complete (PR pending)
+**Dev-QA iterations**: 1 (Scrum Master handled both dev and QA directly)
+**Implementation notes**:
+- New module `mock_provider.rs` with configurable MockProvider (issues, comments, error injection, call tracking)
+- Added `IssueFilter` derive for PartialEq (required for MockCall equality checks)
+- Plugin test helpers: `with_provider()` and `with_config()` for dependency injection
+- Modified plugin init() to skip provider creation if already injected (enables mock testing)
+- 16 new integration tests in `tests/issues_integration.rs` and `tests/issues_error_tests.rs`
+- Test coverage: inbox message delivery, reply handling, label filtering, synthetic member lifecycle, disabled plugin, error scenarios, config validation
+- All tests pass (342 total workspace tests, up from 317 baseline)
+- Clippy clean with no warnings
+- Cross-platform compliant (ATM_HOME in all test helpers)
+
 ---
 
 ## 8. Phase 6: Additional Plugins
