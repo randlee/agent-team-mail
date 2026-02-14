@@ -650,6 +650,11 @@ Plugins access shared system info (repo name, git provider, claude version) via 
 - CI Monitor supports multiple agents per repo, potentially branch-scoped subscriptions.
 - Notifications should include co-recipient hints when multiple agents are subscribed.
 
+**Configuration tiers (agreed)**:
+- **Machine/daemon**: machine-scoped config listing repos to monitor.
+- **Repo**: repo-scoped CI settings (single source of truth for agents).
+- **Team**: collaboration/transport settings only (no CI settings).
+
 ### 5.4 Plugin Registration
 
 Compile-time registration via `inventory` crate (avoids hardcoded registration):
@@ -753,12 +758,28 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 - Requires git repo context; if no repo is detected, the plugin should disable itself with a clear warning.
 
 **Multi-repo + agent subscription model (planned)**:
-- Single daemon per machine; CI Monitor registers multiple repos from root-level config.
+- Single daemon per machine; CI Monitor registers multiple repos from machine-level config.
 - Each repo can have one or more subscribed agents (team-lead or dedicated CI agent).
 - Branch filters support exact branch, branch + derived branches (worktree ancestry), and “all branches.”
+  - Proposed syntax: `develop:*` (develop + all branches derived from develop), `develop:feature/*` (derived + pattern). `:` indicates derived-branch matching.
 - If multiple agents are subscribed to the same event, include a notification warning such as:
   `Warning: <agent>@<team> is also receiving this notification`
 - Distinguish **plugin settings** (repo registry, provider config, poll interval) from **agent settings** (response behavior, routing preferences, scratch-pad state).
+
+**Multi-repo config file layout (agreed)**:
+- Mono-repo: single `config.atm.toml` at repo root.
+- Multi-repo: machine-level config lists repo paths, and each repo has its own `<repo>.config.atm.toml`.
+  - Machine-level daemon config path: `~/.config/atm/daemon.toml`
+  - Repo-level config path: `<repo>/.atm/config.toml` (for mono-repo, `config.atm.toml` at repo root is acceptable)
+
+**Daemon lifecycle (planned)**:
+- CLI starts the daemon on first use of any daemon-backed feature if not already running.
+- Daemon should support hot-reload for config changes without restart.
+
+**CI Monitor without repo**:
+- CI Monitor is only valid for repo contexts.
+- If repo is missing, CI Monitor should disable with a clear warning and prompt the CI agent to ask the team-lead/user for repo info.
+- Agents may intentionally subscribe to repos outside their local root for dashboards or testing; co-recipient warnings help disambiguate.
 
 ### 6.3 Cross-Computer Bridge Plugin
 

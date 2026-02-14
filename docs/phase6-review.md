@@ -11,6 +11,8 @@ Phase 6 delivers the CI Monitor plugin with GitHub Actions provider, mock provid
 - **Project-root ownership**: Team-lead or CI-monitor agent operates at project root (not necessarily identical to a git repo root).
 - **Cross-repo monitoring**: CI for a repo may need to be monitored from a different project root (e.g., umbrella project with nested repos).
 - **Multi-agent notifications**: Multiple agents may subscribe to the same repo (e.g., per-branch owners). Notifications should include co-recipient info for triage coordination.
+- **Multi-repo config layout**: Mono-repo uses `config.atm.toml`; multi-repo uses machine-level repo list + per-repo `<repo>.config.atm.toml`.
+  - Proposed paths: `~/.config/atm/daemon.toml` for machine-level daemon config; `<repo>/.atm/config.toml` for repo-level settings.
 
 ## Items Discussed This Session (Included in Review)
 
@@ -36,6 +38,7 @@ Phase 6 delivers the CI Monitor plugin with GitHub Actions provider, mock provid
 - **Daemon lifecycle**: No explicit policy for single daemon per machine; startup/activation behavior needs to be defined.
 - **Routing & subscriptions**: CI Monitor needs explicit per-repo/per-branch subscription metadata; agent settings must be separated from plugin settings.
 - **Notification semantics**: Co-recipient warnings are not implemented; needed for multi-agent coordination.
+- **Filter intent metadata**: Subscriptions lack a lightweight “reason/justification” field (optionally with expiry) to capture why a filter exists and for how long.
 
 ## Evidence and Notes
 - CI Monitor plugin is present under `crates/atm-daemon/src/plugins/ci_monitor/`.

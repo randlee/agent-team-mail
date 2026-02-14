@@ -1254,6 +1254,9 @@ Phase 5 Complete
 - Multi-repo daemon model: per-repo scoping for caches, reports, and plugin state
 - CI monitor behavior when `repo` is absent (disable with warning or degrade)
 - Path resolution rules for plugin outputs (repo-root vs workspace root)
+- Subscription schema: support per-filter `reason/justification` (and optional expiry) without enforcing behavior
+- Config tiers: machine-level daemon config listing repo paths; repo-level CI settings in `<repo>.config.atm.toml`; team config for collaboration/transport only
+  - Proposed paths: `~/.config/atm/daemon.toml` (machine) and `<repo>/.atm/config.toml` (repo)
 - Plan update for Phase 7/8 to reflect multi-repo support decisions
 
 **Acceptance criteria**:
