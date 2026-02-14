@@ -18,10 +18,9 @@ use tokio_util::sync::CancellationToken;
 
 /// Helper to create a test PluginContext with mock provider injection
 fn create_test_context(temp_dir: &TempDir, provider: Option<GitProvider>) -> PluginContext {
-    // Set ATM_HOME for cross-platform compliance
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
+    // ATM_HOME is set by the test runner for the whole test process
+    // Individual tests should not mutate it (unsafe and causes races)
+    // Instead, construct paths directly from temp_dir
 
     let claude_root = temp_dir.path().join(".claude");
     let teams_root = claude_root.join("teams");
@@ -251,6 +250,10 @@ async fn test_ci_deduplication() {
         owner: None,
         repo: None,
         provider_libraries: std::collections::HashMap::new(),
+        dedup_strategy: atm_daemon::plugins::ci_monitor::DedupStrategy::PerCommit,
+        dedup_ttl_hours: 24,
+        report_dir: std::path::PathBuf::from("temp/atm/ci-monitor"),
+        provider_config: None,
     };
 
     let mut plugin = CiMonitorPlugin::new()

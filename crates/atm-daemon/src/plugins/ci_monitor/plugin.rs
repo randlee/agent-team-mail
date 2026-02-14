@@ -1,14 +1,16 @@
 //! CI Monitor plugin implementation
 
-use super::config::CiMonitorConfig;
+use super::config::{CiMonitorConfig, DedupStrategy};
 use super::github::GitHubActionsProvider;
+use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
 use super::types::{CiFilter, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use atm_core::context::GitProvider as GitProviderType;
 use atm_core::schema::{AgentMember, InboxMessage};
-use std::collections::HashSet;
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,10 +26,12 @@ pub struct CiMonitorPlugin {
     config: CiMonitorConfig,
     /// Provider registry for runtime provider selection
     registry: Option<CiProviderRegistry>,
+    /// Provider loader (kept alive to hold dynamic libraries)
+    loader: Option<CiProviderLoader>,
     /// Cached context for runtime use
     ctx: Option<PluginContext>,
-    /// Tracking: seen run IDs with their conclusions for deduplication
-    seen_runs: HashSet<String>,
+    /// Tracking: seen run dedup keys with their timestamps
+    seen_runs: HashMap<String, DateTime<Utc>>,
 }
 
 impl CiMonitorPlugin {
@@ -37,8 +41,9 @@ impl CiMonitorPlugin {
             provider: None,
             config: CiMonitorConfig::default(),
             registry: None,
+            loader: None,
             ctx: None,
-            seen_runs: HashSet::new(),
+            seen_runs: HashMap::new(),
         }
     }
 
@@ -61,7 +66,7 @@ impl CiMonitorPlugin {
     }
 
     /// Build the provider registry with built-in and external providers
-    fn build_registry(&mut self, _atm_home: &std::path::Path) -> CiProviderRegistry {
+    fn build_registry(&mut self, atm_home: &std::path::Path) -> CiProviderRegistry {
         let mut registry = CiProviderRegistry::new();
 
         // Register built-in GitHub Actions provider
@@ -78,15 +83,32 @@ impl CiMonitorPlugin {
             }),
         });
 
-        // TODO: Load external providers from provider directory
-        // For now, we only support built-in GitHub provider
+        // Load external providers from provider directory
+        let provider_dir = atm_home.join("providers");
+        let mut loader = CiProviderLoader::new();
+        match loader.load_from_directory(&provider_dir) {
+            Ok(factories) => {
+                debug!("Loaded {} external CI providers", factories.len());
+                for factory in factories {
+                    registry.register(factory);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to load external CI providers: {}", e);
+            }
+        }
 
         // Load config-specified provider libraries
         if !self.config.provider_libraries.is_empty() {
-            let _paths: Vec<PathBuf> = self.config.provider_libraries.values().cloned().collect();
-            // TODO: Implement dynamic library loading for external CI providers
-            // This will be similar to the Issues plugin's ProviderLoader pattern
+            let paths: Vec<PathBuf> = self.config.provider_libraries.values().cloned().collect();
+            let factories = loader.load_libraries(&paths);
+            for factory in factories {
+                registry.register(factory);
+            }
         }
+
+        // Keep loader alive so dynamic libraries stay loaded
+        self.loader = Some(loader);
 
         registry
     }
@@ -146,17 +168,98 @@ impl CiMonitorPlugin {
         }
     }
 
-    /// Generate a deduplication key for a run
+    /// Generate a deduplication key for a run based on configured strategy
     ///
-    /// Format: "{run_id}-{conclusion}-{updated_at}"
-    /// This ensures we only notify once per run status transition
-    fn dedup_key(run_id: u64, conclusion: Option<CiRunConclusion>, updated_at: &str) -> String {
-        format!(
-            "{}-{}-{}",
-            run_id,
-            conclusion.map(|c| format!("{c:?}")).unwrap_or_else(|| "InProgress".to_string()),
-            updated_at
-        )
+    /// PerCommit: "ci-{head_sha}-{conclusion}" — notify once per commit+conclusion
+    /// PerRun: "ci-{run_id}-{conclusion}" — notify once per run_id+conclusion
+    fn dedup_key(&self, run: &super::types::CiRun) -> String {
+        let conclusion_str = run
+            .conclusion
+            .map(|c| format!("{c:?}"))
+            .unwrap_or_else(|| "InProgress".to_string());
+
+        match self.config.dedup_strategy {
+            DedupStrategy::PerCommit => {
+                format!("ci-{}-{}", run.head_sha, conclusion_str)
+            }
+            DedupStrategy::PerRun => {
+                format!("ci-{}-{}", run.id, conclusion_str)
+            }
+        }
+    }
+
+    /// Evict old entries from the dedup cache based on TTL
+    fn evict_old_dedup_entries(&mut self) {
+        let ttl = chrono::Duration::hours(self.config.dedup_ttl_hours as i64);
+        let cutoff = Utc::now() - ttl;
+
+        self.seen_runs.retain(|_key, timestamp| *timestamp > cutoff);
+    }
+
+    /// Generate failure reports (JSON + Markdown) in the report directory
+    fn generate_reports(&self, run: &super::types::CiRun) -> Result<(), PluginError> {
+        // Create report directory if it doesn't exist
+        std::fs::create_dir_all(&self.config.report_dir).map_err(|e| PluginError::Runtime {
+            message: format!("Failed to create report directory: {}", self.config.report_dir.display()),
+            source: Some(Box::new(e)),
+        })?;
+
+        // Write JSON report
+        let json_path = self.config.report_dir.join(format!("{}.json", run.id));
+        let json_content = serde_json::to_string_pretty(run).map_err(|e| PluginError::Runtime {
+            message: format!("Failed to serialize run to JSON: {}", run.id),
+            source: Some(Box::new(e)),
+        })?;
+        std::fs::write(&json_path, json_content).map_err(|e| PluginError::Runtime {
+            message: format!("Failed to write JSON report: {}", json_path.display()),
+            source: Some(Box::new(e)),
+        })?;
+
+        // Write Markdown report
+        let md_path = self.config.report_dir.join(format!("{}.md", run.id));
+        let conclusion_display = match run.conclusion {
+            Some(CiRunConclusion::Failure) => "Failed",
+            Some(CiRunConclusion::TimedOut) => "Timed Out",
+            Some(CiRunConclusion::Cancelled) => "Cancelled",
+            Some(CiRunConclusion::ActionRequired) => "Action Required",
+            _ => "Unknown Issue",
+        };
+
+        let failed_jobs = run
+            .jobs
+            .as_ref()
+            .map(|jobs| {
+                jobs.iter()
+                    .filter(|job| {
+                        job.conclusion == Some(CiRunConclusion::Failure)
+                            || job.conclusion == Some(CiRunConclusion::TimedOut)
+                    })
+                    .map(|job| format!("- {}", job.name))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_else(|| "- (job details not available)".to_string());
+
+        let md_content = format!(
+            "# CI Run {} - {}\n\n\
+            **Status:** {}\n\
+            **Branch:** {}\n\
+            **Commit:** {}\n\
+            **URL:** {}\n\n\
+            ## Failed Jobs\n\n\
+            {}\n\n\
+            ---\n\
+            *Generated by atm-daemon CI Monitor plugin*\n",
+            run.id, conclusion_display, conclusion_display, run.head_branch, run.head_sha, run.url, failed_jobs
+        );
+
+        std::fs::write(&md_path, md_content).map_err(|e| PluginError::Runtime {
+            message: format!("Failed to write Markdown report: {}", md_path.display()),
+            source: Some(Box::new(e)),
+        })?;
+
+        debug!("Generated reports for run #{}: {} and {}", run.id, json_path.display(), md_path.display());
+        Ok(())
     }
 
     /// Transform a CI failure into an InboxMessage for delivery
@@ -196,7 +299,7 @@ impl CiMonitorPlugin {
             run.url
         );
 
-        let message_id = Self::dedup_key(run.id, run.conclusion, &run.updated_at);
+        let message_id = self.dedup_key(run);
 
         InboxMessage {
             from: self.config.agent.clone(),
@@ -254,6 +357,11 @@ impl Plugin for CiMonitorPlugin {
             source: None,
         })?;
 
+        // Resolve report directory relative to repo root when configured as a relative path
+        if !self.config.report_dir.is_absolute() {
+            self.config.report_dir = repo.path.join(&self.config.report_dir);
+        }
+
         // Determine ATM home directory
         let atm_home = if let Ok(atm_home_env) = std::env::var("ATM_HOME") {
             PathBuf::from(atm_home_env)
@@ -282,8 +390,10 @@ impl Plugin for CiMonitorPlugin {
             })?;
 
             // Create the CI provider from the registry
+            // Pass provider_config for external providers
+            let provider_config = self.config.provider_config.as_ref();
             self.provider =
-                Some(self.create_provider_from_registry(&registry, git_provider, config_table)?);
+                Some(self.create_provider_from_registry(&registry, git_provider, provider_config)?);
         }
 
         // Store registry for potential runtime use
@@ -330,11 +440,11 @@ impl Plugin for CiMonitorPlugin {
             return Ok(());
         }
 
-        let provider = self.provider.as_ref().unwrap();
+        // Clone context for use in loop (Arc, so cheap)
         let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
             message: "Plugin not initialized".to_string(),
             source: None,
-        })?;
+        })?.clone();
 
         let mut ticker = interval(Duration::from_secs(self.config.poll_interval_secs));
 
@@ -344,6 +454,18 @@ impl Plugin for CiMonitorPlugin {
                     break;
                 }
                 _ = ticker.tick() => {
+                    // Evict old dedup cache entries
+                    self.evict_old_dedup_entries();
+
+                    // Get provider reference for this iteration
+                    let provider = match self.provider.as_ref() {
+                        Some(p) => p,
+                        None => {
+                            warn!("CI Monitor: Provider disappeared during run");
+                            break;
+                        }
+                    };
+
                     // Build filter from config
                     let mut filter = CiFilter {
                         status: Some(CiRunStatus::Completed),
@@ -367,19 +489,9 @@ impl Plugin for CiMonitorPlugin {
                                 // Process each run
                                 for run in runs {
                                     // Check if this run matches our notification criteria
-                                    if let Some(conclusion) = run.conclusion {
-                                        if !self.config.notify_on.contains(&conclusion) {
-                                            continue;
-                                        }
-
-                                        // Generate dedup key
-                                        let key = Self::dedup_key(run.id, Some(conclusion), &run.updated_at);
-
-                                        // Skip if we've already seen this run+conclusion
-                                        if self.seen_runs.contains(&key) {
-                                            continue;
-                                        }
-
+                                    if let Some(conclusion) = run.conclusion
+                                        && self.config.notify_on.contains(&conclusion)
+                                    {
                                         // Fetch full run details with jobs
                                         let full_run = match provider.get_run(run.id).await {
                                             Ok(r) => r,
@@ -389,13 +501,26 @@ impl Plugin for CiMonitorPlugin {
                                             }
                                         };
 
+                                        // Generate dedup key
+                                        let key = self.dedup_key(&full_run);
+
+                                        // Skip if we've already seen this run+conclusion
+                                        if self.seen_runs.contains_key(&key) {
+                                            continue;
+                                        }
+
+                                        // Generate failure reports
+                                        if let Err(e) = self.generate_reports(&full_run) {
+                                            warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
+                                        }
+
                                         // Create and send notification
                                         let msg = self.run_to_message(&full_run);
                                         if let Err(e) = ctx.mail.send(&self.config.team, &self.config.agent, &msg) {
                                             warn!("CI Monitor: Failed to send message for run #{}: {e}", run.id);
                                         } else {
                                             debug!("CI Monitor: Notified about run #{} ({:?})", run.id, conclusion);
-                                            self.seen_runs.insert(key);
+                                            self.seen_runs.insert(key, Utc::now());
                                         }
                                     }
                                 }
@@ -475,42 +600,55 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_key_format() {
-        let key1 = CiMonitorPlugin::dedup_key(
+    fn test_dedup_key_per_commit() {
+        use crate::plugins::ci_monitor::{create_test_run, CiRunConclusion, CiRunStatus};
+        let plugin = CiMonitorPlugin::new(); // Default uses PerCommit
+        let run = create_test_run(
             123456,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
             Some(CiRunConclusion::Failure),
-            "2026-02-13T10:00:00Z",
         );
-        assert_eq!(key1, "123456-Failure-2026-02-13T10:00:00Z");
+        let key = plugin.dedup_key(&run);
+        assert_eq!(key, "ci-sha123456-Failure");
+    }
 
-        let key2 = CiMonitorPlugin::dedup_key(123456, None, "2026-02-13T10:00:00Z");
-        assert_eq!(key2, "123456-InProgress-2026-02-13T10:00:00Z");
+    #[test]
+    fn test_dedup_key_per_run() {
+        use crate::plugins::ci_monitor::{create_test_run, CiRunConclusion, CiRunStatus};
+        let config = CiMonitorConfig {
+            dedup_strategy: DedupStrategy::PerRun,
+            ..Default::default()
+        };
+        let plugin = CiMonitorPlugin::new().with_config(config);
+        let run = create_test_run(
+            123456,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        let key = plugin.dedup_key(&run);
+        assert_eq!(key, "ci-123456-Failure");
     }
 
     #[test]
     fn test_dedup_key_distinct_on_conclusion_change() {
-        let key1 = CiMonitorPlugin::dedup_key(
+        use crate::plugins::ci_monitor::{create_test_run, CiRunConclusion, CiRunStatus};
+        let plugin = CiMonitorPlugin::new();
+        let run1 = create_test_run(
             123,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
             Some(CiRunConclusion::Failure),
-            "2026-02-13T10:00:00Z",
         );
-        let key2 = CiMonitorPlugin::dedup_key(123, None, "2026-02-13T10:00:00Z");
+        let mut run2 = run1.clone();
+        run2.conclusion = Some(CiRunConclusion::TimedOut);
 
-        assert_ne!(key1, key2);
-    }
-
-    #[test]
-    fn test_dedup_key_distinct_on_updated_at() {
-        let key1 = CiMonitorPlugin::dedup_key(
-            123,
-            Some(CiRunConclusion::Failure),
-            "2026-02-13T10:00:00Z",
-        );
-        let key2 = CiMonitorPlugin::dedup_key(
-            123,
-            Some(CiRunConclusion::Failure),
-            "2026-02-13T10:30:00Z",
-        );
+        let key1 = plugin.dedup_key(&run1);
+        let key2 = plugin.dedup_key(&run2);
 
         assert_ne!(key1, key2);
     }
