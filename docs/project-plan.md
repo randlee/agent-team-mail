@@ -1274,6 +1274,27 @@ Phase 5 Complete
 **Depends on**: Phase 6.4 design reconciliation complete
 **Status**: Not planned (sprint details TBD)
 
+### Sprint 7.1: Codex TMUX Worker Adapter (Async Agent Runner)
+
+**Branch**: `feature/p7-s1-codex-tmux`
+**Depends on**: Phase 6.4
+**Parallel**: None (foundation for async worker use)
+
+**Goal**: Enable async Codex teammates via a daemon plugin + tmux worker process so messages can be handled without a foreground terminal.
+
+**Deliverables**:
+- Daemon plugin that watches inboxes and routes messages to a worker adapter
+- TMUX worker launcher (spawns/attaches Codex session per agent)
+- IPC path: plugin sends message → tmux `send-keys` → Codex input
+- Response capture: worker output captured and written back to inbox
+- Minimal config in `daemon.toml` to enable/disable Codex worker adapter
+- Safety: avoid stdin corruption of user terminal; all interaction via tmux pane
+
+**Acceptance criteria**:
+- Codex teammate can receive a message asynchronously and respond via tmux session
+- User can attach to tmux pane to observe activity
+- No interference with the user's active terminal
+
 ---
 
 ## 10. Future Plugins

@@ -793,6 +793,16 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 - Handle offline scenarios with temp file caching
 - Bidirectional — both machines can initiate communication
 
+### 6.7 Async Agent Worker Adapter (Codex TMUX)
+
+**Purpose**: Allow async Codex teammates without requiring a foreground terminal.
+
+**Planned features**:
+- Daemon plugin that routes inbox messages to a tmux-backed Codex session
+- Worker launches/attaches per agent and uses `tmux send-keys` for input
+- Responses are captured and written back to inbox
+- Designed to avoid stdin injection into the user's active terminal
+
 ### 6.4 Human Chat Interface Plugin
 
 **Purpose**: Connect human users via chat applications.
