@@ -6,6 +6,15 @@ use atm_core::toml;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Deduplication strategy for CI runs
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DedupStrategy {
+    /// Deduplicate per commit (notify once per commit+conclusion)
+    PerCommit,
+    /// Deduplicate per run (notify once per run_id+conclusion)
+    PerRun,
+}
+
 /// Configuration for the CI Monitor plugin, parsed from [plugins.ci_monitor]
 #[derive(Debug, Clone)]
 pub struct CiMonitorConfig {
@@ -29,6 +38,14 @@ pub struct CiMonitorConfig {
     pub notify_on: Vec<CiRunConclusion>,
     /// Additional provider libraries to load: provider_name -> library_path
     pub provider_libraries: HashMap<String, PathBuf>,
+    /// Deduplication strategy
+    pub dedup_strategy: DedupStrategy,
+    /// Deduplication cache TTL in hours
+    pub dedup_ttl_hours: u64,
+    /// Report directory for failure reports (JSON + Markdown)
+    pub report_dir: PathBuf,
+    /// Provider-specific configuration (passed to external providers)
+    pub provider_config: Option<toml::Table>,
 }
 
 impl CiMonitorConfig {
@@ -140,6 +157,30 @@ impl CiMonitorConfig {
             })
             .unwrap_or_default();
 
+        let dedup_strategy = table
+            .get("dedup_strategy")
+            .and_then(|v| v.as_str())
+            .map(|s| match s.to_lowercase().as_str() {
+                "per_run" => DedupStrategy::PerRun,
+                _ => DedupStrategy::PerCommit,
+            })
+            .unwrap_or(DedupStrategy::PerCommit);
+
+        let dedup_ttl_hours = table
+            .get("dedup_ttl_hours")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u64)
+            .unwrap_or(24);
+
+        let report_dir = table
+            .get("report_dir")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("temp/atm/ci-monitor"));
+
+        // Extract provider_config for external providers
+        let provider_config = table.clone();
+
         Ok(Self {
             enabled,
             provider,
@@ -151,6 +192,10 @@ impl CiMonitorConfig {
             watched_branches,
             notify_on,
             provider_libraries,
+            dedup_strategy,
+            dedup_ttl_hours,
+            report_dir,
+            provider_config: Some(provider_config),
         })
     }
 }
@@ -168,6 +213,10 @@ impl Default for CiMonitorConfig {
             watched_branches: Vec::new(),
             notify_on: vec![CiRunConclusion::Failure, CiRunConclusion::TimedOut],
             provider_libraries: HashMap::new(),
+            dedup_strategy: DedupStrategy::PerCommit,
+            dedup_ttl_hours: 24,
+            report_dir: PathBuf::from("temp/atm/ci-monitor"),
+            provider_config: None,
         }
     }
 }
@@ -191,6 +240,9 @@ mod tests {
             config.notify_on,
             vec![CiRunConclusion::Failure, CiRunConclusion::TimedOut]
         );
+        assert_eq!(config.dedup_strategy, DedupStrategy::PerCommit);
+        assert_eq!(config.dedup_ttl_hours, 24);
+        assert_eq!(config.report_dir, PathBuf::from("temp/atm/ci-monitor"));
     }
 
     #[test]
