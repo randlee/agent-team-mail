@@ -10,6 +10,7 @@ mod error;
 mod inbox;
 mod members;
 mod read;
+mod request;
 mod send;
 mod status;
 mod teams;
@@ -38,6 +39,9 @@ enum Commands {
     /// Read messages from an inbox
     Read(read::ReadArgs),
 
+    /// Send a message and wait for a response (polling)
+    Request(request::RequestArgs),
+
     /// Show inbox summary for team members
     Inbox(inbox::InboxArgs),
 
@@ -64,6 +68,7 @@ impl Cli {
             Commands::Send(args) => send::execute(args),
             Commands::Broadcast(args) => broadcast::execute(args),
             Commands::Read(args) => read::execute(args),
+            Commands::Request(args) => request::execute(args),
             Commands::Inbox(args) => inbox::execute(args),
             Commands::Teams(args) => teams::execute(args),
             Commands::Members(args) => members::execute(args),

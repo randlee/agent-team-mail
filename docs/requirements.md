@@ -282,6 +282,7 @@ pub struct SystemContext {
     pub hostname: String,
     pub platform: Platform,               // macOS, Linux, Windows
     pub claude_root: PathBuf,             // ~/.claude/
+    pub root: PathBuf,                    // current workspace root (always present)
     pub claude_version: String,           // "2.1.39"
     pub schema_version: SchemaVersion,
     pub repo: Option<RepoContext>,
@@ -309,6 +310,11 @@ pub enum GitProvider {
 
 Provider detection is purely URL parsing — no network calls, no auth. Plugins consume `ctx.system.repo.provider` and handle everything provider-specific (tokens, API clients, rate limits).
 
+**Root vs repo distinction**:
+- `root` is always present and represents the workspace root where the CLI/daemon is running (may be a non-git directory).
+- `repo` is optional and only present when a git repository is detected under `root`.
+- Plugins and commands must treat these as distinct concepts (e.g., CI monitor requires `repo`, but other tooling may operate on `root` without git).
+
 ---
 
 ## 4. CLI Requirements (`atm`)
@@ -320,13 +326,18 @@ atm <command> [options]
 
 Commands:
   send        Send a message to an agent
+  request     Send a message and wait for a response (polling)
   broadcast   Send a message to all team members
   read        Read messages from an inbox
   inbox       List inbox summary (message counts, unread)
-  teams       List teams on this machine
+  teams       List teams on this machine (and manage members)
   members     List agents in a team
   status      Show team status overview
   config      Show/set configuration
+  cleanup     Apply retention policies
+
+Teams subcommands:
+  teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
 ```
 
 ### 4.2 Messaging Commands
@@ -392,6 +403,23 @@ Before writing to the inbox, `atm send` checks the recipient's status in `config
 Original: /Users/randlee/project/secrets/trace.txt
 Copy: ~/.config/atm/share/backend-ci-team/trace.txt
 ```
+
+#### `atm request`
+
+Send a message from one mailbox to another and wait for a response by polling the sender inbox.
+This is a temporary CLI convenience and will be replaced by a daemon-backed watcher.
+
+```
+atm request <from> <to> <message>
+atm request <from> <to> <message> --timeout 30 --poll-interval 200
+atm request <from> <to> <message> --from-team <team> --to-team <team>
+```
+
+**Behavior**:
+- Requires explicit sender and destination mailboxes (name@team or explicit `--from-team` / `--to-team`)
+- Adds a `Request-ID` marker to the message
+- Polls the sender inbox for a response containing that marker
+- Times out after the specified interval
 
 #### `atm broadcast`
 
@@ -610,6 +638,18 @@ pub struct PluginContext {
 
 Plugins access shared system info (repo name, git provider, claude version) via `ctx.system`. Provider-specific concerns (auth tokens, API clients, rate limiting) are the plugin's responsibility.
 
+**Multi-repo daemon model (design gap to address)**:
+- Current implementation assumes one daemon per repo (paths and plugin state are repo-scoped).
+- Future design must support a single daemon hosting multiple repos/roots.
+- Plugin state, caches, and report outputs must be scoped by repo/root context.
+- When `repo` is missing, plugins should fall back to `root` for storage and either disable or degrade gracefully if git context is required.
+
+**Proposed direction (from Phase 6 review)**:
+- Single daemon per machine, started on first plugin activation.
+- Plugins maintain repo registries and agent subscriptions (per repo).
+- CI Monitor supports multiple agents per repo, potentially branch-scoped subscriptions.
+- Notifications should include co-recipient hints when multiple agents are subscribed.
+
 ### 5.4 Plugin Registration
 
 Compile-time registration via `inventory` crate (avoids hardcoded registration):
@@ -710,6 +750,15 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 - Generate failure reports (JSON + Markdown) in `temp/atm/ci-monitor/`
 - Post concise notification to designated agent's inbox
 - Deduplicate per-commit
+- Requires git repo context; if no repo is detected, the plugin should disable itself with a clear warning.
+
+**Multi-repo + agent subscription model (planned)**:
+- Single daemon per machine; CI Monitor registers multiple repos from root-level config.
+- Each repo can have one or more subscribed agents (team-lead or dedicated CI agent).
+- Branch filters support exact branch, branch + derived branches (worktree ancestry), and “all branches.”
+- If multiple agents are subscribed to the same event, include a notification warning such as:
+  `Warning: <agent>@<team> is also receiving this notification`
+- Distinguish **plugin settings** (repo registry, provider config, poll interval) from **agent settings** (response behavior, routing preferences, scratch-pad state).
 
 ### 6.3 Cross-Computer Bridge Plugin
 

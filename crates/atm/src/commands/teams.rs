@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use clap::Args;
 use serde_json::json;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 
 use crate::util::settings::get_home_dir;
@@ -13,9 +14,45 @@ use crate::util::settings::get_home_dir;
 /// List all teams on this machine
 #[derive(Args, Debug)]
 pub struct TeamsArgs {
+    /// Subcommand (e.g., add-member)
+    #[command(subcommand)]
+    command: Option<TeamsCommand>,
+
     /// Output as JSON
     #[arg(long)]
     json: bool,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum TeamsCommand {
+    /// Add a member to a team without launching an agent
+    AddMember(AddMemberArgs),
+}
+
+/// Add a member to a team (no agent spawn)
+#[derive(Args, Debug)]
+pub struct AddMemberArgs {
+    /// Team name
+    team: String,
+
+    /// Agent name (unique within team)
+    agent: String,
+
+    /// Agent type (e.g., "codex", "human", "plugin:ci_monitor")
+    #[arg(long, default_value = "codex")]
+    agent_type: String,
+
+    /// Model identifier (optional, defaults to "unknown")
+    #[arg(long, default_value = "unknown")]
+    model: String,
+
+    /// Working directory (defaults to current directory)
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+
+    /// Mark agent as inactive
+    #[arg(long)]
+    inactive: bool,
 }
 
 /// Team summary information
@@ -28,6 +65,12 @@ struct TeamSummary {
 
 /// Execute the teams command
 pub fn execute(args: TeamsArgs) -> Result<()> {
+    if let Some(command) = args.command {
+        return match command {
+            TeamsCommand::AddMember(add_args) => add_member(add_args),
+        };
+    }
+
     let home_dir = get_home_dir()?;
     let teams_dir = home_dir.join(".claude/teams");
 
@@ -98,6 +141,71 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
             println!("  {name:20}  {count} members    Created {age}");
         }
     }
+
+    Ok(())
+}
+
+fn add_member(args: AddMemberArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    if !team_dir.exists() {
+        anyhow::bail!(
+            "Team '{}' not found (directory {} doesn't exist)",
+            args.team,
+            team_dir.display()
+        );
+    }
+
+    let config_path = team_dir.join("config.json");
+    if !config_path.exists() {
+        anyhow::bail!("Team config not found at {}", config_path.display());
+    }
+
+    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+
+    let agent_id = format!("{}@{}", args.agent, args.team);
+    let existing = team_config
+        .members
+        .iter()
+        .any(|m| m.agent_id == agent_id || m.name == args.agent);
+    if existing {
+        println!("Member '{}' already exists in team '{}'", args.agent, args.team);
+        return Ok(());
+    }
+
+    let cwd = match args.cwd {
+        Some(path) => path,
+        None => std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
+    };
+
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+
+    let agent_type = args.agent_type.clone();
+    let member = atm_core::schema::AgentMember {
+        agent_id,
+        name: args.agent.clone(),
+        agent_type,
+        model: args.model,
+        prompt: None,
+        color: None,
+        plan_mode_required: None,
+        joined_at: now_ms,
+        tmux_pane_id: None,
+        cwd: cwd.to_string_lossy().to_string(),
+        subscriptions: Vec::new(),
+        backend_type: None,
+        is_active: Some(!args.inactive),
+        unknown_fields: std::collections::HashMap::new(),
+    };
+
+    team_config.members.push(member);
+    let serialized = serde_json::to_string_pretty(&team_config)?;
+    fs::write(&config_path, serialized)?;
+
+    println!(
+        "Added member '{}' to team '{}' (agentType='{}')",
+        args.agent, args.team, args.agent_type
+    );
 
     Ok(())
 }

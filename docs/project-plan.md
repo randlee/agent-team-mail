@@ -2,7 +2,7 @@
 
 **Version**: 0.2
 **Date**: 2026-02-13
-**Status**: Phase 5 Complete — Phase 6 Next
+**Status**: Phase 6 Complete — Phase 7 Next
 
 ---
 
@@ -1241,12 +1241,34 @@ Phase 5 Complete
 
 ---
 
+## 8.5 Phase 6.4: Design Reconciliation (Post-Phase 6)
+
+**Goal**: Update requirements and plan to support multi-repo daemon model and clarify root vs repo semantics.
+
+**Branch prefix**: `planning/p6-4-*`
+**Depends on**: Phase 6 complete
+**Status**: Planned (before Phase 7 starts)
+
+**Deliverables**:
+- Requirements update: explicit `root` vs `repo` distinction and behavior in non-repo contexts
+- Multi-repo daemon model: per-repo scoping for caches, reports, and plugin state
+- CI monitor behavior when `repo` is absent (disable with warning or degrade)
+- Path resolution rules for plugin outputs (repo-root vs workspace root)
+- Plan update for Phase 7/8 to reflect multi-repo support decisions
+
+**Acceptance criteria**:
+- docs/requirements.md updated with root/repo + multi-repo daemon rules
+- docs/project-plan.md updated with follow-on work items (if code changes required)
+- ARCH-ATM + ARCH-CTM agree on the model and sign off before Phase 7 sprints
+
+---
+
 ## 9. Phase 7: Cross-Computer Bridge Plugin
 
 **Goal**: Bridge plugin enabling multi-machine agent teams.
 
 **Branch prefix**: `feature/p7-*`
-**Depends on**: Phase 6 complete (or Phase 5 — independent of CI Monitor)
+**Depends on**: Phase 6.4 design reconciliation complete
 **Status**: Not planned (sprint details TBD)
 
 ---
@@ -1290,12 +1312,12 @@ Additional plugins planned (each is a self-contained sprint series):
 | **5** | 5.3 | Issues Plugin Testing | ✅ | [#29](https://github.com/randlee/agent-team-mail/pull/29) |
 | **5** | 5.4 | Pluggable Provider Architecture | ✅ | [#31](https://github.com/randlee/agent-team-mail/pull/31) |
 | **5** | 5.5 | ARCH-CTM Review Fixes | ✅ | [#32](https://github.com/randlee/agent-team-mail/pull/32), [#33](https://github.com/randlee/agent-team-mail/pull/33) |
-| **6** | 6.1 | CI Provider Abstraction | — | — |
-| **6** | 6.2 | CI Monitor Plugin Core | — | — |
-| **6** | 6.3 | CI Monitor Testing + Azure External | — | — |
+| **6** | 6.1 | CI Provider Abstraction | ✅ | [#35](https://github.com/randlee/agent-team-mail/pull/35) |
+| **6** | 6.2 | CI Monitor Plugin Core | ✅ | [#36](https://github.com/randlee/agent-team-mail/pull/36) |
+| **6** | 6.3 | CI Monitor Testing + Azure External | ✅ | [#37](https://github.com/randlee/agent-team-mail/pull/37) |
 
-**Completed**: 23 sprints across 5 phases (363 tests, all CI green)
-**Next**: Phase 6 — CI Monitor Plugin (3 sprints)
+**Completed**: 26 sprints across 6 phases (CI green)
+**Next**: Phase 7 — Cross-Computer Bridge Plugin (after Phase 6.4 design reconciliation)
 
 **Phase integration PRs**:
 | Phase | Integration PR | Status |
