@@ -357,6 +357,11 @@ impl Plugin for CiMonitorPlugin {
             source: None,
         })?;
 
+        // Resolve report directory relative to repo root when configured as a relative path
+        if !self.config.report_dir.is_absolute() {
+            self.config.report_dir = repo.path.join(&self.config.report_dir);
+        }
+
         // Determine ATM home directory
         let atm_home = if let Ok(atm_home_env) = std::env::var("ATM_HOME") {
             PathBuf::from(atm_home_env)
@@ -632,7 +637,7 @@ mod tests {
     fn test_dedup_key_distinct_on_conclusion_change() {
         use crate::plugins::ci_monitor::{create_test_run, CiRunConclusion, CiRunStatus};
         let plugin = CiMonitorPlugin::new();
-        let mut run1 = create_test_run(
+        let run1 = create_test_run(
             123,
             "CI",
             "main",
