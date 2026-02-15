@@ -46,15 +46,7 @@ impl ActivityTracker {
         team_config_path: &Path,
         agent_name: &str,
     ) -> Result<(), PluginError> {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| PluginError::Runtime {
-                message: format!("System time error: {e}"),
-                source: Some(Box::new(e)),
-            })?
-            .as_millis() as u64;
-
-        self.update_config_atomic(team_config_path, |config| {
+        self.update_config_atomic_with_time(team_config_path, |config, now_ms| {
             if let Some(member) = config.members.iter_mut().find(|m| m.name == agent_name) {
                 member.is_active = Some(true);
                 member.last_active = Some(now_ms);
@@ -80,15 +72,7 @@ impl ActivityTracker {
     ///
     /// Returns `PluginError` if config update fails
     pub fn check_inactivity(&self, team_config_path: &Path) -> Result<(), PluginError> {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| PluginError::Runtime {
-                message: format!("System time error: {e}"),
-                source: Some(Box::new(e)),
-            })?
-            .as_millis() as u64;
-
-        self.update_config_atomic(team_config_path, |config| {
+        self.update_config_atomic_with_time(team_config_path, |config, now_ms| {
             let mut changed = false;
             for member in &mut config.members {
                 // Only check agents that are marked active
@@ -128,13 +112,13 @@ impl ActivityTracker {
     /// # Errors
     ///
     /// Returns `PluginError` for I/O errors, JSON errors, or lock timeout
-    fn update_config_atomic<F>(
+    fn update_config_atomic_with_time<F>(
         &self,
         team_config_path: &Path,
         update_fn: F,
     ) -> Result<(), PluginError>
     where
-        F: FnOnce(&mut TeamConfig) -> bool,
+        F: FnOnce(&mut TeamConfig, u64) -> bool,
     {
         let lock_path = team_config_path.with_extension("lock");
 
@@ -156,8 +140,16 @@ impl ActivityTracker {
                 source: Some(Box::new(e)),
             })?;
 
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| PluginError::Runtime {
+                message: format!("System time error: {e}"),
+                source: Some(Box::new(e)),
+            })?
+            .as_millis() as u64;
+
         // Step 3: Apply modification
-        if !update_fn(&mut config) {
+        if !update_fn(&mut config, now_ms) {
             // No changes needed
             return Ok(());
         }
