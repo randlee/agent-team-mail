@@ -195,6 +195,7 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
         subscriptions: Vec::new(),
         backend_type: None,
         is_active: Some(!args.inactive),
+        last_active: if !args.inactive { Some(now_ms) } else { None },
         unknown_fields: std::collections::HashMap::new(),
     };
 

@@ -400,6 +400,11 @@ impl Plugin for CiMonitorPlugin {
         self.registry = Some(registry);
 
         // Register synthetic member
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
         let member = AgentMember {
             agent_id: format!("{}@{}", self.config.agent, self.config.team),
             name: self.config.agent.clone(),
@@ -408,15 +413,13 @@ impl Plugin for CiMonitorPlugin {
             prompt: None,
             color: Some("blue".to_string()),
             plan_mode_required: None,
-            joined_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            joined_at: now_ms,
             tmux_pane_id: None,
             cwd: repo.path.to_string_lossy().to_string(),
             subscriptions: Vec::new(),
             backend_type: None,
             is_active: Some(true),
+            last_active: Some(now_ms),
             unknown_fields: std::collections::HashMap::new(),
         };
 
