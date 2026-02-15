@@ -32,7 +32,7 @@ pub trait WorkerAdapter: Send + Sync {
     /// # Arguments
     ///
     /// * `agent_id` - Full agent identifier (e.g., "arch-ctm@atm-planning")
-    /// * `config` - Backend-specific configuration (JSON or similar)
+    /// * `command` - Startup command to run in the worker (e.g., "codex --yolo")
     ///
     /// # Returns
     ///
@@ -41,7 +41,7 @@ pub trait WorkerAdapter: Send + Sync {
     /// # Errors
     ///
     /// Returns PluginError::Runtime if spawn fails
-    async fn spawn(&mut self, agent_id: &str, config: &str) -> Result<WorkerHandle, PluginError>;
+    async fn spawn(&mut self, agent_id: &str, command: &str) -> Result<WorkerHandle, PluginError>;
 
     /// Send a message to a running worker
     ///

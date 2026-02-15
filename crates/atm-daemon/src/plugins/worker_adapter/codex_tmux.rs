@@ -119,7 +119,7 @@ impl CodexTmuxBackend {
 
 #[async_trait::async_trait]
 impl WorkerAdapter for CodexTmuxBackend {
-    async fn spawn(&mut self, agent_id: &str, _config: &str) -> Result<WorkerHandle, PluginError> {
+    async fn spawn(&mut self, agent_id: &str, command: &str) -> Result<WorkerHandle, PluginError> {
         // Check tmux availability
         if !Self::tmux_available() {
             return Err(PluginError::Runtime {
@@ -170,25 +170,36 @@ impl WorkerAdapter for CodexTmuxBackend {
 
         debug!("Created tmux pane {tmux_pane_id} for agent {agent_id}");
 
-        // TODO: In Sprint 7.2, we'll send the actual Codex start command here
-        // For now, just start a shell
-        let start_command = format!(
-            "# Worker pane for {}\n# Log file: {}\n",
-            agent_id,
-            log_path.display()
-        );
+        // Build the startup command with log capture via tee.
+        // The command is sent as a shell line so tee captures all output.
+        let log_display = log_path.display();
+        let startup = format!("{command} 2>&1 | tee -a {log_display}");
 
-        // Send initial setup text using literal mode (-l)
-        // CRITICAL: -l prevents shell interpretation of special characters
+        debug!("Starting worker {agent_id} with: {startup}");
+
+        // Send the startup command using literal mode (-l) to prevent
+        // shell interpretation of special chars in the command string.
         Command::new("tmux")
             .arg("send-keys")
             .arg("-t")
             .arg(&tmux_pane_id)
             .arg("-l") // LITERAL MODE - prevents command injection
-            .arg(&start_command)
+            .arg(&startup)
             .output()
             .map_err(|e| PluginError::Runtime {
-                message: format!("Failed to send initial text to tmux pane: {e}"),
+                message: format!("Failed to send startup command to tmux pane: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        // Send Enter to execute the command (not literal — this is a key press)
+        Command::new("tmux")
+            .arg("send-keys")
+            .arg("-t")
+            .arg(&tmux_pane_id)
+            .arg("Enter")
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to send Enter key to tmux pane: {e}"),
                 source: Some(Box::new(e)),
             })?;
 

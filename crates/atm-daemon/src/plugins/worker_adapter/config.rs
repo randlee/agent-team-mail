@@ -5,11 +5,16 @@ use atm_core::toml;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Default startup command for worker agents
+pub const DEFAULT_COMMAND: &str = "codex --yolo";
+
 /// Per-agent configuration
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     /// Whether this agent is enabled for worker adapter
     pub enabled: bool,
+    /// Startup command override (if None, uses WorkersConfig.command)
+    pub command: Option<String>,
     /// Prompt template for message formatting
     pub prompt_template: String,
     /// Concurrency policy: "queue" (default), "reject", or "concurrent"
@@ -20,6 +25,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            command: None,
             prompt_template: "{message}".to_string(),
             concurrency_policy: "queue".to_string(),
         }
@@ -33,6 +39,9 @@ pub struct WorkersConfig {
     pub enabled: bool,
     /// Backend type (currently only "codex-tmux" is supported)
     pub backend: String,
+    /// Default startup command for workers (default: "codex --yolo")
+    /// Per-agent override via agents.<name>.command
+    pub command: String,
     /// TMUX session name for worker panes
     pub tmux_session: String,
     /// Directory for worker log files
@@ -147,6 +156,15 @@ impl WorkersConfig {
         }
     }
 
+    /// Resolve the startup command for an agent.
+    /// Per-agent command takes priority over the default.
+    pub fn resolve_command(&self, agent_name: &str) -> &str {
+        self.agents
+            .get(agent_name)
+            .and_then(|a| a.command.as_deref())
+            .unwrap_or(&self.command)
+    }
+
     /// Validate the entire configuration
     ///
     /// # Errors
@@ -187,6 +205,12 @@ impl WorkersConfig {
             .get("backend")
             .and_then(|v| v.as_str())
             .unwrap_or("codex-tmux")
+            .to_string();
+
+        let command = table
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_COMMAND)
             .to_string();
 
         let tmux_session = table
@@ -251,6 +275,10 @@ impl WorkersConfig {
                             .get("enabled")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(true),
+                        command: agent_table
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
                         prompt_template: agent_table
                             .get("prompt_template")
                             .and_then(|v| v.as_str())
@@ -272,6 +300,7 @@ impl WorkersConfig {
         let config = Self {
             enabled,
             backend,
+            command,
             tmux_session,
             log_dir,
             inactivity_timeout_ms,
@@ -303,6 +332,7 @@ impl Default for WorkersConfig {
         Self {
             enabled: false,
             backend: "codex-tmux".to_string(),
+            command: DEFAULT_COMMAND.to_string(),
             tmux_session: "atm-workers".to_string(),
             log_dir: default_log_dir,
             inactivity_timeout_ms: 5 * 60 * 1000,

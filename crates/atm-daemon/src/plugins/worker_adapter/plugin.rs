@@ -248,6 +248,7 @@ impl WorkerAdapterPlugin {
                         && let Err(e) = lifecycle::restart_worker(
                             &agent_id,
                             backend.as_mut(),
+                            &self.config,
                             &mut self.lifecycle,
                             &mut self.workers,
                         )

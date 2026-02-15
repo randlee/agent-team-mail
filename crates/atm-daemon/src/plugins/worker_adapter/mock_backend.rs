@@ -114,7 +114,7 @@ impl MockTmuxBackend {
 
 #[async_trait::async_trait]
 impl WorkerAdapter for MockTmuxBackend {
-    async fn spawn(&mut self, agent_id: &str, _config: &str) -> Result<WorkerHandle, PluginError> {
+    async fn spawn(&mut self, agent_id: &str, _command: &str) -> Result<WorkerHandle, PluginError> {
         let mut state = self.state.lock().unwrap();
 
         // Check for injected error

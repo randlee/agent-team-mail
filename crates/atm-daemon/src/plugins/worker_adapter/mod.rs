@@ -30,7 +30,7 @@ pub mod trait_def;
 pub use activity::ActivityTracker;
 pub use capture::{CaptureConfig, CapturedResponse, LogTailer};
 pub use codex_tmux::CodexTmuxBackend;
-pub use config::{AgentConfig, WorkersConfig};
+pub use config::{AgentConfig, WorkersConfig, DEFAULT_COMMAND};
 pub use lifecycle::{LifecycleManager, WorkerState};
 pub use mock_backend::{MockCall, MockTmuxBackend};
 pub use plugin::WorkerAdapterPlugin;

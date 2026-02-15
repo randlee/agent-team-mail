@@ -222,8 +222,9 @@ pub async fn auto_start_workers(
             continue;
         }
 
-        info!("Starting worker for agent {agent_id}");
-        match backend.spawn(agent_id, "{}").await {
+        let command = config.resolve_command(agent_id);
+        info!("Starting worker for agent {agent_id} with command: {command}");
+        match backend.spawn(agent_id, command).await {
             Ok(handle) => {
                 lifecycle.register_worker(agent_id);
                 workers.insert(agent_id.clone(), handle);
@@ -293,6 +294,7 @@ pub async fn check_worker_health(handle: &WorkerHandle) -> bool {
 pub async fn restart_worker(
     agent_id: &str,
     backend: &mut dyn WorkerAdapter,
+    config: &WorkersConfig,
     lifecycle: &mut LifecycleManager,
     workers: &mut HashMap<String, WorkerHandle>,
 ) -> Result<(), PluginError> {
@@ -321,8 +323,9 @@ pub async fn restart_worker(
     // Remove old handle if exists
     workers.remove(agent_id);
 
-    // Spawn new worker
-    match backend.spawn(agent_id, "{}").await {
+    // Spawn new worker with resolved command
+    let command = config.resolve_command(agent_id);
+    match backend.spawn(agent_id, command).await {
         Ok(handle) => {
             workers.insert(agent_id.to_string(), handle);
             lifecycle.set_state(agent_id, WorkerState::Running);
