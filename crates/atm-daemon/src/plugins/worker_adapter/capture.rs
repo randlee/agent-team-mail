@@ -19,6 +19,8 @@ pub struct CaptureConfig {
     pub poll_interval_ms: u64,
     /// Maximum response size (bytes)
     pub max_response_bytes: usize,
+    /// Idle timeout: if no new content for this duration, consider response complete (milliseconds)
+    pub idle_timeout_ms: u64,
 }
 
 impl Default for CaptureConfig {
@@ -27,6 +29,7 @@ impl Default for CaptureConfig {
             timeout_ms: 60_000,         // 60 seconds
             poll_interval_ms: 100,       // 100ms polling
             max_response_bytes: 1_048_576, // 1MB
+            idle_timeout_ms: 2_000,     // 2 seconds idle timeout
         }
     }
 }
@@ -41,6 +44,7 @@ pub struct CapturedResponse {
 }
 
 /// Log file tailer for capturing worker responses
+#[derive(Clone)]
 pub struct LogTailer {
     config: CaptureConfig,
 }
@@ -106,9 +110,11 @@ impl LogTailer {
         let start_time = Instant::now();
         let timeout = Duration::from_millis(self.config.timeout_ms);
         let poll_interval = Duration::from_millis(self.config.poll_interval_ms);
+        let idle_timeout = Duration::from_millis(self.config.idle_timeout_ms);
 
         let mut buffer = Vec::new();
         let mut last_size = start_pos;
+        let mut last_activity = Instant::now();
 
         loop {
             // Check timeout
@@ -128,6 +134,15 @@ impl LogTailer {
                     );
                     break;
                 }
+            }
+
+            // Check idle timeout (no new content for idle_timeout duration)
+            if !buffer.is_empty() && last_activity.elapsed() > idle_timeout {
+                debug!(
+                    "No new content for {} ms (idle timeout), considering response complete",
+                    self.config.idle_timeout_ms
+                );
+                break;
             }
 
             // Check current file size
@@ -154,6 +169,9 @@ impl LogTailer {
                     message: format!("Failed to get file position: {e}"),
                     source: Some(Box::new(e)),
                 })?;
+
+                // Update last activity timestamp
+                last_activity = Instant::now();
 
                 debug!("Captured {} bytes (total {} bytes)", chunk.len(), buffer.len());
 
@@ -311,6 +329,7 @@ mod tests {
             timeout_ms: 2000,
             poll_interval_ms: 10,
             max_response_bytes: 1024,
+            idle_timeout_ms: 1000,
         });
 
         let result = tailer.capture_response(&log_path, "test prompt");

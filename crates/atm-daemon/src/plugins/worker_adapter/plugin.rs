@@ -146,20 +146,73 @@ impl WorkerAdapterPlugin {
 
         debug!("Sent message to worker {member_name}");
 
-        // Capture response from log file
-        let captured = match self
-            .log_tailer
-            .capture_response(&worker_handle.log_file_path, &formatted_prompt)
+        // Record activity after successful message send
+        let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
+            message: "Plugin context not initialized".to_string(),
+            source: None,
+        })?;
+        let team_name = if self.config.team_name.is_empty() {
+            &ctx.system.default_team
+        } else {
+            &self.config.team_name
+        };
+        let team_config_path = ctx
+            .system
+            .claude_root
+            .join("teams")
+            .join(team_name)
+            .join("config.json");
+        if team_config_path.exists() {
+            let _ = self.activity_tracker.record_activity(&team_config_path, &member_name);
+        }
+
+        // Capture response from log file (uses blocking sleep, so wrap in spawn_blocking)
+        let log_path = worker_handle.log_file_path.clone();
+        let prompt_for_capture = formatted_prompt.clone();
+        let log_tailer = self.log_tailer.clone();
+
+        let captured = match tokio::task::spawn_blocking(move || {
+            log_tailer.capture_response(&log_path, &prompt_for_capture)
+        })
+        .await
         {
-            Ok(captured) => captured,
-            Err(e) => {
+            Ok(Ok(captured)) => captured,
+            Ok(Err(e)) => {
                 error!("Failed to capture response from {member_name}: {e}");
                 self.router.agent_finished(&member_name);
                 return Err(e);
             }
+            Err(e) => {
+                error!("Task join error while capturing response from {member_name}: {e}");
+                self.router.agent_finished(&member_name);
+                return Err(PluginError::Runtime {
+                    message: format!("Task join error: {e}"),
+                    source: Some(Box::new(e)),
+                });
+            }
         };
 
         debug!("Captured response from {member_name}: {} bytes", captured.response_text.len());
+
+        // Record activity after successful response capture
+        let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
+            message: "Plugin context not initialized".to_string(),
+            source: None,
+        })?;
+        let team_name_for_activity = if self.config.team_name.is_empty() {
+            &ctx.system.default_team
+        } else {
+            &self.config.team_name
+        };
+        let team_config_path_for_activity = ctx
+            .system
+            .claude_root
+            .join("teams")
+            .join(team_name_for_activity)
+            .join("config.json");
+        if team_config_path_for_activity.exists() {
+            let _ = self.activity_tracker.record_activity(&team_config_path_for_activity, &member_name);
+        }
 
         // Build response message (use member_name as sender)
         let response = InboxMessage {
