@@ -244,17 +244,16 @@ impl WorkerAdapterPlugin {
                     self.lifecycle.set_state(&agent_id, WorkerState::Crashed);
 
                     // Attempt restart
-                    if let Some(backend) = self.backend.as_mut() {
-                        if let Err(e) = lifecycle::restart_worker(
+                    if let Some(backend) = self.backend.as_mut()
+                        && let Err(e) = lifecycle::restart_worker(
                             &agent_id,
                             backend.as_mut(),
                             &mut self.lifecycle,
                             &mut self.workers,
                         )
                         .await
-                        {
-                            error!("Failed to restart worker {agent_id}: {e}");
-                        }
+                    {
+                        error!("Failed to restart worker {agent_id}: {e}");
                     }
                 }
             }
