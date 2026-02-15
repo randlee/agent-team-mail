@@ -76,6 +76,7 @@ fn test_inbox_single_team() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .assert()
         .success();
 }
@@ -115,6 +116,7 @@ fn test_inbox_shows_correct_counts() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .assert()
         .success();
 }
@@ -130,6 +132,7 @@ fn test_inbox_no_messages() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .assert()
         .success();
 }
@@ -144,6 +147,7 @@ fn test_inbox_all_teams() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "team-a")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .arg("--all-teams")
         .assert()
         .success();
@@ -157,6 +161,7 @@ fn test_inbox_team_not_found() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "nonexistent-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .assert()
         .failure();
 }
@@ -170,6 +175,7 @@ fn test_inbox_with_team_flag() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "default-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .arg("--team")
         .arg("override-team")
         .assert()
