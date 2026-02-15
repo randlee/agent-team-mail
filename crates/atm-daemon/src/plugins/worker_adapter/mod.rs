@@ -14,11 +14,13 @@
 //! - `router.rs` — Message routing with concurrency control
 //! - `capture.rs` — Response capture via log file tailing
 //! - `activity.rs` — Agent activity tracking
+//! - `lifecycle.rs` — Worker lifecycle management (startup, health, restart, shutdown)
 
 pub mod activity;
 pub mod capture;
 pub mod codex_tmux;
 pub mod config;
+pub mod lifecycle;
 pub mod plugin;
 pub mod router;
 pub mod trait_def;
@@ -27,6 +29,7 @@ pub use activity::ActivityTracker;
 pub use capture::{CaptureConfig, CapturedResponse, LogTailer};
 pub use codex_tmux::CodexTmuxBackend;
 pub use config::{AgentConfig, WorkersConfig};
+pub use lifecycle::{LifecycleManager, WorkerState};
 pub use plugin::WorkerAdapterPlugin;
 pub use router::{ConcurrencyPolicy, MessageRouter};
 pub use trait_def::{WorkerAdapter, WorkerHandle};

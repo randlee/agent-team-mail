@@ -39,6 +39,14 @@ pub struct WorkersConfig {
     pub log_dir: PathBuf,
     /// Inactivity timeout in milliseconds (default: 5 minutes)
     pub inactivity_timeout_ms: u64,
+    /// Health check interval in seconds (default: 30)
+    pub health_check_interval_secs: u64,
+    /// Maximum restart attempts before giving up (default: 3)
+    pub max_restart_attempts: u32,
+    /// Backoff duration between restarts in seconds (default: 5)
+    pub restart_backoff_secs: u64,
+    /// Graceful shutdown timeout in seconds (default: 10)
+    pub shutdown_timeout_secs: u64,
     /// Per-agent configuration
     pub agents: HashMap<String, AgentConfig>,
 }
@@ -93,6 +101,30 @@ impl WorkersConfig {
             .map(|i| i as u64)
             .unwrap_or(5 * 60 * 1000); // 5 minutes default
 
+        let health_check_interval_secs = table
+            .get("health_check_interval_secs")
+            .and_then(|v| v.as_integer())
+            .map(|i| i as u64)
+            .unwrap_or(30); // 30 seconds default
+
+        let max_restart_attempts = table
+            .get("max_restart_attempts")
+            .and_then(|v| v.as_integer())
+            .map(|i| i as u32)
+            .unwrap_or(3); // 3 attempts default
+
+        let restart_backoff_secs = table
+            .get("restart_backoff_secs")
+            .and_then(|v| v.as_integer())
+            .map(|i| i as u64)
+            .unwrap_or(5); // 5 seconds default
+
+        let shutdown_timeout_secs = table
+            .get("shutdown_timeout_secs")
+            .and_then(|v| v.as_integer())
+            .map(|i| i as u64)
+            .unwrap_or(10); // 10 seconds default
+
         // Parse per-agent configuration
         let mut agents = HashMap::new();
         if let Some(agents_table) = table.get("agents").and_then(|v| v.as_table()) {
@@ -134,6 +166,10 @@ impl WorkersConfig {
             tmux_session,
             log_dir,
             inactivity_timeout_ms,
+            health_check_interval_secs,
+            max_restart_attempts,
+            restart_backoff_secs,
+            shutdown_timeout_secs,
             agents,
         })
     }
@@ -156,6 +192,10 @@ impl Default for WorkersConfig {
             tmux_session: "atm-workers".to_string(),
             log_dir: default_log_dir,
             inactivity_timeout_ms: 5 * 60 * 1000,
+            health_check_interval_secs: 30,
+            max_restart_attempts: 3,
+            restart_backoff_secs: 5,
+            shutdown_timeout_secs: 10,
             agents: HashMap::new(),
         }
     }
