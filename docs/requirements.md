@@ -376,10 +376,21 @@ atm send <agent> --stdin             # message from stdin
 **Offline recipient detection**:
 
 Before writing to the inbox, `atm send` checks the recipient's status in `config.json`:
-- If the recipient is **not in the members array** or has **`isActive: false`**, the recipient is considered offline.
+- If the recipient has **`isActive: false`** (explicitly set), the recipient is considered offline.
+- If `isActive` is **missing or null**, the recipient's status is unknown — **no offline warning** is shown. (Many agents, including the team lead, never have `isActive` set by Claude Code.)
+- If the recipient is **not in the members array**, the recipient is treated as unknown (no warning, message still delivered).
 - When offline, `atm` prepends a call-to-action tag to the message body: `[{action_text}] {original_message}`
 - The sender receives a warning: `Warning: Agent X appears offline. Message will be queued with call-to-action.`
 - The message is still delivered (written to inbox file) — the warning is informational, not a hard block.
+
+**Agent activity tracking (daemon-managed)**:
+
+The daemon tracks agent activity by monitoring inbox file changes and message timestamps:
+- `atm send` sets the sender's `isActive: true` and `lastActive` timestamp in team `config.json` as a heartbeat.
+- The daemon watches inbox file events (already part of the event loop) and tracks last-activity-per-agent from `from` fields and `timestamp` values — no extra I/O beyond existing file watching.
+- After a configurable inactivity timeout (default: 5 minutes), the daemon sets `isActive: false` for the agent.
+- Two activity signals: (1) messages sent by the agent (`from` field across inboxes), (2) messages read by the agent (`read: true` transitions).
+- `lastActive` is stored in the member entry in `config.json` (ISO 8601 timestamp).
 
 **Call-to-action text precedence** (highest to lowest):
 1. `--offline-action "custom text"` CLI flag
