@@ -337,6 +337,11 @@ impl Plugin for IssuesPlugin {
         };
 
         // Register synthetic member
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
         let member = AgentMember {
             agent_id: format!("{}@{}", self.config.agent, target_team),
             name: self.config.agent.clone(),
@@ -345,10 +350,7 @@ impl Plugin for IssuesPlugin {
             prompt: None,
             color: Some("purple".to_string()),
             plan_mode_required: None,
-            joined_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            joined_at: now_ms,
             tmux_pane_id: None,
             cwd: repo
                 .path
@@ -357,6 +359,7 @@ impl Plugin for IssuesPlugin {
             subscriptions: Vec::new(),
             backend_type: None,
             is_active: Some(true),
+            last_active: Some(now_ms),
             unknown_fields: HashMap::new(),
         };
 

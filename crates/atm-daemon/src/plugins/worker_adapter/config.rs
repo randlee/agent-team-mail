@@ -2,7 +2,29 @@
 
 use crate::plugin::PluginError;
 use atm_core::toml;
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Per-agent configuration
+#[derive(Debug, Clone)]
+pub struct AgentConfig {
+    /// Whether this agent is enabled for worker adapter
+    pub enabled: bool,
+    /// Prompt template for message formatting
+    pub prompt_template: String,
+    /// Concurrency policy: "queue" (default), "reject", or "concurrent"
+    pub concurrency_policy: String,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prompt_template: "{message}".to_string(),
+            concurrency_policy: "queue".to_string(),
+        }
+    }
+}
 
 /// Configuration for the Worker Adapter plugin, parsed from [workers]
 #[derive(Debug, Clone)]
@@ -15,6 +37,10 @@ pub struct WorkersConfig {
     pub tmux_session: String,
     /// Directory for worker log files
     pub log_dir: PathBuf,
+    /// Inactivity timeout in milliseconds (default: 5 minutes)
+    pub inactivity_timeout_ms: u64,
+    /// Per-agent configuration
+    pub agents: HashMap<String, AgentConfig>,
 }
 
 impl WorkersConfig {
@@ -61,6 +87,40 @@ impl WorkersConfig {
             .map(PathBuf::from)
             .unwrap_or(default_log_dir);
 
+        let inactivity_timeout_ms = table
+            .get("inactivity_timeout_ms")
+            .and_then(|v| v.as_integer())
+            .map(|i| i as u64)
+            .unwrap_or(5 * 60 * 1000); // 5 minutes default
+
+        // Parse per-agent configuration
+        let mut agents = HashMap::new();
+        if let Some(agents_table) = table.get("agents").and_then(|v| v.as_table()) {
+            for (agent_name, agent_value) in agents_table {
+                let agent_config = if let Some(agent_table) = agent_value.as_table() {
+                    AgentConfig {
+                        enabled: agent_table
+                            .get("enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true),
+                        prompt_template: agent_table
+                            .get("prompt_template")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("{message}")
+                            .to_string(),
+                        concurrency_policy: agent_table
+                            .get("concurrency_policy")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("queue")
+                            .to_string(),
+                    }
+                } else {
+                    AgentConfig::default()
+                };
+                agents.insert(agent_name.clone(), agent_config);
+            }
+        }
+
         // Validate backend
         if backend != "codex-tmux" {
             return Err(PluginError::Config {
@@ -73,6 +133,8 @@ impl WorkersConfig {
             backend,
             tmux_session,
             log_dir,
+            inactivity_timeout_ms,
+            agents,
         })
     }
 }
@@ -93,6 +155,8 @@ impl Default for WorkersConfig {
             backend: "codex-tmux".to_string(),
             tmux_session: "atm-workers".to_string(),
             log_dir: default_log_dir,
+            inactivity_timeout_ms: 5 * 60 * 1000,
+            agents: HashMap::new(),
         }
     }
 }
