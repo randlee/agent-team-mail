@@ -410,3 +410,49 @@ fn test_read_since_last_seen_default() {
         .unwrap();
     assert!(ts.starts_with("2026-02-11T11:00:00"));
 }
+
+#[test]
+fn test_read_no_update_seen() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "New message",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": true,
+            "message_id": "msg-020"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    // Seed last-seen state at 10:00
+    let state_path = temp_dir.path().join("state.json");
+    let state = serde_json::json!({
+        "last_seen": {
+            "test-team": {
+                "test-agent": "2026-02-11T10:00:00Z"
+            }
+        }
+    });
+    fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("test-agent")
+        .arg("--no-update-seen")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("New message"));
+
+    // Verify last-seen was NOT updated (still at 10:00)
+    let updated = fs::read_to_string(&state_path).unwrap();
+    let updated_json: serde_json::Value = serde_json::from_str(&updated).unwrap();
+    let ts = updated_json["last_seen"]["test-team"]["test-agent"]
+        .as_str()
+        .unwrap();
+    assert!(ts.starts_with("2026-02-11T10:00:00"));
+}

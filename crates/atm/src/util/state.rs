@@ -23,6 +23,11 @@ pub fn load_seen_state() -> Result<SeenState> {
     Ok(state)
 }
 
+/// Save seen state to disk.
+///
+/// Note: concurrent writes from multiple `atm read` processes may race.
+/// This is benign — the worst case is a slightly stale last-seen timestamp,
+/// causing a few extra messages to appear on the next read. No data is lost.
 pub fn save_seen_state(state: &SeenState) -> Result<()> {
     let path = state_path()?;
     if let Some(parent) = path.parent() {

@@ -1,6 +1,7 @@
 //! Integration tests for the inbox command
 
 use assert_cmd::cargo;
+use predicates::str::contains;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -118,7 +119,17 @@ fn test_inbox_shows_correct_counts() {
         .arg("inbox")
         .arg("--no-since-last-seen")
         .assert()
-        .success();
+        .success()
+        .stdout(contains("Unread"));
+
+    // When using since-last-seen (default), header should say "New"
+    let mut cmd2 = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd2, &temp_dir);
+    cmd2.env("ATM_TEAM", "test-team")
+        .arg("inbox")
+        .assert()
+        .success()
+        .stdout(contains("New"));
 }
 
 #[test]
