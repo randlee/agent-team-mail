@@ -355,6 +355,7 @@ mod tmux_tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires active tmux server — run locally with `cargo test -- --ignored`
     async fn test_real_tmux_spawn_requires_tmux() {
         if !tmux_available() {
             eprintln!("Skipping test: tmux not available");
