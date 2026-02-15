@@ -53,6 +53,10 @@ pub struct SendArgs {
     /// Custom call-to-action text for offline recipients
     #[arg(long)]
     offline_action: Option<String>,
+
+    /// Override sender identity (default: ATM_IDENTITY env or config identity)
+    #[arg(long)]
+    from: Option<String>,
 }
 
 /// Execute the send command
@@ -66,7 +70,12 @@ pub fn execute(args: SendArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
+
+    // Override sender identity if --from provided
+    if let Some(ref from) = args.from {
+        config.core.identity = from.clone();
+    }
 
     // Parse addressing (agent@team or just agent)
     let (agent_name, team_name) = parse_address(&args.agent, &args.team, &config.core.default_team)?;
@@ -378,6 +387,7 @@ mod tests {
             json: false,
             dry_run: false,
             offline_action,
+            from: None,
         }
     }
 
