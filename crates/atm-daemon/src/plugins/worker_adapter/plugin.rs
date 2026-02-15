@@ -63,10 +63,10 @@ impl WorkerAdapterPlugin {
         ctx: &'a PluginContext,
         msg: Option<&'a InboxMessage>,
     ) -> &'a str {
-        if let Some(msg) = msg {
-            if let Some(team) = msg.unknown_fields.get("team").and_then(|v| v.as_str()) {
-                return team;
-            }
+        if let Some(msg) = msg
+            && let Some(team) = msg.unknown_fields.get("team").and_then(|v| v.as_str())
+        {
+            return team;
         }
 
         if self.config.team_name.is_empty() {
@@ -86,13 +86,12 @@ impl WorkerAdapterPlugin {
 
     fn record_activity(&self, ctx: &PluginContext, team_name: &str, member_name: &str) {
         let team_config_path = self.team_config_path(ctx, team_name);
-        if team_config_path.exists() {
-            if let Err(e) = self
+        if team_config_path.exists()
+            && let Err(e) = self
                 .activity_tracker
                 .record_activity(&team_config_path, member_name)
-            {
-                warn!("Failed to record activity for {member_name}: {e}");
-            }
+        {
+            warn!("Failed to record activity for {member_name}: {e}");
         }
     }
 
