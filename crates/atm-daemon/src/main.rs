@@ -139,6 +139,17 @@ async fn main() -> Result<()> {
         info!("Registered Issues plugin");
     }
 
+    // Register Worker Adapter plugin if configured
+    if let Some(workers_config) = plugin_ctx.plugin_config("workers")
+        && workers_config
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    {
+        registry.register(atm_daemon::plugins::worker_adapter::WorkerAdapterPlugin::new());
+        info!("Registered Worker Adapter plugin");
+    }
+
     info!("Registered {} plugin(s)", registry.len());
 
     // Create cancellation token for graceful shutdown

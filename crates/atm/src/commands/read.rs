@@ -4,10 +4,11 @@ use anyhow::Result;
 use atm_core::config::{resolve_config, ConfigOverrides};
 use atm_core::schema::{InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
-use clap::Args;
+use clap::{ArgAction, Args};
 
 use crate::util::addressing::parse_address;
 use crate::util::settings::get_home_dir;
+use crate::util::state::{get_last_seen, load_seen_state, save_seen_state, update_last_seen};
 
 /// Read messages from an inbox
 ///
@@ -26,9 +27,21 @@ pub struct ReadArgs {
     #[arg(long)]
     all: bool,
 
+    /// Show messages since last seen (default: true)
+    #[arg(long, default_value_t = true)]
+    since_last_seen: bool,
+
+    /// Disable since-last-seen filtering
+    #[arg(long = "no-since-last-seen", action = ArgAction::SetTrue, overrides_with = "since_last_seen")]
+    no_since_last_seen: bool,
+
     /// Don't mark messages as read
     #[arg(long)]
     no_mark: bool,
+
+    /// Don't update last-seen state
+    #[arg(long)]
+    no_update_seen: bool,
 
     /// Show only last N messages
     #[arg(long)]
@@ -100,9 +113,27 @@ pub fn execute(args: ReadArgs) -> Result<()> {
     // Apply filters
     let mut filtered_messages = messages.clone();
 
-    // Filter by read status (unless --all specified)
-    if !args.all {
+    // Resolve last-seen state (if enabled)
+    let use_since_last_seen = args.since_last_seen && !args.no_since_last_seen;
+    let last_seen = if use_since_last_seen && !args.all {
+        let state = load_seen_state().unwrap_or_default();
+        get_last_seen(&state, &team_name, &agent_name)
+    } else {
+        None
+    };
+
+    // Filter by read status (unless --all or since-last-seen)
+    if !args.all && !use_since_last_seen {
         filtered_messages.retain(|m| !m.read);
+    }
+
+    // Filter by last-seen timestamp
+    if let Some(last_seen_dt) = last_seen {
+        filtered_messages.retain(|m| {
+            DateTime::parse_from_rfc3339(&m.timestamp)
+                .map(|dt| dt > last_seen_dt)
+                .unwrap_or(false)
+        });
     }
 
     // Filter by sender
@@ -159,6 +190,18 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                 }
             })?;
         }
+    }
+
+    // Update last-seen state (unless disabled)
+    if use_since_last_seen && !args.no_update_seen
+        && let Some(latest) = filtered_messages
+            .iter()
+            .filter_map(|m| DateTime::parse_from_rfc3339(&m.timestamp).ok())
+            .max()
+    {
+        let mut state = load_seen_state().unwrap_or_default();
+        update_last_seen(&mut state, &team_name, &agent_name, &latest.to_rfc3339());
+        let _ = save_seen_state(&state);
     }
 
     // Output results

@@ -1,8 +1,9 @@
 //! Integration tests for the inbox command
 
 use assert_cmd::cargo;
+use predicates::str::contains;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// Helper to set home directory for cross-platform test compatibility.
@@ -62,8 +63,8 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 }
 
 /// Create a test inbox with messages
-fn create_test_inbox(team_dir: &PathBuf, agent_name: &str, messages: Vec<serde_json::Value>) {
-    let inbox_path = team_dir.join("inboxes").join(format!("{}.json", agent_name));
+fn create_test_inbox(team_dir: &Path, agent_name: &str, messages: Vec<serde_json::Value>) {
+    let inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
     fs::write(&inbox_path, serde_json::to_string_pretty(&messages).unwrap()).unwrap();
 }
 
@@ -76,6 +77,7 @@ fn test_inbox_single_team() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .assert()
         .success();
 }
@@ -115,8 +117,19 @@ fn test_inbox_shows_correct_counts() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .assert()
-        .success();
+        .success()
+        .stdout(contains("Unread"));
+
+    // When using since-last-seen (default), header should say "New"
+    let mut cmd2 = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd2, &temp_dir);
+    cmd2.env("ATM_TEAM", "test-team")
+        .arg("inbox")
+        .assert()
+        .success()
+        .stdout(contains("New"));
 }
 
 #[test]
@@ -130,6 +143,7 @@ fn test_inbox_no_messages() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .assert()
         .success();
 }
@@ -144,6 +158,7 @@ fn test_inbox_all_teams() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "team-a")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .arg("--all-teams")
         .assert()
         .success();
@@ -157,6 +172,7 @@ fn test_inbox_team_not_found() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "nonexistent-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .assert()
         .failure();
 }
@@ -170,6 +186,7 @@ fn test_inbox_with_team_flag() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "default-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .arg("--team")
         .arg("override-team")
         .assert()

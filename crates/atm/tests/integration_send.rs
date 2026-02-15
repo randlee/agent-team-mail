@@ -608,7 +608,8 @@ fn test_no_status_agent_treated_as_offline() {
 
     let text = messages[0]["text"].as_str().unwrap();
     assert!(
-        text.starts_with("[PENDING ACTION - execute when online]"),
-        "Agent with no isActive should be treated as offline, got: {text}"
+        !text.starts_with("[PENDING ACTION - execute when online]"),
+        "Agent with no isActive should NOT be treated as offline (new behavior), got: {text}"
     );
+    assert_eq!(text, "Check status");
 }

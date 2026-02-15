@@ -45,11 +45,13 @@ fn create_lead_member(team_name: &str) -> AgentMember {
         subscriptions: vec![],
         backend_type: None,
         is_active: Some(true),
+        last_active: Some(1770765919076),
         unknown_fields: HashMap::new(),
     }
 }
 
 fn create_synthetic_member(plugin_name: &str, function_name: &str, team_name: &str) -> AgentMember {
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     AgentMember {
         agent_id: format!("{plugin_name}-{function_name}@{team_name}"),
         name: format!("{plugin_name}-{function_name}"),
@@ -58,12 +60,13 @@ fn create_synthetic_member(plugin_name: &str, function_name: &str, team_name: &s
         prompt: None,
         color: None,
         plan_mode_required: None,
-        joined_at: chrono::Utc::now().timestamp_millis() as u64,
+        joined_at: now_ms,
         tmux_pane_id: None,
         cwd: "/test".to_string(),
         subscriptions: vec![],
         backend_type: None,
         is_active: Some(true),
+        last_active: Some(now_ms),
         unknown_fields: HashMap::new(),
     }
 }
@@ -324,6 +327,7 @@ fn test_concurrent_add_remove() {
                 subscriptions: vec![],
                 backend_type: None,
                 is_active: Some(true),
+                last_active: Some(1770765919076),
                 unknown_fields: HashMap::new(),
             };
 

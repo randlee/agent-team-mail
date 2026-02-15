@@ -55,6 +55,10 @@ pub struct AgentMember {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_active: Option<bool>,
 
+    /// Unix timestamp in milliseconds of last activity (message sent, message read)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active: Option<u64>,
+
     /// Unknown fields for forward compatibility
     #[serde(flatten)]
     pub unknown_fields: HashMap<String, serde_json::Value>,

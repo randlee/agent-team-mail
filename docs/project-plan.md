@@ -1453,6 +1453,12 @@ Phase 6.4 Complete
                                          Phase 7 Complete
 ```
 
+### Deferred to Phase 8+
+
+- **WorkerHandle tmux-specific** (Issue #48, Finding 1): `WorkerHandle` has hardcoded `tmux_pane_id` field. Refactor to generic `adapter_handle` or associated type when second backend (SSH, Docker) is added in Phase 8.
+- **Parent directory fsync after atomic swap** (Issue #48, Finding 5): After `atomic_swap` rename, parent directory entry is not fsynced. Unlikely to matter in practice but noted for "guaranteed delivery" semantics. Could gate behind config flag. See also: "Windows atomic swap fsync" deferred from Phase 3.
+- **Retention wired into daemon event loop** (Issue #48, Finding 6): `retention.rs` exists (Phase 3) but is CLI-only (`atm cleanup`). Wire into daemon as periodic task or threshold-triggered on hot inboxes to prevent unbounded inbox growth.
+
 ---
 
 ## 10. Phase 8: Cross-Computer Bridge Plugin
