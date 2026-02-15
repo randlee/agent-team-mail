@@ -4,6 +4,7 @@ use super::activity::ActivityTracker;
 use super::capture::LogTailer;
 use super::codex_tmux::CodexTmuxBackend;
 use super::config::WorkersConfig;
+use super::lifecycle::{self, LifecycleManager, WorkerState};
 use super::router::{ConcurrencyPolicy, MessageRouter};
 use super::trait_def::{WorkerAdapter, WorkerHandle};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
@@ -13,7 +14,7 @@ use chrono::Utc;
 use std::collections::HashMap;
 use tokio::time::{interval, Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 /// Worker Adapter plugin — manages async agent teammates in tmux panes
@@ -30,6 +31,8 @@ pub struct WorkerAdapterPlugin {
     activity_tracker: ActivityTracker,
     /// Log tailer for response capture
     log_tailer: LogTailer,
+    /// Lifecycle manager for worker health and restart
+    lifecycle: LifecycleManager,
     /// Cached context for runtime use
     ctx: Option<PluginContext>,
 }
@@ -44,8 +47,15 @@ impl WorkerAdapterPlugin {
             router: MessageRouter::new(),
             activity_tracker: ActivityTracker::default(),
             log_tailer: LogTailer::new(),
+            lifecycle: LifecycleManager::new(),
             ctx: None,
         }
+    }
+
+    /// Get worker status for all configured agents
+    #[allow(dead_code)]
+    pub fn get_worker_states(&self) -> HashMap<String, WorkerState> {
+        self.lifecycle.get_all_states()
     }
 
     /// Format a message using the agent's prompt template
@@ -208,10 +218,58 @@ impl WorkerAdapterPlugin {
         })?;
 
         let handle = backend.spawn(agent_name, "{}").await?;
+        self.lifecycle.register_worker(agent_name);
         self.workers.insert(agent_name.to_string(), handle);
         debug!("Spawned worker for agent {agent_name}");
 
         Ok(())
+    }
+
+    /// Perform health check on all workers
+    async fn health_check_all_workers(&mut self) -> Result<(), PluginError> {
+        let agent_ids: Vec<String> = self.workers.keys().cloned().collect();
+
+        for agent_id in agent_ids {
+            // Skip if health check not needed yet
+            if !self.lifecycle.needs_health_check(&agent_id) {
+                continue;
+            }
+
+            if let Some(handle) = self.workers.get(&agent_id) {
+                let is_healthy = lifecycle::check_worker_health(handle).await;
+                self.lifecycle.update_health_check(&agent_id);
+
+                if !is_healthy {
+                    error!("Worker {agent_id} health check failed, initiating restart");
+                    self.lifecycle.set_state(&agent_id, WorkerState::Crashed);
+
+                    // Attempt restart
+                    if let Some(backend) = self.backend.as_mut() {
+                        if let Err(e) = lifecycle::restart_worker(
+                            &agent_id,
+                            backend.as_mut(),
+                            &mut self.lifecycle,
+                            &mut self.workers,
+                        )
+                        .await
+                        {
+                            error!("Failed to restart worker {agent_id}: {e}");
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Rotate log files for all workers if needed
+    fn rotate_logs_if_needed(&self) {
+        for handle in self.workers.values() {
+            if let Err(e) = lifecycle::rotate_log_if_needed(&handle.log_file_path) {
+                error!("Failed to rotate log for {}: {e}", handle.agent_id);
+            }
+        }
     }
 
     /// Check for inactive agents and mark them as offline
@@ -293,6 +351,9 @@ impl Plugin for WorkerAdapterPlugin {
         // Initialize activity tracker with configured timeout
         self.activity_tracker = ActivityTracker::new(self.config.inactivity_timeout_ms);
 
+        // Initialize lifecycle manager with config
+        self.lifecycle = LifecycleManager::from_config(&self.config);
+
         // Configure router policies for each agent
         for (agent_name, agent_config) in &self.config.agents {
             let policy = match agent_config.concurrency_policy.as_str() {
@@ -310,6 +371,18 @@ impl Plugin for WorkerAdapterPlugin {
         debug!("Worker Adapter plugin initialized with {} backend", self.config.backend);
         debug!("Configured {} agents", self.config.agents.len());
 
+        // Auto-start configured workers
+        if let Some(backend) = self.backend.as_mut() {
+            info!("Auto-starting configured workers on daemon init");
+            lifecycle::auto_start_workers(
+                backend.as_mut(),
+                &self.config,
+                &mut self.lifecycle,
+                &mut self.workers,
+            )
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -320,10 +393,17 @@ impl Plugin for WorkerAdapterPlugin {
             return Ok(());
         }
 
-        debug!("Worker Adapter plugin running with message routing enabled");
+        debug!("Worker Adapter plugin running with lifecycle management enabled");
 
         // Set up periodic inactivity check (every 30 seconds)
         let mut inactivity_timer = interval(Duration::from_secs(30));
+
+        // Set up periodic health check (configurable, default 30 seconds)
+        let health_check_interval = Duration::from_secs(self.config.health_check_interval_secs);
+        let mut health_check_timer = interval(health_check_interval);
+
+        // Set up periodic log rotation check (every 5 minutes)
+        let mut log_rotation_timer = interval(Duration::from_secs(300));
 
         loop {
             tokio::select! {
@@ -336,6 +416,14 @@ impl Plugin for WorkerAdapterPlugin {
                         error!("Failed to check agent inactivity: {e}");
                     }
                 }
+                _ = health_check_timer.tick() => {
+                    if let Err(e) = self.health_check_all_workers().await {
+                        error!("Failed to perform health checks: {e}");
+                    }
+                }
+                _ = log_rotation_timer.tick() => {
+                    self.rotate_logs_if_needed();
+                }
             }
         }
 
@@ -343,14 +431,27 @@ impl Plugin for WorkerAdapterPlugin {
     }
 
     async fn shutdown(&mut self) -> Result<(), PluginError> {
-        // Shut down all active workers
+        // Shut down all active workers gracefully
         if let Some(backend) = &mut self.backend {
+            info!("Shutting down {} workers", self.workers.len());
+
             for (agent_id, handle) in self.workers.drain() {
                 debug!("Shutting down worker for agent {}", agent_id);
-                if let Err(e) = backend.shutdown(&handle).await {
-                    eprintln!("Failed to shut down worker for {agent_id}: {e}");
+
+                // Use graceful shutdown with timeout
+                let timeout_secs = self.config.shutdown_timeout_secs;
+                if let Err(e) =
+                    lifecycle::graceful_shutdown(&agent_id, backend.as_mut(), &handle, timeout_secs)
+                        .await
+                {
+                    error!("Failed to shut down worker for {agent_id}: {e}");
                 }
+
+                // Unregister from lifecycle manager
+                self.lifecycle.unregister_worker(&agent_id);
             }
+
+            info!("All workers shut down");
         }
 
         Ok(())
