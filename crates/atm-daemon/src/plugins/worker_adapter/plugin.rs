@@ -92,11 +92,11 @@ impl WorkerAdapterPlugin {
         message: InboxMessage,
     ) -> Result<(), PluginError> {
         // Check if agent is configured and enabled
-        if let Some(agent_config) = self.config.agents.get(agent_name) {
-            if !agent_config.enabled {
-                debug!("Agent {agent_name} is not enabled for worker adapter");
-                return Ok(());
-            }
+        if let Some(agent_config) = self.config.agents.get(agent_name)
+            && !agent_config.enabled
+        {
+            debug!("Agent {agent_name} is not enabled for worker adapter");
+            return Ok(());
         }
 
         // Route through concurrency control

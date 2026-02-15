@@ -8,20 +8,15 @@ use std::collections::{HashMap, VecDeque};
 use tracing::{debug, warn};
 
 /// Concurrency policy for handling multiple messages to the same agent
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConcurrencyPolicy {
     /// Queue incoming messages (default) — only one message processed at a time
+    #[default]
     Queue,
     /// Reject new messages if agent is busy
     Reject,
     /// Allow concurrent message processing
     Concurrent,
-}
-
-impl Default for ConcurrencyPolicy {
-    fn default() -> Self {
-        Self::Queue
-    }
 }
 
 /// Message router with concurrency control
