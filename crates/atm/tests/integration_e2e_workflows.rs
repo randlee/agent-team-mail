@@ -148,7 +148,7 @@ fn test_send_multiple_read_verify_all_marked() {
         cmd.env("ATM_TEAM", "test-team")
             .arg("send")
             .arg("agent-a")
-            .arg(format!("Message {}", i))
+            .arg(format!("Message {i}"))
             .assert()
             .success();
     }
@@ -238,7 +238,7 @@ fn test_send_read_with_limit_verify() {
         cmd.env("ATM_TEAM", "test-team")
             .arg("send")
             .arg("agent-a")
-            .arg(format!("Message {}", i))
+            .arg(format!("Message {i}"))
             .assert()
             .success();
     }
@@ -392,7 +392,7 @@ fn test_broadcast_read_all_inboxes_verify() {
 
     // Verify all three agents received the message
     for agent in &["agent-a", "agent-b", "agent-c"] {
-        let inbox_path = team_dir.join(format!("inboxes/{}.json", agent));
+        let inbox_path = team_dir.join(format!("inboxes/{agent}.json"));
         assert!(inbox_path.exists());
 
         let content = fs::read_to_string(&inbox_path).unwrap();
@@ -415,7 +415,7 @@ fn test_broadcast_read_all_inboxes_verify() {
 
     // Verify all messages are marked as read
     for agent in &["agent-a", "agent-b", "agent-c"] {
-        let inbox_path = team_dir.join(format!("inboxes/{}.json", agent));
+        let inbox_path = team_dir.join(format!("inboxes/{agent}.json"));
         let content = fs::read_to_string(&inbox_path).unwrap();
         let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
         assert_eq!(messages[0]["read"], true);
@@ -441,7 +441,7 @@ fn test_broadcast_cross_team_verify() {
 
     // Verify all team-b agents received the message
     for agent in &["agent-a", "agent-b", "agent-c"] {
-        let inbox_path = team_dir_b.join(format!("inboxes/{}.json", agent));
+        let inbox_path = team_dir_b.join(format!("inboxes/{agent}.json"));
         assert!(inbox_path.exists());
 
         let content = fs::read_to_string(&inbox_path).unwrap();
@@ -462,7 +462,7 @@ fn test_broadcast_cross_team_verify() {
 
     // Verify all are read
     for agent in &["agent-a", "agent-b", "agent-c"] {
-        let inbox_path = team_dir_b.join(format!("inboxes/{}.json", agent));
+        let inbox_path = team_dir_b.join(format!("inboxes/{agent}.json"));
         let content = fs::read_to_string(&inbox_path).unwrap();
         let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
         assert_eq!(messages[0]["read"], true);
@@ -480,14 +480,14 @@ fn test_broadcast_multiple_times_verify_all_received() {
         set_home_env(&mut cmd, &temp_dir);
         cmd.env("ATM_TEAM", "test-team")
             .arg("broadcast")
-            .arg(format!("Broadcast {}", i))
+            .arg(format!("Broadcast {i}"))
             .assert()
             .success();
     }
 
     // Verify each agent has 3 messages
     for agent in &["agent-a", "agent-b", "agent-c"] {
-        let inbox_path = team_dir.join(format!("inboxes/{}.json", agent));
+        let inbox_path = team_dir.join(format!("inboxes/{agent}.json"));
         let content = fs::read_to_string(&inbox_path).unwrap();
         let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
         assert_eq!(messages.len(), 3);
@@ -506,7 +506,7 @@ fn test_broadcast_multiple_times_verify_all_received() {
 
     // Verify all messages are read
     for agent in &["agent-a", "agent-b", "agent-c"] {
-        let inbox_path = team_dir.join(format!("inboxes/{}.json", agent));
+        let inbox_path = team_dir.join(format!("inboxes/{agent}.json"));
         let content = fs::read_to_string(&inbox_path).unwrap();
         let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
         assert!(messages.iter().all(|m| m["read"] == true));
@@ -541,7 +541,7 @@ fn test_broadcast_sender_no_self_message() {
 
     // Verify agent-b and agent-c did receive it
     for agent in &["agent-b", "agent-c"] {
-        let inbox_path = team_dir.join(format!("inboxes/{}.json", agent));
+        let inbox_path = team_dir.join(format!("inboxes/{agent}.json"));
         assert!(inbox_path.exists());
 
         let content = fs::read_to_string(&inbox_path).unwrap();
@@ -784,7 +784,7 @@ fn test_team_discussion_workflow() {
             .env("ATM_IDENTITY", agent)
             .arg("send")
             .arg("team-lead")
-            .arg(format!("Status from {}: All good", agent))
+            .arg(format!("Status from {agent}: All good"))
             .assert()
             .success();
     }
@@ -880,7 +880,7 @@ fn test_inbox_summary_workflow() {
             cmd.env("ATM_TEAM", "test-team")
                 .arg("send")
                 .arg(agent)
-                .arg(format!("Message {} to {}", i, agent))
+                .arg(format!("Message {i} to {agent}"))
                 .assert()
                 .success();
         }
