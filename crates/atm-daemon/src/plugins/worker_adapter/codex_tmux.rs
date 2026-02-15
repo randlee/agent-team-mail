@@ -164,16 +164,16 @@ impl WorkerAdapter for CodexTmuxBackend {
             });
         }
 
-        let tmux_pane_id = String::from_utf8_lossy(&output.stdout)
+        let pane_id = String::from_utf8_lossy(&output.stdout)
             .trim()
             .to_string();
 
-        debug!("Created tmux pane {tmux_pane_id} for agent {agent_id}");
+        debug!("Created tmux pane {pane_id} for agent {agent_id}");
 
         // Build the startup command with log capture via tee.
         // The command is sent as a shell line so tee captures all output.
         let log_display = log_path.display();
-        let startup = format!("{command} 2>&1 | tee -a {log_display}");
+        let startup = format!("{command} 2>&1 | tee -a '{log_display}'");
 
         debug!("Starting worker {agent_id} with: {startup}");
 
@@ -182,7 +182,7 @@ impl WorkerAdapter for CodexTmuxBackend {
         Command::new("tmux")
             .arg("send-keys")
             .arg("-t")
-            .arg(&tmux_pane_id)
+            .arg(&pane_id)
             .arg("-l") // LITERAL MODE - prevents command injection
             .arg(&startup)
             .output()
@@ -195,7 +195,7 @@ impl WorkerAdapter for CodexTmuxBackend {
         Command::new("tmux")
             .arg("send-keys")
             .arg("-t")
-            .arg(&tmux_pane_id)
+            .arg(&pane_id)
             .arg("Enter")
             .output()
             .map_err(|e| PluginError::Runtime {
@@ -205,7 +205,7 @@ impl WorkerAdapter for CodexTmuxBackend {
 
         Ok(WorkerHandle {
             agent_id: agent_id.to_string(),
-            tmux_pane_id,
+            backend_id: pane_id,
             log_file_path: log_path,
         })
     }
@@ -220,7 +220,7 @@ impl WorkerAdapter for CodexTmuxBackend {
         let output = Command::new("tmux")
             .arg("send-keys")
             .arg("-t")
-            .arg(&handle.tmux_pane_id)
+            .arg(&handle.backend_id)
             .arg("-l") // LITERAL MODE - mandatory for safety
             .arg(message)
             .output()
@@ -230,7 +230,7 @@ impl WorkerAdapter for CodexTmuxBackend {
             })?;
 
         if !output.status.success() {
-            let pane_id = &handle.tmux_pane_id;
+            let pane_id = &handle.backend_id;
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(PluginError::Runtime {
                 message: format!("Failed to send message to pane {pane_id}: {stderr}"),
@@ -242,7 +242,7 @@ impl WorkerAdapter for CodexTmuxBackend {
         let output = Command::new("tmux")
             .arg("send-keys")
             .arg("-t")
-            .arg(&handle.tmux_pane_id)
+            .arg(&handle.backend_id)
             .arg("Enter")
             .output()
             .map_err(|e| PluginError::Runtime {
@@ -251,13 +251,13 @@ impl WorkerAdapter for CodexTmuxBackend {
             })?;
 
         if !output.status.success() {
-            let pane_id = &handle.tmux_pane_id;
+            let pane_id = &handle.backend_id;
             let stderr = String::from_utf8_lossy(&output.stderr);
             warn!("Failed to send Enter key to pane {pane_id}: {stderr}");
         }
 
         let agent_id = &handle.agent_id;
-        let pane_id = &handle.tmux_pane_id;
+        let pane_id = &handle.backend_id;
         debug!("Sent message to agent {agent_id} in pane {pane_id}");
 
         Ok(())
@@ -268,7 +268,7 @@ impl WorkerAdapter for CodexTmuxBackend {
         let output = Command::new("tmux")
             .arg("kill-pane")
             .arg("-t")
-            .arg(&handle.tmux_pane_id)
+            .arg(&handle.backend_id)
             .output()
             .map_err(|e| PluginError::Runtime {
                 message: format!("Failed to kill tmux pane: {e}"),
@@ -276,13 +276,13 @@ impl WorkerAdapter for CodexTmuxBackend {
             })?;
 
         if !output.status.success() {
-            let pane_id = &handle.tmux_pane_id;
+            let pane_id = &handle.backend_id;
             let agent_id = &handle.agent_id;
             let stderr = String::from_utf8_lossy(&output.stderr);
             warn!("Failed to kill pane {pane_id} for agent {agent_id}: {stderr}");
             // Don't return error — pane may already be gone
         } else {
-            let pane_id = &handle.tmux_pane_id;
+            let pane_id = &handle.backend_id;
             let agent_id = &handle.agent_id;
             debug!("Shut down tmux pane {pane_id} for agent {agent_id}");
         }

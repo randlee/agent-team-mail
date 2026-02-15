@@ -471,6 +471,16 @@ fn test_validate_agent_name() {
 }
 
 #[test]
+fn test_validate_command() {
+    assert!(WorkersConfig::validate_command("codex --yolo").is_ok());
+    assert!(WorkersConfig::validate_command("codex --yolo --last").is_ok());
+    assert!(WorkersConfig::validate_command("").is_err());
+    assert!(WorkersConfig::validate_command("   ").is_err());
+    // Shell-chaining patterns produce warnings but don't error
+    assert!(WorkersConfig::validate_command("cmd1 && cmd2").is_ok());
+}
+
+#[test]
 fn test_validate_concurrency_policy() {
     assert!(WorkersConfig::validate_concurrency_policy("queue").is_ok());
     assert!(WorkersConfig::validate_concurrency_policy("reject").is_ok());

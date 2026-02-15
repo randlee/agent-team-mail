@@ -201,10 +201,7 @@ impl WorkerAdapterPlugin {
             debug!("Wrote response to {sender_name} inbox");
         }
 
-        // Mark agent as finished processing (using member_name)
-        self.router.agent_finished(&member_name);
-
-        // Check for queued messages and process next one
+        // Mark agent as finished and check for queued messages
         if let Some(next_message) = self.router.agent_finished(&member_name) {
             debug!("Processing next queued message for {member_name}");
             Box::pin(self.process_message(config_key, next_message)).await?;

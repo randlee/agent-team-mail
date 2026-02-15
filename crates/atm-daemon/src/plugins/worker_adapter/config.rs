@@ -191,6 +191,35 @@ impl WorkersConfig {
         Ok(())
     }
 
+    /// Validate startup command
+    ///
+    /// Ensures the command is non-empty when workers are enabled.
+    /// Logs a warning for commands containing shell-chaining operators.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` if command is empty
+    pub fn validate_command(command: &str) -> Result<(), PluginError> {
+        if command.trim().is_empty() {
+            return Err(PluginError::Config {
+                message: "Worker startup command cannot be empty".to_string(),
+            });
+        }
+
+        // Warn about shell-chaining operators (informational, not a hard error)
+        for pattern in &["&&", "||", ";", "$("] {
+            if command.contains(pattern) {
+                tracing::warn!(
+                    "Worker command contains shell operator '{pattern}': {command}. \
+                     Ensure this is intentional."
+                );
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Validate concurrency policy
     ///
     /// # Arguments
@@ -237,9 +266,10 @@ impl WorkersConfig {
         // Validate tmux session
         Self::validate_tmux_session(&self.tmux_session)?;
 
-        // If enabled, team_name is required
+        // If enabled, team_name and command are required
         if self.enabled {
             Self::validate_team_name(&self.team_name)?;
+            Self::validate_command(&self.command)?;
         }
 
         // Track member_names to check for duplicates
@@ -250,6 +280,11 @@ impl WorkersConfig {
             Self::validate_agent_name(agent_name)?;
             Self::validate_member_name(&agent_config.member_name)?;
             Self::validate_concurrency_policy(&agent_config.concurrency_policy)?;
+
+            // Validate per-agent command override if present
+            if let Some(cmd) = &agent_config.command {
+                Self::validate_command(cmd)?;
+            }
 
             // Check for duplicate member_names
             if !member_names.insert(&agent_config.member_name) {

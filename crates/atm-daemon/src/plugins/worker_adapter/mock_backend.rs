@@ -149,7 +149,7 @@ impl WorkerAdapter for MockTmuxBackend {
 
         let handle = WorkerHandle {
             agent_id: agent_id.to_string(),
-            tmux_pane_id: format!("mock-pane-{agent_id}"),
+            backend_id: format!("mock-pane-{agent_id}"),
             log_file_path: log_path,
         };
 
@@ -225,7 +225,7 @@ mod tests {
         let handle = backend.spawn("test-agent", "{}").await.unwrap();
 
         assert_eq!(handle.agent_id, "test-agent");
-        assert_eq!(handle.tmux_pane_id, "mock-pane-test-agent");
+        assert_eq!(handle.backend_id, "mock-pane-test-agent");
         assert!(handle.log_file_path.exists());
         assert!(backend.is_spawned("test-agent"));
         assert_eq!(backend.spawned_count(), 1);

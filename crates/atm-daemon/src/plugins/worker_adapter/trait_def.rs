@@ -12,8 +12,8 @@ use std::path::PathBuf;
 pub struct WorkerHandle {
     /// Agent identifier (e.g., "arch-ctm@atm-planning")
     pub agent_id: String,
-    /// TMUX pane identifier (e.g., "%1", "%2")
-    pub tmux_pane_id: String,
+    /// Backend-assigned process identifier (e.g., tmux pane "%1", container ID, SSH session)
+    pub backend_id: String,
     /// Path to the worker's log file
     pub log_file_path: PathBuf,
 }

@@ -263,7 +263,7 @@ pub async fn check_worker_health(handle: &WorkerHandle) -> bool {
     match output {
         Ok(output) if output.status.success() => {
             let panes = String::from_utf8_lossy(&output.stdout);
-            panes.contains(&handle.tmux_pane_id)
+            panes.contains(&handle.backend_id)
         }
         Ok(output) => {
             warn!(
