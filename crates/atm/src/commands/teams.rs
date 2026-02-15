@@ -1,6 +1,8 @@
 //! Teams command implementation
 
 use anyhow::Result;
+use atm_core::io::atomic::atomic_swap;
+use atm_core::io::lock::acquire_lock;
 use atm_core::schema::TeamConfig;
 use chrono::{DateTime, Utc};
 use clap::Args;
@@ -8,6 +10,7 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::io::Write;
 
 use crate::util::settings::get_home_dir;
 
@@ -161,6 +164,10 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
         anyhow::bail!("Team config not found at {}", config_path.display());
     }
 
+    let lock_path = config_path.with_extension("lock");
+    let _lock = acquire_lock(&lock_path, 5)
+        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
+
     let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
 
     let agent_id = format!("{}@{}", args.agent, args.team);
@@ -201,7 +208,13 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
 
     team_config.members.push(member);
     let serialized = serde_json::to_string_pretty(&team_config)?;
-    fs::write(&config_path, serialized)?;
+    let tmp_path = config_path.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp_path)?;
+    file.write_all(serialized.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
+    atomic_swap(&config_path, &tmp_path)?;
 
     println!(
         "Added member '{}' to team '{}' (agentType='{}')",

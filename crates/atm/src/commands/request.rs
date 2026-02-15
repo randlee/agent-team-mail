@@ -175,10 +175,19 @@ fn read_and_mark_response(
     let mut found: Option<InboxMessage> = None;
     inbox_update(inbox_path, team, agent, |messages| {
         for msg in messages.iter_mut().rev() {
-            if found.is_none()
-                && msg.from == expected_from
-                && msg.text.contains(request_id)
-            {
+            if found.is_some() || msg.from != expected_from {
+                continue;
+            }
+
+            let matches_request = msg
+                .unknown_fields
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| id == request_id)
+                || msg.message_id.as_deref() == Some(request_id)
+                || msg.text.contains(request_id);
+
+            if matches_request {
                 msg.read = true;
                 found = Some(msg.clone());
                 break;
@@ -208,5 +217,80 @@ fn one_line(text: &str) -> String {
         format!("{}...", &single[..120])
     } else {
         single
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    fn write_inbox(path: &std::path::Path, messages: &[InboxMessage]) {
+        let content = serde_json::to_string_pretty(messages).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn test_read_and_mark_response_matches_unknown_field_request_id() {
+        let temp = TempDir::new().unwrap();
+        let inbox_path = temp.path().join("inbox.json");
+
+        let mut fields = HashMap::new();
+        fields.insert("requestId".to_string(), serde_json::Value::String("req-123".to_string()));
+
+        let msg = InboxMessage {
+            from: "responder".to_string(),
+            text: "response body".to_string(),
+            timestamp: "2026-02-14T00:00:00Z".to_string(),
+            read: false,
+            summary: None,
+            message_id: None,
+            unknown_fields: fields,
+        };
+
+        write_inbox(&inbox_path, &[msg]);
+
+        let found = read_and_mark_response(
+            &inbox_path,
+            "team",
+            "agent",
+            "responder",
+            "req-123",
+        )
+        .unwrap();
+
+        assert!(found.is_some());
+        assert!(found.unwrap().read);
+    }
+
+    #[test]
+    fn test_read_and_mark_response_matches_message_id() {
+        let temp = TempDir::new().unwrap();
+        let inbox_path = temp.path().join("inbox.json");
+
+        let msg = InboxMessage {
+            from: "responder".to_string(),
+            text: "response body".to_string(),
+            timestamp: "2026-02-14T00:00:00Z".to_string(),
+            read: false,
+            summary: None,
+            message_id: Some("req-456".to_string()),
+            unknown_fields: HashMap::new(),
+        };
+
+        write_inbox(&inbox_path, &[msg]);
+
+        let found = read_and_mark_response(
+            &inbox_path,
+            "team",
+            "agent",
+            "responder",
+            "req-456",
+        )
+        .unwrap();
+
+        assert!(found.is_some());
+        assert!(found.unwrap().read);
     }
 }

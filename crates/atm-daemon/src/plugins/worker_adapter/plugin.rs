@@ -14,7 +14,7 @@ use chrono::Utc;
 use std::collections::HashMap;
 use tokio::time::{interval, Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Worker Adapter plugin — manages async agent teammates in tmux panes
@@ -56,6 +56,79 @@ impl WorkerAdapterPlugin {
     #[allow(dead_code)]
     pub fn get_worker_states(&self) -> HashMap<String, WorkerState> {
         self.lifecycle.get_all_states()
+    }
+
+    fn resolve_team_name<'a>(
+        &'a self,
+        ctx: &'a PluginContext,
+        msg: Option<&'a InboxMessage>,
+    ) -> &'a str {
+        if let Some(msg) = msg {
+            if let Some(team) = msg.unknown_fields.get("team").and_then(|v| v.as_str()) {
+                return team;
+            }
+        }
+
+        if self.config.team_name.is_empty() {
+            &ctx.system.default_team
+        } else {
+            &self.config.team_name
+        }
+    }
+
+    fn team_config_path(&self, ctx: &PluginContext, team_name: &str) -> std::path::PathBuf {
+        ctx.system
+            .claude_root
+            .join("teams")
+            .join(team_name)
+            .join("config.json")
+    }
+
+    fn record_activity(&self, ctx: &PluginContext, team_name: &str, member_name: &str) {
+        let team_config_path = self.team_config_path(ctx, team_name);
+        if team_config_path.exists() {
+            if let Err(e) = self
+                .activity_tracker
+                .record_activity(&team_config_path, member_name)
+            {
+                warn!("Failed to record activity for {member_name}: {e}");
+            }
+        }
+    }
+
+    fn notify_routing_issue(
+        &self,
+        ctx: &PluginContext,
+        team_name: &str,
+        sender_name: &str,
+        details: &str,
+    ) {
+        let warning_text = format!(
+            "Warning: worker_adapter could not route your message. {details}\n\nAction: Please specify a valid recipient (agent member_name)."
+        );
+
+        let warn_msg = InboxMessage {
+            from: "worker-adapter".to_string(),
+            text: warning_text,
+            timestamp: Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some("Worker adapter routing warning".to_string()),
+            message_id: Some(Uuid::new_v4().to_string()),
+            unknown_fields: HashMap::new(),
+        };
+
+        let team_root = ctx.system.claude_root.join("teams").join(team_name);
+        let sender_inbox = team_root.join("inboxes").join(format!("{sender_name}.json"));
+        if let Err(e) = inbox_append(&sender_inbox, &warn_msg, team_name, sender_name) {
+            error!("Failed to warn sender {sender_name}: {e}");
+        }
+
+        if sender_name != "team-lead" {
+            let lead_inbox = team_root.join("inboxes").join("team-lead.json");
+            if let Err(e) = inbox_append(&lead_inbox, &warn_msg, team_name, "team-lead") {
+                error!("Failed to warn team-lead: {e}");
+            }
+        }
     }
 
     /// Format a message using the agent's prompt template
@@ -151,20 +224,8 @@ impl WorkerAdapterPlugin {
             message: "Plugin context not initialized".to_string(),
             source: None,
         })?;
-        let team_name = if self.config.team_name.is_empty() {
-            &ctx.system.default_team
-        } else {
-            &self.config.team_name
-        };
-        let team_config_path = ctx
-            .system
-            .claude_root
-            .join("teams")
-            .join(team_name)
-            .join("config.json");
-        if team_config_path.exists() {
-            let _ = self.activity_tracker.record_activity(&team_config_path, &member_name);
-        }
+        let team_name = self.resolve_team_name(ctx, Some(&message));
+        self.record_activity(ctx, team_name, &member_name);
 
         // Capture response from log file (uses blocking sleep, so wrap in spawn_blocking)
         let log_path = worker_handle.log_file_path.clone();
@@ -195,24 +256,7 @@ impl WorkerAdapterPlugin {
         debug!("Captured response from {member_name}: {} bytes", captured.response_text.len());
 
         // Record activity after successful response capture
-        let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
-            message: "Plugin context not initialized".to_string(),
-            source: None,
-        })?;
-        let team_name_for_activity = if self.config.team_name.is_empty() {
-            &ctx.system.default_team
-        } else {
-            &self.config.team_name
-        };
-        let team_config_path_for_activity = ctx
-            .system
-            .claude_root
-            .join("teams")
-            .join(team_name_for_activity)
-            .join("config.json");
-        if team_config_path_for_activity.exists() {
-            let _ = self.activity_tracker.record_activity(&team_config_path_for_activity, &member_name);
-        }
+        self.record_activity(ctx, team_name, &member_name);
 
         // Build response message (use member_name as sender)
         let response = InboxMessage {
@@ -240,12 +284,8 @@ impl WorkerAdapterPlugin {
             source: None,
         })?;
 
-        // Use workers.team_name for routing, falling back to default_team
-        let team_name = if self.config.team_name.is_empty() {
-            &ctx.system.default_team
-        } else {
-            &self.config.team_name
-        };
+        // Use workers.team_name or message team (if present)
+        let team_name = self.resolve_team_name(ctx, Some(&message));
         let home_dir = &ctx.system.claude_root;
         let sender_inbox_path = home_dir
             .join("teams")
@@ -353,11 +393,7 @@ impl WorkerAdapterPlugin {
         })?;
 
         // Use workers.team_name for team lookups, falling back to default_team
-        let team_name = if self.config.team_name.is_empty() {
-            &ctx.system.default_team
-        } else {
-            &self.config.team_name
-        };
+        let team_name = self.resolve_team_name(ctx, None);
         let home_dir = &ctx.system.claude_root;
         let team_config_path = home_dir
             .join("teams")
@@ -541,29 +577,46 @@ impl Plugin for WorkerAdapterPlugin {
             return Ok(());
         }
 
-        // Determine target agent from unknown_fields["recipient"] or by matching member_name
-        let target_config_key = if let Some(recipient) = msg.unknown_fields.get("recipient") {
-            // Explicit recipient — find config key by member_name match
-            let recipient_str = recipient.as_str().unwrap_or_default();
-            self.config
-                .agents
-                .iter()
-                .find(|(_, cfg)| cfg.member_name == recipient_str)
-                .map(|(key, _)| key.clone())
-        } else {
-            // No explicit recipient — try to match against member_names directly
-            // (e.g., message addressed to "arch-ctm" where that's a member_name)
-            self.config
-                .agents
-                .iter()
-                .find(|(_, cfg)| cfg.enabled)
-                .map(|(key, _)| key.clone())
+        let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
+            message: "Plugin context not initialized".to_string(),
+            source: None,
+        })?;
+
+        let team_name = self.resolve_team_name(ctx, Some(msg));
+
+        let recipient = msg
+            .unknown_fields
+            .get("recipient")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let recipient = match recipient {
+            Some(recipient) => recipient,
+            None => {
+                self.notify_routing_issue(
+                    ctx,
+                    team_name,
+                    &msg.from,
+                    "Recipient not specified in message metadata.",
+                );
+                return Ok(());
+            }
         };
 
+        // Determine target agent from unknown_fields["recipient"]
+        let target_config_key = self
+            .config
+            .agents
+            .iter()
+            .find(|(_, cfg)| cfg.enabled && cfg.member_name == recipient)
+            .map(|(key, _)| key.clone());
+
         let Some(config_key) = target_config_key else {
-            debug!(
-                "No target agent found for message from {} — skipping",
-                msg.from
+            self.notify_routing_issue(
+                ctx,
+                team_name,
+                &msg.from,
+                &format!("Recipient '{recipient}' not found or not enabled."),
             );
             return Ok(());
         };

@@ -3,6 +3,7 @@
 use crate::daemon::{graceful_shutdown, spool_drain_loop, watch_inboxes, InboxEvent, InboxEventKind};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use anyhow::{Context, Result};
+use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -113,7 +114,7 @@ pub async fn run(
                         continue;
                     }
 
-                    let inbox_msg = match read_latest_inbox_message(&event.path).await {
+                    let mut inbox_msg = match read_latest_inbox_message(&event.path).await {
                         Ok(Some(msg)) => msg,
                         Ok(None) => continue,
                         Err(e) => {
@@ -127,17 +128,22 @@ pub async fn run(
                         }
                     };
 
+                    // Attach routing metadata for plugins
+                    inbox_msg
+                        .unknown_fields
+                        .insert("recipient".to_string(), Value::String(event.agent.clone()));
+                    inbox_msg
+                        .unknown_fields
+                        .insert("team".to_string(), Value::String(event.team.clone()));
+
                     // Dispatch to all plugins with EventListener capability
                     for (metadata, plugin_arc) in &dispatch_plugins {
                         if metadata.capabilities.contains(&Capability::EventListener) {
-                            // Try to acquire lock without blocking
-                            if let Ok(mut plugin) = plugin_arc.try_lock() {
-                                debug!("Dispatching to plugin: {}", metadata.name);
-                                if let Err(e) = plugin.handle_message(&inbox_msg).await {
-                                    error!("Plugin {} handle_message error: {}", metadata.name, e);
-                                }
-                            } else {
-                                debug!("Plugin {} is busy, skipping event dispatch", metadata.name);
+                            // Await lock to avoid dropping events under load
+                            let mut plugin = plugin_arc.lock().await;
+                            debug!("Dispatching to plugin: {}", metadata.name);
+                            if let Err(e) = plugin.handle_message(&inbox_msg).await {
+                                error!("Plugin {} handle_message error: {}", metadata.name, e);
                             }
                         }
                     }
