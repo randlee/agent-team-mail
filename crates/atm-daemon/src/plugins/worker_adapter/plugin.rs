@@ -187,7 +187,12 @@ impl WorkerAdapterPlugin {
             source: None,
         })?;
 
-        let team_name = &ctx.system.default_team;
+        // Use workers.team_name for routing, falling back to default_team
+        let team_name = if self.config.team_name.is_empty() {
+            &ctx.system.default_team
+        } else {
+            &self.config.team_name
+        };
         let home_dir = &ctx.system.claude_root;
         let sender_inbox_path = home_dir
             .join("teams")
@@ -294,7 +299,12 @@ impl WorkerAdapterPlugin {
             source: None,
         })?;
 
-        let team_name = &ctx.system.default_team;
+        // Use workers.team_name for team lookups, falling back to default_team
+        let team_name = if self.config.team_name.is_empty() {
+            &ctx.system.default_team
+        } else {
+            &self.config.team_name
+        };
         let home_dir = &ctx.system.claude_root;
         let team_config_path = home_dir
             .join("teams")
@@ -474,18 +484,44 @@ impl Plugin for WorkerAdapterPlugin {
     }
 
     async fn handle_message(&mut self, msg: &InboxMessage) -> Result<(), PluginError> {
-        // Sprint 7.2: Implement message routing
-        // This is called when a new inbox message is detected by the daemon
+        if !self.config.enabled {
+            return Ok(());
+        }
 
-        // For now, we need to determine the target agent from context
-        // The daemon should provide this information, but we'll use a placeholder
-        // In a real implementation, the daemon would pass the target agent name
+        // Determine target agent from unknown_fields["recipient"] or by matching member_name
+        let target_config_key = if let Some(recipient) = msg.unknown_fields.get("recipient") {
+            // Explicit recipient — find config key by member_name match
+            let recipient_str = recipient.as_str().unwrap_or_default();
+            self.config
+                .agents
+                .iter()
+                .find(|(_, cfg)| cfg.member_name == recipient_str)
+                .map(|(key, _)| key.clone())
+        } else {
+            // No explicit recipient — try to match against member_names directly
+            // (e.g., message addressed to "arch-ctm" where that's a member_name)
+            self.config
+                .agents
+                .iter()
+                .find(|(_, cfg)| cfg.enabled)
+                .map(|(key, _)| key.clone())
+        };
 
-        // TODO: Get target agent from daemon context
-        // For now, skip message handling (will be implemented when daemon provides routing info)
+        let Some(config_key) = target_config_key else {
+            debug!(
+                "No target agent found for message from {} — skipping",
+                msg.from
+            );
+            return Ok(());
+        };
 
-        debug!("Received message from {} (routing not yet implemented)", msg.from);
-        Ok(())
+        debug!(
+            "Routing message from {} to agent {} (config key: {config_key})",
+            msg.from,
+            self.config.agents[&config_key].member_name
+        );
+
+        self.process_message(&config_key, msg.clone()).await
     }
 }
 
