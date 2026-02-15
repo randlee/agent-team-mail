@@ -52,6 +52,122 @@ pub struct WorkersConfig {
 }
 
 impl WorkersConfig {
+    /// Validate backend name
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - Backend name to validate
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` if backend is not supported
+    pub fn validate_backend(backend: &str) -> Result<(), PluginError> {
+        if backend != "codex-tmux" {
+            return Err(PluginError::Config {
+                message: format!(
+                    "Unsupported worker backend: '{backend}'. Currently only 'codex-tmux' is supported."
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate tmux session name
+    ///
+    /// # Arguments
+    ///
+    /// * `session_name` - Session name to validate
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` if session name is invalid
+    pub fn validate_tmux_session(session_name: &str) -> Result<(), PluginError> {
+        if session_name.is_empty() {
+            return Err(PluginError::Config {
+                message: "TMUX session name cannot be empty".to_string(),
+            });
+        }
+
+        // TMUX session names cannot contain colons, dots, or periods
+        if session_name.contains(':') || session_name.contains('.') {
+            return Err(PluginError::Config {
+                message: format!(
+                    "Invalid TMUX session name '{session_name}': cannot contain ':' or '.'"
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate agent name
+    ///
+    /// # Arguments
+    ///
+    /// * `agent_name` - Agent name to validate
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` if agent name is invalid
+    pub fn validate_agent_name(agent_name: &str) -> Result<(), PluginError> {
+        if agent_name.is_empty() {
+            return Err(PluginError::Config {
+                message: "Agent name cannot be empty".to_string(),
+            });
+        }
+
+        // Agent names should follow the pattern: name@team or just name
+        // We'll be lenient here and just check for basic sanity
+        if agent_name.contains('\n') || agent_name.contains('\r') {
+            return Err(PluginError::Config {
+                message: format!("Invalid agent name '{agent_name}': cannot contain newlines"),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate concurrency policy
+    ///
+    /// # Arguments
+    ///
+    /// * `policy` - Concurrency policy to validate
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` if policy is invalid
+    pub fn validate_concurrency_policy(policy: &str) -> Result<(), PluginError> {
+        match policy {
+            "queue" | "reject" | "concurrent" => Ok(()),
+            _ => Err(PluginError::Config {
+                message: format!(
+                    "Invalid concurrency policy '{policy}'. Must be 'queue', 'reject', or 'concurrent'"
+                ),
+            }),
+        }
+    }
+
+    /// Validate the entire configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` if any validation fails
+    pub fn validate(&self) -> Result<(), PluginError> {
+        // Validate backend
+        Self::validate_backend(&self.backend)?;
+
+        // Validate tmux session
+        Self::validate_tmux_session(&self.tmux_session)?;
+
+        // Validate each agent
+        for (agent_name, agent_config) in &self.agents {
+            Self::validate_agent_name(agent_name)?;
+            Self::validate_concurrency_policy(&agent_config.concurrency_policy)?;
+        }
+
+        Ok(())
+    }
+
     /// Parse configuration from TOML table
     ///
     /// # Arguments
@@ -153,14 +269,7 @@ impl WorkersConfig {
             }
         }
 
-        // Validate backend
-        if backend != "codex-tmux" {
-            return Err(PluginError::Config {
-                message: format!("Unsupported worker backend: '{backend}'. Currently only 'codex-tmux' is supported."),
-            });
-        }
-
-        Ok(Self {
+        let config = Self {
             enabled,
             backend,
             tmux_session,
@@ -171,7 +280,12 @@ impl WorkersConfig {
             restart_backoff_secs,
             shutdown_timeout_secs,
             agents,
-        })
+        };
+
+        // Validate the configuration
+        config.validate()?;
+
+        Ok(config)
     }
 }
 
@@ -298,5 +412,142 @@ tmux_session = false
         unsafe {
             std::env::remove_var("ATM_HOME");
         }
+    }
+
+    #[test]
+    fn test_validate_backend_valid() {
+        assert!(WorkersConfig::validate_backend("codex-tmux").is_ok());
+    }
+
+    #[test]
+    fn test_validate_backend_invalid() {
+        let result = WorkersConfig::validate_backend("invalid-backend");
+        assert!(result.is_err());
+        if let Err(PluginError::Config { message }) = result {
+            assert!(message.contains("Unsupported worker backend"));
+            assert!(message.contains("invalid-backend"));
+        } else {
+            panic!("Expected Config error");
+        }
+    }
+
+    #[test]
+    fn test_validate_tmux_session_valid() {
+        assert!(WorkersConfig::validate_tmux_session("atm-workers").is_ok());
+        assert!(WorkersConfig::validate_tmux_session("my_session").is_ok());
+        assert!(WorkersConfig::validate_tmux_session("session123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_tmux_session_empty() {
+        let result = WorkersConfig::validate_tmux_session("");
+        assert!(result.is_err());
+        if let Err(PluginError::Config { message }) = result {
+            assert!(message.contains("cannot be empty"));
+        } else {
+            panic!("Expected Config error");
+        }
+    }
+
+    #[test]
+    fn test_validate_tmux_session_invalid_chars() {
+        let result = WorkersConfig::validate_tmux_session("session:name");
+        assert!(result.is_err());
+        if let Err(PluginError::Config { message }) = result {
+            assert!(message.contains("cannot contain ':' or '.'"));
+        } else {
+            panic!("Expected Config error");
+        }
+
+        let result = WorkersConfig::validate_tmux_session("session.name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_agent_name_valid() {
+        assert!(WorkersConfig::validate_agent_name("agent1").is_ok());
+        assert!(WorkersConfig::validate_agent_name("arch-ctm@atm-planning").is_ok());
+        assert!(WorkersConfig::validate_agent_name("my_agent").is_ok());
+    }
+
+    #[test]
+    fn test_validate_agent_name_empty() {
+        let result = WorkersConfig::validate_agent_name("");
+        assert!(result.is_err());
+        if let Err(PluginError::Config { message }) = result {
+            assert!(message.contains("cannot be empty"));
+        } else {
+            panic!("Expected Config error");
+        }
+    }
+
+    #[test]
+    fn test_validate_agent_name_newlines() {
+        let result = WorkersConfig::validate_agent_name("agent\nname");
+        assert!(result.is_err());
+        if let Err(PluginError::Config { message }) = result {
+            assert!(message.contains("cannot contain newlines"));
+        } else {
+            panic!("Expected Config error");
+        }
+    }
+
+    #[test]
+    fn test_validate_concurrency_policy_valid() {
+        assert!(WorkersConfig::validate_concurrency_policy("queue").is_ok());
+        assert!(WorkersConfig::validate_concurrency_policy("reject").is_ok());
+        assert!(WorkersConfig::validate_concurrency_policy("concurrent").is_ok());
+    }
+
+    #[test]
+    fn test_validate_concurrency_policy_invalid() {
+        let result = WorkersConfig::validate_concurrency_policy("invalid");
+        assert!(result.is_err());
+        if let Err(PluginError::Config { message }) = result {
+            assert!(message.contains("Invalid concurrency policy"));
+            assert!(message.contains("invalid"));
+        } else {
+            panic!("Expected Config error");
+        }
+    }
+
+    #[test]
+    fn test_validate_full_config() {
+        let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+tmux_session = "atm-workers"
+[agents."test-agent"]
+enabled = true
+concurrency_policy = "queue"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = WorkersConfig::from_toml(&table).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_config_invalid_tmux_session() {
+        let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+tmux_session = "invalid:session"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let result = WorkersConfig::from_toml(&table);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_config_invalid_policy() {
+        let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+[agents."test-agent"]
+concurrency_policy = "invalid-policy"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let result = WorkersConfig::from_toml(&table);
+        assert!(result.is_err());
     }
 }
