@@ -13,6 +13,8 @@ pub const DEFAULT_COMMAND: &str = "codex --yolo";
 pub struct AgentConfig {
     /// Whether this agent is enabled for worker adapter
     pub enabled: bool,
+    /// Team member name for this agent (required, used as runtime identity)
+    pub member_name: String,
     /// Startup command override (if None, uses WorkersConfig.command)
     pub command: Option<String>,
     /// Prompt template for message formatting
@@ -25,6 +27,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            member_name: String::new(),
             command: None,
             prompt_template: "{message}".to_string(),
             concurrency_policy: "queue".to_string(),
@@ -39,6 +42,8 @@ pub struct WorkersConfig {
     pub enabled: bool,
     /// Backend type (currently only "codex-tmux" is supported)
     pub backend: String,
+    /// Claude team name (required when enabled = true)
+    pub team_name: String,
     /// Default startup command for workers (default: "codex --yolo")
     /// Per-agent override via agents.<name>.command
     pub command: String,
@@ -109,6 +114,56 @@ impl WorkersConfig {
         Ok(())
     }
 
+    /// Validate team name
+    ///
+    /// # Arguments
+    ///
+    /// * `team_name` - Team name to validate
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` if team name is invalid
+    pub fn validate_team_name(team_name: &str) -> Result<(), PluginError> {
+        if team_name.is_empty() {
+            return Err(PluginError::Config {
+                message: "Team name cannot be empty when workers are enabled".to_string(),
+            });
+        }
+
+        if team_name.contains('\n') || team_name.contains('\r') {
+            return Err(PluginError::Config {
+                message: format!("Invalid team name '{team_name}': cannot contain newlines"),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate member name
+    ///
+    /// # Arguments
+    ///
+    /// * `member_name` - Member name to validate
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` if member name is invalid
+    pub fn validate_member_name(member_name: &str) -> Result<(), PluginError> {
+        if member_name.is_empty() {
+            return Err(PluginError::Config {
+                message: "Member name cannot be empty".to_string(),
+            });
+        }
+
+        if member_name.contains('\n') || member_name.contains('\r') {
+            return Err(PluginError::Config {
+                message: format!("Invalid member name '{member_name}': cannot contain newlines"),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Validate agent name
     ///
     /// # Arguments
@@ -156,13 +211,18 @@ impl WorkersConfig {
         }
     }
 
-    /// Resolve the startup command for an agent.
+    /// Resolve the startup command for an agent by config key.
     /// Per-agent command takes priority over the default.
-    pub fn resolve_command(&self, agent_name: &str) -> &str {
+    pub fn resolve_command(&self, config_key: &str) -> &str {
         self.agents
-            .get(agent_name)
+            .get(config_key)
             .and_then(|a| a.command.as_deref())
             .unwrap_or(&self.command)
+    }
+
+    /// Get member_name for a config key
+    pub fn get_member_name(&self, config_key: &str) -> Option<&str> {
+        self.agents.get(config_key).map(|a| a.member_name.as_str())
     }
 
     /// Validate the entire configuration
@@ -177,10 +237,29 @@ impl WorkersConfig {
         // Validate tmux session
         Self::validate_tmux_session(&self.tmux_session)?;
 
+        // If enabled, team_name is required
+        if self.enabled {
+            Self::validate_team_name(&self.team_name)?;
+        }
+
+        // Track member_names to check for duplicates
+        let mut member_names = std::collections::HashSet::new();
+
         // Validate each agent
         for (agent_name, agent_config) in &self.agents {
             Self::validate_agent_name(agent_name)?;
+            Self::validate_member_name(&agent_config.member_name)?;
             Self::validate_concurrency_policy(&agent_config.concurrency_policy)?;
+
+            // Check for duplicate member_names
+            if !member_names.insert(&agent_config.member_name) {
+                return Err(PluginError::Config {
+                    message: format!(
+                        "Duplicate member_name '{}' found. Each agent must have a unique member_name.",
+                        agent_config.member_name
+                    ),
+                });
+            }
         }
 
         Ok(())
@@ -205,6 +284,12 @@ impl WorkersConfig {
             .get("backend")
             .and_then(|v| v.as_str())
             .unwrap_or("codex-tmux")
+            .to_string();
+
+        let team_name = table
+            .get("team_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
             .to_string();
 
         let command = table
@@ -275,6 +360,11 @@ impl WorkersConfig {
                             .get("enabled")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(true),
+                        member_name: agent_table
+                            .get("member_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         command: agent_table
                             .get("command")
                             .and_then(|v| v.as_str())
@@ -300,6 +390,7 @@ impl WorkersConfig {
         let config = Self {
             enabled,
             backend,
+            team_name,
             command,
             tmux_session,
             log_dir,
@@ -332,6 +423,7 @@ impl Default for WorkersConfig {
         Self {
             enabled: false,
             backend: "codex-tmux".to_string(),
+            team_name: String::new(),
             command: DEFAULT_COMMAND.to_string(),
             tmux_session: "atm-workers".to_string(),
             log_dir: default_log_dir,
@@ -373,6 +465,7 @@ mod tests {
         let toml_str = r#"
 enabled = true
 backend = "codex-tmux"
+team_name = "test-team"
 tmux_session = "my-workers"
 log_dir = "/var/log/atm-workers"
 "#;
@@ -381,6 +474,7 @@ log_dir = "/var/log/atm-workers"
 
         assert!(config.enabled);
         assert_eq!(config.backend, "codex-tmux");
+        assert_eq!(config.team_name, "test-team");
         assert_eq!(config.tmux_session, "my-workers");
         assert_eq!(config.log_dir, PathBuf::from("/var/log/atm-workers"));
     }
@@ -389,12 +483,14 @@ log_dir = "/var/log/atm-workers"
     fn test_config_from_toml_partial() {
         let toml_str = r#"
 enabled = true
+team_name = "test-team"
 "#;
         let table: toml::Table = toml::from_str(toml_str).unwrap();
         let config = WorkersConfig::from_toml(&table).unwrap();
 
         assert!(config.enabled);
         assert_eq!(config.backend, "codex-tmux"); // default
+        assert_eq!(config.team_name, "test-team");
         assert_eq!(config.tmux_session, "atm-workers"); // default
     }
 
@@ -403,6 +499,7 @@ enabled = true
         let toml_str = r#"
 enabled = true
 backend = "unsupported-backend"
+team_name = "test-team"
 "#;
         let table: toml::Table = toml::from_str(toml_str).unwrap();
         let result = WorkersConfig::from_toml(&table);
@@ -546,8 +643,10 @@ tmux_session = false
         let toml_str = r#"
 enabled = true
 backend = "codex-tmux"
+team_name = "test-team"
 tmux_session = "atm-workers"
 [agents."test-agent"]
+member_name = "test-member"
 enabled = true
 concurrency_policy = "queue"
 "#;
@@ -573,11 +672,99 @@ tmux_session = "invalid:session"
         let toml_str = r#"
 enabled = true
 backend = "codex-tmux"
+team_name = "test-team"
 [agents."test-agent"]
+member_name = "test-member"
 concurrency_policy = "invalid-policy"
 "#;
         let table: toml::Table = toml::from_str(toml_str).unwrap();
         let result = WorkersConfig::from_toml(&table);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_config_missing_team_name_when_enabled() {
+        let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+[agents."test-agent"]
+member_name = "test-member"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let result = WorkersConfig::from_toml(&table);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Team name cannot be empty"));
+        }
+    }
+
+    #[test]
+    fn test_validate_config_missing_member_name() {
+        let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+team_name = "test-team"
+[agents."test-agent"]
+enabled = true
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let result = WorkersConfig::from_toml(&table);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Member name cannot be empty"));
+        }
+    }
+
+    #[test]
+    fn test_validate_config_duplicate_member_names() {
+        let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+team_name = "test-team"
+[agents."agent1"]
+member_name = "duplicate"
+[agents."agent2"]
+member_name = "duplicate"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let result = WorkersConfig::from_toml(&table);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Duplicate member_name"));
+        }
+    }
+
+    #[test]
+    fn test_validate_team_name() {
+        assert!(WorkersConfig::validate_team_name("valid-team").is_ok());
+        assert!(WorkersConfig::validate_team_name("").is_err());
+        assert!(WorkersConfig::validate_team_name("team\nname").is_err());
+    }
+
+    #[test]
+    fn test_validate_member_name() {
+        assert!(WorkersConfig::validate_member_name("arch-ctm").is_ok());
+        assert!(WorkersConfig::validate_member_name("dev-1").is_ok());
+        assert!(WorkersConfig::validate_member_name("").is_err());
+        assert!(WorkersConfig::validate_member_name("member\nname").is_err());
+    }
+
+    #[test]
+    fn test_get_member_name() {
+        let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+team_name = "test-team"
+[agents."architect"]
+member_name = "arch-ctm"
+[agents."developer"]
+member_name = "dev-1"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = WorkersConfig::from_toml(&table).unwrap();
+
+        assert_eq!(config.get_member_name("architect"), Some("arch-ctm"));
+        assert_eq!(config.get_member_name("developer"), Some("dev-1"));
+        assert_eq!(config.get_member_name("nonexistent"), None);
     }
 }

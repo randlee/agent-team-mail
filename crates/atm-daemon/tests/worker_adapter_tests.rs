@@ -94,6 +94,10 @@ async fn test_plugin_init_with_valid_config() {
         atm_core::toml::Value::String("codex-tmux".to_string()),
     );
     worker_config.insert(
+        "team_name".to_string(),
+        atm_core::toml::Value::String("test-team".to_string()),
+    );
+    worker_config.insert(
         "tmux_session".to_string(),
         atm_core::toml::Value::String("test-session".to_string()),
     );
@@ -166,7 +170,9 @@ fn test_config_validation_invalid_concurrency_policy() {
     let toml_str = r#"
 enabled = true
 backend = "codex-tmux"
+team_name = "test-team"
 [agents."test-agent"]
+member_name = "test-member"
 concurrency_policy = "invalid-policy"
 "#;
     let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
@@ -182,11 +188,14 @@ fn test_config_validation_valid() {
     let toml_str = r#"
 enabled = true
 backend = "codex-tmux"
+team_name = "test-team"
 tmux_session = "atm-workers"
 [agents."test-agent"]
+member_name = "test-member"
 enabled = true
 concurrency_policy = "queue"
-[agents."arch-ctm@atm-planning"]
+[agents."architect"]
+member_name = "arch-ctm"
 enabled = true
 concurrency_policy = "reject"
 "#;
@@ -197,6 +206,7 @@ concurrency_policy = "reject"
     let config = result.unwrap();
     assert!(config.enabled);
     assert_eq!(config.backend, "codex-tmux");
+    assert_eq!(config.team_name, "test-team");
     assert_eq!(config.tmux_session, "atm-workers");
     assert_eq!(config.agents.len(), 2);
 }
@@ -414,6 +424,7 @@ fn test_agent_config_defaults() {
     let config = AgentConfig::default();
 
     assert!(config.enabled);
+    assert_eq!(config.member_name, "");
     assert_eq!(config.prompt_template, "{message}");
     assert_eq!(config.concurrency_policy, "queue");
 }
@@ -465,4 +476,145 @@ fn test_validate_concurrency_policy() {
     assert!(WorkersConfig::validate_concurrency_policy("reject").is_ok());
     assert!(WorkersConfig::validate_concurrency_policy("concurrent").is_ok());
     assert!(WorkersConfig::validate_concurrency_policy("invalid").is_err());
+}
+
+#[test]
+fn test_validate_team_name() {
+    assert!(WorkersConfig::validate_team_name("test-team").is_ok());
+    assert!(WorkersConfig::validate_team_name("atm-sprint").is_ok());
+    assert!(WorkersConfig::validate_team_name("").is_err());
+    assert!(WorkersConfig::validate_team_name("team\nname").is_err());
+}
+
+#[test]
+fn test_validate_member_name() {
+    assert!(WorkersConfig::validate_member_name("arch-ctm").is_ok());
+    assert!(WorkersConfig::validate_member_name("dev-1").is_ok());
+    assert!(WorkersConfig::validate_member_name("qa-1").is_ok());
+    assert!(WorkersConfig::validate_member_name("").is_err());
+    assert!(WorkersConfig::validate_member_name("member\nname").is_err());
+}
+
+#[test]
+fn test_config_missing_team_name_when_enabled() {
+    let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+[agents."test-agent"]
+member_name = "test-member"
+"#;
+    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let result = WorkersConfig::from_toml(&table);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("Team name cannot be empty"));
+}
+
+#[test]
+fn test_config_missing_member_name() {
+    let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+team_name = "test-team"
+[agents."test-agent"]
+enabled = true
+"#;
+    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let result = WorkersConfig::from_toml(&table);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("Member name cannot be empty"));
+}
+
+#[test]
+fn test_config_duplicate_member_names() {
+    let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+team_name = "test-team"
+[agents."agent1"]
+member_name = "duplicate"
+[agents."agent2"]
+member_name = "duplicate"
+"#;
+    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let result = WorkersConfig::from_toml(&table);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("Duplicate member_name"));
+}
+
+#[test]
+fn test_config_get_member_name() {
+    let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+team_name = "test-team"
+[agents."architect"]
+member_name = "arch-ctm"
+[agents."developer"]
+member_name = "dev-1"
+[agents."qa"]
+member_name = "qa-1"
+"#;
+    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let config = WorkersConfig::from_toml(&table).unwrap();
+
+    assert_eq!(config.get_member_name("architect"), Some("arch-ctm"));
+    assert_eq!(config.get_member_name("developer"), Some("dev-1"));
+    assert_eq!(config.get_member_name("qa"), Some("qa-1"));
+    assert_eq!(config.get_member_name("nonexistent"), None);
+}
+
+#[test]
+fn test_config_with_full_structure() {
+    let toml_str = r#"
+enabled = true
+backend = "codex-tmux"
+team_name = "atm-sprint"
+command = "codex --yolo"
+tmux_session = "atm-workers"
+
+[agents.architect]
+member_name = "arch-ctm"
+enabled = true
+command = "codex --yolo --last"
+
+[agents.developer]
+member_name = "dev-1"
+enabled = true
+
+[agents.qa]
+member_name = "qa-1"
+enabled = true
+concurrency_policy = "reject"
+"#;
+    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let result = WorkersConfig::from_toml(&table);
+
+    assert!(result.is_ok());
+    let config = result.unwrap();
+    assert!(config.enabled);
+    assert_eq!(config.backend, "codex-tmux");
+    assert_eq!(config.team_name, "atm-sprint");
+    assert_eq!(config.tmux_session, "atm-workers");
+    assert_eq!(config.agents.len(), 3);
+
+    let architect = config.agents.get("architect").unwrap();
+    assert_eq!(architect.member_name, "arch-ctm");
+    assert!(architect.enabled);
+    assert_eq!(architect.command, Some("codex --yolo --last".to_string()));
+
+    let developer = config.agents.get("developer").unwrap();
+    assert_eq!(developer.member_name, "dev-1");
+    assert!(developer.enabled);
+    assert_eq!(developer.command, None);
+
+    let qa = config.agents.get("qa").unwrap();
+    assert_eq!(qa.member_name, "qa-1");
+    assert!(qa.enabled);
+    assert_eq!(qa.concurrency_policy, "reject");
 }
