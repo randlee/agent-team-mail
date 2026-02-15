@@ -2,3 +2,4 @@
 
 pub mod ci_monitor;
 pub mod issues;
+pub mod worker_adapter;

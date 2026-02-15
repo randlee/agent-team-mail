@@ -1,0 +1,317 @@
+//! Codex TMUX backend implementation
+//!
+//! Spawns Codex agents in dedicated tmux panes for process isolation.
+//! All `tmux send-keys` calls use literal mode (-l) to prevent command injection.
+
+use super::trait_def::{WorkerAdapter, WorkerHandle};
+use crate::plugin::PluginError;
+use std::path::PathBuf;
+use std::process::Command;
+use tracing::{debug, warn};
+
+/// Codex TMUX backend — spawns Codex in tmux panes
+pub struct CodexTmuxBackend {
+    /// TMUX session name for worker panes
+    pub tmux_session: String,
+    /// Base directory for log files
+    pub log_dir: PathBuf,
+}
+
+impl CodexTmuxBackend {
+    /// Create a new Codex TMUX backend
+    ///
+    /// # Arguments
+    ///
+    /// * `tmux_session` - Name of the tmux session to create worker panes in
+    /// * `log_dir` - Directory for worker log files
+    pub fn new(tmux_session: String, log_dir: PathBuf) -> Self {
+        Self {
+            tmux_session,
+            log_dir,
+        }
+    }
+
+    /// Check if tmux is available on the system
+    fn tmux_available() -> bool {
+        Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    /// Ensure the tmux session exists
+    fn ensure_session(&self) -> Result<(), PluginError> {
+        // Check if session exists
+        let check = Command::new("tmux")
+            .arg("has-session")
+            .arg("-t")
+            .arg(&self.tmux_session)
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to check tmux session: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        if !check.status.success() {
+            // Session doesn't exist, create it
+            debug!(
+                "Creating tmux session '{}' for worker adapter",
+                self.tmux_session
+            );
+            let output = Command::new("tmux")
+                .arg("new-session")
+                .arg("-d")
+                .arg("-s")
+                .arg(&self.tmux_session)
+                .output()
+                .map_err(|e| PluginError::Runtime {
+                    message: format!("Failed to create tmux session: {e}"),
+                    source: Some(Box::new(e)),
+                })?;
+
+            if !output.status.success() {
+                let session = &self.tmux_session;
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(PluginError::Runtime {
+                    message: format!("Failed to create tmux session '{session}': {stderr}"),
+                    source: None,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the pane ID of a newly created window
+    #[allow(dead_code)]
+    fn get_pane_id(&self) -> Result<String, PluginError> {
+        let output = Command::new("tmux")
+            .arg("display-message")
+            .arg("-p")
+            .arg("#{pane_id}")
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to get pane ID: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(PluginError::Runtime {
+                message: format!("Failed to get pane ID: {stderr}"),
+                source: None,
+            });
+        }
+
+        let pane_id = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_string();
+        Ok(pane_id)
+    }
+
+    /// Generate a log file path for an agent
+    fn log_path(&self, agent_id: &str) -> PathBuf {
+        // Sanitize agent_id for use in filename
+        let safe_name = agent_id.replace(['@', '/', '\\'], "_");
+        self.log_dir.join(format!("{safe_name}.log"))
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkerAdapter for CodexTmuxBackend {
+    async fn spawn(&mut self, agent_id: &str, _config: &str) -> Result<WorkerHandle, PluginError> {
+        // Check tmux availability
+        if !Self::tmux_available() {
+            return Err(PluginError::Runtime {
+                message: "tmux is not available on this system".to_string(),
+                source: None,
+            });
+        }
+
+        // Ensure tmux session exists
+        self.ensure_session()?;
+
+        // Create log directory if it doesn't exist
+        let log_dir = self.log_dir.display();
+        std::fs::create_dir_all(&self.log_dir).map_err(|e| PluginError::Runtime {
+            message: format!("Failed to create log directory: {log_dir}"),
+            source: Some(Box::new(e)),
+        })?;
+
+        let log_path = self.log_path(agent_id);
+
+        // Create a new window in the tmux session for this worker
+        let output = Command::new("tmux")
+            .arg("new-window")
+            .arg("-t")
+            .arg(&self.tmux_session)
+            .arg("-n")
+            .arg(agent_id) // Window name
+            .arg("-P") // Print pane info
+            .arg("-F")
+            .arg("#{pane_id}") // Format: just the pane ID
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to create tmux window: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(PluginError::Runtime {
+                message: format!("Failed to create tmux window: {stderr}"),
+                source: None,
+            });
+        }
+
+        let tmux_pane_id = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_string();
+
+        debug!("Created tmux pane {tmux_pane_id} for agent {agent_id}");
+
+        // TODO: In Sprint 7.2, we'll send the actual Codex start command here
+        // For now, just start a shell
+        let start_command = format!(
+            "# Worker pane for {}\n# Log file: {}\n",
+            agent_id,
+            log_path.display()
+        );
+
+        // Send initial setup text using literal mode (-l)
+        // CRITICAL: -l prevents shell interpretation of special characters
+        Command::new("tmux")
+            .arg("send-keys")
+            .arg("-t")
+            .arg(&tmux_pane_id)
+            .arg("-l") // LITERAL MODE - prevents command injection
+            .arg(&start_command)
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to send initial text to tmux pane: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        Ok(WorkerHandle {
+            agent_id: agent_id.to_string(),
+            tmux_pane_id,
+            log_file_path: log_path,
+        })
+    }
+
+    async fn send_message(
+        &mut self,
+        handle: &WorkerHandle,
+        message: &str,
+    ) -> Result<(), PluginError> {
+        // CRITICAL: Use literal mode (-l) to prevent command injection
+        // This ensures message content is not interpreted as shell commands
+        let output = Command::new("tmux")
+            .arg("send-keys")
+            .arg("-t")
+            .arg(&handle.tmux_pane_id)
+            .arg("-l") // LITERAL MODE - mandatory for safety
+            .arg(message)
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to send message to tmux pane: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        if !output.status.success() {
+            let pane_id = &handle.tmux_pane_id;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(PluginError::Runtime {
+                message: format!("Failed to send message to pane {pane_id}: {stderr}"),
+                source: None,
+            });
+        }
+
+        // Send Enter key separately (not as literal text)
+        let output = Command::new("tmux")
+            .arg("send-keys")
+            .arg("-t")
+            .arg(&handle.tmux_pane_id)
+            .arg("Enter")
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to send Enter key: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        if !output.status.success() {
+            let pane_id = &handle.tmux_pane_id;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("Failed to send Enter key to pane {pane_id}: {stderr}");
+        }
+
+        let agent_id = &handle.agent_id;
+        let pane_id = &handle.tmux_pane_id;
+        debug!("Sent message to agent {agent_id} in pane {pane_id}");
+
+        Ok(())
+    }
+
+    async fn shutdown(&mut self, handle: &WorkerHandle) -> Result<(), PluginError> {
+        // Gracefully close the tmux pane
+        let output = Command::new("tmux")
+            .arg("kill-pane")
+            .arg("-t")
+            .arg(&handle.tmux_pane_id)
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to kill tmux pane: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        if !output.status.success() {
+            let pane_id = &handle.tmux_pane_id;
+            let agent_id = &handle.agent_id;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("Failed to kill pane {pane_id} for agent {agent_id}: {stderr}");
+            // Don't return error — pane may already be gone
+        } else {
+            let pane_id = &handle.tmux_pane_id;
+            let agent_id = &handle.agent_id;
+            debug!("Shut down tmux pane {pane_id} for agent {agent_id}");
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_log_path_generation() {
+        let backend = CodexTmuxBackend::new(
+            "test-session".to_string(),
+            PathBuf::from("/tmp/logs"),
+        );
+
+        let path = backend.log_path("arch-ctm@atm-planning");
+        assert_eq!(path, PathBuf::from("/tmp/logs/arch-ctm_atm-planning.log"));
+
+        let path = backend.log_path("agent/with/slashes");
+        assert_eq!(path, PathBuf::from("/tmp/logs/agent_with_slashes.log"));
+    }
+
+    #[test]
+    fn test_tmux_available() {
+        // This test will pass or fail depending on whether tmux is installed
+        // We just verify the function doesn't panic
+        let _available = CodexTmuxBackend::tmux_available();
+    }
+
+    #[test]
+    fn test_backend_creation() {
+        let backend = CodexTmuxBackend::new(
+            "test-session".to_string(),
+            PathBuf::from("/tmp/logs"),
+        );
+        assert_eq!(backend.tmux_session, "test-session");
+        assert_eq!(backend.log_dir, PathBuf::from("/tmp/logs"));
+    }
+}
