@@ -288,20 +288,18 @@ fn watch_inboxes(
                 };
 
                 let key = (team_name.clone(), member.name.clone());
-                if let Some(prev) = previous.get(&key) {
-                    if prev != &snapshot {
-                        println!(
-                            "[{}] {}@{} unread {}->{} total {}->{} latest {}",
-                            chrono::Utc::now().to_rfc3339(),
-                            member.name,
-                            team_name,
-                            prev.unread,
-                            snapshot.unread,
-                            prev.total,
-                            snapshot.total,
-                            snapshot.latest
-                        );
-                    }
+                if let Some(prev) = previous.get(&key) && prev != &snapshot {
+                    println!(
+                        "[{}] {}@{} unread {}->{} total {}->{} latest {}",
+                        chrono::Utc::now().to_rfc3339(),
+                        member.name,
+                        team_name,
+                        prev.unread,
+                        snapshot.unread,
+                        prev.total,
+                        snapshot.total,
+                        snapshot.latest
+                    );
                 }
                 previous.insert(key, snapshot);
             }

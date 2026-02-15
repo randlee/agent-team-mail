@@ -193,16 +193,15 @@ pub fn execute(args: ReadArgs) -> Result<()> {
     }
 
     // Update last-seen state (unless disabled)
-    if use_since_last_seen && !args.no_update_seen {
-        if let Some(latest) = filtered_messages
+    if use_since_last_seen && !args.no_update_seen
+        && let Some(latest) = filtered_messages
             .iter()
             .filter_map(|m| DateTime::parse_from_rfc3339(&m.timestamp).ok())
             .max()
-        {
-            let mut state = load_seen_state().unwrap_or_default();
-            update_last_seen(&mut state, &team_name, &agent_name, &latest.to_rfc3339());
-            let _ = save_seen_state(&state);
-        }
+    {
+        let mut state = load_seen_state().unwrap_or_default();
+        update_last_seen(&mut state, &team_name, &agent_name, &latest.to_rfc3339());
+        let _ = save_seen_state(&state);
     }
 
     // Output results
