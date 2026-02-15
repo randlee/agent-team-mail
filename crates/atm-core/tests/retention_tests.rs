@@ -84,7 +84,7 @@ fn test_retention_by_max_count() {
 
     // Create 10 messages, all recent
     let messages: Vec<InboxMessage> = (1..=10)
-        .map(|i| create_test_message(&format!("user{}", i), &format!("Message {}", i), 1, Some(format!("msg-{:03}", i))))
+        .map(|i| create_test_message(&format!("user{i}"), &format!("Message {i}"), 1, Some(format!("msg-{i:03}"))))
         .collect();
 
     write_inbox(&inbox_path, &messages);
@@ -117,10 +117,10 @@ fn test_retention_combined_age_and_count() {
     // Create messages: 5 old (10 days), 5 recent (3 days)
     let mut messages = Vec::new();
     for i in 1..=5 {
-        messages.push(create_test_message(&format!("old-user{}", i), &format!("Old {}", i), 10, Some(format!("msg-old-{:03}", i))));
+        messages.push(create_test_message(&format!("old-user{i}"), &format!("Old {i}"), 10, Some(format!("msg-old-{i:03}"))));
     }
     for i in 1..=5 {
-        messages.push(create_test_message(&format!("new-user{}", i), &format!("Recent {}", i), 3, Some(format!("msg-new-{:03}", i))));
+        messages.push(create_test_message(&format!("new-user{i}"), &format!("Recent {i}"), 3, Some(format!("msg-new-{i:03}"))));
     }
 
     write_inbox(&inbox_path, &messages);

@@ -436,7 +436,7 @@ timestamps = "iso8601"
 
         // Resolve settings from subdirectory
         let home_dir = temp_root.path(); // Use temp root as fake home
-        let settings = resolve_settings(None, &sub_dir, &home_dir);
+        let settings = resolve_settings(None, &sub_dir, home_dir);
 
         // Should find settings.json at repo root
         assert!(settings.is_some());
@@ -468,7 +468,7 @@ timestamps = "iso8601"
 
         // Resolve settings
         let home_dir = temp_root.path();
-        let settings = resolve_settings(None, temp_root.path(), &home_dir);
+        let settings = resolve_settings(None, temp_root.path(), home_dir);
 
         // Should use settings.local.json (higher precedence)
         assert!(settings.is_some());

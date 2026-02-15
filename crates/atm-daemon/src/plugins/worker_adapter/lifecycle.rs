@@ -216,21 +216,23 @@ pub async fn auto_start_workers(
 ) -> Result<(), PluginError> {
     info!("Auto-starting configured workers");
 
-    for (agent_id, agent_config) in &config.agents {
+    for (config_key, agent_config) in &config.agents {
         if !agent_config.enabled {
-            debug!("Skipping disabled agent {agent_id}");
+            debug!("Skipping disabled agent {config_key}");
             continue;
         }
 
-        info!("Starting worker for agent {agent_id}");
-        match backend.spawn(agent_id, "{}").await {
+        let member_name = &agent_config.member_name;
+        let command = config.resolve_command(config_key);
+        info!("Starting worker for agent {config_key} (member: {member_name}) with command: {command}");
+        match backend.spawn(member_name, command).await {
             Ok(handle) => {
-                lifecycle.register_worker(agent_id);
-                workers.insert(agent_id.clone(), handle);
-                info!("Worker {agent_id} started successfully");
+                lifecycle.register_worker(member_name);
+                workers.insert(member_name.clone(), handle);
+                info!("Worker {member_name} started successfully");
             }
             Err(e) => {
-                error!("Failed to start worker {agent_id}: {e}");
+                error!("Failed to start worker {member_name}: {e}");
                 // Continue with other workers even if one fails
             }
         }
@@ -261,7 +263,7 @@ pub async fn check_worker_health(handle: &WorkerHandle) -> bool {
     match output {
         Ok(output) if output.status.success() => {
             let panes = String::from_utf8_lossy(&output.stdout);
-            panes.contains(&handle.tmux_pane_id)
+            panes.contains(&handle.backend_id)
         }
         Ok(output) => {
             warn!(
@@ -282,8 +284,9 @@ pub async fn check_worker_health(handle: &WorkerHandle) -> bool {
 ///
 /// # Arguments
 ///
-/// * `agent_id` - Agent ID to restart
+/// * `member_name` - Member name (runtime identity) to restart
 /// * `backend` - Worker backend
+/// * `config` - Worker configuration (needed to find config_key and command)
 /// * `lifecycle` - Lifecycle manager
 /// * `workers` - Workers map
 ///
@@ -291,48 +294,64 @@ pub async fn check_worker_health(handle: &WorkerHandle) -> bool {
 ///
 /// Returns error if restart fails
 pub async fn restart_worker(
-    agent_id: &str,
+    member_name: &str,
     backend: &mut dyn WorkerAdapter,
+    config: &WorkersConfig,
     lifecycle: &mut LifecycleManager,
     workers: &mut HashMap<String, WorkerHandle>,
 ) -> Result<(), PluginError> {
-    if !lifecycle.can_restart(agent_id) {
+    if !lifecycle.can_restart(member_name) {
         error!(
-            "Worker {agent_id} exceeded max restart attempts, giving up"
+            "Worker {member_name} exceeded max restart attempts, giving up"
         );
-        lifecycle.set_state(agent_id, WorkerState::Crashed);
+        lifecycle.set_state(member_name, WorkerState::Crashed);
         return Err(PluginError::Runtime {
-            message: format!("Worker {agent_id} exceeded max restart attempts"),
+            message: format!("Worker {member_name} exceeded max restart attempts"),
             source: None,
         });
     }
 
-    lifecycle.set_state(agent_id, WorkerState::Restarting);
-    lifecycle.increment_restart_count(agent_id);
+    lifecycle.set_state(member_name, WorkerState::Restarting);
+    lifecycle.increment_restart_count(member_name);
 
     // Apply backoff before restart
-    let backoff = lifecycle.get_backoff_duration(agent_id);
+    let backoff = lifecycle.get_backoff_duration(member_name);
     warn!(
-        "Worker {agent_id} crashed, restarting after {}s backoff",
+        "Worker {member_name} crashed, restarting after {}s backoff",
         backoff.as_secs()
     );
     sleep(backoff).await;
 
     // Remove old handle if exists
-    workers.remove(agent_id);
+    workers.remove(member_name);
 
-    // Spawn new worker
-    match backend.spawn(agent_id, "{}").await {
+    // Find config_key for this member_name to resolve command
+    let config_key = config
+        .agents
+        .iter()
+        .find(|(_, agent_config)| agent_config.member_name == member_name)
+        .map(|(key, _)| key.as_str());
+
+    let command = if let Some(key) = config_key {
+        config.resolve_command(key)
+    } else {
+        // Fallback to default command if we can't find the config entry
+        warn!("Could not find config entry for member {member_name}, using default command");
+        &config.command
+    };
+
+    // Spawn new worker with resolved command
+    match backend.spawn(member_name, command).await {
         Ok(handle) => {
-            workers.insert(agent_id.to_string(), handle);
-            lifecycle.set_state(agent_id, WorkerState::Running);
-            lifecycle.update_health_check(agent_id);
-            info!("Worker {agent_id} restarted successfully");
+            workers.insert(member_name.to_string(), handle);
+            lifecycle.set_state(member_name, WorkerState::Running);
+            lifecycle.update_health_check(member_name);
+            info!("Worker {member_name} restarted successfully");
             Ok(())
         }
         Err(e) => {
-            error!("Failed to restart worker {agent_id}: {e}");
-            lifecycle.set_state(agent_id, WorkerState::Crashed);
+            error!("Failed to restart worker {member_name}: {e}");
+            lifecycle.set_state(member_name, WorkerState::Crashed);
             Err(e)
         }
     }
