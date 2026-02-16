@@ -11,6 +11,8 @@ use tracing::{debug, info, warn};
 
 use super::config::BridgePluginConfig;
 use super::dedup::{assign_message_ids, SyncState};
+use super::metrics::BridgeMetrics;
+use super::team_config_sync::sync_team_config;
 use super::transport::Transport;
 use atm_core::schema::InboxMessage;
 
@@ -36,6 +38,9 @@ impl SyncStats {
     }
 }
 
+/// Circuit breaker threshold - disable remote after this many consecutive failures
+const CIRCUIT_BREAKER_THRESHOLD: u64 = 5;
+
 /// Sync engine for bridge plugin
 ///
 /// Manages push/pull cycles, deduplication, and state persistence.
@@ -54,6 +59,12 @@ pub struct SyncEngine {
 
     /// Path to sync state file
     state_path: PathBuf,
+
+    /// Metrics tracking
+    metrics: BridgeMetrics,
+
+    /// Path to metrics file
+    metrics_path: PathBuf,
 }
 
 impl SyncEngine {
@@ -76,12 +87,17 @@ impl SyncEngine {
         let state_path = team_dir.join(".bridge-state.json");
         let state = SyncState::load(&state_path).await?;
 
+        let metrics_path = team_dir.join(".bridge-metrics.json");
+        let metrics = BridgeMetrics::load(&metrics_path).await.unwrap_or_default();
+
         Ok(Self {
             config,
             transport,
             team_dir,
             state,
             state_path,
+            metrics,
+            metrics_path,
         })
     }
 
@@ -90,6 +106,13 @@ impl SyncEngine {
     /// Exposed for testing and monitoring purposes
     pub fn state(&self) -> &SyncState {
         &self.state
+    }
+
+    /// Get a reference to the metrics
+    ///
+    /// Exposed for monitoring and CLI status commands
+    pub fn metrics(&self) -> &BridgeMetrics {
+        &self.metrics
     }
 
     /// Push local messages to remote(s)
@@ -156,17 +179,37 @@ impl SyncEngine {
     pub async fn sync_pull(&mut self) -> Result<SyncStats> {
         let mut stats = SyncStats::default();
 
-        // Iterate over all configured remotes
+        // Iterate over all configured remotes (skip disabled ones)
         let remotes: Vec<String> = self.config.registry.remotes()
             .map(|r| r.hostname.clone())
             .collect();
 
         for remote_hostname in remotes {
+            // Check circuit breaker
+            if self.metrics.is_remote_disabled(&remote_hostname) {
+                debug!("Skipping disabled remote: {}", remote_hostname);
+                continue;
+            }
+
             match self.pull_from_remote(&remote_hostname).await {
-                Ok(pulled) => stats.messages_pulled += pulled,
+                Ok(pulled) => {
+                    stats.messages_pulled += pulled;
+                    // Reset failure count on success
+                    self.metrics.reset_remote_failures(&remote_hostname);
+                }
                 Err(e) => {
                     warn!("Failed to pull from {}: {}", remote_hostname, e);
                     stats.errors += 1;
+                    self.metrics.record_remote_failure(&remote_hostname);
+
+                    // Check if we should disable this remote
+                    if self.metrics.get_remote_failures(&remote_hostname) >= CIRCUIT_BREAKER_THRESHOLD {
+                        warn!(
+                            "Remote {} disabled after {} consecutive failures",
+                            remote_hostname, CIRCUIT_BREAKER_THRESHOLD
+                        );
+                        self.metrics.disable_remote(&remote_hostname);
+                    }
                 }
             }
         }
@@ -183,7 +226,31 @@ impl SyncEngine {
     ///
     /// Returns error if critical operations fail
     pub async fn sync_cycle(&mut self) -> Result<SyncStats> {
+        info!("Starting sync cycle");
         let mut stats = SyncStats::default();
+
+        // Sync team config from hub (if we're a spoke)
+        if let Some(hub_hostname) = self.get_hub_hostname() {
+            match sync_team_config(
+                self.transport.as_ref(),
+                &self.team_dir,
+                &hub_hostname,
+                &self.config.registry,
+            )
+            .await
+            {
+                Ok(true) => {
+                    debug!("Team config synced from hub");
+                }
+                Ok(false) => {
+                    debug!("Team config sync skipped (no changes or hub unreachable)");
+                }
+                Err(e) => {
+                    warn!("Failed to sync team config from hub: {}", e);
+                    stats.errors += 1;
+                }
+            }
+        }
 
         // Push local changes
         let push_stats = self.sync_push().await?;
@@ -193,12 +260,36 @@ impl SyncEngine {
         let pull_stats = self.sync_pull().await?;
         stats.add(&pull_stats);
 
+        // Update metrics
+        self.metrics.record_sync(
+            stats.messages_pushed,
+            stats.messages_pulled,
+            stats.errors,
+        );
+
+        // Save metrics
+        if let Err(e) = self.metrics.save(&self.metrics_path).await {
+            warn!("Failed to save metrics: {}", e);
+        }
+
         info!(
             "Sync cycle complete: pushed={}, pulled={}, errors={}",
             stats.messages_pushed, stats.messages_pulled, stats.errors
         );
 
         Ok(stats)
+    }
+
+    /// Get hub hostname if this is a spoke node
+    fn get_hub_hostname(&self) -> Option<String> {
+        use atm_core::config::BridgeRole;
+
+        if self.config.core.role == BridgeRole::Spoke {
+            // For spoke, first remote is the hub
+            self.config.registry.remotes().next().map(|r| r.hostname.clone())
+        } else {
+            None
+        }
     }
 
     /// Push a single inbox file to all remotes
@@ -237,9 +328,15 @@ impl SyncEngine {
         // Extract agent name from filename
         let agent_name = self.extract_agent_name(local_path)?;
 
-        // Push to all remotes
+        // Push to all remotes (skip disabled ones)
         let mut pushed_count = 0;
         for remote in self.config.registry.remotes() {
+            // Check circuit breaker
+            if self.metrics.is_remote_disabled(&remote.hostname) {
+                debug!("Skipping disabled remote: {}", remote.hostname);
+                continue;
+            }
+
             match self
                 .push_to_remote(&agent_name, &new_messages, &remote.hostname)
                 .await
@@ -247,9 +344,21 @@ impl SyncEngine {
                 Ok(count) => {
                     pushed_count += count;
                     debug!("Pushed {} messages to {}", count, remote.hostname);
+                    // Reset failure count on success
+                    self.metrics.reset_remote_failures(&remote.hostname);
                 }
                 Err(e) => {
                     warn!("Failed to push to {}: {}", remote.hostname, e);
+                    self.metrics.record_remote_failure(&remote.hostname);
+
+                    // Check if we should disable this remote
+                    if self.metrics.get_remote_failures(&remote.hostname) >= CIRCUIT_BREAKER_THRESHOLD {
+                        warn!(
+                            "Remote {} disabled after {} consecutive failures",
+                            remote.hostname, CIRCUIT_BREAKER_THRESHOLD
+                        );
+                        self.metrics.disable_remote(&remote.hostname);
+                    }
                 }
             }
         }
