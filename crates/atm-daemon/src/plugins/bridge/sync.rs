@@ -621,7 +621,18 @@ impl SyncEngine {
             // Check if this is a per-origin file from another machine
             // Per-origin files have format: agent.hostname.json
             // We only want to pull BASE inbox files (agent.json), not per-origin files
-            let is_per_origin_file = if let Some(last_dot_idx) = stem.rfind('.') {
+            //
+            // IMPORTANT: Check if stem is a known agent name FIRST.
+            // An agent name like "dev.hub" should be treated as a base inbox file,
+            // even if "hub" is a known hostname.
+            let is_known_agent = self.agent_names.as_ref()
+                .map(|names| names.contains(stem))
+                .unwrap_or(false);
+
+            let is_per_origin_file = if is_known_agent {
+                // If the full stem is a known agent name, treat it as a base inbox file
+                false
+            } else if let Some(last_dot_idx) = stem.rfind('.') {
                 let potential_hostname = &stem[last_dot_idx + 1..];
                 // Check if the suffix after the last dot is a known hostname
                 self.config.registry.is_known_hostname(potential_hostname)
@@ -693,9 +704,10 @@ impl SyncEngine {
             }
 
             // Check for per-origin pattern <agent>.<hostname> where hostname is known
-            if let Some((agent, _hostname)) = self.split_origin(stem)
-                && agent_names.contains(&agent)
-            {
+            // Use split_origin to properly extract agent and hostname parts
+            if let Some((_agent, _hostname)) = self.split_origin(stem) {
+                // If we can split into agent + known hostname, it's per-origin
+                // (whether or not the agent part is a known agent)
                 return false;
             }
         } else {
@@ -760,7 +772,9 @@ impl SyncEngine {
         }
         for i in (1..parts.len()).rev() {
             let potential_hostname = parts[i..].join(".");
-            if self.config.registry.is_known_hostname(&potential_hostname) {
+            // Check if it's a known remote hostname OR the local hostname
+            if self.config.registry.is_known_hostname(&potential_hostname)
+                || potential_hostname == self.config.local_hostname {
                 let agent_name = parts[..i].join(".");
                 return Some((agent_name, potential_hostname));
             }
@@ -1111,5 +1125,71 @@ mod tests {
         let content = fs::read(&local_inbox).await.unwrap();
         let local: Vec<InboxMessage> = serde_json::from_slice(&content).unwrap();
         assert_eq!(local.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_dotted_agent_names_in_pull_filtering() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = temp_dir.path().to_path_buf();
+        let inboxes_dir = team_dir.join("inboxes");
+        fs::create_dir_all(&inboxes_dir).await.unwrap();
+
+        // Create config with "hub" as a known hostname
+        let mut registry = HostnameRegistry::new();
+        registry
+            .register(RemoteConfig {
+                hostname: "hub".to_string(),
+                address: "user@hub".to_string(),
+                ssh_key_path: None,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        let config = Arc::new(BridgePluginConfig {
+            core: BridgeConfig {
+                enabled: true,
+                local_hostname: Some("laptop".to_string()),
+                role: BridgeRole::Spoke,
+                sync_interval_secs: 60,
+                remotes: vec![RemoteConfig {
+                    hostname: "hub".to_string(),
+                    address: "user@hub".to_string(),
+                    ssh_key_path: None,
+                    aliases: Vec::new(),
+                }],
+            },
+            registry,
+            local_hostname: "laptop".to_string(),
+        });
+
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
+        let mut transports = HashMap::new();
+        transports.insert("hub".to_string(), transport);
+
+        // Create team config with agent named "dev.hub"
+        write_team_config(&team_dir, &["dev.hub", "qa"]).await;
+        let engine = SyncEngine::new(config, transports, team_dir.clone(), new_filter())
+            .await
+            .unwrap();
+
+        // Test that "dev.hub.json" is treated as a base inbox file (known agent)
+        let dev_hub_inbox = inboxes_dir.join("dev.hub.json");
+        assert!(engine.is_local_inbox_file(&dev_hub_inbox),
+            "dev.hub.json should be treated as a base inbox file because dev.hub is a known agent");
+
+        // Test that "dev.hub.laptop.json" is treated as per-origin (agent.hostname pattern)
+        let dev_hub_origin = inboxes_dir.join("dev.hub.laptop.json");
+        assert!(!engine.is_local_inbox_file(&dev_hub_origin),
+            "dev.hub.laptop.json should be treated as per-origin file");
+
+        // Test that "qa.hub.json" is treated as per-origin (qa is agent, hub is hostname)
+        let qa_hub_origin = inboxes_dir.join("qa.hub.json");
+        assert!(!engine.is_local_inbox_file(&qa_hub_origin),
+            "qa.hub.json should be treated as per-origin file (qa from hub)");
+
+        // Test that "unknown.hub.json" is treated as per-origin (not a known agent)
+        let unknown_hub = inboxes_dir.join("unknown.hub.json");
+        assert!(!engine.is_local_inbox_file(&unknown_hub),
+            "unknown.hub.json should be treated as per-origin file (ends with known hostname hub)");
     }
 }
