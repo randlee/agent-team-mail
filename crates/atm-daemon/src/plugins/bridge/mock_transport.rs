@@ -51,13 +51,13 @@ impl SharedFilesystem {
     }
 
     /// Get a file's contents
-    fn get(&self, path: &Path) -> Option<Vec<u8>> {
+    pub fn get(&self, path: &Path) -> Option<Vec<u8>> {
         let files = self.files.lock().unwrap();
         files.get(path).cloned()
     }
 
     /// Write a file
-    fn put(&self, path: PathBuf, content: Vec<u8>) {
+    pub fn put(&self, path: PathBuf, content: Vec<u8>) {
         let mut files = self.files.lock().unwrap();
         files.insert(path, content);
     }
