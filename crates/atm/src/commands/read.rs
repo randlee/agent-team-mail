@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use atm_core::config::{resolve_config, ConfigOverrides};
-use atm_core::schema::{InboxMessage, TeamConfig};
+use atm_core::schema::TeamConfig;
 use chrono::{DateTime, Utc};
 use clap::{ArgAction, Args};
 
@@ -100,15 +100,15 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         anyhow::bail!("Agent '{agent_name}' not found in team '{team_name}'");
     }
 
-    // Read inbox messages
-    let inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
-    let messages: Vec<InboxMessage> = if inbox_path.exists() {
-        let content = std::fs::read_to_string(&inbox_path)?;
-        serde_json::from_str(&content)?
-    } else {
-        // Empty inbox - not an error
-        Vec::new()
-    };
+    // Extract hostname registry from config (if bridge is configured)
+    let hostname_registry = extract_hostname_registry(&config);
+
+    // Read inbox messages (merged from local + all origin files)
+    let messages = atm_core::io::inbox::inbox_read_merged(
+        &team_dir,
+        &agent_name,
+        hostname_registry.as_ref(),
+    )?;
 
     // Apply filters
     let mut filtered_messages = messages.clone();
@@ -173,9 +173,11 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             .map(|m| m.timestamp.clone())
             .collect();
 
-        // Atomically update inbox to mark messages as read
-        if inbox_path.exists() {
-            atm_core::io::inbox::inbox_update(&inbox_path, &team_name, &agent_name, |msgs| {
+        // Atomically update LOCAL inbox to mark messages as read
+        // Note: we only mark in the local inbox, not in origin files
+        let local_inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
+        if local_inbox_path.exists() {
+            atm_core::io::inbox::inbox_update(&local_inbox_path, &team_name, &agent_name, |msgs| {
                 for msg in msgs.iter_mut() {
                     let should_mark = if let Some(ref msg_id) = msg.message_id {
                         filtered_ids.contains(msg_id) && !msg.read
@@ -252,6 +254,35 @@ fn format_relative_time(timestamp_str: &str) -> String {
     } else {
         "unknown".to_string()
     }
+}
+
+/// Extract hostname registry from bridge plugin config
+///
+/// Returns None if bridge plugin is not configured or not enabled.
+fn extract_hostname_registry(config: &atm_core::config::Config) -> Option<atm_core::config::HostnameRegistry> {
+    use atm_core::config::BridgeConfig;
+
+    // Check if bridge plugin config exists
+    let bridge_table = config.plugins.get("bridge")?;
+
+    // Parse bridge config
+    let bridge_config: BridgeConfig = match bridge_table.clone().try_into() {
+        Ok(cfg) => cfg,
+        Err(_) => return None,
+    };
+
+    // Check if bridge is enabled
+    if !bridge_config.enabled {
+        return None;
+    }
+
+    // Build hostname registry from remotes
+    let mut registry = atm_core::config::HostnameRegistry::new();
+    for remote in bridge_config.remotes {
+        let _ = registry.register(remote); // Ignore errors
+    }
+
+    Some(registry)
 }
 
 #[cfg(test)]
