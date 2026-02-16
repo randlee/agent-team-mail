@@ -1468,7 +1468,7 @@ Phase 6.4 Complete
 **Branch prefix**: `feature/p8-*`
 **Integration branch**: `integrate/phase-8` (off `develop`)
 **Depends on**: Phase 7 complete
-**Status**: Design complete, ready for implementation
+**Status**: Complete (all Phase 8 sprints merged)
 
 **Design reference**: [`docs/phase8-bridge-design.md`](./phase8-bridge-design.md) (ARCH-CTM reviewed, approved)
 
@@ -1580,6 +1580,23 @@ Phase 6.4 Complete
 - `crates/atm-daemon/tests/bridge_e2e.rs`
 - `docs/`
 
+### Sprint 8.6 — Bridge Hardening + Blocking Read
+**Goal**: Address architecture review gaps and add blocking read support.
+**Branch**: `feature/p8-s6-hardening`
+
+**Deliverables**:
+- Bridge pull logic fixes (base inbox pull, per-origin handling)
+- Per-remote transport map, lazy connect
+- Dedup eviction (FIFO cap) and retention for per-origin files
+- Shared mock transport E2E tests
+- `atm read --timeout` (blocking read with watcher fallback)
+
+**Files**:
+- `crates/atm-daemon/src/plugins/bridge/*`
+- `crates/atm/src/commands/read.rs`
+- `crates/atm/src/commands/wait.rs`
+- `crates/atm-daemon/tests/bridge_e2e.rs`
+
 ### Phase 8 Dependency Graph
 
 ```
@@ -1673,7 +1690,7 @@ Concrete definition of “no open P8 blocking issues”:
 - Dependencies: Sprint 9.3 complete
 - Deliverables: daemon writes status JSON file, CLI reads it (no IPC), stale detection based on timestamp
 - Files to create/modify:
-  - `crates/atm-daemon/src/daemon/event_loop.rs` or new `status.rs`
+  - `crates/atm-daemon/src/daemon/status.rs` (new)
   - `crates/atm/src/commands/daemon.rs` (new subcommand) or `commands/status.rs`
 - Status file spec:
   - Location: `${ATM_HOME}/daemon/status.json` (via new `get_home_dir()`)
@@ -1703,7 +1720,7 @@ Concrete definition of “no open P8 blocking issues”:
 - Exit criteria: all worker tests pass; no regressions in adapters
 
 ### Sprint 9.6: Daemon Retention Tasks
-- Dependencies: Sprint 9.2 complete
+- Dependencies: Sprint 9.4 complete
 - Deliverables: periodic inbox trimming in daemon loop; CI report file retention; non-blocking execution
 - Files to create/modify:
   - `crates/atm-daemon/src/daemon/event_loop.rs`
@@ -1731,17 +1748,18 @@ Sprint 9.0 (Verification Gate)
                     │
                     ├── Sprint 9.5 (WorkerHandle Backend Payload)
                     │
-                    └── Sprint 9.6 (Daemon Retention Tasks)
+                    └── Sprint 9.6 (Daemon Retention Tasks)  ← depends on 9.4
 ```
 
 Parallel execution plan:
-- After 9.2 merges, sprints 9.3, 9.5, 9.6 can run in parallel.
+- After 9.2 merges, sprints 9.3 and 9.5 can run in parallel.
+- Sprint 9.6 starts after 9.4 to avoid daemon event loop overlap.
 
 ### File Ownership Matrix (Phase 9)
 - Sprint 9.1: `.github/workflows/ci.yml`, `rust-toolchain.toml`
 - Sprint 9.2: home-dir call sites listed above
 - Sprint 9.3: `crates/atm-daemon/src/plugins/ci_monitor/config.rs`, `plugin.rs`
-- Sprint 9.4: `crates/atm-daemon/src/daemon/event_loop.rs` or `status.rs`, `crates/atm/src/commands/daemon.rs`
+- Sprint 9.4: `crates/atm-daemon/src/daemon/status.rs`, `crates/atm/src/commands/daemon.rs`
 - Sprint 9.5: `crates/atm-daemon/src/plugins/worker_adapter/*`
 - Sprint 9.6: `crates/atm-daemon/src/daemon/event_loop.rs`, `crates/atm-core/src/retention.rs`
 
@@ -1798,14 +1816,16 @@ Additional plugins planned (each is a self-contained sprint series):
 | **6.4** | — | Design Reconciliation | ✅ | [#40](https://github.com/randlee/agent-team-mail/pull/40) |
 | **7** | 7.1–7.4 | Worker Adapter + Integration Tests | ✅ | [#44](https://github.com/randlee/agent-team-mail/pull/44), [#49](https://github.com/randlee/agent-team-mail/pull/49) |
 | **7** | 7.5 | Phase 7 Review + Phase 8 Bridge Design | ✅ | [#52](https://github.com/randlee/agent-team-mail/pull/52) |
-| **8** | 8.1 | Bridge Config + Plugin Scaffold | — | — |
-| **8** | 8.2 | Per-Origin Read Path + Watcher Fix | — | — |
-| **8** | 8.3 | SSH/SFTP Transport | — | — |
-| **8** | 8.4 | Sync Engine + Dedup | — | — |
-| **8** | 8.5 | Team Config Sync + Hardening | — | — |
+| **8** | 8.1 | Bridge Config + Plugin Scaffold | ✅ | [#54](https://github.com/randlee/agent-team-mail/pull/54) |
+| **8** | 8.2 | Per-Origin Read Path + Watcher Fix | ✅ | [#55](https://github.com/randlee/agent-team-mail/pull/55) |
+| **8** | 8.3 | SSH/SFTP Transport | ✅ | [#56](https://github.com/randlee/agent-team-mail/pull/56) |
+| **8** | 8.4 | Sync Engine + Dedup | ✅ | [#57](https://github.com/randlee/agent-team-mail/pull/57) |
+| **8** | 8.5 | Team Config Sync + Hardening | ✅ | [#58](https://github.com/randlee/agent-team-mail/pull/58) |
+| **8** | 8.5.1 | Phase 8 Arch Review Fixes | ✅ | [#60](https://github.com/randlee/agent-team-mail/pull/60) |
+| **8** | 8.6 | Bridge Hardening + Blocking Read | ✅ | [#61](https://github.com/randlee/agent-team-mail/pull/61) |
 
-**Completed**: 31 sprints + 1 design reconciliation across 7 phases (CI green)
-**Next**: Phase 8 — Cross-Computer Bridge Plugin (5 sprints, 8.2/8.3 parallel)
+**Completed**: 36 sprints + 1 design reconciliation across 8 phases (CI green)
+**Next**: Phase 9 — CI Monitor Integration + Platform Stabilization
 
 **Phase integration PRs**:
 | Phase | Integration PR | Status |
@@ -1814,6 +1834,7 @@ Additional plugins planned (each is a self-contained sprint series):
 | Phase 4 | [#25](https://github.com/randlee/agent-team-mail/pull/25) | ✅ Merged |
 | Phase 5 | [#30](https://github.com/randlee/agent-team-mail/pull/30), [#33](https://github.com/randlee/agent-team-mail/pull/33) | ✅ Merged |
 | Phase 7 | [#50](https://github.com/randlee/agent-team-mail/pull/50), [#51](https://github.com/randlee/agent-team-mail/pull/51) | ✅ Merged |
+| Phase 8 | [#59](https://github.com/randlee/agent-team-mail/pull/59) | ✅ Merged |
 
 ---
 
