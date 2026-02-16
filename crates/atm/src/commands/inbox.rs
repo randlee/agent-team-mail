@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use atm_core::config::{resolve_config, ConfigOverrides};
-use atm_core::schema::{InboxMessage, TeamConfig};
+use atm_core::schema::TeamConfig;
 use chrono::DateTime;
 use clap::{ArgAction, Args};
 use std::path::Path;
@@ -115,6 +115,14 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
 
     let team_config: TeamConfig = serde_json::from_str(&std::fs::read_to_string(&team_config_path)?)?;
 
+    // Load config to extract hostname registry (if bridge is configured)
+    let config = atm_core::config::resolve_config(
+        &atm_core::config::ConfigOverrides::default(),
+        &std::env::current_dir()?,
+        home_dir,
+    )?;
+    let hostname_registry = extract_hostname_registry(&config);
+
     println!("Team: {team_name}\n");
     if use_since_last_seen {
         println!("  {:<20} {:>8} {:>8} {:>12}", "Agent", "New", "Total", "Latest");
@@ -126,11 +134,14 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
     // Collect agent summaries
     let mut summaries = Vec::new();
     for member in &team_config.members {
-        let inbox_path = team_dir.join("inboxes").join(format!("{}.json", member.name));
+        // Read merged messages (local + all origin files)
+        let messages = atm_core::io::inbox::inbox_read_merged(
+            &team_dir,
+            &member.name,
+            hostname_registry.as_ref(),
+        )?;
 
-        let (unread, total, latest) = if inbox_path.exists() {
-            let content = std::fs::read_to_string(&inbox_path)?;
-            let messages: Vec<InboxMessage> = serde_json::from_str(&content)?;
+        let (unread, total, latest) = if !messages.is_empty() {
 
             let unread_count = if use_since_last_seen {
                 let state = load_seen_state().unwrap_or_default();
@@ -196,6 +207,14 @@ fn watch_inboxes(
     let mut message_states: std::collections::HashMap<(String, String, String), MessageState> =
         std::collections::HashMap::new();
 
+    // Load config to extract hostname registry
+    let config = atm_core::config::resolve_config(
+        &atm_core::config::ConfigOverrides::default(),
+        &std::env::current_dir()?,
+        home_dir,
+    )?;
+    let hostname_registry = extract_hostname_registry(&config);
+
     loop {
         let team_names = if all_teams {
             let entries = std::fs::read_dir(home_dir.join(".claude/teams"))?;
@@ -225,10 +244,14 @@ fn watch_inboxes(
                 serde_json::from_str(&std::fs::read_to_string(&team_config_path)?)?;
 
             for member in &team_config.members {
-                let inbox_path = team_dir.join("inboxes").join(format!("{}.json", member.name));
-                let snapshot = if inbox_path.exists() {
-                    let content = std::fs::read_to_string(&inbox_path)?;
-                    let messages: Vec<InboxMessage> = serde_json::from_str(&content)?;
+                // Read merged messages (local + all origin files)
+                let messages = atm_core::io::inbox::inbox_read_merged(
+                    &team_dir,
+                    &member.name,
+                    hostname_registry.as_ref(),
+                )?;
+
+                let snapshot = if !messages.is_empty() {
                     let unread = messages.iter().filter(|m| !m.read).count();
                     let total = messages.len();
                     let latest = messages
@@ -330,4 +353,33 @@ fn format_relative_time(timestamp_str: &str) -> String {
     } else {
         "unknown".to_string()
     }
+}
+
+/// Extract hostname registry from bridge plugin config
+///
+/// Returns None if bridge plugin is not configured or not enabled.
+fn extract_hostname_registry(config: &atm_core::config::Config) -> Option<atm_core::config::HostnameRegistry> {
+    use atm_core::config::BridgeConfig;
+
+    // Check if bridge plugin config exists
+    let bridge_table = config.plugins.get("bridge")?;
+
+    // Parse bridge config
+    let bridge_config: BridgeConfig = match bridge_table.clone().try_into() {
+        Ok(cfg) => cfg,
+        Err(_) => return None,
+    };
+
+    // Check if bridge is enabled
+    if !bridge_config.enabled {
+        return None;
+    }
+
+    // Build hostname registry from remotes
+    let mut registry = atm_core::config::HostnameRegistry::new();
+    for remote in bridge_config.remotes {
+        let _ = registry.register(remote); // Ignore errors
+    }
+
+    Some(registry)
 }
