@@ -91,7 +91,6 @@ async fn test_sync_push_with_mock_transport() {
 
     // Setup sync engine with mock transport
     let config = create_test_config("laptop", "desktop");
-    let transport = Arc::new(MockTransport::new()) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
     // Connect transport (required before operations)
     let mut transport_mut = MockTransport::new();

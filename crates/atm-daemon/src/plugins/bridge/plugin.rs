@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Bridge plugin — synchronizes agent inbox queues across machines
 pub struct BridgePlugin {
@@ -102,6 +102,11 @@ impl Plugin for BridgePlugin {
 
         // Get team directory from mail service
         let team_dir = ctx.mail.teams_root().join(&ctx.system.default_team);
+
+        // Cleanup stale temp files on startup
+        if let Err(e) = super::team_config_sync::cleanup_stale_tmp_files(&team_dir).await {
+            warn!("Failed to cleanup stale temp files: {}", e);
+        }
 
         let sync_engine = SyncEngine::new(
             Arc::new(config.clone()),
