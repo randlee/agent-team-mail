@@ -21,7 +21,7 @@ pub use self_write_filter::SelfWriteFilter;
 pub use sync::{SyncEngine, SyncStats};
 pub use team_config_sync::{cleanup_stale_tmp_files, sync_team_config};
 pub use transport::{Transport, TransportError};
-pub use mock_transport::MockTransport;
+pub use mock_transport::{MockTransport, SharedMockTransport, SharedFilesystem};
 
 #[cfg(feature = "ssh")]
 pub use ssh::{SshTransport, SshConfig};

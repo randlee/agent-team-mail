@@ -33,6 +33,63 @@ struct MockState {
     latency_ms: u64,
 }
 
+/// Shared filesystem backend for multiple MockTransport instances
+///
+/// Simulates a real remote filesystem where multiple transports can read/write
+/// the same files. Used for E2E testing with multiple nodes.
+#[derive(Debug, Clone, Default)]
+pub struct SharedFilesystem {
+    files: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
+}
+
+impl SharedFilesystem {
+    /// Create a new shared filesystem
+    pub fn new() -> Self {
+        Self {
+            files: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Get a file's contents
+    pub fn get(&self, path: &Path) -> Option<Vec<u8>> {
+        let files = self.files.lock().unwrap();
+        files.get(path).cloned()
+    }
+
+    /// Write a file
+    pub fn put(&self, path: PathBuf, content: Vec<u8>) {
+        let mut files = self.files.lock().unwrap();
+        files.insert(path, content);
+    }
+
+    /// Remove a file
+    fn remove(&self, path: &Path) -> Option<Vec<u8>> {
+        let mut files = self.files.lock().unwrap();
+        files.remove(path)
+    }
+
+    /// List files in a directory
+    fn list(&self, dir: &Path) -> Vec<PathBuf> {
+        let files = self.files.lock().unwrap();
+        files.keys()
+            .filter(|p| p.parent() == Some(dir))
+            .cloned()
+            .collect()
+    }
+
+    /// Check if file exists
+    fn exists(&self, path: &Path) -> bool {
+        let files = self.files.lock().unwrap();
+        files.contains_key(path)
+    }
+
+    /// Clear all files
+    fn clear(&self) {
+        let mut files = self.files.lock().unwrap();
+        files.clear();
+    }
+}
+
 /// Mock transport implementation for testing
 ///
 /// Stores "files" in memory and simulates network operations.
@@ -250,6 +307,233 @@ impl Transport for MockTransport {
 
         // Insert with new path
         state.files.insert(to.to_path_buf(), content);
+
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> Result<()> {
+        self.simulate_latency().await;
+
+        let mut state = self.state.lock().unwrap();
+        state.connected = false;
+
+        Ok(())
+    }
+}
+
+/// Shared mock transport for E2E testing
+///
+/// Multiple instances can share the same underlying filesystem,
+/// simulating real network file transfers between nodes.
+#[derive(Debug, Clone)]
+pub struct SharedMockTransport {
+    /// Shared filesystem backend
+    filesystem: SharedFilesystem,
+
+    /// Local state (connection status, failure simulation)
+    state: Arc<Mutex<MockState>>,
+}
+
+impl SharedMockTransport {
+    /// Create a new shared mock transport with a shared filesystem
+    ///
+    /// Transport starts in connected state for convenience in tests.
+    pub fn new(filesystem: SharedFilesystem) -> Self {
+        Self {
+            filesystem,
+            state: Arc::new(Mutex::new(MockState {
+                connected: true, // Start connected
+                ..Default::default()
+            })),
+        }
+    }
+
+    /// Set simulated latency for all operations
+    pub fn set_latency(&self, latency_ms: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.latency_ms = latency_ms;
+    }
+
+    /// Enable connection failure simulation
+    pub fn set_fail_connect(&self, fail: bool) {
+        let mut state = self.state.lock().unwrap();
+        state.fail_connect = fail;
+    }
+
+    /// Enable upload failure simulation
+    pub fn set_fail_upload(&self, fail: bool) {
+        let mut state = self.state.lock().unwrap();
+        state.fail_upload = fail;
+    }
+
+    /// Enable download failure simulation
+    pub fn set_fail_download(&self, fail: bool) {
+        let mut state = self.state.lock().unwrap();
+        state.fail_download = fail;
+    }
+
+    /// Get a copy of a file's contents (for test assertions)
+    pub fn get_file(&self, path: &Path) -> Option<Vec<u8>> {
+        self.filesystem.get(path)
+    }
+
+    /// Check if a file exists (for test assertions)
+    pub fn file_exists(&self, path: &Path) -> bool {
+        self.filesystem.exists(path)
+    }
+
+    /// Clear all files (for test cleanup)
+    pub fn clear(&self) {
+        self.filesystem.clear();
+    }
+
+    /// Simulate latency if configured
+    async fn simulate_latency(&self) {
+        let latency_ms = {
+            let state = self.state.lock().unwrap();
+            state.latency_ms
+        };
+
+        if latency_ms > 0 {
+            sleep(Duration::from_millis(latency_ms)).await;
+        }
+    }
+}
+
+#[async_trait]
+impl Transport for SharedMockTransport {
+    async fn connect(&mut self) -> Result<()> {
+        self.simulate_latency().await;
+
+        let mut state = self.state.lock().unwrap();
+
+        if state.fail_connect {
+            return Err(TransportError::ConnectionFailed {
+                message: "Simulated connection failure".to_string(),
+            });
+        }
+
+        state.connected = true;
+        Ok(())
+    }
+
+    async fn is_connected(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.connected
+    }
+
+    async fn upload(&self, local_path: &Path, remote_path: &Path) -> Result<()> {
+        self.simulate_latency().await;
+
+        // Check state before async operation
+        {
+            let state = self.state.lock().unwrap();
+
+            if !state.connected {
+                return Err(TransportError::ConnectionFailed {
+                    message: "Not connected".to_string(),
+                });
+            }
+
+            if state.fail_upload {
+                return Err(TransportError::RemoteError {
+                    message: "Simulated upload failure".to_string(),
+                });
+            }
+        } // Lock is dropped here
+
+        // Read local file
+        let content = tokio::fs::read(local_path).await?;
+
+        // Store in shared filesystem
+        self.filesystem.put(remote_path.to_path_buf(), content);
+
+        Ok(())
+    }
+
+    async fn download(&self, remote_path: &Path, local_path: &Path) -> Result<()> {
+        self.simulate_latency().await;
+
+        // Get file content from shared filesystem
+        let content = {
+            let state = self.state.lock().unwrap();
+
+            if !state.connected {
+                return Err(TransportError::ConnectionFailed {
+                    message: "Not connected".to_string(),
+                });
+            }
+
+            if state.fail_download {
+                return Err(TransportError::RemoteError {
+                    message: "Simulated download failure".to_string(),
+                });
+            }
+
+            // Get file from shared filesystem
+            self.filesystem.get(remote_path).ok_or_else(|| {
+                TransportError::RemoteError {
+                    message: format!("File not found: {}", remote_path.display()),
+                }
+            })?
+        }; // Lock is dropped here
+
+        // Write to local file
+        tokio::fs::write(local_path, content).await?;
+
+        Ok(())
+    }
+
+    async fn list(&self, remote_dir: &Path, pattern: &str) -> Result<Vec<String>> {
+        self.simulate_latency().await;
+
+        let matches = {
+            let state = self.state.lock().unwrap();
+
+            if !state.connected {
+                return Err(TransportError::ConnectionFailed {
+                    message: "Not connected".to_string(),
+                });
+            }
+
+            // Get files from shared filesystem
+            let files = self.filesystem.list(remote_dir);
+            let mut matches = Vec::new();
+
+            for path in files {
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str())
+                    && pattern_matches(pattern, filename)
+                {
+                    matches.push(filename.to_string());
+                }
+            }
+
+            matches
+        }; // Lock is dropped here
+
+        Ok(matches)
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        self.simulate_latency().await;
+
+        let state = self.state.lock().unwrap();
+
+        if !state.connected {
+            return Err(TransportError::ConnectionFailed {
+                message: "Not connected".to_string(),
+            });
+        }
+
+        // Get the content
+        let content = self.filesystem.remove(from).ok_or_else(|| {
+            TransportError::RemoteError {
+                message: format!("Source file not found: {}", from.display()),
+            }
+        })?;
+
+        // Insert with new path
+        self.filesystem.put(to.to_path_buf(), content);
 
         Ok(())
     }

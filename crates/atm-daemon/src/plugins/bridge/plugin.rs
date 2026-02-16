@@ -3,6 +3,8 @@
 use super::config::BridgePluginConfig;
 use super::self_write_filter::SelfWriteFilter;
 use super::sync::SyncEngine;
+#[allow(unused_imports)] // Required for Transport trait method dispatch (.connect())
+use super::transport::Transport;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,32 +100,35 @@ impl Plugin for BridgePlugin {
             );
         }
 
-        // Select transport implementation
-        let transport: Arc<dyn super::transport::Transport> = {
-            let has_remotes = !config.core.remotes.is_empty();
-            if has_remotes {
-                #[cfg(feature = "ssh")]
-                {
-                    let remote = &config.core.remotes[0];
-                    if config.core.remotes.len() > 1 {
-                        warn!("SSH transport currently uses the first remote only; additional remotes will be ignored.");
-                    }
-                    let ssh_config = super::ssh::SshConfig {
-                        address: remote.address.clone(),
-                        key_path: remote.ssh_key_path.as_ref().map(PathBuf::from),
-                        ..Default::default()
-                    };
-                    Arc::new(super::ssh::SshTransport::new(ssh_config))
+        // Create transport implementations for each remote
+        let mut transports = std::collections::HashMap::new();
+        for remote in &config.core.remotes {
+            #[cfg(feature = "ssh")]
+            {
+                let ssh_config = super::ssh::SshConfig {
+                    address: remote.address.clone(),
+                    key_path: remote.ssh_key_path.as_ref().map(PathBuf::from),
+                    ..Default::default()
+                };
+                let mut transport = super::ssh::SshTransport::new(ssh_config);
+
+                // Connect to remote on startup
+                if let Err(e) = transport.connect().await {
+                    warn!("Failed to connect to {}: {}", remote.hostname, e);
                 }
-                #[cfg(not(feature = "ssh"))]
-                {
-                    warn!("SSH feature disabled; falling back to MockTransport.");
-                    Arc::new(super::mock_transport::MockTransport::new())
-                }
-            } else {
-                Arc::new(super::mock_transport::MockTransport::new())
+
+                let transport_arc: Arc<tokio::sync::Mutex<dyn super::transport::Transport>> =
+                    Arc::new(tokio::sync::Mutex::new(transport));
+                transports.insert(remote.hostname.clone(), transport_arc);
             }
-        };
+            #[cfg(not(feature = "ssh"))]
+            {
+                let transport = super::mock_transport::MockTransport::new();
+                let transport_arc: Arc<tokio::sync::Mutex<dyn super::transport::Transport>> =
+                    Arc::new(tokio::sync::Mutex::new(transport));
+                transports.insert(remote.hostname.clone(), transport_arc);
+            }
+        }
 
         // Get team directory from mail service
         let team_dir = ctx.mail.teams_root().join(&ctx.system.default_team);
@@ -135,7 +140,7 @@ impl Plugin for BridgePlugin {
 
         let sync_engine = SyncEngine::new(
             Arc::new(config.clone()),
-            transport,
+            transports,
             team_dir.clone(),
             self.self_write_filter.clone(),
         )

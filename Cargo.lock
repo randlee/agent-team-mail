@@ -124,6 +124,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "notify",
  "predicates",
  "serde",
  "serde_json",

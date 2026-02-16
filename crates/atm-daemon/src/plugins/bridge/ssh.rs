@@ -10,7 +10,6 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::time::sleep;
 
 /// Connection state for SSH transport
 struct ConnectionState {
@@ -74,32 +73,6 @@ impl SshTransport {
                 session: None,
                 last_attempt: None,
             })),
-        }
-    }
-
-    /// Execute operation with retry and exponential backoff
-    async fn with_retry<F, T>(&self, operation: F) -> Result<T>
-    where
-        F: Fn() -> Result<T>,
-    {
-        let mut attempt = 0;
-        let mut backoff_ms = self.config.initial_backoff_ms;
-
-        loop {
-            match operation() {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    attempt += 1;
-
-                    if attempt >= self.config.max_retries {
-                        return Err(e);
-                    }
-
-                    // Exponential backoff
-                    sleep(Duration::from_millis(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(self.config.max_backoff_ms);
-                }
-            }
         }
     }
 }
@@ -214,106 +187,108 @@ impl Transport for SshTransport {
         let remote_path = remote_path.to_path_buf();
         let state = self.state.clone();
 
-        self.with_retry(|| {
-            tokio::task::block_in_place(|| {
-                let state_guard = state.lock().unwrap();
-                let session = state_guard
-                    .session
-                    .as_ref()
-                    .ok_or_else(|| TransportError::ConnectionFailed {
-                        message: "Not connected".to_string(),
-                    })?;
-
-                // Open SFTP channel
-                let sftp = session.sftp().map_err(|e| TransportError::RemoteError {
-                    message: format!("Failed to open SFTP channel: {e}"),
+        tokio::task::spawn_blocking(move || {
+            // Perform blocking SSH operations on dedicated thread pool
+            let state_guard = state.lock().unwrap();
+            let session = state_guard
+                .session
+                .as_ref()
+                .ok_or_else(|| TransportError::ConnectionFailed {
+                    message: "Not connected".to_string(),
                 })?;
 
-                // Read local file
-                let content = std::fs::read(&local_path)?;
+            // Open SFTP channel
+            let sftp = session.sftp().map_err(|e| TransportError::RemoteError {
+                message: format!("Failed to open SFTP channel: {e}"),
+            })?;
 
-                // Write to temp file on remote
-                let temp_path = {
-                    let mut temp = remote_path.clone();
-                    let filename = temp
-                        .file_name()
-                        .ok_or_else(|| TransportError::InvalidPath {
-                            message: "Invalid remote path".to_string(),
-                        })?
-                        .to_string_lossy();
-                    temp.set_file_name(format!("{filename}.bridge-tmp"));
-                    temp
-                };
+            // Read local file
+            let content = std::fs::read(&local_path)?;
 
-                let remote_path_str = remote_path
-                    .to_str()
+            // Write to temp file on remote
+            let temp_path = {
+                let mut temp = remote_path.clone();
+                let filename = temp
+                    .file_name()
                     .ok_or_else(|| TransportError::InvalidPath {
-                        message: "Remote path contains invalid UTF-8".to_string(),
-                    })?;
+                        message: "Invalid remote path".to_string(),
+                    })?
+                    .to_string_lossy();
+                temp.set_file_name(format!("{filename}.bridge-tmp"));
+                temp
+            };
 
-                let temp_path_str = temp_path
-                    .to_str()
-                    .ok_or_else(|| TransportError::InvalidPath {
-                        message: "Temp path contains invalid UTF-8".to_string(),
-                    })?;
-
-                // Ensure parent directory exists
-                if let Some(parent) = remote_path.parent()
-                    && let Some(parent_str) = parent.to_str()
-                {
-                    let _ = sftp.mkdir(
-                        std::path::Path::new(parent_str),
-                        0o755,
-                    );
-                }
-
-                // Write to temp file
-                let mut remote_file = sftp
-                    .create(std::path::Path::new(temp_path_str))
-                    .map_err(|e| TransportError::RemoteError {
-                        message: format!("Failed to create remote temp file: {e}"),
-                    })?;
-
-                std::io::Write::write_all(&mut remote_file, &content)?;
-                drop(remote_file); // Close the file
-
-                // Atomic rename via SSH command
-                drop(sftp); // Close SFTP before running command
-
-                let rename_cmd = format!("mv '{temp_path_str}' '{remote_path_str}'");
-                let mut channel = session
-                    .channel_session()
-                    .map_err(|e| TransportError::RemoteError {
-                        message: format!("Failed to open SSH channel: {e}"),
-                    })?;
-
-                channel
-                    .exec(&rename_cmd)
-                    .map_err(|e| TransportError::RemoteError {
-                        message: format!("Failed to execute rename command: {e}"),
-                    })?;
-
-                let mut stderr = String::new();
-                std::io::Read::read_to_string(&mut channel.stderr(), &mut stderr)?;
-
-                channel.wait_close().ok();
-
-                let exit_status = channel.exit_status().map_err(|e| {
-                    TransportError::RemoteError {
-                        message: format!("Failed to get command exit status: {e}"),
-                    }
+            let remote_path_str = remote_path
+                .to_str()
+                .ok_or_else(|| TransportError::InvalidPath {
+                    message: "Remote path contains invalid UTF-8".to_string(),
                 })?;
 
-                if exit_status != 0 {
-                    return Err(TransportError::RemoteError {
-                        message: format!("Rename command failed: {stderr}"),
-                    });
-                }
+            let temp_path_str = temp_path
+                .to_str()
+                .ok_or_else(|| TransportError::InvalidPath {
+                    message: "Temp path contains invalid UTF-8".to_string(),
+                })?;
 
-                Ok(())
-            })
+            // Ensure parent directory exists
+            if let Some(parent) = remote_path.parent()
+                && let Some(parent_str) = parent.to_str()
+            {
+                let _ = sftp.mkdir(
+                    std::path::Path::new(parent_str),
+                    0o755,
+                );
+            }
+
+            // Write to temp file
+            let mut remote_file = sftp
+                .create(std::path::Path::new(temp_path_str))
+                .map_err(|e| TransportError::RemoteError {
+                    message: format!("Failed to create remote temp file: {e}"),
+                })?;
+
+            std::io::Write::write_all(&mut remote_file, &content)?;
+            drop(remote_file); // Close the file
+
+            // Atomic rename via SSH command
+            drop(sftp); // Close SFTP before running command
+
+            let rename_cmd = format!("mv '{temp_path_str}' '{remote_path_str}'");
+            let mut channel = session
+                .channel_session()
+                .map_err(|e| TransportError::RemoteError {
+                    message: format!("Failed to open SSH channel: {e}"),
+                })?;
+
+            channel
+                .exec(&rename_cmd)
+                .map_err(|e| TransportError::RemoteError {
+                    message: format!("Failed to execute rename command: {e}"),
+                })?;
+
+            let mut stderr = String::new();
+            std::io::Read::read_to_string(&mut channel.stderr(), &mut stderr)?;
+
+            channel.wait_close().ok();
+
+            let exit_status = channel.exit_status().map_err(|e| {
+                TransportError::RemoteError {
+                    message: format!("Failed to get command exit status: {e}"),
+                }
+            })?;
+
+            if exit_status != 0 {
+                return Err(TransportError::RemoteError {
+                    message: format!("Rename command failed: {stderr}"),
+                });
+            }
+
+            Ok(())
         })
         .await
+        .map_err(|e| TransportError::ConnectionFailed {
+            message: format!("Task join error: {e}"),
+        })?
     }
 
     async fn download(&self, remote_path: &Path, local_path: &Path) -> Result<()> {
@@ -321,41 +296,42 @@ impl Transport for SshTransport {
         let local_path = local_path.to_path_buf();
         let state = self.state.clone();
 
-        self.with_retry(|| {
-            tokio::task::block_in_place(|| {
-                let state_guard = state.lock().unwrap();
-                let session = state_guard
-                    .session
-                    .as_ref()
-                    .ok_or_else(|| TransportError::ConnectionFailed {
-                        message: "Not connected".to_string(),
-                    })?;
-
-                let sftp = session.sftp().map_err(|e| TransportError::RemoteError {
-                    message: format!("Failed to open SFTP channel: {e}"),
+        tokio::task::spawn_blocking(move || {
+            let state_guard = state.lock().unwrap();
+            let session = state_guard
+                .session
+                .as_ref()
+                .ok_or_else(|| TransportError::ConnectionFailed {
+                    message: "Not connected".to_string(),
                 })?;
 
-                let remote_path_str = remote_path
-                    .to_str()
-                    .ok_or_else(|| TransportError::InvalidPath {
-                        message: "Remote path contains invalid UTF-8".to_string(),
-                    })?;
+            let sftp = session.sftp().map_err(|e| TransportError::RemoteError {
+                message: format!("Failed to open SFTP channel: {e}"),
+            })?;
 
-                let mut remote_file = sftp
-                    .open(std::path::Path::new(remote_path_str))
-                    .map_err(|e| TransportError::RemoteError {
-                        message: format!("Failed to open remote file: {e}"),
-                    })?;
+            let remote_path_str = remote_path
+                .to_str()
+                .ok_or_else(|| TransportError::InvalidPath {
+                    message: "Remote path contains invalid UTF-8".to_string(),
+                })?;
 
-                let mut content = Vec::new();
-                std::io::Read::read_to_end(&mut remote_file, &mut content)?;
+            let mut remote_file = sftp
+                .open(std::path::Path::new(remote_path_str))
+                .map_err(|e| TransportError::RemoteError {
+                    message: format!("Failed to open remote file: {e}"),
+                })?;
 
-                std::fs::write(&local_path, content)?;
+            let mut content = Vec::new();
+            std::io::Read::read_to_end(&mut remote_file, &mut content)?;
 
-                Ok(())
-            })
+            std::fs::write(&local_path, content)?;
+
+            Ok(())
         })
         .await
+        .map_err(|e| TransportError::ConnectionFailed {
+            message: format!("Task join error: {e}"),
+        })?
     }
 
     async fn list(&self, remote_dir: &Path, pattern: &str) -> Result<Vec<String>> {
@@ -363,46 +339,47 @@ impl Transport for SshTransport {
         let pattern = pattern.to_string();
         let state = self.state.clone();
 
-        self.with_retry(|| {
-            tokio::task::block_in_place(|| {
-                let state_guard = state.lock().unwrap();
-                let session = state_guard
-                    .session
-                    .as_ref()
-                    .ok_or_else(|| TransportError::ConnectionFailed {
-                        message: "Not connected".to_string(),
-                    })?;
-
-                let sftp = session.sftp().map_err(|e| TransportError::RemoteError {
-                    message: format!("Failed to open SFTP channel: {e}"),
+        tokio::task::spawn_blocking(move || {
+            let state_guard = state.lock().unwrap();
+            let session = state_guard
+                .session
+                .as_ref()
+                .ok_or_else(|| TransportError::ConnectionFailed {
+                    message: "Not connected".to_string(),
                 })?;
 
-                let remote_dir_str = remote_dir
-                    .to_str()
-                    .ok_or_else(|| TransportError::InvalidPath {
-                        message: "Remote dir contains invalid UTF-8".to_string(),
-                    })?;
+            let sftp = session.sftp().map_err(|e| TransportError::RemoteError {
+                message: format!("Failed to open SFTP channel: {e}"),
+            })?;
 
-                let entries = sftp
-                    .readdir(std::path::Path::new(remote_dir_str))
-                    .map_err(|e| TransportError::RemoteError {
-                        message: format!("Failed to list remote directory: {e}"),
-                    })?;
+            let remote_dir_str = remote_dir
+                .to_str()
+                .ok_or_else(|| TransportError::InvalidPath {
+                    message: "Remote dir contains invalid UTF-8".to_string(),
+                })?;
 
-                let mut matches = Vec::new();
+            let entries = sftp
+                .readdir(std::path::Path::new(remote_dir_str))
+                .map_err(|e| TransportError::RemoteError {
+                    message: format!("Failed to list remote directory: {e}"),
+                })?;
 
-                for (path, _stat) in entries {
-                    if let Some(filename) = path.file_name().and_then(|n| n.to_str())
-                        && pattern_matches(&pattern, filename)
-                    {
-                        matches.push(filename.to_string());
-                    }
+            let mut matches = Vec::new();
+
+            for (path, _stat) in entries {
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str())
+                    && pattern_matches(&pattern, filename)
+                {
+                    matches.push(filename.to_string());
                 }
+            }
 
-                Ok(matches)
-            })
+            Ok(matches)
         })
         .await
+        .map_err(|e| TransportError::ConnectionFailed {
+            message: format!("Task join error: {e}"),
+        })?
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
@@ -410,62 +387,63 @@ impl Transport for SshTransport {
         let to = to.to_path_buf();
         let state = self.state.clone();
 
-        self.with_retry(|| {
-            tokio::task::block_in_place(|| {
-                let state_guard = state.lock().unwrap();
-                let session = state_guard
-                    .session
-                    .as_ref()
-                    .ok_or_else(|| TransportError::ConnectionFailed {
-                        message: "Not connected".to_string(),
-                    })?;
-
-                let from_str = from
-                    .to_str()
-                    .ok_or_else(|| TransportError::InvalidPath {
-                        message: "Source path contains invalid UTF-8".to_string(),
-                    })?;
-
-                let to_str = to
-                    .to_str()
-                    .ok_or_else(|| TransportError::InvalidPath {
-                        message: "Destination path contains invalid UTF-8".to_string(),
-                    })?;
-
-                let rename_cmd = format!("mv '{from_str}' '{to_str}'");
-                let mut channel = session
-                    .channel_session()
-                    .map_err(|e| TransportError::RemoteError {
-                        message: format!("Failed to open SSH channel: {e}"),
-                    })?;
-
-                channel
-                    .exec(&rename_cmd)
-                    .map_err(|e| TransportError::RemoteError {
-                        message: format!("Failed to execute rename command: {e}"),
-                    })?;
-
-                let mut stderr = String::new();
-                std::io::Read::read_to_string(&mut channel.stderr(), &mut stderr)?;
-
-                channel.wait_close().ok();
-
-                let exit_status = channel.exit_status().map_err(|e| {
-                    TransportError::RemoteError {
-                        message: format!("Failed to get command exit status: {e}"),
-                    }
+        tokio::task::spawn_blocking(move || {
+            let state_guard = state.lock().unwrap();
+            let session = state_guard
+                .session
+                .as_ref()
+                .ok_or_else(|| TransportError::ConnectionFailed {
+                    message: "Not connected".to_string(),
                 })?;
 
-                if exit_status != 0 {
-                    return Err(TransportError::RemoteError {
-                        message: format!("Rename command failed: {stderr}"),
-                    });
-                }
+            let from_str = from
+                .to_str()
+                .ok_or_else(|| TransportError::InvalidPath {
+                    message: "Source path contains invalid UTF-8".to_string(),
+                })?;
 
-                Ok(())
-            })
+            let to_str = to
+                .to_str()
+                .ok_or_else(|| TransportError::InvalidPath {
+                    message: "Destination path contains invalid UTF-8".to_string(),
+                })?;
+
+            let rename_cmd = format!("mv '{from_str}' '{to_str}'");
+            let mut channel = session
+                .channel_session()
+                .map_err(|e| TransportError::RemoteError {
+                    message: format!("Failed to open SSH channel: {e}"),
+                })?;
+
+            channel
+                .exec(&rename_cmd)
+                .map_err(|e| TransportError::RemoteError {
+                    message: format!("Failed to execute rename command: {e}"),
+                })?;
+
+            let mut stderr = String::new();
+            std::io::Read::read_to_string(&mut channel.stderr(), &mut stderr)?;
+
+            channel.wait_close().ok();
+
+            let exit_status = channel.exit_status().map_err(|e| {
+                TransportError::RemoteError {
+                    message: format!("Failed to get command exit status: {e}"),
+                }
+            })?;
+
+            if exit_status != 0 {
+                return Err(TransportError::RemoteError {
+                    message: format!("Rename command failed: {stderr}"),
+                });
+            }
+
+            Ok(())
         })
         .await
+        .map_err(|e| TransportError::ConnectionFailed {
+            message: format!("Task join error: {e}"),
+        })?
     }
 
     async fn disconnect(&mut self) -> Result<()> {

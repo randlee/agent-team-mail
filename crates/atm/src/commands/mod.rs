@@ -15,6 +15,7 @@ mod request;
 mod send;
 mod status;
 mod teams;
+mod wait;
 
 /// atm - Mail-like messaging for Claude agent teams
 #[derive(Parser, Debug)]
