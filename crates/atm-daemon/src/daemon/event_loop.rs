@@ -4,6 +4,7 @@ use crate::daemon::{graceful_shutdown, spool_drain_loop, watch_inboxes, InboxEve
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -312,9 +313,6 @@ fn extract_hostname_registry(config: &agent_team_mail_core::config::Config) -> O
 /// Runs retention on all team inbox files at configured intervals.
 /// Also cleans up old CI report files if CI monitor plugin is configured.
 async fn retention_loop(ctx: PluginContext, cancel: CancellationToken) {
-    use agent_team_mail_core::retention::{apply_retention, clean_report_files};
-    use std::path::PathBuf;
-
     // Extract retention config
     let config = &ctx.config.retention;
     let interval_secs = config.interval_secs;
@@ -337,7 +335,7 @@ async fn retention_loop(ctx: PluginContext, cancel: CancellationToken) {
     // Extract report_dir from CI monitor plugin config if present
     let report_dir: Option<PathBuf> = ctx
         .config
-        .plugin_config("ci-monitor")
+        .plugin_config("ci_monitor")
         .and_then(|table| table.get("report_dir"))
         .and_then(|v| v.as_str())
         .map(PathBuf::from);
@@ -356,135 +354,180 @@ async fn retention_loop(ctx: PluginContext, cancel: CancellationToken) {
             _ = interval.tick() => {
                 debug!("Running periodic retention");
 
-                // Enumerate team directories
-                let team_dirs = match std::fs::read_dir(&teams_root) {
-                    Ok(entries) => entries,
-                    Err(e) => {
-                        error!("Failed to read teams directory {}: {}", teams_root.display(), e);
-                        continue;
-                    }
-                };
+                // Run retention work in spawn_blocking to avoid blocking the tokio runtime
+                let teams_root_clone = teams_root.clone();
+                let retention_policy_clone = retention_policy.clone();
+                let report_dir_clone = report_dir.clone();
 
-                for team_entry in team_dirs {
-                    let team_entry = match team_entry {
-                        Ok(e) => e,
-                        Err(e) => {
-                            warn!("Failed to read team directory entry: {}", e);
-                            continue;
-                        }
-                    };
+                let result = tokio::task::spawn_blocking(move || {
+                    retention_work(&teams_root_clone, &retention_policy_clone, report_dir_clone.as_ref())
+                }).await;
 
-                    let team_path = team_entry.path();
-                    if !team_path.is_dir() {
-                        continue;
-                    }
-
-                    let team_name = match team_path.file_name() {
-                        Some(name) => name.to_string_lossy().to_string(),
-                        None => continue,
-                    };
-
-                    // Enumerate agent inbox files in this team
-                    let agents = match std::fs::read_dir(&team_path) {
-                        Ok(entries) => entries,
-                        Err(e) => {
-                            warn!("Failed to read team directory {}: {}", team_path.display(), e);
-                            continue;
-                        }
-                    };
-
-                    for agent_entry in agents {
-                        let agent_entry = match agent_entry {
-                            Ok(e) => e,
-                            Err(e) => {
-                                warn!("Failed to read agent entry: {}", e);
-                                continue;
-                            }
-                        };
-
-                        let agent_path = agent_entry.path();
-
-                        // Look for inbox files: agent.json or agent.hostname.json
-                        if !agent_path.is_file() {
-                            continue;
-                        }
-
-                        let file_name = match agent_path.file_name() {
-                            Some(name) => name.to_string_lossy().to_string(),
-                            None => continue,
-                        };
-
-                        // Parse agent name from filename
-                        // Format: <agent>.json or <agent>.<hostname>.json
-                        let agent_name = if file_name.ends_with(".json") {
-                            let base = &file_name[..file_name.len() - 5]; // Remove .json
-                            // Extract first component before any dots
-                            base.split('.').next().unwrap_or(base).to_string()
-                        } else {
-                            continue;
-                        };
-
-                        // Apply retention to this inbox
-                        debug!("Applying retention to {}/{}/{}", team_name, agent_name, file_name);
-                        match apply_retention(
-                            &agent_path,
-                            &team_name,
-                            &agent_name,
-                            &retention_policy,
-                            false, // Not a dry run
-                        ) {
-                            Ok(result) => {
-                                if result.removed > 0 {
-                                    info!(
-                                        "Retention: {}/{}/{}: kept={}, removed={}, archived={}",
-                                        team_name, agent_name, file_name,
-                                        result.kept, result.removed, result.archived
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Retention failed for {}/{}/{}: {}",
-                                    team_name, agent_name, file_name, e
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Clean up old report files if configured
-                if let Some(ref dir) = report_dir {
-                    debug!("Cleaning old report files from {}", dir.display());
-
-                    // Use max_age for report files (default 30 days)
-                    let max_age_str = retention_policy.max_age.as_deref().unwrap_or("30d");
-                    let max_age_duration = match agent_team_mail_core::retention::parse_duration(max_age_str) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            error!("Invalid max_age duration '{}': {}", max_age_str, e);
-                            continue;
-                        }
-                    };
-
-                    match clean_report_files(dir, &max_age_duration) {
-                        Ok(result) => {
-                            if result.deleted_count > 0 {
-                                info!(
-                                    "Report cleanup: deleted={}, skipped={}",
-                                    result.deleted_count, result.skipped_count
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            error!("Report cleanup failed: {}", e);
-                        }
-                    }
+                if let Err(e) = result {
+                    error!("Retention task panicked: {}", e);
                 }
             }
         }
     }
 
     info!("Retention loop stopped");
+}
+
+/// Perform retention work synchronously (called from spawn_blocking)
+fn retention_work(
+    teams_root: &PathBuf,
+    retention_policy: &agent_team_mail_core::config::RetentionConfig,
+    report_dir: Option<&PathBuf>,
+) {
+    use agent_team_mail_core::retention::{apply_retention, clean_report_files};
+    use agent_team_mail_core::retention::parse_duration;
+
+    // Enumerate team directories
+    let team_dirs = match std::fs::read_dir(teams_root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::error!("Failed to read teams directory {}: {}", teams_root.display(), e);
+            return;
+        }
+    };
+
+    for team_entry in team_dirs {
+        let team_entry = match team_entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Failed to read team directory entry: {}", e);
+                continue;
+            }
+        };
+
+        let team_path = team_entry.path();
+        if !team_path.is_dir() {
+            continue;
+        }
+
+        let team_name = match team_path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => continue,
+        };
+
+        // Enumerate agent inbox files in the inboxes/ subdirectory
+        let inboxes_path = team_path.join("inboxes");
+        if !inboxes_path.is_dir() {
+            // No inboxes subdirectory, skip this team
+            continue;
+        }
+
+        let agents = match std::fs::read_dir(&inboxes_path) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!("Failed to read inboxes directory {}: {}", inboxes_path.display(), e);
+                continue;
+            }
+        };
+
+        for agent_entry in agents {
+            let agent_entry = match agent_entry {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("Failed to read agent entry: {}", e);
+                    continue;
+                }
+            };
+
+            let agent_path = agent_entry.path();
+
+            // Look for inbox files: agent.json or agent.hostname.json
+            if !agent_path.is_file() {
+                continue;
+            }
+
+            let file_name = match agent_path.file_name() {
+                Some(name) => name.to_string_lossy().to_string(),
+                None => continue,
+            };
+
+            // Parse agent name from filename
+            // Format: <agent>.json or <agent>.<hostname>.json
+            let agent_name = if file_name.ends_with(".json") {
+                let base = &file_name[..file_name.len() - 5]; // Remove .json
+
+                // Check if this is a bridge inbox (has hostname suffix)
+                // Bridge inboxes have format: agent.hostname.json
+                // Local inboxes have format: agent.json
+                // Agent names may contain dots, so we can't just split on dots.
+                //
+                // Heuristic: If the base contains a dot, assume the last component
+                // is the hostname (bridge inbox). Otherwise, use the whole base.
+                if base.contains('.') {
+                    // Has a dot — might be agent.hostname or just agent.with.dots
+                    // We'll use the entire base as the agent name for retention purposes.
+                    // Retention doesn't need to distinguish local vs bridge inboxes;
+                    // it just needs a stable identifier for the archive directory.
+                    base.to_string()
+                } else {
+                    // No dot — simple agent name
+                    base.to_string()
+                }
+            } else {
+                continue;
+            };
+
+            // Apply retention to this inbox
+            tracing::debug!("Applying retention to {}/{}/{}", team_name, agent_name, file_name);
+            match apply_retention(
+                &agent_path,
+                &team_name,
+                &agent_name,
+                retention_policy,
+                false, // Not a dry run
+            ) {
+                Ok(result) => {
+                    if result.removed > 0 {
+                        tracing::info!(
+                            "Retention: {}/{}/{}: kept={}, removed={}, archived={}",
+                            team_name, agent_name, file_name,
+                            result.kept, result.removed, result.archived
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Retention failed for {}/{}/{}: {}",
+                        team_name, agent_name, file_name, e
+                    );
+                }
+            }
+        }
+    }
+
+    // Clean up old report files if configured
+    if let Some(dir) = report_dir {
+        tracing::debug!("Cleaning old report files from {}", dir.display());
+
+        // Use max_age for report files (default 30 days)
+        let max_age_str = retention_policy.max_age.as_deref().unwrap_or("30d");
+        let max_age_duration = match parse_duration(max_age_str) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("Invalid max_age duration '{}': {}", max_age_str, e);
+                return;
+            }
+        };
+
+        match clean_report_files(dir, &max_age_duration) {
+            Ok(result) => {
+                if result.deleted_count > 0 {
+                    tracing::info!(
+                        "Report cleanup: deleted={}, skipped={}",
+                        result.deleted_count, result.skipped_count
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!("Report cleanup failed: {}", e);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

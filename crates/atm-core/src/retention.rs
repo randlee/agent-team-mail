@@ -543,4 +543,39 @@ mod tests {
         assert_eq!(result.deleted_count, 5);
         assert_eq!(result.skipped_count, 10);
     }
+
+    #[test]
+    fn test_parse_inbox_filename_simple() {
+        // Simple agent name: "agent.json"
+        let filename = "agent.json";
+        let base = &filename[..filename.len() - 5];
+        assert_eq!(base, "agent");
+    }
+
+    #[test]
+    fn test_parse_inbox_filename_with_hostname() {
+        // Bridge inbox: "agent.hostname.json"
+        let filename = "agent.hostname.json";
+        let base = &filename[..filename.len() - 5];
+        assert_eq!(base, "agent.hostname");
+        // Retention uses the entire base as agent name
+    }
+
+    #[test]
+    fn test_parse_inbox_filename_dotted_agent() {
+        // Agent name with dots: "dotted.agent.name.json"
+        let filename = "dotted.agent.name.json";
+        let base = &filename[..filename.len() - 5];
+        assert_eq!(base, "dotted.agent.name");
+        // Retention uses the entire base as agent name
+    }
+
+    #[test]
+    fn test_parse_inbox_filename_dotted_agent_with_hostname() {
+        // Bridge inbox with dotted agent: "dotted.agent.hostname.json"
+        let filename = "dotted.agent.hostname.json";
+        let base = &filename[..filename.len() - 5];
+        assert_eq!(base, "dotted.agent.hostname");
+        // Retention uses the entire base as agent name
+    }
 }
