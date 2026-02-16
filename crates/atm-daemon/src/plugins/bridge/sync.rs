@@ -179,12 +179,10 @@ impl SyncEngine {
 
             if let Some(transport) = self.transports.get(remote_hostname) {
                 let mut transport_guard = transport.lock().await;
-                if !transport_guard.is_connected().await {
-                    if let Err(e) = transport_guard.connect().await {
-                        warn!("Failed to connect to {}: {}", remote_hostname, e);
-                        stats.errors += 1;
-                        self.metrics.record_remote_failure(remote_hostname);
-                    }
+                if !transport_guard.is_connected().await && let Err(e) = transport_guard.connect().await {
+                    warn!("Failed to connect to {}: {}", remote_hostname, e);
+                    stats.errors += 1;
+                    self.metrics.record_remote_failure(remote_hostname);
                 }
             }
         }
@@ -254,12 +252,10 @@ impl SyncEngine {
 
             if let Some(transport) = self.transports.get(remote_hostname) {
                 let mut transport_guard = transport.lock().await;
-                if !transport_guard.is_connected().await {
-                    if let Err(e) = transport_guard.connect().await {
-                        warn!("Failed to connect to {}: {}", remote_hostname, e);
-                        stats.errors += 1;
-                        self.metrics.record_remote_failure(remote_hostname);
-                    }
+                if !transport_guard.is_connected().await && let Err(e) = transport_guard.connect().await {
+                    warn!("Failed to connect to {}: {}", remote_hostname, e);
+                    stats.errors += 1;
+                    self.metrics.record_remote_failure(remote_hostname);
                 }
             }
         }
