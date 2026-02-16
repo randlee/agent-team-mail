@@ -530,10 +530,10 @@ impl SyncEngine {
             }
 
             // Check for per-origin pattern <agent>.<hostname> where hostname is known
-            if let Some((agent, _hostname)) = self.split_origin(stem) {
-                if agent_names.contains(&agent) {
-                    return false;
-                }
+            if let Some((agent, _hostname)) = self.split_origin(stem)
+                && agent_names.contains(&agent)
+            {
+                return false;
             }
         } else {
             // Fallback: treat any known hostname suffix as per-origin
