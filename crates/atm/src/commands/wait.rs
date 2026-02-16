@@ -155,24 +155,22 @@ fn count_messages(
 
     // Count messages in local inbox
     let local_inbox = inbox_dir.join(format!("{agent_name}.json"));
-    if local_inbox.exists() {
-        if let Ok(content) = std::fs::read_to_string(&local_inbox) {
-            if let Ok(messages) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
-                total += messages.len();
-            }
-        }
+    if local_inbox.exists()
+        && let Ok(content) = std::fs::read_to_string(&local_inbox)
+        && let Ok(messages) = serde_json::from_str::<Vec<serde_json::Value>>(&content)
+    {
+        total += messages.len();
     }
 
     // Count messages in origin inboxes
     if let Some(hostnames) = known_hostnames {
         for hostname in hostnames {
             let origin_inbox = inbox_dir.join(format!("{agent_name}.{hostname}.json"));
-            if origin_inbox.exists() {
-                if let Ok(content) = std::fs::read_to_string(&origin_inbox) {
-                    if let Ok(messages) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
-                        total += messages.len();
-                    }
-                }
+            if origin_inbox.exists()
+                && let Ok(content) = std::fs::read_to_string(&origin_inbox)
+                && let Ok(messages) = serde_json::from_str::<Vec<serde_json::Value>>(&content)
+            {
+                total += messages.len();
             }
         }
     }
