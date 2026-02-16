@@ -5,10 +5,11 @@
 //! spawning and managing async agent workers.
 
 use crate::plugin::PluginError;
+use std::any::Any;
 use std::path::PathBuf;
 
 /// Handle to a running worker process
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct WorkerHandle {
     /// Agent identifier (e.g., "arch-ctm@atm-planning")
     pub agent_id: String,
@@ -16,6 +17,59 @@ pub struct WorkerHandle {
     pub backend_id: String,
     /// Path to the worker's log file
     pub log_file_path: PathBuf,
+    /// Backend-specific typed payload (e.g., tmux session info, container metadata)
+    pub payload: Option<Box<dyn Any + Send + Sync>>,
+}
+
+impl WorkerHandle {
+    /// Get a reference to the payload as a specific type
+    ///
+    /// # Returns
+    ///
+    /// `Some(&T)` if payload exists and is of type T, `None` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// #[derive(Debug)]
+    /// struct TmuxPayload { session: String, pane_id: String }
+    ///
+    /// if let Some(tmux) = handle.payload_ref::<TmuxPayload>() {
+    ///     println!("Session: {}, Pane: {}", tmux.session, tmux.pane_id);
+    /// }
+    /// ```
+    pub fn payload_ref<T: 'static>(&self) -> Option<&T> {
+        self.payload.as_ref()?.downcast_ref::<T>()
+    }
+
+    /// Get a mutable reference to the payload as a specific type
+    ///
+    /// # Returns
+    ///
+    /// `Some(&mut T)` if payload exists and is of type T, `None` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// if let Some(tmux) = handle.payload_mut::<TmuxPayload>() {
+    ///     tmux.session = "new-session".to_string();
+    /// }
+    /// ```
+    pub fn payload_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.payload.as_mut()?.downcast_mut::<T>()
+    }
+}
+
+impl Clone for WorkerHandle {
+    fn clone(&self) -> Self {
+        Self {
+            agent_id: self.agent_id.clone(),
+            backend_id: self.backend_id.clone(),
+            log_file_path: self.log_file_path.clone(),
+            // Payload cannot be cloned through dyn Any, so we drop it on clone
+            payload: None,
+        }
+    }
 }
 
 /// Trait for worker backends (Codex TMUX, SSH, Docker, etc.)
@@ -77,4 +131,157 @@ pub trait WorkerAdapter: Send + Sync {
     ///
     /// Returns PluginError::Runtime if shutdown fails
     async fn shutdown(&mut self, handle: &WorkerHandle) -> Result<(), PluginError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct TestPayload {
+        value: String,
+        count: u32,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct OtherPayload {
+        data: Vec<u8>,
+    }
+
+    #[test]
+    fn test_payload_ref_with_correct_type() {
+        let payload = TestPayload {
+            value: "test".to_string(),
+            count: 42,
+        };
+
+        let handle = WorkerHandle {
+            agent_id: "test-agent".to_string(),
+            backend_id: "backend-1".to_string(),
+            log_file_path: PathBuf::from("/tmp/test.log"),
+            payload: Some(Box::new(payload)),
+        };
+
+        let retrieved = handle.payload_ref::<TestPayload>();
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().value, "test");
+        assert_eq!(retrieved.unwrap().count, 42);
+    }
+
+    #[test]
+    fn test_payload_ref_with_wrong_type() {
+        let payload = TestPayload {
+            value: "test".to_string(),
+            count: 42,
+        };
+
+        let handle = WorkerHandle {
+            agent_id: "test-agent".to_string(),
+            backend_id: "backend-1".to_string(),
+            log_file_path: PathBuf::from("/tmp/test.log"),
+            payload: Some(Box::new(payload)),
+        };
+
+        // Try to retrieve with wrong type
+        let retrieved = handle.payload_ref::<OtherPayload>();
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_payload_ref_with_none() {
+        let handle = WorkerHandle {
+            agent_id: "test-agent".to_string(),
+            backend_id: "backend-1".to_string(),
+            log_file_path: PathBuf::from("/tmp/test.log"),
+            payload: None,
+        };
+
+        let retrieved = handle.payload_ref::<TestPayload>();
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_payload_mut_modify() {
+        let payload = TestPayload {
+            value: "original".to_string(),
+            count: 10,
+        };
+
+        let mut handle = WorkerHandle {
+            agent_id: "test-agent".to_string(),
+            backend_id: "backend-1".to_string(),
+            log_file_path: PathBuf::from("/tmp/test.log"),
+            payload: Some(Box::new(payload)),
+        };
+
+        // Modify through mutable reference
+        if let Some(p) = handle.payload_mut::<TestPayload>() {
+            p.value = "modified".to_string();
+            p.count = 99;
+        }
+
+        // Verify modification
+        let retrieved = handle.payload_ref::<TestPayload>();
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().value, "modified");
+        assert_eq!(retrieved.unwrap().count, 99);
+    }
+
+    #[test]
+    fn test_payload_mut_with_wrong_type() {
+        let payload = TestPayload {
+            value: "test".to_string(),
+            count: 42,
+        };
+
+        let mut handle = WorkerHandle {
+            agent_id: "test-agent".to_string(),
+            backend_id: "backend-1".to_string(),
+            log_file_path: PathBuf::from("/tmp/test.log"),
+            payload: Some(Box::new(payload)),
+        };
+
+        // Try to get mutable reference with wrong type
+        let retrieved = handle.payload_mut::<OtherPayload>();
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_payload_mut_with_none() {
+        let mut handle = WorkerHandle {
+            agent_id: "test-agent".to_string(),
+            backend_id: "backend-1".to_string(),
+            log_file_path: PathBuf::from("/tmp/test.log"),
+            payload: None,
+        };
+
+        let retrieved = handle.payload_mut::<TestPayload>();
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_clone_drops_payload() {
+        let payload = TestPayload {
+            value: "test".to_string(),
+            count: 42,
+        };
+
+        let handle = WorkerHandle {
+            agent_id: "test-agent".to_string(),
+            backend_id: "backend-1".to_string(),
+            log_file_path: PathBuf::from("/tmp/test.log"),
+            payload: Some(Box::new(payload)),
+        };
+
+        let cloned = handle.clone();
+
+        // Original has payload
+        assert!(handle.payload.is_some());
+        // Clone does not have payload
+        assert!(cloned.payload.is_none());
+        // Other fields are cloned
+        assert_eq!(cloned.agent_id, "test-agent");
+        assert_eq!(cloned.backend_id, "backend-1");
+        assert_eq!(cloned.log_file_path, PathBuf::from("/tmp/test.log"));
+    }
 }
