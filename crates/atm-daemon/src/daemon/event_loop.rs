@@ -85,11 +85,14 @@ pub async fn run(
     // Create event channel for watcher → dispatch communication
     let (event_tx, mut event_rx) = mpsc::channel::<InboxEvent>(100);
 
+    // Extract hostname registry from bridge config (if available)
+    let hostname_registry = extract_hostname_registry(&ctx.config);
+
     // Start file system watcher
     let watcher_root = ctx.mail.teams_root().clone();
     let watcher_cancel = cancel.clone();
     let watcher_task = tokio::spawn(async move {
-        if let Err(e) = watch_inboxes(watcher_root, event_tx, watcher_cancel).await {
+        if let Err(e) = watch_inboxes(watcher_root, event_tx, hostname_registry, watcher_cancel).await {
             error!("Inbox watcher failed: {}", e);
         }
     });
@@ -145,6 +148,16 @@ pub async fn run(
                         inbox_msg
                             .unknown_fields
                             .insert("team".to_string(), Value::String(event.team.clone()));
+                        inbox_msg.unknown_fields.insert(
+                            "path".to_string(),
+                            Value::String(event.path.display().to_string()),
+                        );
+                        if let Some(origin) = &event.origin {
+                            inbox_msg.unknown_fields.insert(
+                                "origin".to_string(),
+                                Value::String(origin.clone()),
+                            );
+                        }
 
                         // Dispatch to all plugins with EventListener capability
                         for (metadata, plugin_arc) in &dispatch_plugins {
@@ -239,6 +252,40 @@ async fn read_new_inbox_messages(
     cursor.last_index = inbox_msgs.len();
     cursor.last_message_id = inbox_msgs.last().and_then(|m| m.message_id.clone());
     Ok(new_msgs)
+}
+
+/// Extract hostname registry from bridge plugin config
+///
+/// Returns None if bridge plugin is not configured or not enabled.
+fn extract_hostname_registry(config: &atm_core::config::Config) -> Option<std::sync::Arc<atm_core::config::HostnameRegistry>> {
+    use atm_core::config::BridgeConfig;
+
+    // Check if bridge plugin config exists
+    let bridge_table = config.plugins.get("bridge")?;
+
+    // Parse bridge config
+    let bridge_config: BridgeConfig = match bridge_table.clone().try_into() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!("Failed to parse bridge config: {}", e);
+            return None;
+        }
+    };
+
+    // Check if bridge is enabled
+    if !bridge_config.enabled {
+        return None;
+    }
+
+    // Build hostname registry from remotes
+    let mut registry = atm_core::config::HostnameRegistry::new();
+    for remote in bridge_config.remotes {
+        if let Err(e) = registry.register(remote) {
+            warn!("Failed to register remote in hostname registry: {}", e);
+        }
+    }
+
+    Some(std::sync::Arc::new(registry))
 }
 
 #[cfg(test)]
@@ -345,7 +392,7 @@ mod tests {
         write_inbox(&path, &[msg1.clone(), msg2]).await;
         let _ = read_new_inbox_messages(&path, &mut cursor).await.unwrap();
 
-        write_inbox(&path, &[msg1.clone()]).await;
+        write_inbox(&path, std::slice::from_ref(&msg1)).await;
         let new_msgs = read_new_inbox_messages(&path, &mut cursor).await.unwrap();
         assert_eq!(new_msgs.len(), 1);
         assert_eq!(new_msgs[0].text, "first");

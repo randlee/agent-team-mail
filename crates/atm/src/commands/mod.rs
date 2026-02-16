@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod bridge;
 mod broadcast;
 mod cleanup;
 mod config_cmd;
@@ -14,6 +15,7 @@ mod request;
 mod send;
 mod status;
 mod teams;
+mod wait;
 
 /// atm - Mail-like messaging for Claude agent teams
 #[derive(Parser, Debug)]
@@ -59,6 +61,9 @@ enum Commands {
 
     /// Apply retention policies to clean up old messages
     Cleanup(cleanup::CleanupArgs),
+
+    /// Bridge plugin commands (status, sync)
+    Bridge(bridge::BridgeArgs),
 }
 
 impl Cli {
@@ -75,6 +80,7 @@ impl Cli {
             Commands::Status(args) => status::execute(args),
             Commands::Config(args) => config_cmd::execute(args),
             Commands::Cleanup(args) => cleanup::execute(args),
+            Commands::Bridge(args) => bridge::execute(args),
         }
     }
 }
