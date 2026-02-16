@@ -7,6 +7,7 @@ mod bridge;
 mod broadcast;
 mod cleanup;
 mod config_cmd;
+mod daemon;
 mod error;
 mod inbox;
 mod members;
@@ -64,6 +65,9 @@ enum Commands {
 
     /// Bridge plugin commands (status, sync)
     Bridge(bridge::BridgeArgs),
+
+    /// Daemon management commands (status)
+    Daemon(daemon::DaemonArgs),
 }
 
 impl Cli {
@@ -81,6 +85,7 @@ impl Cli {
             Commands::Config(args) => config_cmd::execute(args),
             Commands::Cleanup(args) => cleanup::execute(args),
             Commands::Bridge(args) => bridge::execute(args),
+            Commands::Daemon(args) => daemon::execute(args),
         }
     }
 }
