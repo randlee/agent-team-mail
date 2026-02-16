@@ -44,19 +44,14 @@ fn default_sync_interval() -> u64 {
 }
 
 /// Bridge role
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BridgeRole {
     /// Hub role - synchronization point for all spokes
     Hub,
     /// Spoke role - connects to hub for synchronization
+    #[default]
     Spoke,
-}
-
-impl Default for BridgeRole {
-    fn default() -> Self {
-        Self::Spoke
-    }
 }
 
 /// Remote host configuration
