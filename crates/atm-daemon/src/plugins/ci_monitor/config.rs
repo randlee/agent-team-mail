@@ -3,6 +3,7 @@
 use crate::plugin::PluginError;
 use super::types::CiRunConclusion;
 use agent_team_mail_core::toml;
+use globset::{GlobSet, GlobSetBuilder};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -13,6 +14,53 @@ pub enum DedupStrategy {
     PerCommit,
     /// Deduplicate per run (notify once per run_id+conclusion)
     PerRun,
+}
+
+/// Notification routing target for CI alerts
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyTarget {
+    /// Agent name to notify
+    pub agent: String,
+    /// Team name (None = use config team)
+    pub team: Option<String>,
+}
+
+impl NotifyTarget {
+    /// Parse a notify target from a string in the format "agent" or "agent@team"
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` if the format is invalid (e.g., empty, multiple @)
+    pub fn parse(s: &str) -> Result<Self, PluginError> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(PluginError::Config {
+                message: "notify_target cannot be empty".to_string(),
+            });
+        }
+
+        let parts: Vec<&str> = s.split('@').collect();
+        match parts.len() {
+            1 => Ok(Self {
+                agent: parts[0].to_string(),
+                team: None,
+            }),
+            2 => {
+                if parts[0].is_empty() || parts[1].is_empty() {
+                    return Err(PluginError::Config {
+                        message: format!("Invalid notify_target format: '{s}'"),
+                    });
+                }
+                Ok(Self {
+                    agent: parts[0].to_string(),
+                    team: Some(parts[1].to_string()),
+                })
+            }
+            _ => Err(PluginError::Config {
+                message: format!("Invalid notify_target format (multiple @): '{s}'"),
+            }),
+        }
+    }
 }
 
 /// Configuration for the CI Monitor plugin, parsed from [plugins.ci_monitor]
@@ -46,6 +94,10 @@ pub struct CiMonitorConfig {
     pub report_dir: PathBuf,
     /// Provider-specific configuration (passed to external providers)
     pub provider_config: Option<toml::Table>,
+    /// Notification routing targets (empty = send as ci-monitor agent)
+    pub notify_target: Vec<NotifyTarget>,
+    /// Compiled glob matcher for watched_branches (None = match all)
+    pub branch_matcher: Option<GlobSet>,
 }
 
 impl CiMonitorConfig {
@@ -114,7 +166,7 @@ impl CiMonitorConfig {
             .unwrap_or("ci-monitor")
             .to_string();
 
-        let watched_branches = table
+        let watched_branches: Vec<String> = table
             .get("watched_branches")
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -123,6 +175,23 @@ impl CiMonitorConfig {
                     .collect()
             })
             .unwrap_or_default();
+
+        // Compile glob patterns for branch matching
+        let branch_matcher = if watched_branches.is_empty() {
+            None
+        } else {
+            let mut builder = GlobSetBuilder::new();
+            for pattern in &watched_branches {
+                builder.add(
+                    globset::Glob::new(pattern).map_err(|e| PluginError::Config {
+                        message: format!("Invalid glob pattern '{}': {}", pattern, e),
+                    })?,
+                );
+            }
+            Some(builder.build().map_err(|e| PluginError::Config {
+                message: format!("Failed to build glob set: {}", e),
+            })?)
+        };
 
         let notify_on = table
             .get("notify_on")
@@ -178,6 +247,21 @@ impl CiMonitorConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("temp/atm/ci-monitor"));
 
+        // Parse notify_target (can be single string or array of strings)
+        let notify_target = match table.get("notify_target") {
+            Some(toml::Value::String(s)) => vec![NotifyTarget::parse(s)?],
+            Some(toml::Value::Array(arr)) => {
+                let mut targets = Vec::new();
+                for val in arr {
+                    if let Some(s) = val.as_str() {
+                        targets.push(NotifyTarget::parse(s)?);
+                    }
+                }
+                targets
+            }
+            _ => Vec::new(),
+        };
+
         // Extract provider_config for external providers
         let provider_config = table.clone();
 
@@ -196,6 +280,8 @@ impl CiMonitorConfig {
             dedup_ttl_hours,
             report_dir,
             provider_config: Some(provider_config),
+            notify_target,
+            branch_matcher,
         })
     }
 }
@@ -217,6 +303,8 @@ impl Default for CiMonitorConfig {
             dedup_ttl_hours: 24,
             report_dir: PathBuf::from("temp/atm/ci-monitor"),
             provider_config: None,
+            notify_target: Vec::new(),
+            branch_matcher: None,
         }
     }
 }
@@ -378,5 +466,270 @@ notify_on = ["failure", "cancelled", "action_required"]
                 CiRunConclusion::ActionRequired
             ]
         );
+    }
+
+    // Branch matching tests
+    #[test]
+    fn test_branch_matcher_empty_matches_all() {
+        let toml_str = r#"
+team = "dev-team"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        assert!(config.branch_matcher.is_none());
+    }
+
+    #[test]
+    fn test_branch_matcher_exact_match() {
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["main"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let matcher = config.branch_matcher.as_ref().unwrap();
+        assert!(matcher.is_match("main"));
+        assert!(!matcher.is_match("develop"));
+    }
+
+    #[test]
+    fn test_branch_matcher_wildcard() {
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["*"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let matcher = config.branch_matcher.as_ref().unwrap();
+        assert!(matcher.is_match("main"));
+        assert!(matcher.is_match("develop"));
+        assert!(matcher.is_match("feature/test"));
+    }
+
+    #[test]
+    fn test_branch_matcher_glob_pattern() {
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["release/*"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let matcher = config.branch_matcher.as_ref().unwrap();
+        assert!(matcher.is_match("release/v1.0"));
+        assert!(matcher.is_match("release/v2.5"));
+        assert!(!matcher.is_match("main"));
+        // Note: * in globset matches path separators by default
+        assert!(matcher.is_match("release/v1.0/hotfix"));
+    }
+
+    #[test]
+    fn test_branch_matcher_nested_glob() {
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["feature/**"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let matcher = config.branch_matcher.as_ref().unwrap();
+        assert!(matcher.is_match("feature/test"));
+        assert!(matcher.is_match("feature/deep/nested/branch"));
+        assert!(!matcher.is_match("main"));
+    }
+
+    #[test]
+    fn test_branch_matcher_multiple_patterns() {
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["main", "release/*", "feature/important"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let matcher = config.branch_matcher.as_ref().unwrap();
+        assert!(matcher.is_match("main"));
+        assert!(matcher.is_match("release/v1.0"));
+        assert!(matcher.is_match("feature/important"));
+        assert!(!matcher.is_match("develop"));
+    }
+
+    #[test]
+    fn test_branch_matcher_no_match() {
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["main"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let matcher = config.branch_matcher.as_ref().unwrap();
+        assert!(!matcher.is_match("develop"));
+    }
+
+    #[test]
+    fn test_branch_matcher_invalid_pattern() {
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["[invalid"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let result = CiMonitorConfig::from_toml(&table);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid glob pattern"));
+        assert!(err.contains("[invalid"));
+    }
+
+    #[test]
+    fn test_branch_matcher_case_sensitive() {
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["Main"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let matcher = config.branch_matcher.as_ref().unwrap();
+        assert!(matcher.is_match("Main"));
+        assert!(!matcher.is_match("main"));
+    }
+
+    #[test]
+    fn test_branch_matcher_question_mark_wildcard() {
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["v?.0"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let matcher = config.branch_matcher.as_ref().unwrap();
+        assert!(matcher.is_match("v1.0"));
+        assert!(matcher.is_match("v2.0"));
+        assert!(!matcher.is_match("v10.0"));
+    }
+
+    // Routing tests
+    #[test]
+    fn test_notify_target_single() {
+        let toml_str = r#"
+team = "dev-team"
+notify_target = "team-lead"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        assert_eq!(config.notify_target.len(), 1);
+        assert_eq!(config.notify_target[0].agent, "team-lead");
+        assert!(config.notify_target[0].team.is_none());
+    }
+
+    #[test]
+    fn test_notify_target_multiple() {
+        let toml_str = r#"
+team = "dev-team"
+notify_target = ["team-lead", "dev-bot"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        assert_eq!(config.notify_target.len(), 2);
+        assert_eq!(config.notify_target[0].agent, "team-lead");
+        assert_eq!(config.notify_target[1].agent, "dev-bot");
+    }
+
+    #[test]
+    fn test_notify_target_empty_default() {
+        let toml_str = r#"
+team = "dev-team"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        assert!(config.notify_target.is_empty());
+    }
+
+    #[test]
+    fn test_notify_target_with_team() {
+        let toml_str = r#"
+team = "dev-team"
+notify_target = "agent@other-team"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        assert_eq!(config.notify_target.len(), 1);
+        assert_eq!(config.notify_target[0].agent, "agent");
+        assert_eq!(config.notify_target[0].team, Some("other-team".to_string()));
+    }
+
+    #[test]
+    fn test_notify_target_invalid_empty() {
+        let toml_str = r#"
+team = "dev-team"
+notify_target = ""
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let result = CiMonitorConfig::from_toml(&table);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_notify_target_invalid_multiple_at() {
+        let toml_str = r#"
+team = "dev-team"
+notify_target = "agent@team@extra"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let result = CiMonitorConfig::from_toml(&table);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("multiple @"));
+    }
+
+    // Config validation tests
+    #[test]
+    fn test_notify_target_parse_valid() {
+        let target = NotifyTarget::parse("agent-name").unwrap();
+        assert_eq!(target.agent, "agent-name");
+        assert!(target.team.is_none());
+
+        let target = NotifyTarget::parse("agent@team").unwrap();
+        assert_eq!(target.agent, "agent");
+        assert_eq!(target.team, Some("team".to_string()));
+    }
+
+    #[test]
+    fn test_notify_target_parse_empty_parts() {
+        let result = NotifyTarget::parse("@team");
+        assert!(result.is_err());
+
+        let result = NotifyTarget::parse("agent@");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_round_trip() {
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["main", "release/*"]
+notify_target = ["lead", "bot@other"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        assert_eq!(config.team, "dev-team");
+        assert_eq!(config.watched_branches, vec!["main", "release/*"]);
+        assert_eq!(config.notify_target.len(), 2);
+        assert_eq!(config.notify_target[0].agent, "lead");
+        assert_eq!(config.notify_target[1].agent, "bot");
+        assert!(config.branch_matcher.is_some());
     }
 }

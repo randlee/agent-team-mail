@@ -254,6 +254,8 @@ async fn test_ci_deduplication() {
         dedup_ttl_hours: 24,
         report_dir: std::path::PathBuf::from("temp/atm/ci-monitor"),
         provider_config: None,
+        notify_target: Vec::new(),
+        branch_matcher: None,
     };
 
     let mut plugin = CiMonitorPlugin::new()
@@ -548,7 +550,7 @@ async fn test_branch_filtering() {
     });
     let _ = plugin.run(cancel).await;
 
-    // Verify list_runs was called with branch filters
+    // Verify list_runs was called (client-side filtering, so no branch filter in API call)
     let calls = provider_clone.get_calls();
     let list_calls: Vec<_> = calls
         .iter()
@@ -559,15 +561,14 @@ async fn test_branch_filtering() {
         .collect();
 
     assert!(!list_calls.is_empty());
-    // Should have filtered by main and develop
-    assert!(list_calls
-        .iter()
-        .any(|f| f.branch == Some("main".to_string())));
-    assert!(list_calls
-        .iter()
-        .any(|f| f.branch == Some("develop".to_string())));
+    // After Sprint 9.3: Branch filtering is done client-side using glob patterns
+    // API calls fetch all branches without branch filter
+    for filter in &list_calls {
+        assert!(filter.branch.is_none(), "Branch filtering should be client-side");
+    }
 
     // Only two messages (main and develop, not feature-x)
+    // Client-side glob matching filters out feature-x
     let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
     assert_eq!(
         messages.len(),
