@@ -148,6 +148,16 @@ pub async fn run(
                         inbox_msg
                             .unknown_fields
                             .insert("team".to_string(), Value::String(event.team.clone()));
+                        inbox_msg.unknown_fields.insert(
+                            "path".to_string(),
+                            Value::String(event.path.display().to_string()),
+                        );
+                        if let Some(origin) = &event.origin {
+                            inbox_msg.unknown_fields.insert(
+                                "origin".to_string(),
+                                Value::String(origin.clone()),
+                            );
+                        }
 
                         // Dispatch to all plugins with EventListener capability
                         for (metadata, plugin_arc) in &dispatch_plugins {

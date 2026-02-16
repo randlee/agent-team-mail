@@ -12,9 +12,11 @@ use tracing::{debug, info, warn};
 use super::config::BridgePluginConfig;
 use super::dedup::{assign_message_ids, SyncState};
 use super::metrics::BridgeMetrics;
+use super::self_write_filter::SelfWriteFilter;
 use super::team_config_sync::sync_team_config;
 use super::transport::Transport;
-use atm_core::schema::InboxMessage;
+use atm_core::schema::{InboxMessage, TeamConfig};
+use std::collections::HashSet;
 
 /// Statistics from a sync operation
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -65,6 +67,12 @@ pub struct SyncEngine {
 
     /// Path to metrics file
     metrics_path: PathBuf,
+
+    /// Self-write filter to avoid watcher feedback loops
+    self_write_filter: Arc<tokio::sync::Mutex<SelfWriteFilter>>,
+
+    /// Known agent names from team config (if available)
+    agent_names: Option<HashSet<String>>,
 }
 
 impl SyncEngine {
@@ -83,12 +91,15 @@ impl SyncEngine {
         config: Arc<BridgePluginConfig>,
         transport: Arc<dyn Transport>,
         team_dir: PathBuf,
+        self_write_filter: Arc<tokio::sync::Mutex<SelfWriteFilter>>,
     ) -> Result<Self> {
         let state_path = team_dir.join(".bridge-state.json");
         let state = SyncState::load(&state_path).await?;
 
         let metrics_path = team_dir.join(".bridge-metrics.json");
         let metrics = BridgeMetrics::load(&metrics_path).await.unwrap_or_default();
+
+        let agent_names = load_agent_names(&team_dir);
 
         Ok(Self {
             config,
@@ -98,6 +109,8 @@ impl SyncEngine {
             state_path,
             metrics,
             metrics_path,
+            self_write_filter,
+            agent_names,
         })
     }
 
@@ -443,8 +456,7 @@ impl SyncEngine {
             .join("inboxes");
 
         // List files on remote matching pattern
-        let local_hostname = &self.config.local_hostname;
-        let pattern = format!("*.{local_hostname}.json");
+        let pattern = format!("*.{remote_hostname}.json");
         let remote_files = match self.transport.list(&remote_inboxes_dir, &pattern).await {
             Ok(files) => files,
             Err(_) => {
@@ -459,7 +471,7 @@ impl SyncEngine {
 
             // Local path: inboxes/<agent>.<remote-hostname>.json
             // Need to rewrite filename from <agent>.<local-hostname>.json to <agent>.<remote-hostname>.json
-            let agent_name = self.extract_agent_from_origin_filename(&filename)?;
+            let agent_name = self.extract_agent_from_origin_filename(&filename, remote_hostname)?;
             let local_filename = format!("{agent_name}.{remote_hostname}.json");
             let local_path = self.team_dir.join("inboxes").join(&local_filename);
 
@@ -478,7 +490,7 @@ impl SyncEngine {
     }
 
     /// Pull a single file from remote
-    async fn pull_file(&self, remote_path: &Path, local_path: &Path) -> Result<usize> {
+    async fn pull_file(&mut self, remote_path: &Path, local_path: &Path) -> Result<usize> {
         // Download to temp file first
         let temp_path = local_path.with_extension("tmp");
         self.transport.download(remote_path, &temp_path).await?;
@@ -486,6 +498,12 @@ impl SyncEngine {
         // Read messages
         let content = fs::read(&temp_path).await?;
         let messages: Vec<InboxMessage> = serde_json::from_slice(&content)?;
+
+        // Register self-write to avoid watcher feedback
+        {
+            let mut filter = self.self_write_filter.lock().await;
+            filter.register(local_path.to_path_buf());
+        }
 
         // Atomic rename to final path
         fs::rename(&temp_path, local_path).await?;
@@ -505,23 +523,30 @@ impl SyncEngine {
             return false;
         };
 
-        // Check if it contains a hostname (per-origin files have dots)
-        // Local files are just <agent>.json (no dots except extension)
-        // Per-origin files are <agent>.<hostname>.json
+        if let Some(agent_names) = &self.agent_names {
+            // Exact agent match is always local
+            if agent_names.contains(stem) {
+                return true;
+            }
 
-        // If the stem contains any known hostname, it's a per-origin file
-        for remote in self.config.registry.remotes() {
-            if stem.ends_with(&format!(".{}", remote.hostname)) {
+            // Check for per-origin pattern <agent>.<hostname> where hostname is known
+            if let Some((agent, _hostname)) = self.split_origin(stem)
+                && agent_names.contains(&agent)
+            {
+                return false;
+            }
+        } else {
+            // Fallback: treat any known hostname suffix as per-origin
+            for remote in self.config.registry.remotes() {
+                if stem.ends_with(&format!(".{}", remote.hostname)) {
+                    return false;
+                }
+            }
+            if stem.ends_with(&format!(".{}", self.config.local_hostname)) {
                 return false;
             }
         }
 
-        // Also check if it ends with our local hostname (shouldn't happen, but be safe)
-        if stem.ends_with(&format!(".{}", self.config.local_hostname)) {
-            return false;
-        }
-
-        // It's a local inbox file
         true
     }
 
@@ -539,27 +564,69 @@ impl SyncEngine {
     ///
     /// Input: "agent-1.laptop.json"
     /// Output: "agent-1"
-    fn extract_agent_from_origin_filename(&self, filename: &str) -> Result<String> {
+    fn extract_agent_from_origin_filename(
+        &self,
+        filename: &str,
+        origin_hostname: &str,
+    ) -> Result<String> {
         let stem = filename
             .strip_suffix(".json")
             .context("Filename must end with .json")?;
 
-        // Remove local hostname suffix
+        // Remove origin hostname suffix
         let agent_name = stem
-            .strip_suffix(&format!(".{}", self.config.local_hostname))
-            .context("Filename must end with local hostname")?;
+            .strip_suffix(&format!(".{origin_hostname}"))
+            .context("Filename must end with origin hostname")?;
 
         Ok(agent_name.to_string())
     }
+
+    pub(crate) async fn push_inbox_path(&mut self, path: &Path) -> Result<usize> {
+        if !self.is_local_inbox_file(path) {
+            return Ok(0);
+        }
+        self.push_inbox_file(path).await
+    }
+
+    fn split_origin(&self, stem: &str) -> Option<(String, String)> {
+        let parts: Vec<&str> = stem.split('.').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        for i in (1..parts.len()).rev() {
+            let potential_hostname = parts[i..].join(".");
+            if self.config.registry.is_known_hostname(&potential_hostname) {
+                let agent_name = parts[..i].join(".");
+                return Some((agent_name, potential_hostname));
+            }
+        }
+        None
+    }
+}
+
+fn load_agent_names(team_dir: &Path) -> Option<HashSet<String>> {
+    let config_path = team_dir.join("config.json");
+    if !config_path.exists() {
+        return None;
+    }
+    let content = std::fs::read(&config_path).ok()?;
+    let config: TeamConfig = serde_json::from_slice(&content).ok()?;
+    let mut names = HashSet::new();
+    for member in config.members {
+        names.insert(member.name);
+    }
+    Some(names)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::self_write_filter::SelfWriteFilter;
     use super::super::mock_transport::MockTransport;
     use atm_core::config::{BridgeConfig, BridgeRole, RemoteConfig, HostnameRegistry};
     use std::collections::HashMap;
     use tempfile::TempDir;
+    use tokio::sync::Mutex as TokioMutex;
 
     fn create_test_config(local_hostname: &str, remote_hostname: &str) -> Arc<BridgePluginConfig> {
         let mut registry = HostnameRegistry::new();
@@ -602,6 +669,35 @@ mod tests {
         }
     }
 
+    fn new_filter() -> Arc<TokioMutex<SelfWriteFilter>> {
+        Arc::new(TokioMutex::new(SelfWriteFilter::default()))
+    }
+
+    async fn write_team_config(team_dir: &Path, members: &[&str]) {
+        let mut members_json = Vec::new();
+        for name in members {
+            members_json.push(serde_json::json!({
+                "agentId": format!("{name}@test-team"),
+                "name": name,
+                "agentType": "general-purpose",
+                "model": "claude-opus-4-6",
+                "joinedAt": 1234567890,
+                "tmuxPaneId": null,
+                "cwd": "/tmp",
+                "subscriptions": []
+            }));
+        }
+        let config = serde_json::json!({
+            "name": "test-team",
+            "createdAt": 1234567890,
+            "leadAgentId": "team-lead@test-team",
+            "leadSessionId": "session-123",
+            "members": members_json
+        });
+        let path = team_dir.join("config.json");
+        fs::write(path, serde_json::to_vec_pretty(&config).unwrap()).await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_sync_engine_new() {
         let temp_dir = TempDir::new().unwrap();
@@ -610,7 +706,8 @@ mod tests {
         let config = create_test_config("laptop", "desktop");
         let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
 
-        let engine = SyncEngine::new(config, transport, team_dir).await.unwrap();
+        write_team_config(&team_dir, &["agent-1", "dev.mac"]).await;
+        let engine = SyncEngine::new(config, transport, team_dir, new_filter()).await.unwrap();
         assert!(engine.state.synced_message_ids.is_empty());
     }
 
@@ -622,7 +719,7 @@ mod tests {
         let config = create_test_config("laptop", "desktop");
         let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
 
-        let mut engine = SyncEngine::new(config, transport, team_dir).await.unwrap();
+        let mut engine = SyncEngine::new(config, transport, team_dir, new_filter()).await.unwrap();
 
         // Push with no inboxes directory
         let stats = engine.sync_push().await.unwrap();
@@ -653,7 +750,7 @@ mod tests {
         let config = create_test_config("laptop", "desktop");
         let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
 
-        let engine = SyncEngine::new(config, transport, team_dir).await.unwrap();
+        let engine = SyncEngine::new(config, transport, team_dir, new_filter()).await.unwrap();
 
         // Local inbox file
         let local = inboxes_dir.join("agent-1.json");
@@ -666,6 +763,14 @@ mod tests {
         // Per-origin inbox file (local hostname)
         let origin_local = inboxes_dir.join("agent-1.laptop.json");
         assert!(!engine.is_local_inbox_file(&origin_local));
+
+        // Agent name containing hostname suffix should still be local
+        let dot_agent = inboxes_dir.join("dev.mac.json");
+        assert!(engine.is_local_inbox_file(&dot_agent));
+
+        // Per-origin for dot agent should be treated as origin
+        let dot_origin = inboxes_dir.join("dev.mac.desktop.json");
+        assert!(!engine.is_local_inbox_file(&dot_origin));
 
         // Non-JSON file
         let txt_file = inboxes_dir.join("agent-1.txt");
@@ -680,7 +785,7 @@ mod tests {
         let config = create_test_config("laptop", "desktop");
         let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
 
-        let engine = SyncEngine::new(config, transport, team_dir.clone()).await.unwrap();
+        let engine = SyncEngine::new(config, transport, team_dir.clone(), new_filter()).await.unwrap();
 
         let path = team_dir.join("inboxes/agent-1.json");
         let name = engine.extract_agent_name(&path).unwrap();
@@ -695,10 +800,12 @@ mod tests {
         let config = create_test_config("laptop", "desktop");
         let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
 
-        let engine = SyncEngine::new(config, transport, team_dir).await.unwrap();
+        let engine = SyncEngine::new(config, transport, team_dir, new_filter()).await.unwrap();
 
         let filename = "agent-1.laptop.json";
-        let name = engine.extract_agent_from_origin_filename(filename).unwrap();
+        let name = engine
+            .extract_agent_from_origin_filename(filename, "laptop")
+            .unwrap();
         assert_eq!(name, "agent-1");
     }
 
