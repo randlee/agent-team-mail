@@ -9,6 +9,8 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+use serde_json::Value;
+use std::path::PathBuf;
 
 /// Bridge plugin — synchronizes agent inbox queues across machines
 pub struct BridgePlugin {
@@ -96,9 +98,32 @@ impl Plugin for BridgePlugin {
             );
         }
 
-        // Create sync engine with mock transport for now
-        // TODO: Sprint 8.3 will replace this with SSH transport
-        let transport = Arc::new(super::mock_transport::MockTransport::new()) as Arc<dyn super::transport::Transport>;
+        // Select transport implementation
+        let transport: Arc<dyn super::transport::Transport> = {
+            let has_remotes = !config.core.remotes.is_empty();
+            if has_remotes {
+                #[cfg(feature = "ssh")]
+                {
+                    let remote = &config.core.remotes[0];
+                    if config.core.remotes.len() > 1 {
+                        warn!("SSH transport currently uses the first remote only; additional remotes will be ignored.");
+                    }
+                    let ssh_config = super::ssh::SshConfig {
+                        address: remote.address.clone(),
+                        key_path: remote.ssh_key_path.as_ref().map(PathBuf::from),
+                        ..Default::default()
+                    };
+                    Arc::new(super::ssh::SshTransport::new(ssh_config))
+                }
+                #[cfg(not(feature = "ssh"))]
+                {
+                    warn!("SSH feature disabled; falling back to MockTransport.");
+                    Arc::new(super::mock_transport::MockTransport::new())
+                }
+            } else {
+                Arc::new(super::mock_transport::MockTransport::new())
+            }
+        };
 
         // Get team directory from mail service
         let team_dir = ctx.mail.teams_root().join(&ctx.system.default_team);
@@ -112,6 +137,7 @@ impl Plugin for BridgePlugin {
             Arc::new(config.clone()),
             transport,
             team_dir.clone(),
+            self.self_write_filter.clone(),
         )
         .await
         .map_err(|e| PluginError::Runtime {
@@ -173,6 +199,47 @@ impl Plugin for BridgePlugin {
                     }
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_message(
+        &mut self,
+        msg: &atm_core::schema::InboxMessage,
+    ) -> Result<(), PluginError> {
+        if !self.config.as_ref().map(|c| c.is_enabled()).unwrap_or(false) {
+            return Ok(());
+        }
+
+        let sync_engine = match &self.sync_engine {
+            Some(engine) => engine.clone(),
+            None => return Ok(()),
+        };
+
+        // Extract event metadata
+        let path = match msg.unknown_fields.get("path") {
+            Some(Value::String(path)) => PathBuf::from(path),
+            _ => return Ok(()),
+        };
+
+        // Skip per-origin files (origin present)
+        if msg.unknown_fields.contains_key("origin") {
+            return Ok(());
+        }
+
+        // Skip if this path was written by the bridge itself
+        {
+            let mut filter = self.self_write_filter.lock().await;
+            if filter.should_filter(&path) {
+                debug!("Skipping self-written path {}", path.display());
+                return Ok(());
+            }
+        }
+
+        let mut engine = sync_engine.lock().await;
+        if let Err(e) = engine.push_inbox_path(&path).await {
+            warn!("Bridge push for {} failed: {}", path.display(), e);
         }
 
         Ok(())

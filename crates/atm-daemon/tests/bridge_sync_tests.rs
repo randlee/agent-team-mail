@@ -2,12 +2,13 @@
 
 use atm_core::config::{BridgeConfig, BridgeRole, HostnameRegistry, RemoteConfig};
 use atm_core::schema::InboxMessage;
-use atm_daemon::plugins::bridge::{BridgePluginConfig, MockTransport, SyncEngine, SyncState, Transport};
+use atm_daemon::plugins::bridge::{BridgePluginConfig, MockTransport, SyncEngine, SyncState, Transport, SelfWriteFilter};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::fs;
+use tokio::sync::Mutex as TokioMutex;
 
 /// Helper to create a test message
 fn create_test_message(from: &str, text: &str, message_id: Option<String>) -> InboxMessage {
@@ -50,6 +51,10 @@ fn create_test_config(local_hostname: &str, remote_hostname: &str) -> Arc<Bridge
         registry,
         local_hostname: local_hostname.to_string(),
     })
+}
+
+fn new_filter() -> Arc<TokioMutex<SelfWriteFilter>> {
+    Arc::new(TokioMutex::new(SelfWriteFilter::default()))
 }
 
 #[tokio::test]
@@ -97,7 +102,7 @@ async fn test_sync_push_with_mock_transport() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport.clone(), team_dir.clone())
+    let mut engine = SyncEngine::new(config, transport.clone(), team_dir.clone(), new_filter())
         .await
         .unwrap();
 
@@ -142,7 +147,7 @@ async fn test_sync_push_dedup() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir.clone())
+    let mut engine = SyncEngine::new(config, transport, team_dir.clone(), new_filter())
         .await
         .unwrap();
 
@@ -179,7 +184,7 @@ async fn test_sync_push_assigns_message_ids() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir.clone())
+    let mut engine = SyncEngine::new(config, transport, team_dir.clone(), new_filter())
         .await
         .unwrap();
 
@@ -203,7 +208,7 @@ async fn test_sync_engine_empty_inbox() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir)
+    let mut engine = SyncEngine::new(config, transport, team_dir, new_filter())
         .await
         .unwrap();
 
@@ -236,7 +241,7 @@ async fn test_sync_cycle() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir)
+    let mut engine = SyncEngine::new(config, transport, team_dir, new_filter())
         .await
         .unwrap();
 
@@ -275,7 +280,7 @@ async fn test_sync_cursor_advancement() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir.clone())
+    let mut engine = SyncEngine::new(config, transport, team_dir.clone(), new_filter())
         .await
         .unwrap();
 

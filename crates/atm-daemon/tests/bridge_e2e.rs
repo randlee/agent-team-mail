@@ -4,12 +4,13 @@
 
 use atm_core::config::{BridgeConfig, BridgeRole, HostnameRegistry, RemoteConfig};
 use atm_core::schema::{InboxMessage, TeamConfig, AgentMember};
-use atm_daemon::plugins::bridge::{BridgePluginConfig, MockTransport, SyncEngine};
+use atm_daemon::plugins::bridge::{BridgePluginConfig, MockTransport, SyncEngine, SelfWriteFilter};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::fs;
+use tokio::sync::Mutex as TokioMutex;
 
 fn create_test_message(from: &str, text: &str) -> InboxMessage {
     InboxMessage {
@@ -99,6 +100,10 @@ async fn setup_node(
     (temp_dir, team_dir, config, transport)
 }
 
+fn new_filter() -> Arc<TokioMutex<SelfWriteFilter>> {
+    Arc::new(TokioMutex::new(SelfWriteFilter::default()))
+}
+
 #[tokio::test]
 async fn test_bridge_e2e_spoke_to_spoke_via_hub() {
     // Setup 3 nodes: hub + 2 spokes
@@ -147,15 +152,15 @@ async fn test_bridge_e2e_spoke_to_spoke_via_hub() {
     .await;
 
     // Create sync engines
-    let mut hub_engine = SyncEngine::new(hub_config, hub_transport, hub_dir.clone())
+    let mut hub_engine = SyncEngine::new(hub_config, hub_transport, hub_dir.clone(), new_filter())
         .await
         .unwrap();
 
-    let mut spoke_a_engine = SyncEngine::new(spoke_a_config, spoke_a_transport, spoke_a_dir.clone())
+    let mut spoke_a_engine = SyncEngine::new(spoke_a_config, spoke_a_transport, spoke_a_dir.clone(), new_filter())
         .await
         .unwrap();
 
-    let mut spoke_b_engine = SyncEngine::new(spoke_b_config, spoke_b_transport, spoke_b_dir.clone())
+    let mut spoke_b_engine = SyncEngine::new(spoke_b_config, spoke_b_transport, spoke_b_dir.clone(), new_filter())
         .await
         .unwrap();
 
@@ -271,7 +276,7 @@ async fn test_circuit_breaker_disables_failing_remote() {
     )
     .await;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir.clone())
+    let mut engine = SyncEngine::new(config, transport, team_dir.clone(), new_filter())
         .await
         .unwrap();
 
