@@ -392,7 +392,7 @@ mod tests {
         write_inbox(&path, &[msg1.clone(), msg2]).await;
         let _ = read_new_inbox_messages(&path, &mut cursor).await.unwrap();
 
-        write_inbox(&path, &[msg1.clone()]).await;
+        write_inbox(&path, std::slice::from_ref(&msg1)).await;
         let new_msgs = read_new_inbox_messages(&path, &mut cursor).await.unwrap();
         assert_eq!(new_msgs.len(), 1);
         assert_eq!(new_msgs[0].text, "first");

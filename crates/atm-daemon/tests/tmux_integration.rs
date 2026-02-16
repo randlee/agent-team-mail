@@ -160,12 +160,12 @@ fn wait_for_tmux_window(session: &str, window_name: &str, timeout: Duration) -> 
             .arg("-t")
             .arg(session)
             .output();
-        if let Ok(output) = output {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if stdout.contains(window_name) {
-                    return true;
-                }
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains(window_name) {
+                return true;
             }
         }
         if start.elapsed().unwrap_or_default() > timeout {
@@ -185,12 +185,12 @@ fn wait_for_tmux_pane(session: &str, pane_id: &str, timeout: Duration) -> bool {
             .arg("-F")
             .arg("#{pane_id}")
             .output();
-        if let Ok(output) = output {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if stdout.lines().any(|line| line.trim() == pane_id) {
-                    return true;
-                }
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.lines().any(|line| line.trim() == pane_id) {
+                return true;
             }
         }
         if start.elapsed().unwrap_or_default() > timeout {
