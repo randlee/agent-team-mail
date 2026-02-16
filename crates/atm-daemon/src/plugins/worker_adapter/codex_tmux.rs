@@ -9,6 +9,17 @@ use std::path::PathBuf;
 use std::process::Command;
 use tracing::{debug, warn};
 
+/// Codex TMUX backend payload with tmux-specific metadata
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxPayload {
+    /// TMUX session name
+    pub session: String,
+    /// TMUX pane ID (e.g., "%1")
+    pub pane_id: String,
+    /// Window name
+    pub window_name: String,
+}
+
 /// Codex TMUX backend — spawns Codex in tmux panes
 pub struct CodexTmuxBackend {
     /// TMUX session name for worker panes
@@ -203,10 +214,18 @@ impl WorkerAdapter for CodexTmuxBackend {
                 source: Some(Box::new(e)),
             })?;
 
+        // Create tmux-specific payload
+        let tmux_payload = TmuxPayload {
+            session: self.tmux_session.clone(),
+            pane_id: pane_id.clone(),
+            window_name: agent_id.to_string(),
+        };
+
         Ok(WorkerHandle {
             agent_id: agent_id.to_string(),
             backend_id: pane_id,
             log_file_path: log_path,
+            payload: Some(Box::new(tmux_payload)),
         })
     }
 
@@ -324,5 +343,30 @@ mod tests {
         );
         assert_eq!(backend.tmux_session, "test-session");
         assert_eq!(backend.log_dir, PathBuf::from("/tmp/logs"));
+    }
+
+    #[test]
+    fn test_tmux_payload_construction() {
+        let payload = TmuxPayload {
+            session: "test-session".to_string(),
+            pane_id: "%42".to_string(),
+            window_name: "arch-ctm@planning".to_string(),
+        };
+
+        assert_eq!(payload.session, "test-session");
+        assert_eq!(payload.pane_id, "%42");
+        assert_eq!(payload.window_name, "arch-ctm@planning");
+    }
+
+    #[test]
+    fn test_tmux_payload_clone() {
+        let payload = TmuxPayload {
+            session: "test-session".to_string(),
+            pane_id: "%42".to_string(),
+            window_name: "arch-ctm@planning".to_string(),
+        };
+
+        let cloned = payload.clone();
+        assert_eq!(cloned, payload);
     }
 }
