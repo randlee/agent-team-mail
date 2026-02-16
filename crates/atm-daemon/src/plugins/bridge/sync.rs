@@ -51,7 +51,7 @@ pub struct SyncEngine {
     config: Arc<BridgePluginConfig>,
 
     /// Transport implementations per remote hostname
-    transports: std::collections::HashMap<String, Arc<dyn Transport>>,
+    transports: std::collections::HashMap<String, Arc<tokio::sync::Mutex<dyn Transport>>>,
 
     /// Team directory (e.g., ~/.claude/teams/my-team)
     team_dir: PathBuf,
@@ -89,7 +89,7 @@ impl SyncEngine {
     /// Returns error if sync state cannot be loaded
     pub async fn new(
         config: Arc<BridgePluginConfig>,
-        transports: std::collections::HashMap<String, Arc<dyn Transport>>,
+        transports: std::collections::HashMap<String, Arc<tokio::sync::Mutex<dyn Transport>>>,
         team_dir: PathBuf,
         self_write_filter: Arc<tokio::sync::Mutex<SelfWriteFilter>>,
     ) -> Result<Self> {
@@ -171,6 +171,24 @@ impl SyncEngine {
         let mut remote_hostnames: Vec<_> = self.transports.keys().cloned().collect();
         remote_hostnames.sort();
 
+        // Lazy connect to each remote (if not already connected)
+        for remote_hostname in &remote_hostnames {
+            if self.metrics.is_remote_disabled(remote_hostname) {
+                continue;
+            }
+
+            if let Some(transport) = self.transports.get(remote_hostname) {
+                let mut transport_guard = transport.lock().await;
+                if !transport_guard.is_connected().await {
+                    if let Err(e) = transport_guard.connect().await {
+                        warn!("Failed to connect to {}: {}", remote_hostname, e);
+                        stats.errors += 1;
+                        self.metrics.record_remote_failure(remote_hostname);
+                    }
+                }
+            }
+        }
+
         // Push each inbox file to all remotes
         for path in inbox_files {
             for remote_hostname in &remote_hostnames {
@@ -228,6 +246,24 @@ impl SyncEngine {
         let mut remote_hostnames: Vec<_> = self.transports.keys().cloned().collect();
         remote_hostnames.sort();
 
+        // Lazy connect to each remote (if not already connected)
+        for remote_hostname in &remote_hostnames {
+            if self.metrics.is_remote_disabled(remote_hostname) {
+                continue;
+            }
+
+            if let Some(transport) = self.transports.get(remote_hostname) {
+                let mut transport_guard = transport.lock().await;
+                if !transport_guard.is_connected().await {
+                    if let Err(e) = transport_guard.connect().await {
+                        warn!("Failed to connect to {}: {}", remote_hostname, e);
+                        stats.errors += 1;
+                        self.metrics.record_remote_failure(remote_hostname);
+                    }
+                }
+            }
+        }
+
         for remote_hostname in remote_hostnames {
             // Check circuit breaker
             if self.metrics.is_remote_disabled(&remote_hostname) {
@@ -278,9 +314,10 @@ impl SyncEngine {
 
         // Sync team config from hub (if we're a spoke)
         if let Some(hub_hostname) = self.get_hub_hostname() {
-            if let Some(hub_transport) = self.get_transport(&hub_hostname) {
+            if let Some(hub_transport_arc) = self.get_transport(&hub_hostname) {
+                let hub_transport = hub_transport_arc.lock().await;
                 match sync_team_config(
-                    hub_transport.as_ref(),
+                    &*hub_transport,
                     &self.team_dir,
                     &hub_hostname,
                     &self.config.registry,
@@ -420,14 +457,14 @@ impl SyncEngine {
     }
 
     /// Get transport for a specific remote hostname
-    fn get_transport(&self, remote_hostname: &str) -> Option<&Arc<dyn Transport>> {
+    fn get_transport(&self, remote_hostname: &str) -> Option<&Arc<tokio::sync::Mutex<dyn Transport>>> {
         self.transports.get(remote_hostname)
     }
 
     /// Push a single inbox file to a specific remote
     async fn push_inbox_file_to_remote(&mut self, local_path: &Path, remote_hostname: &str) -> Result<usize> {
         // Get transport for this remote
-        let transport = self.get_transport(remote_hostname)
+        let transport_arc = self.get_transport(remote_hostname)
             .ok_or_else(|| anyhow::anyhow!("No transport for remote: {remote_hostname}"))?
             .clone();
 
@@ -467,7 +504,7 @@ impl SyncEngine {
 
         // Push to this remote
         let pushed_count = self
-            .push_to_remote(&agent_name, &new_messages, remote_hostname, &transport)
+            .push_to_remote(&agent_name, &new_messages, remote_hostname, &transport_arc)
             .await?;
 
         // Update cursor and mark messages as synced
@@ -487,7 +524,7 @@ impl SyncEngine {
         agent_name: &str,
         messages: &[InboxMessage],
         remote_hostname: &str,
-        transport: &Arc<dyn Transport>,
+        transport_arc: &Arc<tokio::sync::Mutex<dyn Transport>>,
     ) -> Result<usize> {
         if messages.is_empty() {
             return Ok(0);
@@ -503,6 +540,7 @@ impl SyncEngine {
         // Read existing messages from remote (if file exists)
         let remote_temp_path = self.team_dir.join(format!(".bridge-pull-{remote_hostname}.json"));
 
+        let transport = transport_arc.lock().await;
         let mut existing_messages = if transport.is_connected().await {
             match transport.download(&remote_path, &remote_temp_path).await {
                 Ok(()) => {
@@ -547,7 +585,7 @@ impl SyncEngine {
     /// Pull messages from a specific remote
     async fn pull_from_remote(&mut self, remote_hostname: &str) -> Result<usize> {
         // Get transport for this remote
-        let transport = self.get_transport(remote_hostname)
+        let transport_arc = self.get_transport(remote_hostname)
             .ok_or_else(|| anyhow::anyhow!("No transport for remote: {remote_hostname}"))?
             .clone();
 
@@ -557,6 +595,7 @@ impl SyncEngine {
 
         // List files on remote matching pattern *.json
         let pattern = "*.json";
+        let transport = transport_arc.lock().await;
         let remote_files = match transport.list(&remote_inboxes_dir, pattern).await {
             Ok(files) => files,
             Err(_) => {
@@ -567,27 +606,38 @@ impl SyncEngine {
 
         let mut pulled_count = 0;
         for filename in remote_files {
-            let remote_path = remote_inboxes_dir.join(&filename);
-
-            // Determine local path based on filename type
-            let local_path = if filename.ends_with(".json") {
-                // Check if this is already a per-origin file (contains hostname)
-                // Per-origin files: agent.hostname.json (copy as-is)
-                // Base files: agent.json (save as agent.remote-hostname.json)
-                let stem = filename.strip_suffix(".json").unwrap();
-
-                if stem.contains('.') {
-                    // Already per-origin format - copy as-is
-                    self.team_dir.join("inboxes").join(&filename)
-                } else {
-                    // Base inbox file - add remote hostname suffix
-                    let local_filename = format!("{stem}.{remote_hostname}.json");
-                    self.team_dir.join("inboxes").join(&local_filename)
-                }
-            } else {
-                // Not a JSON file - skip
+            // Skip temp files created by bridge operations
+            if filename.starts_with(".bridge-") {
+                debug!("Skipping temp file: {}", filename);
                 continue;
+            }
+
+            if !filename.ends_with(".json") {
+                continue;
+            }
+
+            let stem = filename.strip_suffix(".json").unwrap();
+
+            // Check if this is a per-origin file from another machine
+            // Per-origin files have format: agent.hostname.json
+            // We only want to pull BASE inbox files (agent.json), not per-origin files
+            let is_per_origin_file = if let Some(last_dot_idx) = stem.rfind('.') {
+                let potential_hostname = &stem[last_dot_idx + 1..];
+                // Check if the suffix after the last dot is a known hostname
+                self.config.registry.is_known_hostname(potential_hostname)
+            } else {
+                false
             };
+
+            if is_per_origin_file {
+                debug!("Skipping per-origin file: {}", filename);
+                continue;
+            }
+
+            // This is a base inbox file - download it and save as agent.remote-hostname.json
+            let remote_path = remote_inboxes_dir.join(&filename);
+            let local_filename = format!("{stem}.{remote_hostname}.json");
+            let local_path = self.team_dir.join("inboxes").join(&local_filename);
 
             match self.pull_file(&remote_path, &local_path, &transport).await {
                 Ok(count) => {
@@ -603,7 +653,7 @@ impl SyncEngine {
     }
 
     /// Pull a single file from remote
-    async fn pull_file(&mut self, remote_path: &Path, local_path: &Path, transport: &Arc<dyn Transport>) -> Result<usize> {
+    async fn pull_file(&mut self, remote_path: &Path, local_path: &Path, transport: &tokio::sync::MutexGuard<'_, dyn Transport>) -> Result<usize> {
         // Download to temp file first
         let temp_path = local_path.with_extension("tmp");
         transport.download(remote_path, &temp_path).await?;
@@ -819,7 +869,7 @@ mod tests {
         let team_dir = temp_dir.path().to_path_buf();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
@@ -834,7 +884,7 @@ mod tests {
         let team_dir = temp_dir.path().to_path_buf();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
@@ -867,7 +917,7 @@ mod tests {
         fs::create_dir_all(&inboxes_dir).await.unwrap();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
@@ -904,7 +954,7 @@ mod tests {
         let team_dir = temp_dir.path().to_path_buf();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
@@ -945,7 +995,7 @@ mod tests {
         fs::create_dir_all(&inboxes_dir).await.unwrap();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
@@ -983,7 +1033,7 @@ mod tests {
         fs::create_dir_all(&inboxes_dir).await.unwrap();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
@@ -1020,7 +1070,7 @@ mod tests {
         fs::create_dir_all(&inboxes_dir).await.unwrap();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(MockTransport::new()) as Arc<dyn Transport>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 

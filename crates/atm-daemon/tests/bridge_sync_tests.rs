@@ -100,7 +100,7 @@ async fn test_sync_push_with_mock_transport() {
     // Connect transport (required before operations)
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -147,7 +147,7 @@ async fn test_sync_push_dedup() {
     let config = create_test_config("laptop", "desktop");
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -186,7 +186,7 @@ async fn test_sync_push_assigns_message_ids() {
     let config = create_test_config("laptop", "desktop");
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -212,7 +212,7 @@ async fn test_sync_engine_empty_inbox() {
 
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -247,7 +247,7 @@ async fn test_sync_cycle() {
     let config = create_test_config("laptop", "desktop");
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -288,7 +288,7 @@ async fn test_sync_cursor_advancement() {
     let config = create_test_config("laptop", "desktop");
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);

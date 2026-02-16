@@ -3,6 +3,7 @@
 use super::config::BridgePluginConfig;
 use super::self_write_filter::SelfWriteFilter;
 use super::sync::SyncEngine;
+use super::transport::Transport;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,22 +102,31 @@ impl Plugin for BridgePlugin {
         // Create transport implementations for each remote
         let mut transports = std::collections::HashMap::new();
         for remote in &config.core.remotes {
-            let transport: Arc<dyn super::transport::Transport> = {
-                #[cfg(feature = "ssh")]
-                {
-                    let ssh_config = super::ssh::SshConfig {
-                        address: remote.address.clone(),
-                        key_path: remote.ssh_key_path.as_ref().map(PathBuf::from),
-                        ..Default::default()
-                    };
-                    Arc::new(super::ssh::SshTransport::new(ssh_config))
+            #[cfg(feature = "ssh")]
+            {
+                let ssh_config = super::ssh::SshConfig {
+                    address: remote.address.clone(),
+                    key_path: remote.ssh_key_path.as_ref().map(PathBuf::from),
+                    ..Default::default()
+                };
+                let mut transport = super::ssh::SshTransport::new(ssh_config);
+
+                // Connect to remote on startup
+                if let Err(e) = transport.connect().await {
+                    warn!("Failed to connect to {}: {}", remote.hostname, e);
                 }
-                #[cfg(not(feature = "ssh"))]
-                {
-                    Arc::new(super::mock_transport::MockTransport::new())
-                }
-            };
-            transports.insert(remote.hostname.clone(), transport);
+
+                let transport_arc: Arc<tokio::sync::Mutex<dyn super::transport::Transport>> =
+                    Arc::new(tokio::sync::Mutex::new(transport));
+                transports.insert(remote.hostname.clone(), transport_arc);
+            }
+            #[cfg(not(feature = "ssh"))]
+            {
+                let transport = super::mock_transport::MockTransport::new();
+                let transport_arc: Arc<tokio::sync::Mutex<dyn super::transport::Transport>> =
+                    Arc::new(tokio::sync::Mutex::new(transport));
+                transports.insert(remote.hostname.clone(), transport_arc);
+            }
         }
 
         // Get team directory from mail service

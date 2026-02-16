@@ -15,11 +15,13 @@ use atm_core::schema::InboxMessage;
 /// Maximum number of message_ids to keep in dedup cache
 const MAX_SYNCED_MESSAGE_IDS: usize = 10_000;
 
-/// LRU cache for synced message IDs
+/// Bounded FIFO cache for synced message IDs
 ///
-/// Maintains a bounded set of recently synced message IDs with LRU eviction.
+/// Maintains a bounded set of recently synced message IDs with FIFO eviction.
+/// Note: This is NOT a true LRU cache - it does not update recency on re-insertion.
+/// Messages are evicted in insertion order (oldest first).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LruMessageIdCache {
+pub struct FifoMessageIdCache {
     /// Set of synced message IDs for fast lookup
     #[serde(default)]
     ids: HashSet<String>,
@@ -37,8 +39,8 @@ fn default_max_size() -> usize {
     MAX_SYNCED_MESSAGE_IDS
 }
 
-impl LruMessageIdCache {
-    /// Create a new LRU cache with default size
+impl FifoMessageIdCache {
+    /// Create a new FIFO cache with default size
     pub fn new() -> Self {
         Self {
             ids: HashSet::new(),
@@ -82,7 +84,7 @@ impl LruMessageIdCache {
     }
 }
 
-impl Default for LruMessageIdCache {
+impl Default for FifoMessageIdCache {
     fn default() -> Self {
         Self::new()
     }
@@ -101,12 +103,12 @@ pub struct SyncState {
     #[serde(default)]
     pub per_file_cursors: HashMap<PathBuf, usize>,
 
-    /// LRU cache of synced message_ids
+    /// Bounded FIFO cache of synced message_ids
     ///
     /// Used for deduplication across multiple sync cycles.
-    /// Bounded to MAX_SYNCED_MESSAGE_IDS entries with LRU eviction.
+    /// Bounded to MAX_SYNCED_MESSAGE_IDS entries with FIFO eviction (oldest first).
     #[serde(default)]
-    pub synced_message_ids: LruMessageIdCache,
+    pub synced_message_ids: FifoMessageIdCache,
 }
 
 impl SyncState {
@@ -114,7 +116,7 @@ impl SyncState {
     pub fn new() -> Self {
         Self {
             per_file_cursors: HashMap::new(),
-            synced_message_ids: LruMessageIdCache::new(),
+            synced_message_ids: FifoMessageIdCache::new(),
         }
     }
 
@@ -382,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_basic() {
-        let mut cache = LruMessageIdCache::new();
+        let mut cache = FifoMessageIdCache::new();
         assert!(cache.is_empty());
 
         cache.insert("msg-001".to_string());
@@ -398,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_duplicate_insert() {
-        let mut cache = LruMessageIdCache::new();
+        let mut cache = FifoMessageIdCache::new();
         cache.insert("msg-001".to_string());
         cache.insert("msg-001".to_string());
 
@@ -410,7 +412,7 @@ mod tests {
     #[test]
     fn test_lru_cache_eviction() {
         // Create a small cache for testing eviction
-        let mut cache = LruMessageIdCache {
+        let mut cache = FifoMessageIdCache {
             ids: HashSet::new(),
             queue: VecDeque::new(),
             max_size: 3,
@@ -441,12 +443,12 @@ mod tests {
 
     #[test]
     fn test_lru_cache_serialization() {
-        let mut cache = LruMessageIdCache::new();
+        let mut cache = FifoMessageIdCache::new();
         cache.insert("msg-001".to_string());
         cache.insert("msg-002".to_string());
 
         let json = serde_json::to_string(&cache).unwrap();
-        let deserialized: LruMessageIdCache = serde_json::from_str(&json).unwrap();
+        let deserialized: FifoMessageIdCache = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.len(), 2);
         assert!(deserialized.contains("msg-001"));
@@ -455,7 +457,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_default_max_size() {
-        let cache = LruMessageIdCache::new();
+        let cache = FifoMessageIdCache::new();
         assert_eq!(cache.max_size, MAX_SYNCED_MESSAGE_IDS);
     }
 }
