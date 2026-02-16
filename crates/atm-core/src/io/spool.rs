@@ -301,15 +301,13 @@ fn get_spool_dir_with_base(subdir: &str, base_dir: Option<&Path>) -> Result<Path
     let spool_dir = if let Some(base) = base_dir {
         base.join("spool").join(subdir)
     } else if let Ok(atm_home) = std::env::var("ATM_HOME") {
+        // When ATM_HOME is set, use it directly (test-friendly)
         PathBuf::from(atm_home).join("spool").join(subdir)
     } else {
-        dirs::config_dir()
-            .ok_or_else(|| InboxError::SpoolError {
-                message: "Could not determine config directory".to_string(),
-            })?
-            .join("atm")
-            .join("spool")
-            .join(subdir)
+        let home = crate::home::get_home_dir().map_err(|e| InboxError::SpoolError {
+            message: format!("Could not determine home directory: {e}"),
+        })?;
+        home.join(".config/atm/spool").join(subdir)
     };
 
     Ok(spool_dir)

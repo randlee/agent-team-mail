@@ -339,14 +339,14 @@ impl WorkersConfig {
             .unwrap_or("atm-workers")
             .to_string();
 
-        // Log directory: default to ~/.config/atm/worker-logs or ATM_HOME/worker-logs
+        // Log directory: default to ~/.config/atm/worker-logs
+        // When ATM_HOME is set, use it directly (test-friendly)
         let default_log_dir = if let Ok(atm_home) = std::env::var("ATM_HOME") {
             PathBuf::from(atm_home).join("worker-logs")
         } else {
-            dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("atm")
-                .join("worker-logs")
+            agent_team_mail_core::home::get_home_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".config/atm/worker-logs")
         };
 
         let log_dir = table
@@ -446,13 +446,13 @@ impl WorkersConfig {
 
 impl Default for WorkersConfig {
     fn default() -> Self {
+        // When ATM_HOME is set, use it directly (test-friendly)
         let default_log_dir = if let Ok(atm_home) = std::env::var("ATM_HOME") {
             PathBuf::from(atm_home).join("worker-logs")
         } else {
-            dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("atm")
-                .join("worker-logs")
+            agent_team_mail_core::home::get_home_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".config/atm/worker-logs")
         };
 
         Self {
