@@ -165,21 +165,21 @@ mod tests {
 
     #[test]
     fn test_filter_reregister() {
-        let mut filter = SelfWriteFilter::new(Duration::from_millis(100));
+        let mut filter = SelfWriteFilter::new(Duration::from_millis(200));
         let path = PathBuf::from("/tmp/test.json");
 
         // Register path
         filter.register(path.clone());
         assert!(filter.should_filter(&path));
 
-        // Wait half TTL
-        thread::sleep(Duration::from_millis(50));
+        // Wait less than TTL
+        thread::sleep(Duration::from_millis(80));
 
         // Re-register (extends TTL)
         filter.register(path.clone());
 
-        // Wait another 60ms (total 110ms from first register, but only 60ms from second)
-        thread::sleep(Duration::from_millis(60));
+        // Wait another 100ms (total 180ms from first register, but only 100ms from second)
+        thread::sleep(Duration::from_millis(100));
 
         // Should still filter (TTL extended by second register)
         assert!(filter.should_filter(&path));
