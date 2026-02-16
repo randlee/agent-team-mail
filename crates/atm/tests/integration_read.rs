@@ -1,8 +1,9 @@
 //! Integration tests for the read command
 
 use assert_cmd::cargo;
+use predicates::prelude::*;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// Helper to set home directory for cross-platform test compatibility.
@@ -62,8 +63,8 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 }
 
 /// Create a test inbox with messages
-fn create_test_inbox(team_dir: &PathBuf, agent_name: &str, messages: Vec<serde_json::Value>) {
-    let inbox_path = team_dir.join("inboxes").join(format!("{}.json", agent_name));
+fn create_test_inbox(team_dir: &Path, agent_name: &str, messages: Vec<serde_json::Value>) {
+    let inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
     fs::write(&inbox_path, serde_json::to_string_pretty(&messages).unwrap()).unwrap();
 }
 
@@ -102,6 +103,7 @@ fn test_read_unread_messages() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("test-agent")
         .assert()
         .success();
@@ -134,6 +136,7 @@ fn test_read_all_messages() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("test-agent")
         .arg("--all")
         .assert()
@@ -160,6 +163,7 @@ fn test_read_no_mark() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("test-agent")
         .arg("--no-mark")
         .assert()
@@ -192,6 +196,7 @@ fn test_read_marks_as_read() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("test-agent")
         .assert()
         .success();
@@ -230,6 +235,7 @@ fn test_read_filter_by_from() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("test-agent")
         .arg("--from")
         .arg("team-lead")
@@ -271,6 +277,7 @@ fn test_read_with_limit() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("test-agent")
         .arg("--limit")
         .arg("2")
@@ -289,6 +296,7 @@ fn test_read_empty_inbox() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("test-agent")
         .assert()
         .success();
@@ -303,6 +311,7 @@ fn test_read_agent_not_found() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("nonexistent-agent")
         .assert()
         .failure();
@@ -316,6 +325,7 @@ fn test_read_team_not_found() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "nonexistent-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("test-agent")
         .assert()
         .failure();
@@ -341,8 +351,108 @@ fn test_read_json_output() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("test-agent")
         .arg("--json")
         .assert()
         .success();
+}
+
+#[test]
+fn test_read_since_last_seen_default() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Old message",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": true,
+            "message_id": "msg-010"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "New message",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": true,
+            "message_id": "msg-011"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    // Seed last-seen state at 10:30
+    let state_path = temp_dir.path().join("state.json");
+    let state = serde_json::json!({
+        "last_seen": {
+            "test-team": {
+                "test-agent": "2026-02-11T10:30:00Z"
+            }
+        }
+    });
+    fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("New message"))
+        .stdout(predicates::str::contains("Old message").not());
+
+    // Verify last-seen updated to latest message
+    let updated = fs::read_to_string(&state_path).unwrap();
+    let updated_json: serde_json::Value = serde_json::from_str(&updated).unwrap();
+    let ts = updated_json["last_seen"]["test-team"]["test-agent"]
+        .as_str()
+        .unwrap();
+    assert!(ts.starts_with("2026-02-11T11:00:00"));
+}
+
+#[test]
+fn test_read_no_update_seen() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "New message",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": true,
+            "message_id": "msg-020"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    // Seed last-seen state at 10:00
+    let state_path = temp_dir.path().join("state.json");
+    let state = serde_json::json!({
+        "last_seen": {
+            "test-team": {
+                "test-agent": "2026-02-11T10:00:00Z"
+            }
+        }
+    });
+    fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("test-agent")
+        .arg("--no-update-seen")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("New message"));
+
+    // Verify last-seen was NOT updated (still at 10:00)
+    let updated = fs::read_to_string(&state_path).unwrap();
+    let updated_json: serde_json::Value = serde_json::from_str(&updated).unwrap();
+    let ts = updated_json["last_seen"]["test-team"]["test-agent"]
+        .as_str()
+        .unwrap();
+    assert!(ts.starts_with("2026-02-11T10:00:00"));
 }

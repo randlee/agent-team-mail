@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod bridge;
 mod broadcast;
 mod cleanup;
 mod config_cmd;
@@ -10,9 +11,11 @@ mod error;
 mod inbox;
 mod members;
 mod read;
+mod request;
 mod send;
 mod status;
 mod teams;
+mod wait;
 
 /// atm - Mail-like messaging for Claude agent teams
 #[derive(Parser, Debug)]
@@ -38,6 +41,9 @@ enum Commands {
     /// Read messages from an inbox
     Read(read::ReadArgs),
 
+    /// Send a message and wait for a response (polling)
+    Request(request::RequestArgs),
+
     /// Show inbox summary for team members
     Inbox(inbox::InboxArgs),
 
@@ -55,6 +61,9 @@ enum Commands {
 
     /// Apply retention policies to clean up old messages
     Cleanup(cleanup::CleanupArgs),
+
+    /// Bridge plugin commands (status, sync)
+    Bridge(bridge::BridgeArgs),
 }
 
 impl Cli {
@@ -64,12 +73,14 @@ impl Cli {
             Commands::Send(args) => send::execute(args),
             Commands::Broadcast(args) => broadcast::execute(args),
             Commands::Read(args) => read::execute(args),
+            Commands::Request(args) => request::execute(args),
             Commands::Inbox(args) => inbox::execute(args),
             Commands::Teams(args) => teams::execute(args),
             Commands::Members(args) => members::execute(args),
             Commands::Status(args) => status::execute(args),
             Commands::Config(args) => config_cmd::execute(args),
             Commands::Cleanup(args) => cleanup::execute(args),
+            Commands::Bridge(args) => bridge::execute(args),
         }
     }
 }

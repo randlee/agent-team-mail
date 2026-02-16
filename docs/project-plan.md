@@ -2,7 +2,7 @@
 
 **Version**: 0.2
 **Date**: 2026-02-13
-**Status**: Phase 5 Complete — Phase 6 Next
+**Status**: Phase 6 Complete — Phase 7 Next
 
 ---
 
@@ -1241,17 +1241,364 @@ Phase 5 Complete
 
 ---
 
-## 9. Phase 7: Cross-Computer Bridge Plugin
+## 8.5 Phase 6.4: Design Reconciliation (Post-Phase 6) ✅
 
-**Goal**: Bridge plugin enabling multi-machine agent teams.
+**Goal**: Update requirements and plan to support multi-repo daemon model and clarify root vs repo semantics.
 
-**Branch prefix**: `feature/p7-*`
-**Depends on**: Phase 6 complete (or Phase 5 — independent of CI Monitor)
-**Status**: Not planned (sprint details TBD)
+**Branch prefix**: `planning/p6-4-*`
+**Depends on**: Phase 6 complete
+**Status**: ✅ Complete (incorporated into planning/phase-7 branch, PR #40)
+**Completed**: 2026-02-14
+
+**Deliverables**:
+- ✅ Requirements update: explicit `root` vs `repo` distinction and behavior in non-repo contexts
+- ✅ Multi-repo daemon model: per-repo scoping for caches, reports, and plugin state
+- ✅ CI monitor behavior when `repo` is absent (disable with warning or degrade)
+- ✅ Path resolution rules for plugin outputs (repo-root vs workspace root)
+- ✅ Subscription schema: support per-filter `reason/justification` (and optional expiry) without enforcing behavior
+- ✅ Config tiers: machine-level daemon config listing repo paths; repo-level CI settings in `<repo>.config.atm.toml`; team config for collaboration/transport only
+  - Proposed paths: `~/.config/atm/daemon.toml` (machine) and `<repo>/.atm/config.toml` (repo)
+- ✅ Plan update for Phase 7/8 to reflect multi-repo support decisions
+- ✅ Co-recipient notification confirmed as hard requirement
+- ✅ Branch filter syntax: `develop:*` (derived), `develop:feature/*` (derived + pattern)
+- ✅ Daemon lifecycle: CLI starts daemon on first use, hot-reload support
+
+**Acceptance criteria**:
+- ✅ docs/requirements.md updated with root/repo + multi-repo daemon rules
+- ✅ docs/project-plan.md updated with follow-on work items
+- ✅ ARCH-ATM + ARCH-CTM agree on the model and sign off
 
 ---
 
-## 10. Future Plugins
+## 9. Phase 7: Async Agent Worker Adapter
+
+**Goal**: Generic async worker adapter enabling daemon-managed agent teammates (Codex first backend), with TMUX-based process isolation and log-file IPC.
+
+**Branch prefix**: `feature/p7-*`
+**Depends on**: Phase 6.4 design reconciliation complete
+**Status**: Planned (5 sprints: 7.1–7.5)
+
+**Design reference**: [`docs/codex-tmux-adapter.md`](./codex-tmux-adapter.md)
+
+### Sprint 7.1: Worker Adapter Trait + Codex Backend
+
+**Branch**: `feature/p7-s1-worker-adapter`
+**Depends on**: Phase 6.4
+**Parallel**: None (foundation for all subsequent sprints)
+
+**Goal**: Define the generic `WorkerAdapter` trait and implement the Codex TMUX backend. Wire into daemon plugin system.
+
+**Deliverables**:
+- `WorkerAdapter` trait in `atm-daemon` with methods: `spawn(agent, config) -> WorkerHandle`, `send_message(handle, message) -> Result<()>`, `shutdown(handle) -> Result<()>`
+- `WorkerHandle` struct holding tmux pane ID, log file path, agent identity
+- `CodexTmuxBackend` implementing `WorkerAdapter` — spawns Codex in a tmux pane via `tmux new-window` / `tmux send-keys`
+- **CRITICAL**: All `tmux send-keys` calls MUST use literal mode (`-l`) to prevent command injection and garbled prompts. Escape sequences must be handled explicitly.
+- `WorkerAdapterPlugin` implementing `Plugin` trait — registers with daemon, watches inbox events
+- Daemon config schema: `[workers]` section in `daemon.toml` with `enabled`, `backend`, `tmux_session` fields
+- Safety: each agent gets its own tmux pane; no stdin injection into user's active terminal
+- Unit tests for trait, config parsing, and tmux command generation (mocked)
+
+**File ownership**:
+- `crates/atm-daemon/src/plugins/worker_adapter/` — new module (mod.rs, trait.rs, codex_tmux.rs, config.rs, plugin.rs)
+- `crates/atm-daemon/src/plugins/mod.rs` — register worker_adapter module
+
+**Acceptance criteria**:
+- `WorkerAdapter` trait compiles with at least one backend (CodexTmuxBackend)
+- Plugin registers with daemon and can be enabled/disabled via config
+- Codex tmux pane spawns successfully when adapter is triggered
+- All tests pass, clippy clean with `-D warnings`
+
+### Sprint 7.2: Message Routing + Response Capture + Activity Tracking
+
+**Branch**: `feature/p7-s2-message-routing`
+**Depends on**: Sprint 7.1
+**Parallel**: None
+
+**Goal**: Complete the message flow: inbox event → worker input → response capture → inbox write-back. Also implement agent activity tracking for accurate offline detection.
+
+**Deliverables**:
+- Inbox watcher in `WorkerAdapterPlugin`: subscribe to inbox events for configured agents, filter by agent subscription config
+- Message formatting: convert `InboxMessage` to worker-compatible prompt (configurable template)
+- Input delivery: `tmux send-keys -t <pane> <formatted-prompt> Enter`
+- Response capture via log file tailing: worker backend writes to a known log path, adapter tails file for new output after message delivery
+  - **CRITICAL**: Log capture requires an explicit writer contract — backend must use a wrapper/tee to write output to the log file. Cannot rely on implicit stdout capture. Codex backend should launch with output redirected (e.g., `codex ... 2>&1 | tee <log_path>`).
+- Response parsing: extract worker output, strip prompt echo, build `InboxMessage` with `from = <agent>`
+- Write response to sender's inbox via `inbox_append`
+- Request-ID correlation: if incoming message has Request-ID, include it in response for `atm request` compatibility
+- Per-agent config in repo-level `.atm/config.toml`: agent name, enabled flag, prompt template
+- **Concurrency policy**: enforce before routing — queue incoming messages per-agent by default. Prevents interleaved responses when multiple messages arrive for the same worker. Policy configurable per-agent: `queue` (default), `reject`, or `concurrent`.
+- **Agent activity tracking**:
+  - `atm send` sets sender's `isActive: true` and `lastActive` timestamp in team `config.json` as heartbeat
+  - **CRITICAL**: Activity tracking updates config.json frequently — MUST use atomic swap/lock (same infrastructure as inbox writes) to prevent corruption. This is the same class of bug caught in Phase 3.
+  - Daemon monitors inbox file events (already in event loop) and tracks last-activity-per-agent
+  - Primary activity signal: messages sent by agent (`from` field in inbox writes). This is the source of truth — the agent actively produced output.
+  - Secondary signal: messages read by agent (`read: true` transitions). Indicates consumption but is less reliable (bulk read operations may batch transitions).
+  - Configurable inactivity timeout (default: 5 minutes) — daemon sets `isActive: false` after timeout
+  - Fix `atm send` offline detection: only warn on explicit `isActive: false`, not missing/null
+
+**File ownership**:
+- `crates/atm-daemon/src/plugins/worker_adapter/router.rs` — message routing logic
+- `crates/atm-daemon/src/plugins/worker_adapter/capture.rs` — log file tailing + response extraction
+- `crates/atm-daemon/src/plugins/worker_adapter/codex_tmux.rs` — extend with send_message implementation
+- `crates/atm-daemon/src/plugins/worker_adapter/activity.rs` — agent activity tracker (inbox event → isActive/lastActive updates)
+- `crates/atm/src/commands/send.rs` — fix offline detection logic + set sender heartbeat on send
+
+**Acceptance criteria**:
+- End-to-end: send message to agent inbox → Codex receives prompt → response appears in sender inbox
+- Request-ID correlation works for `atm request` use case
+- Log file tailing correctly captures output without race conditions
+- `atm send` sets sender `isActive: true` + `lastActive` in config.json
+- Daemon marks inactive agents after timeout
+- `atm send` only warns on explicit `isActive: false` (no warning for missing/null)
+- All tests pass, clippy clean with `-D warnings`
+
+### Sprint 7.3: Worker Lifecycle + Health Monitoring
+
+**Branch**: `feature/p7-s3-worker-lifecycle`
+**Depends on**: Sprint 7.2
+**Parallel**: None
+
+**Goal**: Production-ready worker management — startup, crash recovery, health checks, graceful shutdown.
+
+**Deliverables**:
+- Worker startup on daemon init: auto-spawn configured agents on daemon start
+- Health check: periodic tmux pane liveness check (`tmux has-session`), detect crashed/exited workers
+- Crash recovery: auto-restart worker pane with configurable retry limit and backoff
+- Graceful shutdown: `WorkerAdapter::shutdown()` sends exit command, waits for clean exit, falls back to `tmux kill-pane`
+- Concurrent request policy: configurable per-agent — queue (default), reject, or allow concurrent
+- Worker status reporting: expose worker state (running, crashed, restarting, idle) via daemon status endpoint
+- Log rotation: cap log file size, rotate on worker restart
+
+**File ownership**:
+- `crates/atm-daemon/src/plugins/worker_adapter/lifecycle.rs` — startup, health, restart logic
+- `crates/atm-daemon/src/plugins/worker_adapter/plugin.rs` — extend with lifecycle hooks
+
+**Acceptance criteria**:
+- Workers auto-start on daemon init
+- Crashed worker is detected and restarted within configurable interval
+- Graceful shutdown works without orphaned tmux panes
+- Concurrent request policy is enforced
+- All tests pass, clippy clean with `-D warnings`
+
+### Sprint 7.4: Integration Testing + Config Validation
+
+**Branch**: `feature/p7-s4-integration-tests`
+**Depends on**: Sprint 7.3
+**Parallel**: None
+
+**Goal**: Comprehensive integration tests and config validation for the worker adapter system.
+
+**Deliverables**:
+- Integration test: full daemon → worker adapter → Codex tmux → response cycle (using mock backend for CI)
+- Mock worker backend: `MockTmuxBackend` implementing `WorkerAdapter` for testing without real tmux/Codex
+- Config validation: reject invalid config (missing backend, unknown agent, bad tmux session name)
+- Error scenario tests: worker crash during message processing, log file missing, tmux not available
+- Cross-platform considerations: tmux availability check (skip gracefully on Windows CI), ATM_HOME compliance
+- Documentation: update `docs/codex-tmux-adapter.md` with final architecture, config reference, troubleshooting
+
+**File ownership**:
+- `crates/atm-daemon/tests/worker_adapter_tests.rs` — integration tests
+- `crates/atm-daemon/src/plugins/worker_adapter/mock_backend.rs` — mock for testing
+- `docs/codex-tmux-adapter.md` — update with final design
+
+**Acceptance criteria**:
+- All integration tests pass with mock backend on all CI platforms (Ubuntu, macOS, Windows)
+- Real tmux tests pass locally on macOS/Linux (skipped on Windows CI)
+- Config validation rejects all known invalid configurations
+- Documentation is complete and accurate
+- All tests pass, clippy clean with `-D warnings`
+
+### Sprint 7.5: Phase 7 Review + Phase 8 Bridge Design
+
+**Branch**: `planning/phase-7-review`
+**Depends on**: Sprint 7.4
+**Parallel**: None
+
+**Goal**: ARCH-CTM review of Phase 7 implementation, gap analysis, and design planning for Phase 8 (Cross-Computer Bridge Plugin).
+
+**Deliverables**:
+- `docs/phase7-review.md` — ARCH-CTM review of worker adapter implementation (correctness, design, gaps)
+- Fix sprint for any issues found during review (if needed)
+- Phase 8 design outline: Cross-Computer Bridge Plugin
+  - Transport protocol selection (TCP/SSH/HTTP/WebSocket)
+  - Authentication model between machines
+  - Bidirectional inbox sync strategy
+  - Offline queue and retry semantics
+  - How bridge interacts with multi-repo daemon model and worker adapter
+- Requirements updates for Phase 8
+- Project plan updates with Phase 8 sprint decomposition
+
+**Acceptance criteria**:
+- All review findings addressed (fixes committed or tracked as follow-up)
+- Phase 8 design document exists with agreed transport and sync model
+- docs/requirements.md updated with bridge plugin details
+- docs/project-plan.md updated with Phase 8 sprint list
+- ARCH-ATM + ARCH-CTM sign off on Phase 8 plan
+
+### Phase 7 Dependency Graph
+
+```
+Phase 6.4 Complete
+    │
+    └── Sprint 7.1 (Worker Adapter Trait + Codex Backend)
+            │
+            └── Sprint 7.2 (Message Routing + Response Capture)
+                    │
+                    └── Sprint 7.3 (Worker Lifecycle + Health Monitoring)
+                            │
+                            └── Sprint 7.4 (Integration Testing + Config Validation)
+                                    │
+                                    └── Sprint 7.5 (Phase 7 Review + Phase 8 Bridge Design)
+                                            │
+                                         Phase 7 Complete
+```
+
+### Deferred to Phase 8+
+
+- **WorkerHandle tmux-specific** (Issue #48, Finding 1): `WorkerHandle` has hardcoded `tmux_pane_id` field. Refactor to generic `adapter_handle` or associated type when second backend (SSH, Docker) is added in Phase 8.
+- **Parent directory fsync after atomic swap** (Issue #48, Finding 5): After `atomic_swap` rename, parent directory entry is not fsynced. Unlikely to matter in practice but noted for "guaranteed delivery" semantics. Could gate behind config flag. See also: "Windows atomic swap fsync" deferred from Phase 3.
+- **Retention wired into daemon event loop** (Issue #48, Finding 6): `retention.rs` exists (Phase 3) but is CLI-only (`atm cleanup`). Wire into daemon as periodic task or threshold-triggered on hot inboxes to prevent unbounded inbox growth.
+
+---
+
+## 10. Phase 8: Cross-Computer Bridge Plugin
+
+**Goal**: Bridge plugin enabling multi-machine agent teams with bidirectional inbox sync via SSH/SFTP.
+
+**Branch prefix**: `feature/p8-*`
+**Integration branch**: `integrate/phase-8` (off `develop`)
+**Depends on**: Phase 7 complete
+**Status**: Design complete, ready for implementation
+
+**Design reference**: [`docs/phase8-bridge-design.md`](./phase8-bridge-design.md) (ARCH-CTM reviewed, approved)
+
+**Key decisions**:
+- Local `<agent>.json` files NEVER modified (Claude Code contract)
+- Remote origin files additive: `<agent>.<hostname>.json` alongside local files
+- Hub-spoke topology, SSH/SFTP transport, atomic temp+rename writes
+- Filename parsing: match suffix against hostname registry (not dot-split)
+- Bridge assigns `message_id` to messages lacking one
+- Self-write filtering to prevent event storm feedback loop
+
+### Sprint 8.1 — Bridge Config + Plugin Scaffold
+**Goal**: Bridge plugin scaffold and configuration model.
+**Branch**: `feature/p8-s1-bridge-config`
+
+**Deliverables**:
+- Bridge plugin scaffold implementing Plugin trait (`init`/`run`/`shutdown`)
+- Bridge config structs: hostname, role (hub/spoke), remotes list, sync interval
+- Hostname registry with collision detection
+- Alias resolution
+- Config parsing from `[plugins.bridge]` in `.atm.toml`
+- Unit tests for config parsing and hostname validation
+
+**Files**:
+- `crates/atm-daemon/src/plugins/bridge/mod.rs`
+- `crates/atm-daemon/src/plugins/bridge/config.rs`
+- `crates/atm-core/src/config/` (bridge config types)
+
+### Sprint 8.2 — Per-Origin Read Path + Watcher Fix
+**Goal**: Enable reading from multiple per-origin inbox files. Can run in parallel with Sprint 8.3.
+**Branch**: `feature/p8-s2-read-path`
+
+**Deliverables**:
+- New `inbox_read_merged(team_dir, agent_name) -> Vec<InboxMessage>` in `atm-core::io::inbox`
+  - Lists inbox dir, filters by known hostnames from registry
+  - Merges, deduplicates by `message_id`, sorts by timestamp
+  - Backward-compatible: falls back to `<agent>.json` only when bridge not configured
+- Update CLI `read.rs` to call merged reader
+- Update CLI `inbox.rs` to call merged reader
+- Update daemon watcher `parse_event`: add `origin: Option<String>` to `InboxEvent`, normalize agent name by matching known agent names + hostname registry (NOT dot-split — agent names may contain dots)
+- Verify daemon `event_loop.rs` cursor tracking with per-origin files
+- Unit + integration tests for merge, dedup, and watcher parsing (include test for agent name containing dots with hostname suffix)
+
+**Files**:
+- `crates/atm-core/src/io/inbox.rs` (new `inbox_read_merged`)
+- `crates/atm/src/commands/read.rs`
+- `crates/atm/src/commands/inbox.rs`
+- `crates/atm-daemon/src/daemon/watcher.rs`
+- `crates/atm-daemon/src/daemon/event_loop.rs`
+
+### Sprint 8.3 — SSH/SFTP Transport
+**Goal**: Transport abstraction with SSH/SFTP implementation. Can run in parallel with Sprint 8.2.
+**Branch**: `feature/p8-s3-ssh-transport`
+
+**Deliverables**:
+- Transport trait: `connect`, `upload`, `download`, `list`, `rename`
+- SSH/SFTP implementation using `russh`/`ssh2` crate
+- `ControlMaster` connection pooling and lifecycle
+- Mock transport implementation for tests
+- Connection health check, retry with exponential backoff
+- Unit tests with mock transport
+- SSH tests gated behind `ATM_TEST_SSH=1` feature flag
+
+**Files**:
+- `crates/atm-daemon/src/plugins/bridge/transport.rs`
+- `crates/atm-daemon/src/plugins/bridge/ssh.rs`
+- `crates/atm-daemon/src/plugins/bridge/mock_transport.rs`
+
+### Sprint 8.4 — Sync Engine + Dedup
+**Goal**: Core sync logic connecting transport to inbox files.
+**Branch**: `feature/p8-s4-sync-engine`
+**Depends on**: Sprint 8.2 + Sprint 8.3
+
+**Deliverables**:
+- Push cycle: watch local inbox → SFTP new messages to remote `<agent>.<local-hostname>.json`
+- Pull cycle: download remote origin files → write locally
+- Atomic remote writes (temp+rename via transport trait)
+- Cursor/watermark tracking to avoid re-transferring old messages
+- `message_id` assignment for messages that lack one
+- Self-write filtering (HashSet with TTL to prevent feedback loop)
+- **Invariant**: local `<agent>.json` is NEVER modified by bridge; only per-origin `<agent>.<hostname>.json` files are written
+- Integration tests with mock transport simulating 2-node sync (verify local inbox untouched)
+
+**Files**:
+- `crates/atm-daemon/src/plugins/bridge/sync.rs`
+- `crates/atm-daemon/src/plugins/bridge/dedup.rs`
+- `crates/atm-daemon/tests/bridge_sync.rs`
+
+### Sprint 8.5 — Team Config Sync + Hardening
+**Goal**: Production hardening, CLI commands, and documentation.
+**Branch**: `feature/p8-s5-hardening`
+**Depends on**: Sprint 8.4
+
+**Deliverables**:
+- Sync team config from hub to spokes
+- Hostname registry warnings on config sync
+- Logging and operational metrics
+- Failure handling and retry policy for partial syncs
+- Retention extension: `RetentionConfig` handles per-origin files
+- Stale `.bridge-tmp` file cleanup on startup
+- `atm bridge status` / `atm bridge sync` CLI commands
+- **Invariant**: local `<agent>.json` is NEVER modified by bridge; only per-origin files are written
+- End-to-end integration test: 3-node simulated topology with mock transport (verify local inbox untouched)
+- Documentation and ops checklist
+
+**Files**:
+- `crates/atm-daemon/src/plugins/bridge/`
+- `crates/atm/src/commands/bridge.rs`
+- `crates/atm-daemon/tests/bridge_e2e.rs`
+- `docs/`
+
+### Phase 8 Dependency Graph
+
+```
+Sprint 8.1 (Config + Scaffold)
+    │
+    ├──→ Sprint 8.2 (Read Path + Watcher)  ──→ Sprint 8.4 (Sync Engine)
+    │                                              │
+    └──→ Sprint 8.3 (SSH Transport)  ─────────────┘
+                                                   │
+                                              Sprint 8.5 (Config Sync + Hardening)
+```
+
+- 8.2 and 8.3 can run **in parallel** after 8.1 completes
+- 8.4 depends on both 8.2 (read path) and 8.3 (transport)
+- 8.5 depends on 8.4
+
+---
+
+## 12. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
 
@@ -1263,7 +1610,7 @@ Additional plugins planned (each is a self-contained sprint series):
 
 ---
 
-## 11. Sprint Summary
+## 13. Sprint Summary
 
 | Phase | Sprint | Name | Status | PR |
 |-------|--------|------|--------|-----|
@@ -1290,19 +1637,28 @@ Additional plugins planned (each is a self-contained sprint series):
 | **5** | 5.3 | Issues Plugin Testing | ✅ | [#29](https://github.com/randlee/agent-team-mail/pull/29) |
 | **5** | 5.4 | Pluggable Provider Architecture | ✅ | [#31](https://github.com/randlee/agent-team-mail/pull/31) |
 | **5** | 5.5 | ARCH-CTM Review Fixes | ✅ | [#32](https://github.com/randlee/agent-team-mail/pull/32), [#33](https://github.com/randlee/agent-team-mail/pull/33) |
-| **6** | 6.1 | CI Provider Abstraction | — | — |
-| **6** | 6.2 | CI Monitor Plugin Core | — | — |
-| **6** | 6.3 | CI Monitor Testing + Azure External | — | — |
+| **6** | 6.1 | CI Provider Abstraction | ✅ | [#35](https://github.com/randlee/agent-team-mail/pull/35) |
+| **6** | 6.2 | CI Monitor Plugin Core | ✅ | [#36](https://github.com/randlee/agent-team-mail/pull/36) |
+| **6** | 6.3 | CI Monitor Testing + Azure External | ✅ | [#37](https://github.com/randlee/agent-team-mail/pull/37) |
+| **6.4** | — | Design Reconciliation | ✅ | [#40](https://github.com/randlee/agent-team-mail/pull/40) |
+| **7** | 7.1–7.4 | Worker Adapter + Integration Tests | ✅ | [#44](https://github.com/randlee/agent-team-mail/pull/44), [#49](https://github.com/randlee/agent-team-mail/pull/49) |
+| **7** | 7.5 | Phase 7 Review + Phase 8 Bridge Design | ✅ | [#52](https://github.com/randlee/agent-team-mail/pull/52) |
+| **8** | 8.1 | Bridge Config + Plugin Scaffold | — | — |
+| **8** | 8.2 | Per-Origin Read Path + Watcher Fix | — | — |
+| **8** | 8.3 | SSH/SFTP Transport | — | — |
+| **8** | 8.4 | Sync Engine + Dedup | — | — |
+| **8** | 8.5 | Team Config Sync + Hardening | — | — |
 
-**Completed**: 23 sprints across 5 phases (363 tests, all CI green)
-**Next**: Phase 6 — CI Monitor Plugin (3 sprints)
+**Completed**: 31 sprints + 1 design reconciliation across 7 phases (CI green)
+**Next**: Phase 8 — Cross-Computer Bridge Plugin (5 sprints, 8.2/8.3 parallel)
 
 **Phase integration PRs**:
 | Phase | Integration PR | Status |
 |-------|---------------|--------|
 | Phase 3 | [#20](https://github.com/randlee/agent-team-mail/pull/20) | ✅ Merged |
 | Phase 4 | [#25](https://github.com/randlee/agent-team-mail/pull/25) | ✅ Merged |
-| Phase 5 | [#30](https://github.com/randlee/agent-team-mail/pull/30), [#33](https://github.com/randlee/agent-team-mail/pull/33) | ✅ Merged / Pending |
+| Phase 5 | [#30](https://github.com/randlee/agent-team-mail/pull/30), [#33](https://github.com/randlee/agent-team-mail/pull/33) | ✅ Merged |
+| Phase 7 | [#50](https://github.com/randlee/agent-team-mail/pull/50), [#51](https://github.com/randlee/agent-team-mail/pull/51) | ✅ Merged |
 
 ---
 

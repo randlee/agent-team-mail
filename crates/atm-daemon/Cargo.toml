@@ -1,17 +1,22 @@
 [package]
-name = "atm-daemon"
+name = "agent-team-mail-daemon"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Plugin daemon for agent-team-mail: GitHub issues, CI monitoring, cross-computer bridge"
+keywords = ["ai-agents", "messaging", "daemon", "plugins", "automation"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "atm-daemon"
 path = "src/main.rs"
 
 [dependencies]
-atm-core.workspace = true
+agent-team-mail-core.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -27,6 +32,16 @@ hostname = "0.4"
 chrono = "0.4"
 toml = "0.8"
 libloading = "0.8"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+# SSH/SFTP support (optional, behind feature flag)
+ssh2 = { version = "0.9", optional = true }
+
+[features]
+default = []
+ssh = ["ssh2"]
+ssh-tests = ["ssh"]
 
 [dev-dependencies]
 tempfile = "3.13"

@@ -1,11 +1,11 @@
-use atm_core::config::Config;
-use atm_core::context::SystemContext;
-use atm_core::schema::InboxMessage;
-use atm_daemon::plugin::{
+use agent_team_mail_core::config::Config;
+use agent_team_mail_core::context::SystemContext;
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
     PluginState,
 };
-use atm_daemon::roster::RosterService;
+use agent_team_mail_daemon::roster::RosterService;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -110,7 +110,7 @@ impl Plugin for EchoPlugin {
 fn create_test_context(teams_root: std::path::PathBuf) -> PluginContext {
     let system = Arc::new(SystemContext::new(
         "test-host".to_string(),
-        atm_core::context::Platform::Linux,
+        agent_team_mail_core::context::Platform::Linux,
         std::path::PathBuf::from("/tmp/.claude"),
         "2.1.39".to_string(),
         "test-team".to_string(),

@@ -7,8 +7,8 @@ use super::provider::ErasedIssueProvider;
 use super::registry::{ProviderFactory, ProviderRegistry};
 use super::types::{Issue, IssueFilter, IssueState};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
-use atm_core::context::GitProvider as GitProviderType;
-use atm_core::schema::{AgentMember, InboxMessage};
+use agent_team_mail_core::context::GitProvider as GitProviderType;
+use agent_team_mail_core::schema::{AgentMember, InboxMessage};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -337,6 +337,11 @@ impl Plugin for IssuesPlugin {
         };
 
         // Register synthetic member
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
         let member = AgentMember {
             agent_id: format!("{}@{}", self.config.agent, target_team),
             name: self.config.agent.clone(),
@@ -345,10 +350,7 @@ impl Plugin for IssuesPlugin {
             prompt: None,
             color: Some("purple".to_string()),
             plan_mode_required: None,
-            joined_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            joined_at: now_ms,
             tmux_pane_id: None,
             cwd: repo
                 .path
@@ -357,6 +359,7 @@ impl Plugin for IssuesPlugin {
             subscriptions: Vec::new(),
             backend_type: None,
             is_active: Some(true),
+            last_active: Some(now_ms),
             unknown_fields: HashMap::new(),
         };
 
@@ -618,7 +621,7 @@ mod tests {
 
     #[test]
     fn test_issue_update_generates_distinct_message_ids() {
-        use atm_core::io::inbox::inbox_append;
+        use agent_team_mail_core::io::inbox::inbox_append;
         use tempfile::TempDir;
 
         let plugin = IssuesPlugin::new();

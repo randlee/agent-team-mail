@@ -282,6 +282,7 @@ pub struct SystemContext {
     pub hostname: String,
     pub platform: Platform,               // macOS, Linux, Windows
     pub claude_root: PathBuf,             // ~/.claude/
+    pub root: PathBuf,                    // current workspace root (always present)
     pub claude_version: String,           // "2.1.39"
     pub schema_version: SchemaVersion,
     pub repo: Option<RepoContext>,
@@ -309,6 +310,11 @@ pub enum GitProvider {
 
 Provider detection is purely URL parsing — no network calls, no auth. Plugins consume `ctx.system.repo.provider` and handle everything provider-specific (tokens, API clients, rate limits).
 
+**Root vs repo distinction**:
+- `root` is always present and represents the workspace root where the CLI/daemon is running (may be a non-git directory).
+- `repo` is optional and only present when a git repository is detected under `root`.
+- Plugins and commands must treat these as distinct concepts (e.g., CI monitor requires `repo`, but other tooling may operate on `root` without git).
+
 ---
 
 ## 4. CLI Requirements (`atm`)
@@ -320,13 +326,18 @@ atm <command> [options]
 
 Commands:
   send        Send a message to an agent
+  request     Send a message and wait for a response (polling)
   broadcast   Send a message to all team members
   read        Read messages from an inbox
   inbox       List inbox summary (message counts, unread)
-  teams       List teams on this machine
+  teams       List teams on this machine (and manage members)
   members     List agents in a team
   status      Show team status overview
   config      Show/set configuration
+  cleanup     Apply retention policies
+
+Teams subcommands:
+  teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
 ```
 
 ### 4.2 Messaging Commands
@@ -365,10 +376,21 @@ atm send <agent> --stdin             # message from stdin
 **Offline recipient detection**:
 
 Before writing to the inbox, `atm send` checks the recipient's status in `config.json`:
-- If the recipient is **not in the members array** or has **`isActive: false`**, the recipient is considered offline.
+- If the recipient has **`isActive: false`** (explicitly set), the recipient is considered offline.
+- If `isActive` is **missing or null**, the recipient's status is unknown — **no offline warning** is shown. (Many agents, including the team lead, never have `isActive` set by Claude Code.)
+- If the recipient is **not in the members array**, the recipient is treated as unknown (no warning, message still delivered).
 - When offline, `atm` prepends a call-to-action tag to the message body: `[{action_text}] {original_message}`
 - The sender receives a warning: `Warning: Agent X appears offline. Message will be queued with call-to-action.`
 - The message is still delivered (written to inbox file) — the warning is informational, not a hard block.
+
+**Agent activity tracking (daemon-managed)**:
+
+The daemon tracks agent activity by monitoring inbox file changes and message timestamps:
+- `atm send` sets the sender's `isActive: true` and `lastActive` timestamp in team `config.json` as a heartbeat.
+- The daemon watches inbox file events (already part of the event loop) and tracks last-activity-per-agent from `from` fields and `timestamp` values — no extra I/O beyond existing file watching.
+- After a configurable inactivity timeout (default: 5 minutes), the daemon sets `isActive: false` for the agent.
+- Two activity signals: (1) messages sent by the agent (`from` field across inboxes), (2) messages read by the agent (`read: true` transitions).
+- `lastActive` is stored in the member entry in `config.json` (ISO 8601 timestamp).
 
 **Call-to-action text precedence** (highest to lowest):
 1. `--offline-action "custom text"` CLI flag
@@ -392,6 +414,23 @@ Before writing to the inbox, `atm send` checks the recipient's status in `config
 Original: /Users/randlee/project/secrets/trace.txt
 Copy: ~/.config/atm/share/backend-ci-team/trace.txt
 ```
+
+#### `atm request`
+
+Send a message from one mailbox to another and wait for a response by polling the sender inbox.
+This is a temporary CLI convenience and will be replaced by a daemon-backed watcher.
+
+```
+atm request <from> <to> <message>
+atm request <from> <to> <message> --timeout 30 --poll-interval 200
+atm request <from> <to> <message> --from-team <team> --to-team <team>
+```
+
+**Behavior**:
+- Requires explicit sender and destination mailboxes (name@team or explicit `--from-team` / `--to-team`)
+- Adds a `Request-ID` marker to the message
+- Polls the sender inbox for a response containing that marker
+- Times out after the specified interval
 
 #### `atm broadcast`
 
@@ -610,6 +649,23 @@ pub struct PluginContext {
 
 Plugins access shared system info (repo name, git provider, claude version) via `ctx.system`. Provider-specific concerns (auth tokens, API clients, rate limiting) are the plugin's responsibility.
 
+**Multi-repo daemon model (design gap to address)**:
+- Current implementation assumes one daemon per repo (paths and plugin state are repo-scoped).
+- Future design must support a single daemon hosting multiple repos/roots.
+- Plugin state, caches, and report outputs must be scoped by repo/root context.
+- When `repo` is missing, plugins should fall back to `root` for storage and either disable or degrade gracefully if git context is required.
+
+**Proposed direction (from Phase 6 review)**:
+- Single daemon per machine, started on first plugin activation.
+- Plugins maintain repo registries and agent subscriptions (per repo).
+- CI Monitor supports multiple agents per repo, potentially branch-scoped subscriptions.
+- Notifications should include co-recipient hints when multiple agents are subscribed.
+
+**Configuration tiers (agreed)**:
+- **Machine/daemon**: machine-scoped config listing repos to monitor.
+- **Repo**: repo-scoped CI settings (single source of truth for agents).
+- **Team**: collaboration/transport settings only (no CI settings).
+
 ### 5.4 Plugin Registration
 
 Compile-time registration via `inventory` crate (avoids hardcoded registration):
@@ -710,6 +766,31 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 - Generate failure reports (JSON + Markdown) in `temp/atm/ci-monitor/`
 - Post concise notification to designated agent's inbox
 - Deduplicate per-commit
+- Requires git repo context; if no repo is detected, the plugin should disable itself with a clear warning.
+
+**Multi-repo + agent subscription model (planned)**:
+- Single daemon per machine; CI Monitor registers multiple repos from machine-level config.
+- Each repo can have one or more subscribed agents (team-lead or dedicated CI agent).
+- Branch filters support exact branch, branch + derived branches (worktree ancestry), and “all branches.”
+  - Proposed syntax: `develop:*` (develop + all branches derived from develop), `develop:feature/*` (derived + pattern). `:` indicates derived-branch matching.
+- If multiple agents are subscribed to the same event, include a notification warning such as:
+  `Warning: <agent>@<team> is also receiving this notification`
+- Distinguish **plugin settings** (repo registry, provider config, poll interval) from **agent settings** (response behavior, routing preferences, scratch-pad state).
+
+**Multi-repo config file layout (agreed)**:
+- Mono-repo: single `config.atm.toml` at repo root.
+- Multi-repo: machine-level config lists repo paths, and each repo has its own `<repo>.config.atm.toml`.
+  - Machine-level daemon config path: `~/.config/atm/daemon.toml`
+  - Repo-level config path: `<repo>/.atm/config.toml` (for mono-repo, `config.atm.toml` at repo root is acceptable)
+
+**Daemon lifecycle (planned)**:
+- CLI starts the daemon on first use of any daemon-backed feature if not already running.
+- Daemon should support hot-reload for config changes without restart.
+
+**CI Monitor without repo**:
+- CI Monitor is only valid for repo contexts.
+- If repo is missing, CI Monitor should disable with a clear warning and prompt the CI agent to ask the team-lead/user for repo info.
+- Agents may intentionally subscribe to repos outside their local root for dashboards or testing; co-recipient warnings help disambiguate.
 
 ### 6.3 Cross-Computer Bridge Plugin
 
@@ -722,6 +803,17 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 - Sync inbox files between machines (transport TBD: TCP, SSH, HTTP)
 - Handle offline scenarios with temp file caching
 - Bidirectional — both machines can initiate communication
+
+### 6.7 Async Agent Worker Adapter (Generic, Codex First)
+
+**Purpose**: Allow async teammates without requiring a foreground terminal. Codex is the first backend.
+
+**Planned features**:
+- Daemon plugin that routes inbox messages to a tmux-backed worker session
+- Worker launches/attaches per agent and uses `tmux send-keys` for input
+- Responses are captured (prefer log file tailing over capture-pane) and written back to inbox
+- Designed to avoid stdin injection into the user's active terminal
+- Backend-agnostic adapter interface (Codex implementation first, others later)
 
 ### 6.4 Human Chat Interface Plugin
 

@@ -224,7 +224,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 fn test_lock_contention_queues_to_spool() {
     // When the lock can't be acquired, messages should be spooled
     // We simulate this by having one thread hold the lock while another sends
-    use atm_core::io::lock::acquire_lock;
+    use agent_team_mail_core::io::lock::acquire_lock;
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
@@ -266,9 +266,9 @@ fn test_lock_contention_queues_to_spool() {
 fn test_spool_drain_delivery_cycle() {
     // This test uses the library API directly since spool_drain is not yet
     // exposed via CLI command.
-    use atm_core::io::inbox::inbox_append;
-    use atm_core::io::lock::acquire_lock;
-    use atm_core::schema::InboxMessage;
+    use agent_team_mail_core::io::inbox::inbox_append;
+    use agent_team_mail_core::io::lock::acquire_lock;
+    use agent_team_mail_core::schema::InboxMessage;
     use std::collections::HashMap;
 
     let temp_dir = TempDir::new().unwrap();
@@ -304,7 +304,7 @@ fn test_spool_drain_delivery_cycle() {
     let outcome =
         inbox_append(&inbox_path, &message, "test-team", "agent-a").unwrap();
     assert!(
-        matches!(outcome, atm_core::io::WriteOutcome::Queued { .. }),
+        matches!(outcome, agent_team_mail_core::io::WriteOutcome::Queued { .. }),
         "Expected Queued outcome when lock held"
     );
 
@@ -314,7 +314,7 @@ fn test_spool_drain_delivery_cycle() {
     // Step 4: Drain the spool - message should be delivered
     // Note: spool_drain uses system-global spool dir, so other tests may have
     // queued messages. We verify our message was delivered rather than exact count.
-    let status = atm_core::io::spool::spool_drain(&teams_dir).unwrap();
+    let status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
     assert!(
         status.delivered >= 1,
         "At least our spooled message should be delivered, got: {}",
@@ -409,6 +409,7 @@ fn test_malformed_inbox_read_graceful() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("agent-a")
         .assert()
         .failure();
@@ -477,6 +478,7 @@ fn test_large_inbox_10k_messages() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("agent-a")
         .arg("--limit")
         .arg("10")
@@ -535,6 +537,7 @@ fn test_read_nonexistent_inbox_graceful() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("agent-a")
         .assert()
         .success();
@@ -559,6 +562,7 @@ fn test_empty_inbox_file_read() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
+        .arg("--no-since-last-seen")
         .arg("agent-a");
 
     // We just verify it doesn't panic - either success or controlled error is OK
@@ -799,6 +803,7 @@ fn test_inbox_command_with_no_messages_anywhere() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("inbox")
+        .arg("--no-since-last-seen")
         .assert()
         .success();
 }

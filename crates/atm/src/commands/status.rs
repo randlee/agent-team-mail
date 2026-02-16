@@ -1,8 +1,8 @@
 //! Status command implementation
 
 use anyhow::Result;
-use atm_core::config::{resolve_config, ConfigOverrides};
-use atm_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use clap::Args;
 use serde_json::json;
 use std::collections::HashMap;
@@ -141,7 +141,7 @@ fn count_inbox_messages(team_dir: &std::path::Path, team_config: &TeamConfig) ->
 
 /// Count pending and completed tasks
 fn count_tasks(tasks_dir: &std::path::Path) -> Result<(usize, usize)> {
-    use atm_core::{TaskItem, TaskStatus};
+    use agent_team_mail_core::{TaskItem, TaskStatus};
 
     let mut pending = 0;
     let mut completed = 0;

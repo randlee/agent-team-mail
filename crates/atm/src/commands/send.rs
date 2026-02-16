@@ -1,13 +1,16 @@
 //! Send command implementation
 
 use anyhow::Result;
-use atm_core::config::{resolve_config, Config, ConfigOverrides};
-use atm_core::io::inbox::{inbox_append, WriteOutcome};
-use atm_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::config::{resolve_config, Config, ConfigOverrides};
+use agent_team_mail_core::io::atomic::atomic_swap;
+use agent_team_mail_core::io::inbox::{inbox_append, WriteOutcome};
+use agent_team_mail_core::io::lock::acquire_lock;
+use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use chrono::Utc;
 use clap::Args;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::util::addressing::parse_address;
@@ -50,6 +53,10 @@ pub struct SendArgs {
     /// Custom call-to-action text for offline recipients
     #[arg(long)]
     offline_action: Option<String>,
+
+    /// Override sender identity (default: ATM_IDENTITY env or config identity)
+    #[arg(long)]
+    from: Option<String>,
 }
 
 /// Execute the send command
@@ -63,7 +70,16 @@ pub fn execute(args: SendArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
+
+    // Override sender identity if --from provided
+    if let Some(ref from) = args.from {
+        config.core.identity = from.clone();
+    } else if config.core.identity == "human" {
+        // If identity is still "human" (default), try to auto-detect from team context
+        config.core.identity = detect_sender_identity(&config.core.default_team, &home_dir)
+            .unwrap_or_else(|| "human".to_string());
+    }
 
     // Parse addressing (agent@team or just agent)
     let (agent_name, team_name) = parse_address(&args.agent, &args.team, &config.core.default_team)?;
@@ -98,12 +114,14 @@ pub fn execute(args: SendArgs) -> Result<()> {
     };
 
     // Check if recipient is offline and prepend action text
+    // Only warn if isActive is explicitly false, not on missing/null
     let recipient_offline = team_config
         .members
         .iter()
         .find(|m| m.name == agent_name)
-        .map(|m| !m.is_active.unwrap_or(false))
-        .unwrap_or(true); // Not found = offline
+        .and_then(|m| m.is_active)
+        .map(|is_active| !is_active)
+        .unwrap_or(false); // Missing or null = not offline
 
     if recipient_offline {
         let action_text = resolve_offline_action(&args, &config);
@@ -113,6 +131,12 @@ pub fn execute(args: SendArgs) -> Result<()> {
             );
             final_message_text = format!("[{action_text}] {final_message_text}");
         }
+    }
+
+    // Set sender heartbeat (isActive: true, lastActive timestamp)
+    if let Err(e) = set_sender_heartbeat(&team_config_path, &config.core.identity) {
+        // Non-fatal: log warning but proceed with send
+        eprintln!("Warning: Failed to update sender activity: {e}");
     }
 
     // Generate summary
@@ -280,6 +304,102 @@ fn generate_summary(text: &str) -> String {
     }
 }
 
+/// Set sender heartbeat in team config (isActive: true, lastActive timestamp)
+///
+/// Uses atomic lock/swap to prevent corruption (same infrastructure as inbox writes).
+///
+/// # Arguments
+///
+/// * `team_config_path` - Path to team config.json
+/// * `sender_name` - Name of the sending agent
+///
+/// # Errors
+///
+/// Returns error if config update fails (non-fatal for send operation)
+fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()> {
+    let lock_path = team_config_path.with_extension("lock");
+
+    // Acquire lock with retry
+    let _lock = acquire_lock(&lock_path, 5).map_err(|e| {
+        anyhow::anyhow!("Failed to acquire lock for team config: {e}")
+    })?;
+
+    // Read current config
+    let content = std::fs::read(team_config_path)?;
+    let mut config: TeamConfig = serde_json::from_slice(&content)?;
+
+    // Update sender's activity
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_millis() as u64;
+
+    if let Some(member) = config.members.iter_mut().find(|m| m.name == sender_name) {
+        member.is_active = Some(true);
+        member.last_active = Some(now_ms);
+    } else {
+        // Sender not in team members — this is unusual but not fatal
+        return Ok(());
+    }
+
+    // Write to temp file with fsync, then swap
+    let tmp_path = team_config_path.with_extension("tmp");
+    let new_content = serde_json::to_string_pretty(&config)?;
+
+    let mut file = std::fs::File::create(&tmp_path)?;
+    std::io::Write::write_all(&mut file, new_content.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
+    // Atomic swap
+    atomic_swap(team_config_path, &tmp_path)?;
+
+    Ok(())
+}
+
+/// Detect sender identity from team context
+///
+/// Attempts to match the current process with a team member by checking:
+/// 1. ATM_IDENTITY env var (already checked by config resolution)
+/// 2. Team config members list (checks for session ID or process context)
+///
+/// Returns None if no match found (caller should default to "human")
+fn detect_sender_identity(team_name: &str, home_dir: &Path) -> Option<String> {
+    // Load team config
+    let team_config_path = home_dir
+        .join(".claude/teams")
+        .join(team_name)
+        .join("config.json");
+
+    if !team_config_path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&team_config_path).ok()?;
+    let team_config: TeamConfig = serde_json::from_str(&content).ok()?;
+
+    // Try to match by session ID (from env)
+    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID") {
+        for member in &team_config.members {
+            if member.agent_id.starts_with(&format!("{session_id}@")) {
+                return Some(member.name.clone());
+            }
+        }
+    }
+
+    // Try to match by CWD (if agent's cwd matches current dir)
+    if let Ok(current_dir) = std::env::current_dir() {
+        let current_path = current_dir.to_string_lossy();
+        for member in &team_config.members {
+            if member.cwd == current_path {
+                return Some(member.name.clone());
+            }
+        }
+    }
+
+    // No match found
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +435,7 @@ mod tests {
             json: false,
             dry_run: false,
             offline_action,
+            from: None,
         }
     }
 

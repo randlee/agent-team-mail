@@ -1,9 +1,9 @@
 //! ATM Daemon - Background service for agent team mail plugins
 
 use anyhow::{Context, Result};
-use atm_daemon::daemon;
-use atm_daemon::plugin::{MailService, PluginContext, PluginRegistry};
-use atm_daemon::roster::RosterService;
+use agent_team_mail_daemon::daemon;
+use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
+use agent_team_mail_daemon::roster::RosterService;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,13 +69,13 @@ async fn main() -> Result<()> {
         .context("Failed to get current directory")?;
 
     // Load configuration
-    let config_overrides = atm_core::config::ConfigOverrides {
+    let config_overrides = agent_team_mail_core::config::ConfigOverrides {
         config_path: args.config.clone(),
         team: args.team.clone(),
         ..Default::default()
     };
 
-    let config = atm_core::config::resolve_config(&config_overrides, &current_dir, &home_dir)
+    let config = agent_team_mail_core::config::resolve_config(&config_overrides, &current_dir, &home_dir)
         .context("Failed to resolve configuration")?;
 
     if let Some(config_path) = args.config {
@@ -87,12 +87,12 @@ async fn main() -> Result<()> {
     // Build system context
     let claude_root = home_dir.join(".claude");
 
-    let system_ctx = atm_core::context::SystemContext::new(
+    let system_ctx = agent_team_mail_core::context::SystemContext::new(
         hostname::get()
             .map_err(|e| anyhow::anyhow!("Failed to get hostname: {e}"))?
             .to_string_lossy()
             .to_string(),
-        atm_core::context::Platform::detect(),
+        agent_team_mail_core::context::Platform::detect(),
         claude_root.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
         config.core.default_team.clone(),
@@ -117,8 +117,38 @@ async fn main() -> Result<()> {
     // Create plugin registry
     let mut registry = PluginRegistry::new();
 
-    // TODO: Register plugins here
-    // For now, the registry is empty but the daemon will still run
+    // Register CI Monitor plugin if configured
+    if let Some(ci_config) = plugin_ctx.plugin_config("ci_monitor")
+        && ci_config
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    {
+        registry.register(agent_team_mail_daemon::plugins::ci_monitor::CiMonitorPlugin::new());
+        info!("Registered CI Monitor plugin");
+    }
+
+    // Register Issues plugin if configured
+    if let Some(issues_config) = plugin_ctx.plugin_config("issues")
+        && issues_config
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    {
+        registry.register(agent_team_mail_daemon::plugins::issues::IssuesPlugin::new());
+        info!("Registered Issues plugin");
+    }
+
+    // Register Worker Adapter plugin if configured
+    if let Some(workers_config) = plugin_ctx.plugin_config("workers")
+        && workers_config
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    {
+        registry.register(agent_team_mail_daemon::plugins::worker_adapter::WorkerAdapterPlugin::new());
+        info!("Registered Worker Adapter plugin");
+    }
 
     info!("Registered {} plugin(s)", registry.len());
 

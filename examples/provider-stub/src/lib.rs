@@ -35,10 +35,10 @@
 //!
 //! The daemon will automatically discover and load this provider.
 
-use atm_daemon::plugins::issues::{
+use agent_team_mail_daemon::plugins::issues::{
     ErasedIssueProvider, Issue, IssueComment, IssueFilter, IssueProvider, ProviderFactory,
 };
-use atm_daemon::plugin::PluginError;
+use agent_team_mail_daemon::plugin::PluginError;
 use std::sync::Arc;
 
 /// Stub issue provider for demonstration

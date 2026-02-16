@@ -1,8 +1,8 @@
 use crate::roster::RosterService;
 use super::MailService;
-use atm_core::config::Config;
-use atm_core::context::SystemContext;
-use atm_core::toml;
+use agent_team_mail_core::config::Config;
+use agent_team_mail_core::context::SystemContext;
+use agent_team_mail_core::toml;
 use std::sync::Arc;
 
 /// Shared services available to plugins during init and runtime

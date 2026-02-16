@@ -1,6 +1,6 @@
 //! Integration test for loading external provider libraries
 
-use atm_daemon::plugins::issues::ProviderLoader;
+use agent_team_mail_daemon::plugins::issues::ProviderLoader;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -21,7 +21,7 @@ fn provider_stub_lib_path() -> PathBuf {
     let dir = provider_stub_dir().join("target").join("release");
     let prefix = if cfg!(windows) { "" } else { "lib" };
     let suffix = std::env::consts::DLL_SUFFIX.trim_start_matches('.');
-    let name = format!("{}atm_provider_stub.{}", prefix, suffix);
+    let name = format!("{prefix}atm_provider_stub.{suffix}");
     dir.join(name)
 }
 
@@ -43,8 +43,7 @@ fn test_provider_loader_loads_stub_library() {
     let lib_path = provider_stub_lib_path();
     assert!(
         lib_path.exists(),
-        "provider-stub library not found at {:?}",
-        lib_path
+        "provider-stub library not found at {lib_path:?}"
     );
 
     let mut loader = ProviderLoader::new();

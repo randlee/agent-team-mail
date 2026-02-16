@@ -12,8 +12,8 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use atm_core::io::{inbox_append, WriteOutcome};
-//! use atm_core::InboxMessage;
+//! use agent_team_mail_core::io::{inbox_append, WriteOutcome};
+//! use agent_team_mail_core::InboxMessage;
 //! use std::path::Path;
 //! use std::collections::HashMap;
 //!

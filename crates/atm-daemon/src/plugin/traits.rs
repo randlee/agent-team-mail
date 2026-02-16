@@ -1,5 +1,5 @@
 use super::{PluginContext, PluginError, PluginMetadata};
-use atm_core::schema::InboxMessage;
+use agent_team_mail_core::schema::InboxMessage;
 use std::future::Future;
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;

@@ -1,12 +1,12 @@
 //! Integration tests for daemon event loop
 
-use atm_core::config::Config;
-use atm_core::context::SystemContext;
-use atm_daemon::daemon;
-use atm_daemon::plugin::{
+use agent_team_mail_core::config::Config;
+use agent_team_mail_core::context::SystemContext;
+use agent_team_mail_daemon::daemon;
+use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
-use atm_daemon::roster::RosterService;
+use agent_team_mail_daemon::roster::RosterService;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -99,7 +99,7 @@ fn create_test_context() -> (PluginContext, TempDir) {
 
     let system_ctx = SystemContext::new(
         "test-host".to_string(),
-        atm_core::context::Platform::detect(),
+        agent_team_mail_core::context::Platform::detect(),
         claude_root,
         "test-version".to_string(),
         "test-team".to_string(),

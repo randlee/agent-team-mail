@@ -233,6 +233,137 @@ where
     Ok(outcome)
 }
 
+/// Read and merge messages from all inbox files for an agent (local + remote origins)
+///
+/// This reads the local inbox file (`<agent>.json`) and all per-origin files
+/// (`<agent>.<hostname>.json`), merges them, deduplicates by `message_id`,
+/// and sorts by timestamp.
+///
+/// # Arguments
+///
+/// * `team_dir` - Path to team directory (e.g., `~/.claude/teams/my-team`)
+/// * `agent_name` - Agent name to read messages for
+/// * `hostname_registry` - Optional hostname registry for filtering origin files
+///
+/// # Returns
+///
+/// A vector of merged and deduplicated messages, sorted by timestamp.
+/// Returns empty vec if no inbox files exist for the agent.
+///
+/// # Errors
+///
+/// Returns `InboxError::Io` for file system errors or `InboxError::Json` for parse errors.
+pub fn inbox_read_merged(
+    team_dir: &Path,
+    agent_name: &str,
+    hostname_registry: Option<&crate::config::HostnameRegistry>,
+) -> Result<Vec<InboxMessage>, InboxError> {
+    let inboxes_dir = team_dir.join("inboxes");
+    if !inboxes_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    // Collect all inbox files for this agent
+    let mut all_messages = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Read entries from inboxes directory
+    let entries = fs::read_dir(&inboxes_dir).map_err(|e| InboxError::Io {
+        path: inboxes_dir.clone(),
+        source: e,
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| InboxError::Io {
+            path: inboxes_dir.clone(),
+            source: e,
+        })?;
+
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        // Check if this is an inbox file for our agent
+        let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+
+        // Must end with .json
+        if !file_name.ends_with(".json") {
+            continue;
+        }
+
+        // Check if this is the local inbox or an origin inbox
+        let is_match = if file_name == format!("{agent_name}.json") {
+            // Local inbox file
+            true
+        } else if let Some(stem) = file_name.strip_suffix(".json") {
+            // Could be an origin file: <agent>.<hostname>.json
+            // Need to check if stem starts with agent_name followed by a dot
+            if let Some(suffix) = stem.strip_prefix(&format!("{agent_name}.")) {
+                // Check if suffix is a known hostname (if registry provided)
+                if let Some(registry) = hostname_registry {
+                    registry.is_known_hostname(suffix)
+                } else {
+                    // No registry - skip origin files (backward compatible)
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !is_match {
+            continue;
+        }
+
+        // Read and parse the inbox file
+        let content = fs::read(&path).map_err(|e| InboxError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+
+        let messages: Vec<InboxMessage> =
+            serde_json::from_slice(&content).map_err(|e| InboxError::Json {
+                path: path.clone(),
+                source: e,
+            })?;
+
+        // Add messages, deduplicating by message_id
+        for msg in messages {
+            if let Some(ref msg_id) = msg.message_id {
+                if seen_ids.contains(msg_id) {
+                    continue; // Already seen, skip
+                }
+                seen_ids.insert(msg_id.clone());
+            }
+            all_messages.push(msg);
+        }
+    }
+
+    // Sort by timestamp (stable tie-breaker: message_id)
+    all_messages.sort_by(|a, b| {
+        match a.timestamp.cmp(&b.timestamp) {
+            std::cmp::Ordering::Equal => {
+                // Stable tie-breaker: message_id
+                match (&a.message_id, &b.message_id) {
+                    (Some(id_a), Some(id_b)) => id_a.cmp(id_b),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            }
+            other => other,
+        }
+    });
+
+    Ok(all_messages)
+}
+
 /// Merge two message arrays, preserving order and deduplicating by message_id
 fn merge_messages(
     our_messages: &[InboxMessage],
@@ -514,5 +645,251 @@ mod tests {
             messages.iter().any(|m| m.message_id == Some("msg-003".to_string())),
             "msg-003 should be present"
         );
+    }
+
+    #[test]
+    fn test_inbox_read_merged_empty_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = temp_dir.path();
+
+        // No inboxes directory exists
+        let messages = super::inbox_read_merged(team_dir, "agent-1", None).unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_inbox_read_merged_local_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = temp_dir.path();
+        let inboxes_dir = team_dir.join("inboxes");
+        fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create local inbox file
+        let inbox_path = inboxes_dir.join("agent-1.json");
+        let msg1 = create_test_message("user-a", "Local message 1", Some("msg-001".to_string()));
+        let msg2 = create_test_message("user-b", "Local message 2", Some("msg-002".to_string()));
+        let json = serde_json::to_string_pretty(&vec![msg1, msg2]).unwrap();
+        fs::write(&inbox_path, json).unwrap();
+
+        // Read merged (no hostname registry)
+        let messages = super::inbox_read_merged(team_dir, "agent-1", None).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "Local message 1");
+        assert_eq!(messages[1].text, "Local message 2");
+    }
+
+    #[test]
+    fn test_inbox_read_merged_with_origin_files() {
+        use crate::config::{HostnameRegistry, RemoteConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = temp_dir.path();
+        let inboxes_dir = team_dir.join("inboxes");
+        fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create hostname registry
+        let mut registry = HostnameRegistry::new();
+        registry
+            .register(RemoteConfig {
+                hostname: "remote1".to_string(),
+                address: "user@remote1".to_string(),
+                ssh_key_path: None,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        registry
+            .register(RemoteConfig {
+                hostname: "remote2".to_string(),
+                address: "user@remote2".to_string(),
+                ssh_key_path: None,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        // Create local inbox
+        let local_path = inboxes_dir.join("agent-1.json");
+        let mut msg1 = create_test_message("user-a", "Local message", Some("msg-001".to_string()));
+        msg1.timestamp = "2026-02-11T10:00:00Z".to_string();
+        fs::write(&local_path, serde_json::to_string_pretty(&vec![msg1]).unwrap()).unwrap();
+
+        // Create origin inbox from remote1
+        let origin1_path = inboxes_dir.join("agent-1.remote1.json");
+        let mut msg2 = create_test_message("user-b", "Remote1 message", Some("msg-002".to_string()));
+        msg2.timestamp = "2026-02-11T10:05:00Z".to_string();
+        fs::write(&origin1_path, serde_json::to_string_pretty(&vec![msg2]).unwrap()).unwrap();
+
+        // Create origin inbox from remote2
+        let origin2_path = inboxes_dir.join("agent-1.remote2.json");
+        let mut msg3 = create_test_message("user-c", "Remote2 message", Some("msg-003".to_string()));
+        msg3.timestamp = "2026-02-11T10:10:00Z".to_string();
+        fs::write(&origin2_path, serde_json::to_string_pretty(&vec![msg3]).unwrap()).unwrap();
+
+        // Read merged
+        let messages = super::inbox_read_merged(team_dir, "agent-1", Some(&registry)).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].text, "Local message");
+        assert_eq!(messages[1].text, "Remote1 message");
+        assert_eq!(messages[2].text, "Remote2 message");
+    }
+
+    #[test]
+    fn test_inbox_read_merged_deduplication() {
+        use crate::config::{HostnameRegistry, RemoteConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = temp_dir.path();
+        let inboxes_dir = team_dir.join("inboxes");
+        fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create hostname registry
+        let mut registry = HostnameRegistry::new();
+        registry
+            .register(RemoteConfig {
+                hostname: "remote1".to_string(),
+                address: "user@remote1".to_string(),
+                ssh_key_path: None,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        // Create local inbox with duplicate message_id
+        let local_path = inboxes_dir.join("agent-1.json");
+        let msg1 = create_test_message("user-a", "First occurrence", Some("msg-001".to_string()));
+        fs::write(&local_path, serde_json::to_string_pretty(&vec![msg1]).unwrap()).unwrap();
+
+        // Create origin inbox with same message_id
+        let origin_path = inboxes_dir.join("agent-1.remote1.json");
+        let msg2 = create_test_message("user-b", "Duplicate (should be dropped)", Some("msg-001".to_string()));
+        fs::write(&origin_path, serde_json::to_string_pretty(&vec![msg2]).unwrap()).unwrap();
+
+        // Read merged - should deduplicate (directory order is not guaranteed)
+        let messages = super::inbox_read_merged(team_dir, "agent-1", Some(&registry)).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_id, Some("msg-001".to_string()));
+        // Text could be either "First occurrence" or "Duplicate (should be dropped)"
+        // depending on directory read order (first occurrence wins)
+        assert!(
+            messages[0].text == "First occurrence" || messages[0].text == "Duplicate (should be dropped)",
+            "Expected one of the duplicate messages, got: {}",
+            messages[0].text
+        );
+    }
+
+    #[test]
+    fn test_inbox_read_merged_no_message_id() {
+        use crate::config::{HostnameRegistry, RemoteConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = temp_dir.path();
+        let inboxes_dir = team_dir.join("inboxes");
+        fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create hostname registry
+        let mut registry = HostnameRegistry::new();
+        registry
+            .register(RemoteConfig {
+                hostname: "remote1".to_string(),
+                address: "user@remote1".to_string(),
+                ssh_key_path: None,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        // Create local inbox without message_id
+        let local_path = inboxes_dir.join("agent-1.json");
+        let msg1 = create_test_message("user-a", "Message without ID", None);
+        fs::write(&local_path, serde_json::to_string_pretty(&vec![msg1]).unwrap()).unwrap();
+
+        // Create origin inbox without message_id
+        let origin_path = inboxes_dir.join("agent-1.remote1.json");
+        let msg2 = create_test_message("user-b", "Another without ID", None);
+        fs::write(&origin_path, serde_json::to_string_pretty(&vec![msg2]).unwrap()).unwrap();
+
+        // Read merged - both should be included (no dedup)
+        let messages = super::inbox_read_merged(team_dir, "agent-1", Some(&registry)).unwrap();
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_inbox_read_merged_agent_name_with_dots() {
+        use crate::config::{HostnameRegistry, RemoteConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = temp_dir.path();
+        let inboxes_dir = team_dir.join("inboxes");
+        fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create hostname registry
+        let mut registry = HostnameRegistry::new();
+        registry
+            .register(RemoteConfig {
+                hostname: "mac-studio".to_string(),
+                address: "user@mac".to_string(),
+                ssh_key_path: None,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        // Agent name with dots
+        let agent_name = "dev.agent";
+
+        // Create local inbox
+        let local_path = inboxes_dir.join(format!("{agent_name}.json"));
+        let msg1 = create_test_message("user-a", "Local", Some("msg-001".to_string()));
+        fs::write(&local_path, serde_json::to_string_pretty(&vec![msg1]).unwrap()).unwrap();
+
+        // Create origin inbox
+        let origin_path = inboxes_dir.join(format!("{agent_name}.mac-studio.json"));
+        let msg2 = create_test_message("user-b", "Remote", Some("msg-002".to_string()));
+        fs::write(&origin_path, serde_json::to_string_pretty(&vec![msg2]).unwrap()).unwrap();
+
+        // Read merged - should handle agent name with dots correctly
+        let messages = super::inbox_read_merged(team_dir, agent_name, Some(&registry)).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "Local");
+        assert_eq!(messages[1].text, "Remote");
+    }
+
+    #[test]
+    fn test_inbox_read_merged_ignores_unknown_hostnames() {
+        use crate::config::{HostnameRegistry, RemoteConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = temp_dir.path();
+        let inboxes_dir = team_dir.join("inboxes");
+        fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create hostname registry with only remote1
+        let mut registry = HostnameRegistry::new();
+        registry
+            .register(RemoteConfig {
+                hostname: "remote1".to_string(),
+                address: "user@remote1".to_string(),
+                ssh_key_path: None,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        // Create local inbox
+        let local_path = inboxes_dir.join("agent-1.json");
+        let msg1 = create_test_message("user-a", "Local", Some("msg-001".to_string()));
+        fs::write(&local_path, serde_json::to_string_pretty(&vec![msg1]).unwrap()).unwrap();
+
+        // Create origin inbox from remote1 (known)
+        let origin1_path = inboxes_dir.join("agent-1.remote1.json");
+        let msg2 = create_test_message("user-b", "Remote1", Some("msg-002".to_string()));
+        fs::write(&origin1_path, serde_json::to_string_pretty(&vec![msg2]).unwrap()).unwrap();
+
+        // Create origin inbox from unknown hostname
+        let unknown_path = inboxes_dir.join("agent-1.unknown.json");
+        let msg3 = create_test_message("user-c", "Unknown (should be ignored)", Some("msg-003".to_string()));
+        fs::write(&unknown_path, serde_json::to_string_pretty(&vec![msg3]).unwrap()).unwrap();
+
+        // Read merged - should ignore unknown hostname
+        let messages = super::inbox_read_merged(team_dir, "agent-1", Some(&registry)).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().any(|m| m.text == "Local"));
+        assert!(messages.iter().any(|m| m.text == "Remote1"));
+        assert!(!messages.iter().any(|m| m.text == "Unknown (should be ignored)"));
     }
 }

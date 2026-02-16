@@ -1,8 +1,8 @@
 //! Members command implementation
 
 use anyhow::Result;
-use atm_core::config::{resolve_config, ConfigOverrides};
-use atm_core::schema::TeamConfig;
+use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::schema::TeamConfig;
 use clap::Args;
 use serde_json::json;
 use std::fs;

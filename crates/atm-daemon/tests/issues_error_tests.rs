@@ -1,14 +1,14 @@
 //! Error scenario tests for the Issues plugin
 
-use atm_core::config::Config;
-use atm_core::context::{GitProvider, Platform, RepoContext, SystemContext};
-use atm_core::schema::InboxMessage;
-use atm_daemon::plugin::{Plugin, PluginContext};
-use atm_daemon::plugins::issues::IssuesPlugin;
-use atm_daemon::plugin::MailService;
-use atm_daemon::roster::RosterService;
+use agent_team_mail_core::config::Config;
+use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_daemon::plugin::{Plugin, PluginContext};
+use agent_team_mail_daemon::plugins::issues::IssuesPlugin;
+use agent_team_mail_daemon::plugin::MailService;
+use agent_team_mail_daemon::roster::RosterService;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -54,7 +54,7 @@ fn create_test_context(temp_dir: &TempDir, provider: Option<GitProvider>) -> Plu
 }
 
 /// Helper to create a team config for testing
-fn create_team_config(teams_root: &PathBuf, team_name: &str) {
+fn create_team_config(teams_root: &Path, team_name: &str) {
     let team_dir = teams_root.join(team_name);
     std::fs::create_dir_all(&team_dir).unwrap();
 

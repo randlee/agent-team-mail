@@ -1,9 +1,9 @@
 //! Broadcast command implementation
 
 use anyhow::Result;
-use atm_core::config::{ConfigOverrides, resolve_config};
-use atm_core::io::inbox::{WriteOutcome, inbox_append};
-use atm_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
+use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use chrono::Utc;
 use clap::Args;
 use std::collections::HashMap;
@@ -36,6 +36,10 @@ pub struct BroadcastArgs {
     /// Show what would be written without actually writing
     #[arg(long)]
     dry_run: bool,
+
+    /// Override sender identity (default: ATM_IDENTITY env or config identity)
+    #[arg(long)]
+    from: Option<String>,
 }
 
 /// Delivery status for a single agent
@@ -56,7 +60,12 @@ pub fn execute(args: BroadcastArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
+
+    // Override sender identity if --from provided
+    if let Some(ref from) = args.from {
+        config.core.identity = from.clone();
+    }
 
     // Determine target team
     let team_name = args.team.as_ref().unwrap_or(&config.core.default_team);

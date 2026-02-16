@@ -1,7 +1,7 @@
 //! Roster service for managing synthetic team members
 
 use crate::roster::tracking::MembershipTracker;
-use atm_core::schema::{AgentMember, TeamConfig};
+use agent_team_mail_core::schema::{AgentMember, TeamConfig};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -289,7 +289,7 @@ where
     F: FnOnce(&mut TeamConfig) -> Result<bool, RosterError>,
 {
     let lock_path = config_path.with_extension("lock");
-    let _lock = atm_core::io::lock::acquire_lock(&lock_path, 5)
+    let _lock = agent_team_mail_core::io::lock::acquire_lock(&lock_path, 5)
         .map_err(|e| RosterError::Io(format!("lock failed: {e}")))?;
 
     // Read current config

@@ -1,9 +1,9 @@
 //! Cleanup command implementation - apply retention policies to inboxes
 
 use anyhow::{Context, Result};
-use atm_core::config::{resolve_config, ConfigOverrides};
-use atm_core::retention::apply_retention;
-use atm_core::schema::TeamConfig;
+use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::retention::apply_retention;
+use agent_team_mail_core::schema::TeamConfig;
 use clap::Args;
 use std::path::Path;
 
@@ -86,7 +86,7 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
 fn cleanup_team(
     home_dir: &Path,
     team_name: &str,
-    retention_config: &atm_core::config::RetentionConfig,
+    retention_config: &agent_team_mail_core::config::RetentionConfig,
     dry_run: bool,
 ) -> Result<()> {
     let team_dir = home_dir.join(".claude/teams").join(team_name);
@@ -114,7 +114,7 @@ fn cleanup_team(
     let mut total_removed = 0;
     let mut total_archived = 0;
 
-    // Apply retention to each agent's inbox
+    // Apply retention to each agent's inbox (local files)
     for member in &team_config.members {
         let inbox_path = team_dir.join("inboxes").join(format!("{}.json", member.name));
 
@@ -141,6 +141,63 @@ fn cleanup_team(
             total_kept += result.kept;
             total_removed += result.removed;
             total_archived += result.archived;
+        }
+    }
+
+    // Also clean up per-origin inbox files (format: agent.hostname.json)
+    let inboxes_dir = team_dir.join("inboxes");
+    if inboxes_dir.exists() && let Ok(entries) = std::fs::read_dir(&inboxes_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let Some(filename) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+
+            // Per-origin files have format: agent.hostname.json
+            // Skip if it's a local file (no dots in stem)
+            if !filename.ends_with(".json") {
+                continue;
+            }
+
+            let stem = filename.strip_suffix(".json").unwrap();
+            if !stem.contains('.') {
+                // This is a local file, already processed above
+                continue;
+            }
+
+            // Extract agent name and hostname
+            // Format: agent-name.hostname.json
+            let parts: Vec<_> = stem.rsplitn(2, '.').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+
+            let hostname = parts[0];
+            let agent_name = parts[1];
+            let display_name = format!("{agent_name}@{hostname}");
+
+            let result = apply_retention(
+                &path,
+                team_name,
+                &display_name,
+                retention_config,
+                dry_run,
+            )?;
+
+            if result.removed > 0 || result.kept > 0 {
+                println!(
+                    "  {:<20} {:>8} {:>8} {:>10}",
+                    display_name, result.kept, result.removed, result.archived
+                );
+
+                total_kept += result.kept;
+                total_removed += result.removed;
+                total_archived += result.archived;
+            }
         }
     }
 

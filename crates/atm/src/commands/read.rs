@@ -1,13 +1,16 @@
 //! Read command implementation
 
 use anyhow::Result;
-use atm_core::config::{resolve_config, ConfigOverrides};
-use atm_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Utc};
-use clap::Args;
+use clap::{ArgAction, Args};
 
 use crate::util::addressing::parse_address;
 use crate::util::settings::get_home_dir;
+use crate::util::state::{get_last_seen, load_seen_state, save_seen_state, update_last_seen};
+
+use super::wait::{wait_for_message, WaitResult};
 
 /// Read messages from an inbox
 ///
@@ -26,9 +29,21 @@ pub struct ReadArgs {
     #[arg(long)]
     all: bool,
 
+    /// Show messages since last seen (default: true)
+    #[arg(long, default_value_t = true)]
+    since_last_seen: bool,
+
+    /// Disable since-last-seen filtering
+    #[arg(long = "no-since-last-seen", action = ArgAction::SetTrue, overrides_with = "since_last_seen")]
+    no_since_last_seen: bool,
+
     /// Don't mark messages as read
     #[arg(long)]
     no_mark: bool,
+
+    /// Don't update last-seen state
+    #[arg(long)]
+    no_update_seen: bool,
 
     /// Show only last N messages
     #[arg(long)]
@@ -45,6 +60,10 @@ pub struct ReadArgs {
     /// Output as JSON
     #[arg(long)]
     json: bool,
+
+    /// Wait for new messages (timeout in seconds). Exit 0 if message received, 1 if timeout
+    #[arg(long)]
+    timeout: Option<u64>,
 }
 
 /// Execute the read command
@@ -87,22 +106,40 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         anyhow::bail!("Agent '{agent_name}' not found in team '{team_name}'");
     }
 
-    // Read inbox messages
-    let inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
-    let messages: Vec<InboxMessage> = if inbox_path.exists() {
-        let content = std::fs::read_to_string(&inbox_path)?;
-        serde_json::from_str(&content)?
-    } else {
-        // Empty inbox - not an error
-        Vec::new()
-    };
+    // Extract hostname registry from config (if bridge is configured)
+    let hostname_registry = extract_hostname_registry(&config);
+
+    // Read inbox messages (merged from local + all origin files)
+    let messages = agent_team_mail_core::io::inbox::inbox_read_merged(
+        &team_dir,
+        &agent_name,
+        hostname_registry.as_ref(),
+    )?;
 
     // Apply filters
     let mut filtered_messages = messages.clone();
 
-    // Filter by read status (unless --all specified)
-    if !args.all {
+    // Resolve last-seen state (if enabled)
+    let use_since_last_seen = args.since_last_seen && !args.no_since_last_seen;
+    let last_seen = if use_since_last_seen && !args.all {
+        let state = load_seen_state().unwrap_or_default();
+        get_last_seen(&state, &team_name, &agent_name)
+    } else {
+        None
+    };
+
+    // Filter by read status (unless --all or since-last-seen)
+    if !args.all && !use_since_last_seen {
         filtered_messages.retain(|m| !m.read);
+    }
+
+    // Filter by last-seen timestamp
+    if let Some(last_seen_dt) = last_seen {
+        filtered_messages.retain(|m| {
+            DateTime::parse_from_rfc3339(&m.timestamp)
+                .map(|dt| dt > last_seen_dt)
+                .unwrap_or(false)
+        });
     }
 
     // Filter by sender
@@ -129,6 +166,89 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         filtered_messages = filtered_messages[start..].to_vec();
     }
 
+    // If timeout specified and no messages found, wait for new messages
+    if filtered_messages.is_empty() && let Some(timeout_secs) = args.timeout {
+        let inboxes_dir = team_dir.join("inboxes");
+
+        // Extract hostnames for bridge-synced messages
+        let hostnames: Option<Vec<String>> = hostname_registry.as_ref().map(|reg| {
+            reg.remotes().map(|r| r.hostname.clone()).collect()
+        });
+
+        eprintln!("Waiting for new messages (timeout: {timeout_secs}s)...");
+
+        match wait_for_message(
+            &inboxes_dir,
+            &agent_name,
+            timeout_secs,
+            hostnames.as_ref(),
+        )? {
+            WaitResult::MessageReceived => {
+                // Re-read messages and apply filters
+                let new_messages = agent_team_mail_core::io::inbox::inbox_read_merged(
+                    &team_dir,
+                    &agent_name,
+                    hostname_registry.as_ref(),
+                )?;
+
+                let mut new_filtered = new_messages.clone();
+
+                // Re-apply the same filters
+                if !args.all && !use_since_last_seen {
+                    new_filtered.retain(|m| !m.read);
+                }
+
+                if let Some(last_seen_dt) = last_seen {
+                    new_filtered.retain(|m| {
+                        DateTime::parse_from_rfc3339(&m.timestamp)
+                            .map(|dt| dt > last_seen_dt)
+                            .unwrap_or(false)
+                    });
+                }
+
+                if let Some(ref from_name) = args.from {
+                    new_filtered.retain(|m| m.from == *from_name);
+                }
+
+                if let Some(ref since_ts) = args.since {
+                    let since_dt = DateTime::parse_from_rfc3339(since_ts)
+                        .map_err(|e| anyhow::anyhow!("Invalid timestamp format: {e}"))?;
+                    new_filtered.retain(|m| {
+                        if let Ok(msg_dt) = DateTime::parse_from_rfc3339(&m.timestamp) {
+                            msg_dt > since_dt
+                        } else {
+                            false
+                        }
+                    });
+                }
+
+                if let Some(limit) = args.limit {
+                    let start = new_filtered.len().saturating_sub(limit);
+                    new_filtered = new_filtered[start..].to_vec();
+                }
+
+                // Use the new filtered messages
+                filtered_messages = new_filtered;
+            }
+            WaitResult::Timeout => {
+                if args.json {
+                    let output = serde_json::json!({
+                        "action": "read",
+                        "agent": agent_name,
+                        "team": team_name,
+                        "messages": [],
+                        "count": 0,
+                        "timeout": true,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    println!("Timeout: No new messages for {agent_name}@{team_name}");
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Mark messages as read (unless --no-mark specified)
     if !args.no_mark && !filtered_messages.is_empty() {
         // Find message IDs that need to be marked
@@ -142,9 +262,11 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             .map(|m| m.timestamp.clone())
             .collect();
 
-        // Atomically update inbox to mark messages as read
-        if inbox_path.exists() {
-            atm_core::io::inbox::inbox_update(&inbox_path, &team_name, &agent_name, |msgs| {
+        // Atomically update LOCAL inbox to mark messages as read
+        // Note: we only mark in the local inbox, not in origin files
+        let local_inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
+        if local_inbox_path.exists() {
+            agent_team_mail_core::io::inbox::inbox_update(&local_inbox_path, &team_name, &agent_name, |msgs| {
                 for msg in msgs.iter_mut() {
                     let should_mark = if let Some(ref msg_id) = msg.message_id {
                         filtered_ids.contains(msg_id) && !msg.read
@@ -159,6 +281,18 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                 }
             })?;
         }
+    }
+
+    // Update last-seen state (unless disabled)
+    if use_since_last_seen && !args.no_update_seen
+        && let Some(latest) = filtered_messages
+            .iter()
+            .filter_map(|m| DateTime::parse_from_rfc3339(&m.timestamp).ok())
+            .max()
+    {
+        let mut state = load_seen_state().unwrap_or_default();
+        update_last_seen(&mut state, &team_name, &agent_name, &latest.to_rfc3339());
+        let _ = save_seen_state(&state);
     }
 
     // Output results
@@ -209,6 +343,35 @@ fn format_relative_time(timestamp_str: &str) -> String {
     } else {
         "unknown".to_string()
     }
+}
+
+/// Extract hostname registry from bridge plugin config
+///
+/// Returns None if bridge plugin is not configured or not enabled.
+fn extract_hostname_registry(config: &agent_team_mail_core::config::Config) -> Option<agent_team_mail_core::config::HostnameRegistry> {
+    use agent_team_mail_core::config::BridgeConfig;
+
+    // Check if bridge plugin config exists
+    let bridge_table = config.plugins.get("bridge")?;
+
+    // Parse bridge config
+    let bridge_config: BridgeConfig = match bridge_table.clone().try_into() {
+        Ok(cfg) => cfg,
+        Err(_) => return None,
+    };
+
+    // Check if bridge is enabled
+    if !bridge_config.enabled {
+        return None;
+    }
+
+    // Build hostname registry from remotes
+    let mut registry = agent_team_mail_core::config::HostnameRegistry::new();
+    for remote in bridge_config.remotes {
+        let _ = registry.register(remote); // Ignore errors
+    }
+
+    Some(registry)
 }
 
 #[cfg(test)]
