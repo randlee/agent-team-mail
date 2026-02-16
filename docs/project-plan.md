@@ -1619,31 +1619,31 @@ Sprint 8.1 (Config + Scaffold)
 | 9.5 | WorkerHandle Backend Payload | Worker Adapter | Planned |
 | 9.6 | Daemon Retention Tasks | Platform | Planned |
 
-### Sprint 9.0 — Phase 8.6 Verification Gate
-**Goal**: Verify Phase 8.6 merged and green before Phase 9 changes.
-**Branch**: `feature/p9-s0-verify`
+### Sprint 9.0: Phase 8.6 Verification Gate
+- Dependencies: Phase 8.6 merged to develop
+- Deliverables: verify Phase 8.6 PRs merged, develop CI green, no open P8 blocking issues
+- Files to create/modify: none (gate check only)
+- Test requirements: 0 new tests
+- QA checklist: confirm no open P8 blocker issues; confirm develop CI green; confirm Phase 8.6 PRs merged
+- Exit criteria: all three checks verified and recorded in sprint update
 
-**Deliverables**:
-- Phase 8.6 PRs merged into develop
-- CI green on develop
-- No open P8 blocking issues
+Concrete definition of “no open P8 blocking issues”:
+- No open GitHub issues labeled `phase-8` with severity HIGH
+- No open PRs marked “blocking Phase 8”
+- No failing CI jobs tagged to Phase 8 PRs
 
-### Sprint 9.1 — CI/Tooling Stabilization
-**Goal**: Stabilize CI to prevent repeated clippy/test failures.
-**Branch**: `feature/p9-s1-ci-tooling`
+### Sprint 9.1: CI/Tooling Stabilization
+- Dependencies: Sprint 9.0 complete
+- Deliverables: `rust-toolchain.toml` committed, separate clippy CI job with `needs: [clippy]`, QA clippy gate preserved
+- Files to create/modify: `.github/workflows/ci.yml`, `rust-toolchain.toml` (verify present)
+- Test requirements: 1 CI validation, 1 QA gate
+- QA checklist: clippy runs before tests; test job blocked on clippy; clippy failure prevents tests
+- Exit criteria: CI passes with separate clippy job, no warnings
 
-**Deliverables**:
-- `rust-toolchain.toml` committed on develop
-- Separate clippy job in `.github/workflows/ci.yml` with `needs: [clippy]`
-- QA agent clippy gate preserved
-
-### Sprint 9.2 — Home Dir Resolution (Cross-Platform)
-**Goal**: Make ATM usable on all platforms without requiring ATM_HOME.
-**Branch**: `feature/p9-s2-home-dir`
-
-**Deliverables**:
-- Canonical `get_home_dir()` in `atm-core`
-- Replace ALL call sites:
+### Sprint 9.2: Home Dir Resolution (Cross-Platform)
+- Dependencies: Sprint 9.1 complete
+- Deliverables: canonical `get_home_dir()` in `atm-core`, replace ALL call sites, clear precedence (ATM_HOME → platform default)
+- Files to create/modify:
   - `crates/atm/src/util/settings.rs:14`
   - `crates/atm/src/util/state.rs:62`
   - `crates/atm-core/src/retention.rs:210-214`
@@ -1654,44 +1654,68 @@ Sprint 8.1 (Config + Scaffold)
   - `crates/atm-daemon/src/plugins/issues/plugin.rs:299-302`
   - `crates/atm-daemon/src/plugins/worker_adapter/config.rs:342-346`
   - `crates/atm-daemon/src/plugins/worker_adapter/config.rs:449-452`
-  - `crates/atm-daemon/src/plugins/bridge/ssh.rs:148`
-- Precedence: ATM_HOME → platform default
+  - `crates/atm-daemon/src/plugins/bridge/ssh.rs:148` (ATM_HOME fallback missing)
+- Test requirements: 8 unit, 3 integration (per OS), 1 audit script
+- QA checklist: audit script passes; Windows CI green without ATM_HOME; all 11 call sites replaced; path precedence correct
+- Exit criteria: all tests pass, audit script validates no lingering dir resolution
 
-### Sprint 9.3 — CI Config & Routing
-**Goal**: Finalize CI monitor config and routing behavior.
-**Branch**: `feature/p9-s3-ci-config`
+### Sprint 9.3: CI Config & Routing
+- Dependencies: Sprint 9.2 complete
+- Deliverables: branch glob filtering via `globset` or `wildmatch`, `notify_target` config + routing, config validation for invalid targets
+- Files to create/modify:
+  - `crates/atm-daemon/src/plugins/ci_monitor/config.rs`
+  - `crates/atm-daemon/src/plugins/ci_monitor/plugin.rs`
+- Test requirements: 10 branch matching, 5 routing, 5 config validation, 2 E2E (22 total)
+- QA checklist: empty glob list = all branches; invalid pattern = config error; notify_target defaults to team lead when empty; invalid target fails fast
+- Exit criteria: routing works; branch filter verified; tests pass
 
-**Deliverables**:
-- Client-side branch filtering via `globset` or `wildmatch`
-- Add `notify_target` (string or list) and routing logic
-- Config validation for invalid targets
+### Sprint 9.4: Daemon Operationalization
+- Dependencies: Sprint 9.3 complete
+- Deliverables: daemon writes status JSON file, CLI reads it (no IPC), stale detection based on timestamp
+- Files to create/modify:
+  - `crates/atm-daemon/src/daemon/event_loop.rs` or new `status.rs`
+  - `crates/atm/src/commands/daemon.rs` (new subcommand) or `commands/status.rs`
+- Status file spec:
+  - Location: `${ATM_HOME}/daemon/status.json` (via new `get_home_dir()`)
+  - Atomic write (temp + rename)
+  - Fields: `{ timestamp, pid, version, uptime_secs, plugins: [{name, enabled, status, last_error, last_run}], teams: [<team>] }`
+  - `plugins[].status` enum: `running`, `error`, `disabled`
+  - CLI stale check: timestamp older than 2x poll interval
+- Test requirements: 5 daemon status, 1 startup hint (6 total)
+- QA checklist: status file created at startup; updated each poll cycle; stale detection works; CLI reads JSON correctly
+- Exit criteria: status file + CLI confirmed on all OSes
 
-### Sprint 9.4 — Daemon Operationalization
-**Goal**: Basic daemon status reporting without IPC.
-**Branch**: `feature/p9-s4-daemon-status`
+### Sprint 9.5: WorkerHandle Backend Payload
+- Dependencies: Sprint 9.2 complete
+- Deliverables: add payload to WorkerHandle without refactor; safe downcast helpers; registry/adapter passes payload
+- Files to create/modify:
+  - `crates/atm-daemon/src/plugins/worker_adapter/trait_def.rs`
+  - `crates/atm-daemon/src/plugins/worker_adapter/plugin.rs`
+  - `crates/atm-daemon/src/plugins/worker_adapter/lifecycle.rs`
+  - `crates/atm-daemon/src/plugins/worker_adapter/mock_backend.rs`
+  - `crates/atm-daemon/src/plugins/worker_adapter/codex_tmux.rs`
+- Requirements:
+  - `backend_id` stays as-is
+  - Add `payload: Option<Box<dyn Any + Send + Sync>>`
+  - Add downcast helpers `payload_ref<T>() -> Option<&T>` (no panic, no unsafe)
+- Test requirements: 8 payload/downcast, 5 registry, all 35 existing worker tests must pass (48 total)
+- QA checklist: Codex TMUX adapter works; mock backend works with payload; wrong-type downcast returns None
+- Exit criteria: all worker tests pass; no regressions in adapters
 
-**Deliverables**:
-- Daemon writes JSON status file at `${ATM_HOME}/daemon/status.json`
-- CLI reads and prints status (no IPC)
-- Schema: `{ timestamp, pid, version, uptime_secs, plugins: [{name, enabled, status, last_error, last_run}], teams: [<team>] }`
-
-### Sprint 9.5 — WorkerHandle Backend Payload
-**Goal**: Enable backend-specific metadata without refactoring WorkerAdapter.
-**Branch**: `feature/p9-s5-workerhandle`
-
-**Deliverables**:
-- Add `backend_id: String` and `payload: Box<dyn Any + Send + Sync>` to `WorkerHandle`
-- Provide downcast helper methods (`payload_ref<T>() -> Option<&T>`)
-- Update registry/adapter to pass payload
-
-### Sprint 9.6 — Daemon Retention Tasks
-**Goal**: Retention beyond CLI and bridge sync.
-**Branch**: `feature/p9-s6-retention`
-
-**Deliverables**:
-- Periodic inbox trimming in daemon loop
-- CI monitor report file retention (JSON + Markdown in `report_dir`)
-- Use `tokio::spawn` to avoid blocking plugins/bridge sync
+### Sprint 9.6: Daemon Retention Tasks
+- Dependencies: Sprint 9.2 complete
+- Deliverables: periodic inbox trimming in daemon loop; CI report file retention; non-blocking execution
+- Files to create/modify:
+  - `crates/atm-daemon/src/daemon/event_loop.rs`
+  - `crates/atm-core/src/retention.rs` (extend for report files)
+- Retention spec:
+  - Runs every 5 minutes via `tokio::spawn` (configurable in `.atm.toml`)
+  - Default policy: 30 days max age, 1000 max messages (configurable)
+  - CI reports: delete JSON/Markdown older than max_age in report_dir
+  - Concurrency: acquire per-inbox file lock before trimming; release immediately after
+- Test requirements: 10 daemon integration, 5 concurrency (retention + bridge sync), 3 cross-platform (18 total)
+- QA checklist: retention does not block plugin events; per-origin files handled; report retention works
+- Exit criteria: retention runs safely and predictably on all OSes
 
 ### Phase 9 Dependency Graph
 
@@ -1709,6 +1733,17 @@ Sprint 9.0 (Verification Gate)
                     │
                     └── Sprint 9.6 (Daemon Retention Tasks)
 ```
+
+Parallel execution plan:
+- After 9.2 merges, sprints 9.3, 9.5, 9.6 can run in parallel.
+
+### File Ownership Matrix (Phase 9)
+- Sprint 9.1: `.github/workflows/ci.yml`, `rust-toolchain.toml`
+- Sprint 9.2: home-dir call sites listed above
+- Sprint 9.3: `crates/atm-daemon/src/plugins/ci_monitor/config.rs`, `plugin.rs`
+- Sprint 9.4: `crates/atm-daemon/src/daemon/event_loop.rs` or `status.rs`, `crates/atm/src/commands/daemon.rs`
+- Sprint 9.5: `crates/atm-daemon/src/plugins/worker_adapter/*`
+- Sprint 9.6: `crates/atm-daemon/src/daemon/event_loop.rs`, `crates/atm-core/src/retention.rs`
 
 ### Phase 9 Exit Criteria
 - All 667 existing tests pass
