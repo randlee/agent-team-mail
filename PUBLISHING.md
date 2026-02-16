@@ -2,21 +2,40 @@
 
 Complete publishing workflow for all distribution channels.
 
+## Package Listings
+
+Published packages and where to find them:
+
+| Channel | URL |
+|---------|-----|
+| **GitHub Releases** | <https://github.com/randlee/agent-team-mail/releases> |
+| **Homebrew Tap** | <https://github.com/randlee/homebrew-tap> |
+| **crates.io** — `agent-team-mail-core` | <https://crates.io/crates/agent-team-mail-core> |
+| **crates.io** — `agent-team-mail` (CLI) | <https://crates.io/crates/agent-team-mail> |
+| **crates.io** — `agent-team-mail-daemon` | <https://crates.io/crates/agent-team-mail-daemon> |
+| **Release workflow runs** | <https://github.com/randlee/agent-team-mail/actions/workflows/release.yml> |
+
+---
+
 ## Distribution Channels
 
 ### 1. GitHub Releases (Automated)
 
 **Trigger**: Push a tag matching `v*` (e.g., `v0.8.0`).
 
-**What happens**:
-- `.github/workflows/release.yml` builds release binaries for 4 targets:
-  - `x86_64-unknown-linux-gnu` (tar.gz)
-  - `x86_64-apple-darwin` (tar.gz)
-  - `aarch64-apple-darwin` (tar.gz)
-  - `x86_64-pc-windows-msvc` (zip)
-- Archives contain both `atm` and `atm-daemon` binaries
-- SHA256 checksums are generated automatically (`checksums.txt`)
-- A GitHub Release is created with auto-generated release notes
+**Workflow**: `.github/workflows/release.yml` — runs three jobs in sequence:
+
+1. **`build`** — Compiles release binaries in parallel across 4 platform runners:
+   - `x86_64-unknown-linux-gnu` on `ubuntu-latest` → `.tar.gz`
+   - `x86_64-apple-darwin` on `macos-latest` → `.tar.gz`
+   - `aarch64-apple-darwin` on `macos-latest` → `.tar.gz`
+   - `x86_64-pc-windows-msvc` on `windows-latest` → `.zip`
+   - Each archive contains both `atm` and `atm-daemon` binaries
+   - Archives are uploaded as build artifacts
+
+2. **`release`** — Collects all build artifacts, generates `checksums.txt` (SHA256), and creates a GitHub Release with auto-generated release notes via `softprops/action-gh-release@v2`.
+
+3. **`publish-crates`** — Publishes all 3 crates to crates.io in dependency order (see [crates.io section](#3-cratesio-automated) below). Uses the `crates-io` GitHub environment for deployment protection.
 
 **How to trigger**:
 ```bash

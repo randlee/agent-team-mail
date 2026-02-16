@@ -38,16 +38,24 @@ brew install agent-team-mail
 ### crates.io
 
 ```bash
+# Install the CLI
 cargo install agent-team-mail
+
+# Install the daemon (optional)
+cargo install agent-team-mail-daemon
 ```
 
 ### Build from Source
 
 ```bash
+git clone https://github.com/randlee/agent-team-mail.git
+cd agent-team-mail
 cargo install --path crates/atm
+# Optionally install the daemon:
+cargo install --path crates/atm-daemon
 ```
 
-The `atm` binary will be available in your `$PATH`.
+The `atm` (and `atm-daemon`) binaries will be available in your `$PATH`.
 
 ## Quick Start
 
