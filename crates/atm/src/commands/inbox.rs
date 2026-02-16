@@ -1,8 +1,8 @@
 //! Inbox command implementation - show inbox summaries
 
 use anyhow::Result;
-use atm_core::config::{resolve_config, ConfigOverrides};
-use atm_core::schema::TeamConfig;
+use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::schema::TeamConfig;
 use chrono::DateTime;
 use clap::{ArgAction, Args};
 use std::path::Path;
@@ -116,8 +116,8 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
     let team_config: TeamConfig = serde_json::from_str(&std::fs::read_to_string(&team_config_path)?)?;
 
     // Load config to extract hostname registry (if bridge is configured)
-    let config = atm_core::config::resolve_config(
-        &atm_core::config::ConfigOverrides::default(),
+    let config = agent_team_mail_core::config::resolve_config(
+        &agent_team_mail_core::config::ConfigOverrides::default(),
         &std::env::current_dir()?,
         home_dir,
     )?;
@@ -135,7 +135,7 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
     let mut summaries = Vec::new();
     for member in &team_config.members {
         // Read merged messages (local + all origin files)
-        let messages = atm_core::io::inbox::inbox_read_merged(
+        let messages = agent_team_mail_core::io::inbox::inbox_read_merged(
             &team_dir,
             &member.name,
             hostname_registry.as_ref(),
@@ -208,8 +208,8 @@ fn watch_inboxes(
         std::collections::HashMap::new();
 
     // Load config to extract hostname registry
-    let config = atm_core::config::resolve_config(
-        &atm_core::config::ConfigOverrides::default(),
+    let config = agent_team_mail_core::config::resolve_config(
+        &agent_team_mail_core::config::ConfigOverrides::default(),
         &std::env::current_dir()?,
         home_dir,
     )?;
@@ -245,7 +245,7 @@ fn watch_inboxes(
 
             for member in &team_config.members {
                 // Read merged messages (local + all origin files)
-                let messages = atm_core::io::inbox::inbox_read_merged(
+                let messages = agent_team_mail_core::io::inbox::inbox_read_merged(
                     &team_dir,
                     &member.name,
                     hostname_registry.as_ref(),
@@ -358,8 +358,8 @@ fn format_relative_time(timestamp_str: &str) -> String {
 /// Extract hostname registry from bridge plugin config
 ///
 /// Returns None if bridge plugin is not configured or not enabled.
-fn extract_hostname_registry(config: &atm_core::config::Config) -> Option<atm_core::config::HostnameRegistry> {
-    use atm_core::config::BridgeConfig;
+fn extract_hostname_registry(config: &agent_team_mail_core::config::Config) -> Option<agent_team_mail_core::config::HostnameRegistry> {
+    use agent_team_mail_core::config::BridgeConfig;
 
     // Check if bridge plugin config exists
     let bridge_table = config.plugins.get("bridge")?;
@@ -376,7 +376,7 @@ fn extract_hostname_registry(config: &atm_core::config::Config) -> Option<atm_co
     }
 
     // Build hostname registry from remotes
-    let mut registry = atm_core::config::HostnameRegistry::new();
+    let mut registry = agent_team_mail_core::config::HostnameRegistry::new();
     for remote in bridge_config.remotes {
         let _ = registry.register(remote); // Ignore errors
     }

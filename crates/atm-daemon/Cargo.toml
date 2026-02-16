@@ -1,5 +1,5 @@
 [package]
-name = "atm-daemon"
+name = "agent-team-mail-daemon"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -16,7 +16,7 @@ name = "atm-daemon"
 path = "src/main.rs"
 
 [dependencies]
-atm-core.workspace = true
+agent-team-mail-core.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true

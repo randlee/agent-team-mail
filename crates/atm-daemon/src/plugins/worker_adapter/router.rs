@@ -3,7 +3,7 @@
 //! Routes inbox messages to configured worker agents with concurrency control.
 
 use crate::plugin::PluginError;
-use atm_core::schema::InboxMessage;
+use agent_team_mail_core::schema::InboxMessage;
 use std::collections::{HashMap, VecDeque};
 use tracing::{debug, warn};
 

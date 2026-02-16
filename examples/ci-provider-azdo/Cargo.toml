@@ -12,5 +12,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Use path dependencies to the atm-daemon and atm-core
-atm-daemon = { path = "../../crates/atm-daemon" }
-atm-core = { path = "../../crates/atm-core" }
+agent-team-mail-daemon = { path = "../../crates/atm-daemon" }
+agent-team-mail-core = { path = "../../crates/atm-core" }

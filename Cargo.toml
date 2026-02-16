@@ -28,4 +28,4 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Internal dependencies
-atm-core = { path = "crates/atm-core", version = "=0.8.0" }
+agent-team-mail-core = { path = "crates/atm-core", version = "=0.8.0" }

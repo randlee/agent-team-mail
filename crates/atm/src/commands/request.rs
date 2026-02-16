@@ -1,9 +1,9 @@
 //! Request command implementation (send + wait for response)
 
 use anyhow::Result;
-use atm_core::config::{resolve_config, ConfigOverrides};
-use atm_core::io::inbox::{inbox_append, inbox_update};
-use atm_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::io::inbox::{inbox_append, inbox_update};
+use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use chrono::Utc;
 use clap::Args;
 use std::collections::HashMap;

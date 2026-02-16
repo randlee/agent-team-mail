@@ -1,9 +1,9 @@
 //! Cleanup command implementation - apply retention policies to inboxes
 
 use anyhow::{Context, Result};
-use atm_core::config::{resolve_config, ConfigOverrides};
-use atm_core::retention::apply_retention;
-use atm_core::schema::TeamConfig;
+use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::retention::apply_retention;
+use agent_team_mail_core::schema::TeamConfig;
 use clap::Args;
 use std::path::Path;
 
@@ -86,7 +86,7 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
 fn cleanup_team(
     home_dir: &Path,
     team_name: &str,
-    retention_config: &atm_core::config::RetentionConfig,
+    retention_config: &agent_team_mail_core::config::RetentionConfig,
     dry_run: bool,
 ) -> Result<()> {
     let team_dir = home_dir.join(".claude/teams").join(team_name);

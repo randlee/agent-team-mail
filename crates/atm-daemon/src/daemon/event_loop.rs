@@ -221,9 +221,9 @@ struct InboxCursor {
 async fn read_new_inbox_messages(
     path: &std::path::Path,
     cursor: &mut InboxCursor,
-) -> Result<Vec<atm_core::schema::InboxMessage>> {
+) -> Result<Vec<agent_team_mail_core::schema::InboxMessage>> {
     let content = tokio::fs::read_to_string(path).await?;
-    let inbox_msgs: Vec<atm_core::schema::InboxMessage> = serde_json::from_str(&content)?;
+    let inbox_msgs: Vec<agent_team_mail_core::schema::InboxMessage> = serde_json::from_str(&content)?;
     if inbox_msgs.is_empty() {
         cursor.last_message_id = None;
         cursor.last_index = 0;
@@ -257,8 +257,8 @@ async fn read_new_inbox_messages(
 /// Extract hostname registry from bridge plugin config
 ///
 /// Returns None if bridge plugin is not configured or not enabled.
-fn extract_hostname_registry(config: &atm_core::config::Config) -> Option<std::sync::Arc<atm_core::config::HostnameRegistry>> {
-    use atm_core::config::BridgeConfig;
+fn extract_hostname_registry(config: &agent_team_mail_core::config::Config) -> Option<std::sync::Arc<agent_team_mail_core::config::HostnameRegistry>> {
+    use agent_team_mail_core::config::BridgeConfig;
 
     // Check if bridge plugin config exists
     let bridge_table = config.plugins.get("bridge")?;
@@ -278,7 +278,7 @@ fn extract_hostname_registry(config: &atm_core::config::Config) -> Option<std::s
     }
 
     // Build hostname registry from remotes
-    let mut registry = atm_core::config::HostnameRegistry::new();
+    let mut registry = agent_team_mail_core::config::HostnameRegistry::new();
     for remote in bridge_config.remotes {
         if let Err(e) = registry.register(remote) {
             warn!("Failed to register remote in hostname registry: {}", e);
@@ -291,7 +291,7 @@ fn extract_hostname_registry(config: &atm_core::config::Config) -> Option<std::s
 #[cfg(test)]
 mod tests {
     use super::{read_new_inbox_messages, InboxCursor};
-    use atm_core::schema::InboxMessage;
+    use agent_team_mail_core::schema::InboxMessage;
     use std::collections::HashMap;
     use tempfile::TempDir;
     use tokio::fs;

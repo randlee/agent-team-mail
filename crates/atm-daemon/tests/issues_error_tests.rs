@@ -1,12 +1,12 @@
 //! Error scenario tests for the Issues plugin
 
-use atm_core::config::Config;
-use atm_core::context::{GitProvider, Platform, RepoContext, SystemContext};
-use atm_core::schema::InboxMessage;
-use atm_daemon::plugin::{Plugin, PluginContext};
-use atm_daemon::plugins::issues::IssuesPlugin;
-use atm_daemon::plugin::MailService;
-use atm_daemon::roster::RosterService;
+use agent_team_mail_core::config::Config;
+use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_daemon::plugin::{Plugin, PluginContext};
+use agent_team_mail_daemon::plugins::issues::IssuesPlugin;
+use agent_team_mail_daemon::plugin::MailService;
+use agent_team_mail_daemon::roster::RosterService;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;

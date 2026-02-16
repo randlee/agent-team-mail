@@ -9,7 +9,7 @@ use tracing::{debug, error, info};
 
 /// Run a periodic spool drain loop until cancelled.
 ///
-/// Calls atm_core::io::spool_drain() on the given inbox base directory
+/// Calls agent_team_mail_core::io::spool_drain() on the given inbox base directory
 /// at regular intervals. This ensures that any spooled messages (from lock
 /// contention) are eventually delivered.
 ///
@@ -30,7 +30,7 @@ pub async fn spool_drain_loop(
         tokio::select! {
             _ = ticker.tick() => {
                 debug!("Running spool drain");
-                match atm_core::io::spool_drain(&inbox_base) {
+                match agent_team_mail_core::io::spool_drain(&inbox_base) {
                     Ok(status) => {
                         if status.delivered > 0 || status.failed > 0 {
                             info!(

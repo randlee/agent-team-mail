@@ -68,7 +68,7 @@ pub fn execute(args: BridgeArgs) -> Result<()> {
 }
 
 fn execute_status(args: BridgeStatusArgs) -> Result<()> {
-    use atm_core::config::{resolve_config, ConfigOverrides};
+    use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
 
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -143,7 +143,7 @@ fn execute_status(args: BridgeStatusArgs) -> Result<()> {
 }
 
 fn execute_sync(args: BridgeSyncArgs) -> Result<()> {
-    use atm_core::config::{resolve_config, ConfigOverrides};
+    use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
 
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;

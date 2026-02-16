@@ -74,8 +74,8 @@ The daemon takes ownership and will free the pointer using `Box::from_raw()`.
 Implement the `IssueProvider` trait:
 
 ```rust
-use atm_daemon::plugins::issues::{IssueProvider, Issue, IssueFilter, IssueComment};
-use atm_daemon::plugin::PluginError;
+use agent_team_mail_daemon::plugins::issues::{IssueProvider, Issue, IssueFilter, IssueComment};
+use agent_team_mail_daemon::plugin::PluginError;
 
 #[derive(Debug)]
 pub struct MyProvider {
@@ -111,7 +111,7 @@ The factory receives optional configuration from `.atm.toml` and returns a boxed
 
 ```rust
 use std::sync::Arc;
-use atm_daemon::plugins::issues::{ProviderFactory, ErasedIssueProvider};
+use agent_team_mail_daemon::plugins::issues::{ProviderFactory, ErasedIssueProvider};
 
 #[no_mangle]
 pub extern "C" fn atm_create_provider_factory() -> *mut ProviderFactory {

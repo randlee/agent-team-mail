@@ -7,8 +7,8 @@ use super::provider::ErasedIssueProvider;
 use super::registry::{ProviderFactory, ProviderRegistry};
 use super::types::{Issue, IssueFilter, IssueState};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
-use atm_core::context::GitProvider as GitProviderType;
-use atm_core::schema::{AgentMember, InboxMessage};
+use agent_team_mail_core::context::GitProvider as GitProviderType;
+use agent_team_mail_core::schema::{AgentMember, InboxMessage};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn test_issue_update_generates_distinct_message_ids() {
-        use atm_core::io::inbox::inbox_append;
+        use agent_team_mail_core::io::inbox::inbox_append;
         use tempfile::TempDir;
 
         let plugin = IssuesPlugin::new();

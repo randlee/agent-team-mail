@@ -2,7 +2,7 @@
 
 use crate::plugin::PluginError;
 use super::types::CiRunConclusion;
-use atm_core::toml;
+use agent_team_mail_core::toml;
 use std::collections::HashMap;
 use std::path::PathBuf;
 

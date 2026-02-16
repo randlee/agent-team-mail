@@ -1,10 +1,10 @@
 //! Error scenario tests for the CI Monitor plugin
 
-use atm_core::config::Config;
-use atm_core::context::{GitProvider, Platform, RepoContext, SystemContext};
-use atm_daemon::plugin::{MailService, Plugin, PluginContext};
-use atm_daemon::plugins::ci_monitor::{CiMonitorPlugin, MockCiProvider};
-use atm_daemon::roster::RosterService;
+use agent_team_mail_core::config::Config;
+use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
+use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
+use agent_team_mail_daemon::plugins::ci_monitor::{CiMonitorPlugin, MockCiProvider};
+use agent_team_mail_daemon::roster::RosterService;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;

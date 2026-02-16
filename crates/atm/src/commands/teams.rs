@@ -1,9 +1,9 @@
 //! Teams command implementation
 
 use anyhow::Result;
-use atm_core::io::atomic::atomic_swap;
-use atm_core::io::lock::acquire_lock;
-use atm_core::schema::TeamConfig;
+use agent_team_mail_core::io::atomic::atomic_swap;
+use agent_team_mail_core::io::lock::acquire_lock;
+use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Utc};
 use clap::Args;
 use serde_json::json;
@@ -188,7 +188,7 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
 
     let agent_type = args.agent_type.clone();
-    let member = atm_core::schema::AgentMember {
+    let member = agent_team_mail_core::schema::AgentMember {
         agent_id,
         name: args.agent.clone(),
         agent_type,

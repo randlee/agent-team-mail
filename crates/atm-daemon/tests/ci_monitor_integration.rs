@@ -1,14 +1,14 @@
 //! Integration tests for the CI Monitor plugin
 
-use atm_core::config::Config;
-use atm_core::context::{GitProvider, Platform, RepoContext, SystemContext};
-use atm_core::schema::InboxMessage;
-use atm_daemon::plugin::{MailService, Plugin, PluginContext};
-use atm_daemon::plugins::ci_monitor::{
+use agent_team_mail_core::config::Config;
+use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
+use agent_team_mail_daemon::plugins::ci_monitor::{
     create_test_job, create_test_run, CiMonitorPlugin, CiRunConclusion, CiRunStatus, MockCall,
     MockCiProvider,
 };
-use atm_daemon::roster::RosterService;
+use agent_team_mail_daemon::roster::RosterService;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -236,7 +236,7 @@ async fn test_ci_deduplication() {
     create_team_config(ctx.mail.teams_root(), "test-team");
 
     // Use with_config to override poll interval for fast testing
-    let test_config = atm_daemon::plugins::ci_monitor::CiMonitorConfig {
+    let test_config = agent_team_mail_daemon::plugins::ci_monitor::CiMonitorConfig {
         enabled: true,
         provider: "github".to_string(),
         team: "test-team".to_string(),
@@ -244,13 +244,13 @@ async fn test_ci_deduplication() {
         poll_interval_secs: 10, // Min 10 seconds
         watched_branches: Vec::new(),
         notify_on: vec![
-            atm_daemon::plugins::ci_monitor::CiRunConclusion::Failure,
-            atm_daemon::plugins::ci_monitor::CiRunConclusion::TimedOut,
+            agent_team_mail_daemon::plugins::ci_monitor::CiRunConclusion::Failure,
+            agent_team_mail_daemon::plugins::ci_monitor::CiRunConclusion::TimedOut,
         ],
         owner: None,
         repo: None,
         provider_libraries: std::collections::HashMap::new(),
-        dedup_strategy: atm_daemon::plugins::ci_monitor::DedupStrategy::PerCommit,
+        dedup_strategy: agent_team_mail_daemon::plugins::ci_monitor::DedupStrategy::PerCommit,
         dedup_ttl_hours: 24,
         report_dir: std::path::PathBuf::from("temp/atm/ci-monitor"),
         provider_config: None,
@@ -363,7 +363,7 @@ async fn test_status_transition_notification() {
 
     // Remove synthetic member before re-init
     ctx.roster
-        .cleanup_plugin("test-team", "ci_monitor", atm_daemon::roster::CleanupMode::Hard)
+        .cleanup_plugin("test-team", "ci_monitor", agent_team_mail_daemon::roster::CleanupMode::Hard)
         .unwrap();
 
     // Run plugin again with failed run

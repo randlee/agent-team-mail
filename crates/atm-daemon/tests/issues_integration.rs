@@ -1,14 +1,14 @@
 //! Integration tests for the Issues plugin
 
-use atm_core::config::Config;
-use atm_core::context::{GitProvider, Platform, RepoContext, SystemContext};
-use atm_core::schema::InboxMessage;
-use atm_daemon::plugin::{Plugin, PluginContext};
-use atm_daemon::plugins::issues::{
+use agent_team_mail_core::config::Config;
+use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_daemon::plugin::{Plugin, PluginContext};
+use agent_team_mail_daemon::plugins::issues::{
     Issue, IssueLabel, IssueState, IssuesPlugin, MockCall, MockProvider,
 };
-use atm_daemon::plugin::MailService;
-use atm_daemon::roster::RosterService;
+use agent_team_mail_daemon::plugin::MailService;
+use agent_team_mail_daemon::roster::RosterService;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -358,7 +358,7 @@ async fn test_issue_updates_deliver_multiple_messages() {
 
     // Remove synthetic member before re-init to avoid duplicate member error
     ctx.roster
-        .cleanup_plugin("test-team", "issues", atm_daemon::roster::CleanupMode::Hard)
+        .cleanup_plugin("test-team", "issues", agent_team_mail_daemon::roster::CleanupMode::Hard)
         .unwrap();
 
     // Run plugin again with updated issue

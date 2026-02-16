@@ -39,8 +39,8 @@
 //!
 //! The daemon will automatically discover and load this provider.
 
-use atm_daemon::plugin::PluginError;
-use atm_daemon::plugins::ci_monitor::{
+use agent_team_mail_daemon::plugin::PluginError;
+use agent_team_mail_daemon::plugins::ci_monitor::{
     CiFilter, CiJob, CiProvider, CiProviderFactory, CiRun, CiRunConclusion, CiRunStatus, CiStep,
     ErasedCiProvider,
 };

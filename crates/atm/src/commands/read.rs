@@ -1,8 +1,8 @@
 //! Read command implementation
 
 use anyhow::Result;
-use atm_core::config::{resolve_config, ConfigOverrides};
-use atm_core::schema::TeamConfig;
+use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Utc};
 use clap::{ArgAction, Args};
 
@@ -110,7 +110,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
     let hostname_registry = extract_hostname_registry(&config);
 
     // Read inbox messages (merged from local + all origin files)
-    let messages = atm_core::io::inbox::inbox_read_merged(
+    let messages = agent_team_mail_core::io::inbox::inbox_read_merged(
         &team_dir,
         &agent_name,
         hostname_registry.as_ref(),
@@ -185,7 +185,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         )? {
             WaitResult::MessageReceived => {
                 // Re-read messages and apply filters
-                let new_messages = atm_core::io::inbox::inbox_read_merged(
+                let new_messages = agent_team_mail_core::io::inbox::inbox_read_merged(
                     &team_dir,
                     &agent_name,
                     hostname_registry.as_ref(),
@@ -266,7 +266,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         // Note: we only mark in the local inbox, not in origin files
         let local_inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
         if local_inbox_path.exists() {
-            atm_core::io::inbox::inbox_update(&local_inbox_path, &team_name, &agent_name, |msgs| {
+            agent_team_mail_core::io::inbox::inbox_update(&local_inbox_path, &team_name, &agent_name, |msgs| {
                 for msg in msgs.iter_mut() {
                     let should_mark = if let Some(ref msg_id) = msg.message_id {
                         filtered_ids.contains(msg_id) && !msg.read
@@ -348,8 +348,8 @@ fn format_relative_time(timestamp_str: &str) -> String {
 /// Extract hostname registry from bridge plugin config
 ///
 /// Returns None if bridge plugin is not configured or not enabled.
-fn extract_hostname_registry(config: &atm_core::config::Config) -> Option<atm_core::config::HostnameRegistry> {
-    use atm_core::config::BridgeConfig;
+fn extract_hostname_registry(config: &agent_team_mail_core::config::Config) -> Option<agent_team_mail_core::config::HostnameRegistry> {
+    use agent_team_mail_core::config::BridgeConfig;
 
     // Check if bridge plugin config exists
     let bridge_table = config.plugins.get("bridge")?;
@@ -366,7 +366,7 @@ fn extract_hostname_registry(config: &atm_core::config::Config) -> Option<atm_co
     }
 
     // Build hostname registry from remotes
-    let mut registry = atm_core::config::HostnameRegistry::new();
+    let mut registry = agent_team_mail_core::config::HostnameRegistry::new();
     for remote in bridge_config.remotes {
         let _ = registry.register(remote); // Ignore errors
     }

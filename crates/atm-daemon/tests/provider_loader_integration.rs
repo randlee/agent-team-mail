@@ -1,6 +1,6 @@
 //! Integration test for loading external provider libraries
 
-use atm_daemon::plugins::issues::ProviderLoader;
+use agent_team_mail_daemon::plugins::issues::ProviderLoader;
 use std::path::PathBuf;
 use std::process::Command;
 

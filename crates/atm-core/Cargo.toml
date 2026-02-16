@@ -1,5 +1,5 @@
 [package]
-name = "atm-core"
+name = "agent-team-mail-core"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

@@ -1,7 +1,7 @@
 //! Configuration for the Issues plugin
 
 use crate::plugin::PluginError;
-use atm_core::toml;
+use agent_team_mail_core::toml;
 use std::collections::HashMap;
 use std::path::PathBuf;
 

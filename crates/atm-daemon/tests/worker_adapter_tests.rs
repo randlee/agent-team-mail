@@ -1,12 +1,12 @@
 //! Integration tests for the Worker Adapter plugin
 
-use atm_core::config::Config;
-use atm_core::context::{Platform, SystemContext};
-use atm_daemon::plugin::{MailService, Plugin, PluginContext};
-use atm_daemon::plugins::worker_adapter::{
+use agent_team_mail_core::config::Config;
+use agent_team_mail_core::context::{Platform, SystemContext};
+use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
+use agent_team_mail_daemon::plugins::worker_adapter::{
     AgentConfig, MockCall, MockTmuxBackend, WorkerAdapter, WorkerAdapterPlugin, WorkersConfig,
 };
-use atm_daemon::roster::RosterService;
+use agent_team_mail_daemon::roster::RosterService;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -87,19 +87,19 @@ async fn test_plugin_init_with_valid_config() {
     let mut worker_config = HashMap::new();
     worker_config.insert(
         "enabled".to_string(),
-        atm_core::toml::Value::Boolean(true),
+        agent_team_mail_core::toml::Value::Boolean(true),
     );
     worker_config.insert(
         "backend".to_string(),
-        atm_core::toml::Value::String("codex-tmux".to_string()),
+        agent_team_mail_core::toml::Value::String("codex-tmux".to_string()),
     );
     worker_config.insert(
         "team_name".to_string(),
-        atm_core::toml::Value::String("test-team".to_string()),
+        agent_team_mail_core::toml::Value::String("test-team".to_string()),
     );
     worker_config.insert(
         "tmux_session".to_string(),
-        atm_core::toml::Value::String("test-session".to_string()),
+        agent_team_mail_core::toml::Value::String("test-session".to_string()),
     );
 
     // Create a new config with plugin config
@@ -127,7 +127,7 @@ fn test_config_validation_invalid_backend() {
 enabled = true
 backend = "unsupported-backend"
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -142,7 +142,7 @@ enabled = true
 backend = "codex-tmux"
 tmux_session = "invalid:session"
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -157,7 +157,7 @@ enabled = true
 backend = "codex-tmux"
 tmux_session = ""
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -175,7 +175,7 @@ team_name = "test-team"
 member_name = "test-member"
 concurrency_policy = "invalid-policy"
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -199,7 +199,7 @@ member_name = "arch-ctm"
 enabled = true
 concurrency_policy = "reject"
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_ok());
@@ -354,7 +354,7 @@ async fn test_mock_backend_multiple_workers() {
 #[cfg(not(target_os = "windows"))]
 mod tmux_tests {
     use super::*;
-    use atm_daemon::plugins::worker_adapter::CodexTmuxBackend;
+    use agent_team_mail_daemon::plugins::worker_adapter::CodexTmuxBackend;
     use std::process::Command;
 
     fn tmux_available() -> bool {
@@ -513,7 +513,7 @@ backend = "codex-tmux"
 [agents."test-agent"]
 member_name = "test-member"
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -530,7 +530,7 @@ team_name = "test-team"
 [agents."test-agent"]
 enabled = true
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -549,7 +549,7 @@ member_name = "duplicate"
 [agents."agent2"]
 member_name = "duplicate"
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -570,7 +570,7 @@ member_name = "dev-1"
 [agents."qa"]
 member_name = "qa-1"
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let config = WorkersConfig::from_toml(&table).unwrap();
 
     assert_eq!(config.get_member_name("architect"), Some("arch-ctm"));
@@ -602,7 +602,7 @@ member_name = "qa-1"
 enabled = true
 concurrency_policy = "reject"
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_ok());
@@ -631,7 +631,7 @@ concurrency_policy = "reject"
 
 #[tokio::test]
 async fn test_handle_message_routes_to_agent() {
-    use atm_core::schema::InboxMessage;
+    use agent_team_mail_core::schema::InboxMessage;
 
     let temp_dir = TempDir::new().unwrap();
     let mut ctx = create_test_context(&temp_dir);
@@ -647,38 +647,38 @@ async fn test_handle_message_routes_to_agent() {
     let mut worker_config = HashMap::new();
     worker_config.insert(
         "enabled".to_string(),
-        atm_core::toml::Value::Boolean(true),
+        agent_team_mail_core::toml::Value::Boolean(true),
     );
     worker_config.insert(
         "backend".to_string(),
-        atm_core::toml::Value::String("codex-tmux".to_string()),
+        agent_team_mail_core::toml::Value::String("codex-tmux".to_string()),
     );
     worker_config.insert(
         "team_name".to_string(),
-        atm_core::toml::Value::String("test-team".to_string()),
+        agent_team_mail_core::toml::Value::String("test-team".to_string()),
     );
     worker_config.insert(
         "tmux_session".to_string(),
-        atm_core::toml::Value::String("test-session".to_string()),
+        agent_team_mail_core::toml::Value::String("test-session".to_string()),
     );
 
     // Add agent config
-    let mut agent_table = atm_core::toml::Table::new();
+    let mut agent_table = agent_team_mail_core::toml::Table::new();
     agent_table.insert(
         "member_name".to_string(),
-        atm_core::toml::Value::String("test-member".to_string()),
+        agent_team_mail_core::toml::Value::String("test-member".to_string()),
     );
     agent_table.insert(
         "enabled".to_string(),
-        atm_core::toml::Value::Boolean(true),
+        agent_team_mail_core::toml::Value::Boolean(true),
     );
 
-    let mut agents_table = atm_core::toml::Table::new();
-    agents_table.insert("test-agent".to_string(), atm_core::toml::Value::Table(agent_table));
+    let mut agents_table = agent_team_mail_core::toml::Table::new();
+    agents_table.insert("test-agent".to_string(), agent_team_mail_core::toml::Value::Table(agent_table));
 
     worker_config.insert(
         "agents".to_string(),
-        atm_core::toml::Value::Table(agents_table),
+        agent_team_mail_core::toml::Value::Table(agents_table),
     );
 
     // Create config with plugin config
@@ -733,7 +733,7 @@ tmux_session = "test-session"
 member_name = "test-member"
 enabled = true
 "#;
-    let table: atm_core::toml::Table = atm_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let config = WorkersConfig::from_toml(&table).unwrap();
 
     // Verify team_name is correctly parsed and stored

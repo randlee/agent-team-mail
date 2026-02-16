@@ -4,7 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use atm_daemon::plugins::worker_adapter::{CodexTmuxBackend, WorkerAdapter};
+use agent_team_mail_daemon::plugins::worker_adapter::{CodexTmuxBackend, WorkerAdapter};
 fn tmux_available() -> bool {
     Command::new("tmux")
         .arg("-V")

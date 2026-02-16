@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use uuid::Uuid;
 
-use atm_core::schema::InboxMessage;
+use agent_team_mail_core::schema::InboxMessage;
 
 /// Maximum number of message_ids to keep in dedup cache
 const MAX_SYNCED_MESSAGE_IDS: usize = 10_000;

@@ -1,11 +1,11 @@
 //! Send command implementation
 
 use anyhow::Result;
-use atm_core::config::{resolve_config, Config, ConfigOverrides};
-use atm_core::io::atomic::atomic_swap;
-use atm_core::io::inbox::{inbox_append, WriteOutcome};
-use atm_core::io::lock::acquire_lock;
-use atm_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::config::{resolve_config, Config, ConfigOverrides};
+use agent_team_mail_core::io::atomic::atomic_swap;
+use agent_team_mail_core::io::inbox::{inbox_append, WriteOutcome};
+use agent_team_mail_core::io::lock::acquire_lock;
+use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use chrono::Utc;
 use clap::Args;
 use std::collections::HashMap;

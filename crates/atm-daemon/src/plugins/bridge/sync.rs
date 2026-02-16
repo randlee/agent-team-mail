@@ -15,7 +15,7 @@ use super::metrics::BridgeMetrics;
 use super::self_write_filter::SelfWriteFilter;
 use super::team_config_sync::sync_team_config;
 use super::transport::Transport;
-use atm_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use std::collections::HashSet;
 
 /// Statistics from a sync operation
@@ -442,7 +442,7 @@ impl SyncEngine {
 
     /// Get hub hostname if this is a spoke node
     fn get_hub_hostname(&self) -> Option<String> {
-        use atm_core::config::BridgeRole;
+        use agent_team_mail_core::config::BridgeRole;
 
         if self.config.core.role == BridgeRole::Spoke {
             // For spoke, first remote is the hub
@@ -798,7 +798,7 @@ mod tests {
     use super::*;
     use super::super::self_write_filter::SelfWriteFilter;
     use super::super::mock_transport::MockTransport;
-    use atm_core::config::{BridgeConfig, BridgeRole, RemoteConfig, HostnameRegistry};
+    use agent_team_mail_core::config::{BridgeConfig, BridgeRole, RemoteConfig, HostnameRegistry};
     use std::collections::HashMap;
     use tempfile::TempDir;
     use tokio::sync::Mutex as TokioMutex;

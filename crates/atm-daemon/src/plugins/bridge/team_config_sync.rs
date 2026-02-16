@@ -5,8 +5,8 @@
 //! membership.
 
 use anyhow::{Context, Result};
-use atm_core::config::HostnameRegistry;
-use atm_core::schema::TeamConfig;
+use agent_team_mail_core::config::HostnameRegistry;
+use agent_team_mail_core::schema::TeamConfig;
 use std::path::Path;
 use tokio::fs;
 use tracing::{info, warn};
@@ -190,8 +190,8 @@ pub async fn cleanup_stale_tmp_files(team_dir: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atm_core::config::HostnameRegistry;
-    use atm_core::schema::AgentMember;
+    use agent_team_mail_core::config::HostnameRegistry;
+    use agent_team_mail_core::schema::AgentMember;
     use std::collections::HashMap;
 
     fn create_test_member(name: &str, agent_type: &str) -> AgentMember {

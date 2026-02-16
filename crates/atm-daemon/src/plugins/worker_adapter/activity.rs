@@ -4,8 +4,8 @@
 //! Uses atomic writes to prevent corruption (same infrastructure as inbox writes).
 
 use crate::plugin::PluginError;
-use atm_core::io::{atomic::atomic_swap, lock::acquire_lock};
-use atm_core::schema::TeamConfig;
+use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
+use agent_team_mail_core::schema::TeamConfig;
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -201,7 +201,7 @@ impl Default for ActivityTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atm_core::schema::AgentMember;
+    use agent_team_mail_core::schema::AgentMember;
     use std::collections::HashMap;
     use tempfile::TempDir;
 

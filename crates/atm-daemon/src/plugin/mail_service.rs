@@ -1,5 +1,5 @@
-use atm_core::io::{inbox_append, InboxError, WriteOutcome};
-use atm_core::schema::InboxMessage;
+use agent_team_mail_core::io::{inbox_append, InboxError, WriteOutcome};
+use agent_team_mail_core::schema::InboxMessage;
 use std::path::PathBuf;
 
 /// Thin wrapper around atm-core inbox operations for plugin use

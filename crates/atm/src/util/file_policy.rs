@@ -1,7 +1,7 @@
 //! File access policy enforcement for file references
 
 use anyhow::Result;
-use atm_core::config::resolve_settings;
+use agent_team_mail_core::config::resolve_settings;
 use std::path::{Path, PathBuf};
 
 /// Walk up from `start_dir` to find the nearest `.git` directory,
@@ -88,7 +88,7 @@ fn is_file_in_repo(file_path: &Path, repo_root: &Path) -> bool {
 
 /// Check if settings permissions allow the file
 fn check_permissions_allow_file(
-    settings: &atm_core::schema::SettingsJson,
+    settings: &agent_team_mail_core::schema::SettingsJson,
     file_path: &Path,
     _current_dir: &Path,
 ) -> bool {

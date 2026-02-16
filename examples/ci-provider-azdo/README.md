@@ -98,8 +98,8 @@ The daemon takes ownership and will free the pointer using `Box::from_raw()`.
 Implement the `CiProvider` trait:
 
 ```rust
-use atm_daemon::plugins::ci_monitor::{CiProvider, CiRun, CiFilter};
-use atm_daemon::plugin::PluginError;
+use agent_team_mail_daemon::plugins::ci_monitor::{CiProvider, CiRun, CiFilter};
+use agent_team_mail_daemon::plugin::PluginError;
 
 #[derive(Debug)]
 pub struct AzurePipelinesProvider {
@@ -133,7 +133,7 @@ The factory receives optional configuration from `.atm.toml` and returns a boxed
 
 ```rust
 use std::sync::Arc;
-use atm_daemon::plugins::ci_monitor::{CiProviderFactory, ErasedCiProvider};
+use agent_team_mail_daemon::plugins::ci_monitor::{CiProviderFactory, ErasedCiProvider};
 
 #[no_mangle]
 pub extern "C" fn atm_create_ci_provider_factory() -> *mut CiProviderFactory {

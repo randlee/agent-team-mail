@@ -1,9 +1,9 @@
 //! Broadcast command implementation
 
 use anyhow::Result;
-use atm_core::config::{ConfigOverrides, resolve_config};
-use atm_core::io::inbox::{WriteOutcome, inbox_append};
-use atm_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
+use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use chrono::Utc;
 use clap::Args;
 use std::collections::HashMap;

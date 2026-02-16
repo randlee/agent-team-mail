@@ -2,9 +2,9 @@
 //!
 //! Tests a 3-node topology: hub + 2 spokes with mock transport
 
-use atm_core::config::{BridgeConfig, BridgeRole, HostnameRegistry, RemoteConfig};
-use atm_core::schema::{InboxMessage, TeamConfig, AgentMember};
-use atm_daemon::plugins::bridge::{BridgePluginConfig, MockTransport, SharedMockTransport, SharedFilesystem, SyncEngine, SelfWriteFilter};
+use agent_team_mail_core::config::{BridgeConfig, BridgeRole, HostnameRegistry, RemoteConfig};
+use agent_team_mail_core::schema::{InboxMessage, TeamConfig, AgentMember};
+use agent_team_mail_daemon::plugins::bridge::{BridgePluginConfig, MockTransport, SharedMockTransport, SharedFilesystem, SyncEngine, SelfWriteFilter};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -153,20 +153,20 @@ async fn test_bridge_e2e_spoke_to_spoke_via_hub() {
 
     // Create sync engines
     let mut hub_transports = HashMap::new();
-    hub_transports.insert("spoke-a".to_string(), Arc::new(tokio::sync::Mutex::new(hub_transport.clone())) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>);
-    hub_transports.insert("spoke-b".to_string(), Arc::new(tokio::sync::Mutex::new(hub_transport.clone())) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>);
+    hub_transports.insert("spoke-a".to_string(), Arc::new(tokio::sync::Mutex::new(hub_transport.clone())) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>);
+    hub_transports.insert("spoke-b".to_string(), Arc::new(tokio::sync::Mutex::new(hub_transport.clone())) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>);
     let mut hub_engine = SyncEngine::new(hub_config, hub_transports, hub_dir.clone(), new_filter())
         .await
         .unwrap();
 
     let mut spoke_a_transports = HashMap::new();
-    spoke_a_transports.insert("hub".to_string(), Arc::new(tokio::sync::Mutex::new(spoke_a_transport)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>);
+    spoke_a_transports.insert("hub".to_string(), Arc::new(tokio::sync::Mutex::new(spoke_a_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>);
     let mut spoke_a_engine = SyncEngine::new(spoke_a_config, spoke_a_transports, spoke_a_dir.clone(), new_filter())
         .await
         .unwrap();
 
     let mut spoke_b_transports = HashMap::new();
-    spoke_b_transports.insert("hub".to_string(), Arc::new(tokio::sync::Mutex::new(spoke_b_transport)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>);
+    spoke_b_transports.insert("hub".to_string(), Arc::new(tokio::sync::Mutex::new(spoke_b_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>);
     let mut spoke_b_engine = SyncEngine::new(spoke_b_config, spoke_b_transports, spoke_b_dir.clone(), new_filter())
         .await
         .unwrap();
@@ -215,7 +215,7 @@ async fn test_bridge_e2e_spoke_to_spoke_via_hub() {
 
 #[tokio::test]
 async fn test_bridge_config_sync_spoke_to_hub() {
-    use atm_daemon::plugins::bridge::sync_team_config;
+    use agent_team_mail_daemon::plugins::bridge::sync_team_config;
 
     // Setup hub and spoke
     let (hub_temp, hub_dir, _hub_config, _hub_transport) = setup_node(
@@ -282,7 +282,7 @@ async fn test_circuit_breaker_disables_failing_remote() {
     .await;
 
     let mut transports = HashMap::new();
-    transports.insert("hub".to_string(), Arc::new(tokio::sync::Mutex::new(transport)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>);
+    transports.insert("hub".to_string(), Arc::new(tokio::sync::Mutex::new(transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>);
     let mut engine = SyncEngine::new(config, transports, team_dir.clone(), new_filter())
         .await
         .unwrap();
@@ -307,7 +307,7 @@ async fn test_circuit_breaker_disables_failing_remote() {
 
 #[tokio::test]
 async fn test_stale_tmp_cleanup() {
-    use atm_daemon::plugins::bridge::cleanup_stale_tmp_files;
+    use agent_team_mail_daemon::plugins::bridge::cleanup_stale_tmp_files;
 
     let temp_dir = TempDir::new().unwrap();
     let team_dir = temp_dir.path().join("my-team");
@@ -388,7 +388,7 @@ async fn test_shared_mock_transport_bidirectional_sync() {
     let mut hub_transports = HashMap::new();
     hub_transports.insert(
         "spoke".to_string(),
-        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_transport.clone())) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_transport.clone())) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     let mut hub_engine = SyncEngine::new(hub_config, hub_transports, hub_dir.clone(), new_filter())
         .await
@@ -397,7 +397,7 @@ async fn test_shared_mock_transport_bidirectional_sync() {
     let mut spoke_transports = HashMap::new();
     spoke_transports.insert(
         "hub".to_string(),
-        Arc::new(tokio::sync::Mutex::new(spoke_to_hub_transport.clone())) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(spoke_to_hub_transport.clone())) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     let mut spoke_engine =
         SyncEngine::new(spoke_config, spoke_transports, spoke_dir.clone(), new_filter())
@@ -505,11 +505,11 @@ async fn test_shared_mock_transport_3node_relay() {
     let mut hub_transports = HashMap::new();
     hub_transports.insert(
         "spoke-a".to_string(),
-        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_a_transport)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_a_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     hub_transports.insert(
         "spoke-b".to_string(),
-        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_b_transport)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_b_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     let mut hub_engine = SyncEngine::new(hub_config, hub_transports, hub_dir.clone(), new_filter())
         .await
@@ -518,7 +518,7 @@ async fn test_shared_mock_transport_3node_relay() {
     let mut spoke_a_transports = HashMap::new();
     spoke_a_transports.insert(
         "hub".to_string(),
-        Arc::new(tokio::sync::Mutex::new(spoke_a_to_hub_transport)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(spoke_a_to_hub_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     let mut spoke_a_engine = SyncEngine::new(
         spoke_a_config,
@@ -532,7 +532,7 @@ async fn test_shared_mock_transport_3node_relay() {
     let mut spoke_b_transports = HashMap::new();
     spoke_b_transports.insert(
         "hub".to_string(),
-        Arc::new(tokio::sync::Mutex::new(spoke_b_to_hub_transport)) as Arc<tokio::sync::Mutex<dyn atm_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(spoke_b_to_hub_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     let mut spoke_b_engine = SyncEngine::new(
         spoke_b_config,

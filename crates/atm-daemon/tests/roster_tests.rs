@@ -1,5 +1,5 @@
-use atm_core::schema::{AgentMember, TeamConfig};
-use atm_daemon::roster::{CleanupMode, MembershipTracker, RosterError, RosterService};
+use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+use agent_team_mail_daemon::roster::{CleanupMode, MembershipTracker, RosterError, RosterService};
 use std::collections::HashMap;
 use std::sync::{Arc, Barrier};
 use std::thread;

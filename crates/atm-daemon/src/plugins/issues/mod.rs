@@ -18,7 +18,7 @@ pub use provider::{ErasedIssueProvider, IssueProvider};
 pub use registry::{ProviderFactory, ProviderRegistry};
 pub use types::{Issue, IssueComment, IssueFilter, IssueLabel, IssueState};
 
-use atm_core::context::GitProvider;
+use agent_team_mail_core::context::GitProvider;
 use crate::plugin::PluginError;
 
 /// Create an issue provider for the given git provider (legacy function)

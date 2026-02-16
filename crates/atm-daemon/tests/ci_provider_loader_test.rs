@@ -87,7 +87,7 @@ fn test_azure_provider_exports_factory() {
 
 #[test]
 fn test_azure_provider_factory_creates_provider() {
-    use atm_daemon::plugins::ci_monitor::CiProviderFactory;
+    use agent_team_mail_daemon::plugins::ci_monitor::CiProviderFactory;
 
     // Build the provider
     let lib_path = build_azure_provider().expect("Failed to build Azure provider");
@@ -127,7 +127,7 @@ fn test_azure_provider_factory_creates_provider() {
 
 #[tokio::test]
 async fn test_azure_provider_list_runs() {
-    use atm_daemon::plugins::ci_monitor::{CiFilter, CiProviderFactory};
+    use agent_team_mail_daemon::plugins::ci_monitor::{CiFilter, CiProviderFactory};
 
     // Build the provider
     let lib_path = build_azure_provider().expect("Failed to build Azure provider");
@@ -163,7 +163,7 @@ async fn test_azure_provider_list_runs() {
 
 #[tokio::test]
 async fn test_azure_provider_get_run() {
-    use atm_daemon::plugins::ci_monitor::CiProviderFactory;
+    use agent_team_mail_daemon::plugins::ci_monitor::CiProviderFactory;
 
     // Build the provider
     let lib_path = build_azure_provider().expect("Failed to build Azure provider");
@@ -197,7 +197,7 @@ async fn test_azure_provider_get_run() {
 
 #[tokio::test]
 async fn test_azure_provider_get_job_log() {
-    use atm_daemon::plugins::ci_monitor::CiProviderFactory;
+    use agent_team_mail_daemon::plugins::ci_monitor::CiProviderFactory;
 
     // Build the provider
     let lib_path = build_azure_provider().expect("Failed to build Azure provider");
@@ -228,7 +228,7 @@ async fn test_azure_provider_get_job_log() {
 
 #[test]
 fn test_azure_provider_with_config() {
-    use atm_daemon::plugins::ci_monitor::CiProviderFactory;
+    use agent_team_mail_daemon::plugins::ci_monitor::CiProviderFactory;
 
     // Build the provider
     let lib_path = build_azure_provider().expect("Failed to build Azure provider");

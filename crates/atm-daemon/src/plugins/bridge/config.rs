@@ -1,6 +1,6 @@
 //! Bridge plugin configuration parsing and validation
 
-use atm_core::config::{BridgeConfig, HostnameRegistry};
+use agent_team_mail_core::config::{BridgeConfig, HostnameRegistry};
 use crate::plugin::PluginError;
 
 /// Bridge plugin configuration (daemon-specific)
@@ -228,7 +228,7 @@ address = "user@spoke1.local"
         let table: toml::Table = toml::from_str(hub_toml).unwrap();
         let config = BridgePluginConfig::from_toml(&table, "hub-host").unwrap();
 
-        assert_eq!(config.core.role, atm_core::config::BridgeRole::Hub);
+        assert_eq!(config.core.role, agent_team_mail_core::config::BridgeRole::Hub);
 
         let spoke_toml = r#"
 enabled = true
@@ -242,7 +242,7 @@ address = "user@hub.local"
         let table: toml::Table = toml::from_str(spoke_toml).unwrap();
         let config = BridgePluginConfig::from_toml(&table, "spoke-host").unwrap();
 
-        assert_eq!(config.core.role, atm_core::config::BridgeRole::Spoke);
+        assert_eq!(config.core.role, agent_team_mail_core::config::BridgeRole::Spoke);
     }
 
     #[test]

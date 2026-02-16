@@ -3,6 +3,73 @@
 version = 4
 
 [[package]]
+name = "agent-team-mail"
+version = "0.8.0"
+dependencies = [
+ "agent-team-mail-core",
+ "anyhow",
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "dirs",
+ "notify",
+ "predicates",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "agent-team-mail-core"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "dirs",
+ "fs2",
+ "hostname",
+ "libc",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "agent-team-mail-daemon"
+version = "0.8.0"
+dependencies = [
+ "agent-team-mail-core",
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dirs",
+ "hostname",
+ "libloading",
+ "notify",
+ "serde",
+ "serde_json",
+ "ssh2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -112,73 +179,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "atm"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "atm-core",
- "chrono",
- "clap",
- "dirs",
- "notify",
- "predicates",
- "serde",
- "serde_json",
- "serial_test",
- "tempfile",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "atm-core"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "blake3",
- "chrono",
- "dirs",
- "fs2",
- "hostname",
- "libc",
- "serde",
- "serde_json",
- "serial_test",
- "tempfile",
- "thiserror 2.0.18",
- "toml",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "atm-daemon"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "atm-core",
- "chrono",
- "clap",
- "dirs",
- "hostname",
- "libloading",
- "notify",
- "serde",
- "serde_json",
- "ssh2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

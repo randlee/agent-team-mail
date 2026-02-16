@@ -1,8 +1,8 @@
 //! Integration tests for retention policy implementation
 
-use atm_core::config::{CleanupStrategy, RetentionConfig};
-use atm_core::retention::apply_retention;
-use atm_core::schema::InboxMessage;
+use agent_team_mail_core::config::{CleanupStrategy, RetentionConfig};
+use agent_team_mail_core::retention::apply_retention;
+use agent_team_mail_core::schema::InboxMessage;
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::fs;

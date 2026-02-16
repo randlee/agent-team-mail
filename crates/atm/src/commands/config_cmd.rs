@@ -1,7 +1,7 @@
 //! Config command implementation
 
 use anyhow::Result;
-use atm_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
 use clap::Args;
 use serde_json::json;
 

@@ -3,6 +3,49 @@
 version = 4
 
 [[package]]
+name = "agent-team-mail-core"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "dirs",
+ "fs2",
+ "hostname",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "agent-team-mail-daemon"
+version = "0.8.0"
+dependencies = [
+ "agent-team-mail-core",
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dirs",
+ "hostname",
+ "libloading",
+ "notify",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -91,54 +134,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "atm-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "chrono",
- "dirs",
- "fs2",
- "hostname",
- "libc",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "toml",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "atm-daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "atm-core",
- "chrono",
- "clap",
- "dirs",
- "hostname",
- "libloading",
- "notify",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "atm-provider-stub"
 version = "0.1.0"
 dependencies = [
- "atm-core",
- "atm-daemon",
+ "agent-team-mail-core",
+ "agent-team-mail-daemon",
 ]
 
 [[package]]

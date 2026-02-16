@@ -211,7 +211,7 @@ impl Plugin for BridgePlugin {
 
     async fn handle_message(
         &mut self,
-        msg: &atm_core::schema::InboxMessage,
+        msg: &agent_team_mail_core::schema::InboxMessage,
     ) -> Result<(), PluginError> {
         if !self.config.as_ref().map(|c| c.is_enabled()).unwrap_or(false) {
             return Ok(());
@@ -263,8 +263,8 @@ impl Plugin for BridgePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atm_core::config::Config;
-    use atm_core::context::{Platform, SystemContext};
+    use agent_team_mail_core::config::Config;
+    use agent_team_mail_core::context::{Platform, SystemContext};
     use crate::plugin::MailService;
     use crate::roster::RosterService;
     use std::path::PathBuf;

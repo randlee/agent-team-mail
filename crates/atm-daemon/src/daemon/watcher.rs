@@ -43,7 +43,7 @@ pub enum InboxEventKind {
 pub async fn watch_inboxes(
     teams_root: PathBuf,
     event_tx: mpsc::Sender<InboxEvent>,
-    hostname_registry: Option<std::sync::Arc<atm_core::config::HostnameRegistry>>,
+    hostname_registry: Option<std::sync::Arc<agent_team_mail_core::config::HostnameRegistry>>,
     cancel: CancellationToken,
 ) -> Result<()> {
     info!("Starting inbox watcher for: {}", teams_root.display());
@@ -132,7 +132,7 @@ pub async fn watch_inboxes(
 fn parse_event(
     teams_root: &PathBuf,
     event: Event,
-    hostname_registry: Option<&atm_core::config::HostnameRegistry>,
+    hostname_registry: Option<&agent_team_mail_core::config::HostnameRegistry>,
 ) -> Option<Vec<InboxEvent>> {
     let mut events = Vec::new();
 
@@ -216,7 +216,7 @@ fn parse_event(
 /// Tuple of (agent_name, origin) where origin is Some(hostname) for origin files, None for local files
 fn parse_agent_and_origin(
     file_stem: &str,
-    hostname_registry: Option<&atm_core::config::HostnameRegistry>,
+    hostname_registry: Option<&agent_team_mail_core::config::HostnameRegistry>,
 ) -> (String, Option<String>) {
     // If no hostname registry, treat entire stem as agent name
     let Some(registry) = hostname_registry else {
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_parse_event_per_origin_file() {
-        use atm_core::config::{HostnameRegistry, RemoteConfig};
+        use agent_team_mail_core::config::{HostnameRegistry, RemoteConfig};
 
         let teams_root = PathBuf::from("/tmp/teams");
         let origin_path = teams_root.join("my-team/inboxes/agent-1.mac-studio.json");
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_parse_event_per_origin_file_with_dotted_agent() {
-        use atm_core::config::{HostnameRegistry, RemoteConfig};
+        use agent_team_mail_core::config::{HostnameRegistry, RemoteConfig};
 
         let teams_root = PathBuf::from("/tmp/teams");
         let origin_path = teams_root.join("my-team/inboxes/dev.agent.mac-studio.json");
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_parse_event_unknown_hostname_treated_as_local() {
-        use atm_core::config::{HostnameRegistry, RemoteConfig};
+        use agent_team_mail_core::config::{HostnameRegistry, RemoteConfig};
 
         let teams_root = PathBuf::from("/tmp/teams");
         let unknown_path = teams_root.join("my-team/inboxes/agent-1.unknown-host.json");
