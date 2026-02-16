@@ -215,14 +215,12 @@ impl Transport for MockTransport {
 
             for path in state.files.keys() {
                 // Check if path is in the specified directory
-                if let Some(parent) = path.parent() {
-                    if parent == remote_dir {
-                        if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                            if pattern_matches(pattern, filename) {
-                                matches.push(filename.to_string());
-                            }
-                        }
-                    }
+                if let Some(parent) = path.parent()
+                    && parent == remote_dir
+                    && let Some(filename) = path.file_name().and_then(|n| n.to_str())
+                    && pattern_matches(pattern, filename)
+                {
+                    matches.push(filename.to_string());
                 }
             }
 
@@ -303,10 +301,11 @@ fn pattern_matches(pattern: &str, filename: &str) -> bool {
 
     // If pattern ends with '*', we're done
     // Otherwise, check that we've consumed the entire filename
-    if let Some(last_part) = parts.last() {
-        if !last_part.is_empty() && !filename.ends_with(last_part) {
-            return false;
-        }
+    if let Some(last_part) = parts.last()
+        && !last_part.is_empty()
+        && !filename.ends_with(last_part)
+    {
+        return false;
     }
 
     true

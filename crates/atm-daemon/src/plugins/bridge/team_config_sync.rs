@@ -114,13 +114,13 @@ fn merge_team_config(
     // Warn about hostname collisions in hub config
     // Extract any hostnames mentioned in member names (e.g., "agent@hostname")
     for member in &hub.members {
-        if let Some(hostname) = extract_hostname_from_agent_name(&member.name) {
-            if !registry.is_known_hostname(&hostname) {
-                warn!(
-                    "Hub config introduces unknown hostname '{}' in agent '{}'",
-                    hostname, member.name
-                );
-            }
+        if let Some(hostname) = extract_hostname_from_agent_name(&member.name)
+            && !registry.is_known_hostname(&hostname)
+        {
+            warn!(
+                "Hub config introduces unknown hostname '{}' in agent '{}'",
+                hostname, member.name
+            );
         }
     }
 
@@ -143,16 +143,16 @@ pub async fn cleanup_stale_tmp_files(team_dir: &Path) -> Result<usize> {
     if let Ok(mut entries) = fs::read_dir(team_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.contains(".bridge-tmp") || name.ends_with("-tmp") {
-                    match fs::remove_file(&path).await {
-                        Ok(()) => {
-                            warn!("Cleaned up stale temp file: {}", path.display());
-                            cleaned += 1;
-                        }
-                        Err(e) => {
-                            warn!("Failed to clean up stale temp file {}: {}", path.display(), e);
-                        }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && (name.contains(".bridge-tmp") || name.ends_with("-tmp"))
+            {
+                match fs::remove_file(&path).await {
+                    Ok(()) => {
+                        warn!("Cleaned up stale temp file: {}", path.display());
+                        cleaned += 1;
+                    }
+                    Err(e) => {
+                        warn!("Failed to clean up stale temp file {}: {}", path.display(), e);
                     }
                 }
             }
@@ -161,21 +161,19 @@ pub async fn cleanup_stale_tmp_files(team_dir: &Path) -> Result<usize> {
 
     // Check inboxes directory
     let inboxes_dir = team_dir.join("inboxes");
-    if inboxes_dir.exists() {
-        if let Ok(mut entries) = fs::read_dir(&inboxes_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.contains(".bridge-tmp") || name.ends_with("-tmp") {
-                        match fs::remove_file(&path).await {
-                            Ok(()) => {
-                                warn!("Cleaned up stale temp file: {}", path.display());
-                                cleaned += 1;
-                            }
-                            Err(e) => {
-                                warn!("Failed to clean up stale temp file {}: {}", path.display(), e);
-                            }
-                        }
+    if inboxes_dir.exists() && let Ok(mut entries) = fs::read_dir(&inboxes_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && (name.contains(".bridge-tmp") || name.ends_with("-tmp"))
+            {
+                match fs::remove_file(&path).await {
+                    Ok(()) => {
+                        warn!("Cleaned up stale temp file: {}", path.display());
+                        cleaned += 1;
+                    }
+                    Err(e) => {
+                        warn!("Failed to clean up stale temp file {}: {}", path.display(), e);
                     }
                 }
             }

@@ -258,13 +258,13 @@ impl Transport for SshTransport {
                     })?;
 
                 // Ensure parent directory exists
-                if let Some(parent) = remote_path.parent() {
-                    if let Some(parent_str) = parent.to_str() {
-                        let _ = sftp.mkdir(
-                            std::path::Path::new(parent_str),
-                            0o755,
-                        );
-                    }
+                if let Some(parent) = remote_path.parent()
+                    && let Some(parent_str) = parent.to_str()
+                {
+                    let _ = sftp.mkdir(
+                        std::path::Path::new(parent_str),
+                        0o755,
+                    );
                 }
 
                 // Write to temp file
@@ -392,10 +392,10 @@ impl Transport for SshTransport {
                 let mut matches = Vec::new();
 
                 for (path, _stat) in entries {
-                    if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                        if pattern_matches(&pattern, filename) {
-                            matches.push(filename.to_string());
-                        }
+                    if let Some(filename) = path.file_name().and_then(|n| n.to_str())
+                        && pattern_matches(&pattern, filename)
+                    {
+                        matches.push(filename.to_string());
                     }
                 }
 
@@ -523,10 +523,11 @@ fn pattern_matches(pattern: &str, filename: &str) -> bool {
         }
     }
 
-    if let Some(last_part) = parts.last() {
-        if !last_part.is_empty() && !filename.ends_with(last_part) {
-            return false;
-        }
+    if let Some(last_part) = parts.last()
+        && !last_part.is_empty()
+        && !filename.ends_with(last_part)
+    {
+        return false;
     }
 
     true
