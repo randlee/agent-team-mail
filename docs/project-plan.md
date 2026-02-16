@@ -1508,9 +1508,9 @@ Phase 6.4 Complete
   - Backward-compatible: falls back to `<agent>.json` only when bridge not configured
 - Update CLI `read.rs` to call merged reader
 - Update CLI `inbox.rs` to call merged reader
-- Update daemon watcher `parse_event`: add `origin: Option<String>` to `InboxEvent`, normalize agent name by matching hostname suffix against registry
+- Update daemon watcher `parse_event`: add `origin: Option<String>` to `InboxEvent`, normalize agent name by matching known agent names + hostname registry (NOT dot-split — agent names may contain dots)
 - Verify daemon `event_loop.rs` cursor tracking with per-origin files
-- Unit + integration tests for merge, dedup, and watcher parsing
+- Unit + integration tests for merge, dedup, and watcher parsing (include test for agent name containing dots with hostname suffix)
 
 **Files**:
 - `crates/atm-core/src/io/inbox.rs` (new `inbox_read_merged`)
@@ -1549,7 +1549,8 @@ Phase 6.4 Complete
 - Cursor/watermark tracking to avoid re-transferring old messages
 - `message_id` assignment for messages that lack one
 - Self-write filtering (HashSet with TTL to prevent feedback loop)
-- Integration tests with mock transport simulating 2-node sync
+- **Invariant**: local `<agent>.json` is NEVER modified by bridge; only per-origin `<agent>.<hostname>.json` files are written
+- Integration tests with mock transport simulating 2-node sync (verify local inbox untouched)
 
 **Files**:
 - `crates/atm-daemon/src/plugins/bridge/sync.rs`
@@ -1569,7 +1570,8 @@ Phase 6.4 Complete
 - Retention extension: `RetentionConfig` handles per-origin files
 - Stale `.bridge-tmp` file cleanup on startup
 - `atm bridge status` / `atm bridge sync` CLI commands
-- End-to-end integration test: 3-node simulated topology with mock transport
+- **Invariant**: local `<agent>.json` is NEVER modified by bridge; only per-origin files are written
+- End-to-end integration test: 3-node simulated topology with mock transport (verify local inbox untouched)
 - Documentation and ops checklist
 
 **Files**:
