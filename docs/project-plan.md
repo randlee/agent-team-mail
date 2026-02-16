@@ -1598,6 +1598,126 @@ Sprint 8.1 (Config + Scaffold)
 
 ---
 
+## 11. Phase 9: CI Monitor Integration + Platform Stabilization
+
+**Goal**: Stabilize CI/tooling and platform fundamentals, then integrate GitHub CI Monitor into team workflows.
+
+**Branch prefix**: `feature/p9-*`
+**Integration branch**: `integrate/phase-9` (off `develop`)
+**Depends on**: Phase 8.6 verification gate
+**Status**: Planned
+
+### Phase 9 Sprint Summary
+
+| Sprint | Name | Track | Status |
+|--------|------|-------|--------|
+| 9.0 | Phase 8.6 Verification Gate | Foundation | Planned |
+| 9.1 | CI/Tooling Stabilization | Foundation | Planned |
+| 9.2 | Home Dir Resolution | Foundation | Planned |
+| 9.3 | CI Config & Routing | CI Monitor | Planned |
+| 9.4 | Daemon Operationalization | CI Monitor | Planned |
+| 9.5 | WorkerHandle Backend Payload | Worker Adapter | Planned |
+| 9.6 | Daemon Retention Tasks | Platform | Planned |
+
+### Sprint 9.0 — Phase 8.6 Verification Gate
+**Goal**: Verify Phase 8.6 merged and green before Phase 9 changes.
+**Branch**: `feature/p9-s0-verify`
+
+**Deliverables**:
+- Phase 8.6 PRs merged into develop
+- CI green on develop
+- No open P8 blocking issues
+
+### Sprint 9.1 — CI/Tooling Stabilization
+**Goal**: Stabilize CI to prevent repeated clippy/test failures.
+**Branch**: `feature/p9-s1-ci-tooling`
+
+**Deliverables**:
+- `rust-toolchain.toml` committed on develop
+- Separate clippy job in `.github/workflows/ci.yml` with `needs: [clippy]`
+- QA agent clippy gate preserved
+
+### Sprint 9.2 — Home Dir Resolution (Cross-Platform)
+**Goal**: Make ATM usable on all platforms without requiring ATM_HOME.
+**Branch**: `feature/p9-s2-home-dir`
+
+**Deliverables**:
+- Canonical `get_home_dir()` in `atm-core`
+- Replace ALL call sites:
+  - `crates/atm/src/util/settings.rs:14`
+  - `crates/atm/src/util/state.rs:62`
+  - `crates/atm-core/src/retention.rs:210-214`
+  - `crates/atm-core/src/io/spool.rs:303-306`
+  - `crates/atm-daemon/src/main.rs:60-64`
+  - `crates/atm-daemon/src/plugins/ci_monitor/plugin.rs:366-369`
+  - `crates/atm-daemon/src/plugins/ci_monitor/loader.rs:130-134`
+  - `crates/atm-daemon/src/plugins/issues/plugin.rs:299-302`
+  - `crates/atm-daemon/src/plugins/worker_adapter/config.rs:342-346`
+  - `crates/atm-daemon/src/plugins/worker_adapter/config.rs:449-452`
+  - `crates/atm-daemon/src/plugins/bridge/ssh.rs:148`
+- Precedence: ATM_HOME → platform default
+
+### Sprint 9.3 — CI Config & Routing
+**Goal**: Finalize CI monitor config and routing behavior.
+**Branch**: `feature/p9-s3-ci-config`
+
+**Deliverables**:
+- Client-side branch filtering via `globset` or `wildmatch`
+- Add `notify_target` (string or list) and routing logic
+- Config validation for invalid targets
+
+### Sprint 9.4 — Daemon Operationalization
+**Goal**: Basic daemon status reporting without IPC.
+**Branch**: `feature/p9-s4-daemon-status`
+
+**Deliverables**:
+- Daemon writes JSON status file at `${ATM_HOME}/daemon/status.json`
+- CLI reads and prints status (no IPC)
+- Schema: `{ timestamp, pid, version, uptime_secs, plugins: [{name, enabled, status, last_error, last_run}], teams: [<team>] }`
+
+### Sprint 9.5 — WorkerHandle Backend Payload
+**Goal**: Enable backend-specific metadata without refactoring WorkerAdapter.
+**Branch**: `feature/p9-s5-workerhandle`
+
+**Deliverables**:
+- Add `backend_id: String` and `payload: Box<dyn Any + Send + Sync>` to `WorkerHandle`
+- Provide downcast helper methods (`payload_ref<T>() -> Option<&T>`)
+- Update registry/adapter to pass payload
+
+### Sprint 9.6 — Daemon Retention Tasks
+**Goal**: Retention beyond CLI and bridge sync.
+**Branch**: `feature/p9-s6-retention`
+
+**Deliverables**:
+- Periodic inbox trimming in daemon loop
+- CI monitor report file retention (JSON + Markdown in `report_dir`)
+- Use `tokio::spawn` to avoid blocking plugins/bridge sync
+
+### Phase 9 Dependency Graph
+
+```
+Sprint 9.0 (Verification Gate)
+    │
+    └── Sprint 9.1 (CI/Tooling)
+            │
+            └── Sprint 9.2 (Home Dir Resolution)
+                    │
+                    ├── Sprint 9.3 (CI Config & Routing)
+                    │       └── Sprint 9.4 (Daemon Operationalization)
+                    │
+                    ├── Sprint 9.5 (WorkerHandle Backend Payload)
+                    │
+                    └── Sprint 9.6 (Daemon Retention Tasks)
+```
+
+### Phase 9 Exit Criteria
+- All 667 existing tests pass
+- Phase 9 target test count: 750–780
+- New code coverage ≥ 80%
+- Zero clippy warnings
+
+---
+
 ## 12. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
