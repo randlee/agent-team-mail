@@ -3,6 +3,7 @@
 use super::config::BridgePluginConfig;
 use super::self_write_filter::SelfWriteFilter;
 use super::sync::SyncEngine;
+#[allow(unused_imports)] // Required for Transport trait method dispatch (.connect())
 use super::transport::Transport;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use std::sync::Arc;
