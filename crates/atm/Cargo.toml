@@ -5,6 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "CLI for agent-team-mail: send, read, and manage messages for AI agent teams"
+keywords = ["ai-agents", "messaging", "team-communication", "claude", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "atm"

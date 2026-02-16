@@ -116,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "atm"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "atm-core"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "atm-daemon"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -10,11 +10,13 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.8.0"
 edition = "2024"
 authors = ["agent-team-mail contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/randlee/agent-team-mail"
+homepage = "https://github.com/randlee/agent-team-mail"
+rust-version = "1.85"
 
 [workspace.dependencies]
 # Serialization
@@ -26,4 +28,4 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Internal dependencies
-atm-core = { path = "crates/atm-core" }
+atm-core = { path = "crates/atm-core", version = "=0.8.0" }

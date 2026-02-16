@@ -5,6 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Core library for agent-team-mail: file-based messaging for AI agent teams"
+keywords = ["ai-agents", "messaging", "team-communication", "claude", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 serde.workspace = true

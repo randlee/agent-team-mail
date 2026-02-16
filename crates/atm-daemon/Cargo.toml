@@ -5,6 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Plugin daemon for agent-team-mail: GitHub issues, CI monitoring, cross-computer bridge"
+keywords = ["ai-agents", "messaging", "daemon", "plugins", "automation"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "atm-daemon"
