@@ -1463,13 +1463,138 @@ Phase 6.4 Complete
 
 ## 10. Phase 8: Cross-Computer Bridge Plugin
 
-**Goal**: Bridge plugin enabling multi-machine agent teams with bidirectional inbox sync.
+**Goal**: Bridge plugin enabling multi-machine agent teams with bidirectional inbox sync via SSH/SFTP.
 
 **Branch prefix**: `feature/p8-*`
-**Depends on**: Phase 7 complete (Sprint 7.5 design planning)
-**Status**: Not planned (sprint details TBD in Sprint 7.5)
+**Integration branch**: `integrate/phase-8` (off `develop`)
+**Depends on**: Phase 7 complete
+**Status**: Design complete, ready for implementation
 
-**Design reference**: TBD (created in Sprint 7.5)
+**Design reference**: [`docs/phase8-bridge-design.md`](./phase8-bridge-design.md) (ARCH-CTM reviewed, approved)
+
+**Key decisions**:
+- Local `<agent>.json` files NEVER modified (Claude Code contract)
+- Remote origin files additive: `<agent>.<hostname>.json` alongside local files
+- Hub-spoke topology, SSH/SFTP transport, atomic temp+rename writes
+- Filename parsing: match suffix against hostname registry (not dot-split)
+- Bridge assigns `message_id` to messages lacking one
+- Self-write filtering to prevent event storm feedback loop
+
+### Sprint 8.1 — Bridge Config + Plugin Scaffold
+**Goal**: Bridge plugin scaffold and configuration model.
+**Branch**: `feature/p8-s1-bridge-config`
+
+**Deliverables**:
+- Bridge plugin scaffold implementing Plugin trait (`init`/`run`/`shutdown`)
+- Bridge config structs: hostname, role (hub/spoke), remotes list, sync interval
+- Hostname registry with collision detection
+- Alias resolution
+- Config parsing from `[plugins.bridge]` in `.atm.toml`
+- Unit tests for config parsing and hostname validation
+
+**Files**:
+- `crates/atm-daemon/src/plugins/bridge/mod.rs`
+- `crates/atm-daemon/src/plugins/bridge/config.rs`
+- `crates/atm-core/src/config/` (bridge config types)
+
+### Sprint 8.2 — Per-Origin Read Path + Watcher Fix
+**Goal**: Enable reading from multiple per-origin inbox files. Can run in parallel with Sprint 8.3.
+**Branch**: `feature/p8-s2-read-path`
+
+**Deliverables**:
+- New `inbox_read_merged(team_dir, agent_name) -> Vec<InboxMessage>` in `atm-core::io::inbox`
+  - Lists inbox dir, filters by known hostnames from registry
+  - Merges, deduplicates by `message_id`, sorts by timestamp
+  - Backward-compatible: falls back to `<agent>.json` only when bridge not configured
+- Update CLI `read.rs` to call merged reader
+- Update CLI `inbox.rs` to call merged reader
+- Update daemon watcher `parse_event`: add `origin: Option<String>` to `InboxEvent`, normalize agent name by matching known agent names + hostname registry (NOT dot-split — agent names may contain dots)
+- Verify daemon `event_loop.rs` cursor tracking with per-origin files
+- Unit + integration tests for merge, dedup, and watcher parsing (include test for agent name containing dots with hostname suffix)
+
+**Files**:
+- `crates/atm-core/src/io/inbox.rs` (new `inbox_read_merged`)
+- `crates/atm/src/commands/read.rs`
+- `crates/atm/src/commands/inbox.rs`
+- `crates/atm-daemon/src/daemon/watcher.rs`
+- `crates/atm-daemon/src/daemon/event_loop.rs`
+
+### Sprint 8.3 — SSH/SFTP Transport
+**Goal**: Transport abstraction with SSH/SFTP implementation. Can run in parallel with Sprint 8.2.
+**Branch**: `feature/p8-s3-ssh-transport`
+
+**Deliverables**:
+- Transport trait: `connect`, `upload`, `download`, `list`, `rename`
+- SSH/SFTP implementation using `russh`/`ssh2` crate
+- `ControlMaster` connection pooling and lifecycle
+- Mock transport implementation for tests
+- Connection health check, retry with exponential backoff
+- Unit tests with mock transport
+- SSH tests gated behind `ATM_TEST_SSH=1` feature flag
+
+**Files**:
+- `crates/atm-daemon/src/plugins/bridge/transport.rs`
+- `crates/atm-daemon/src/plugins/bridge/ssh.rs`
+- `crates/atm-daemon/src/plugins/bridge/mock_transport.rs`
+
+### Sprint 8.4 — Sync Engine + Dedup
+**Goal**: Core sync logic connecting transport to inbox files.
+**Branch**: `feature/p8-s4-sync-engine`
+**Depends on**: Sprint 8.2 + Sprint 8.3
+
+**Deliverables**:
+- Push cycle: watch local inbox → SFTP new messages to remote `<agent>.<local-hostname>.json`
+- Pull cycle: download remote origin files → write locally
+- Atomic remote writes (temp+rename via transport trait)
+- Cursor/watermark tracking to avoid re-transferring old messages
+- `message_id` assignment for messages that lack one
+- Self-write filtering (HashSet with TTL to prevent feedback loop)
+- **Invariant**: local `<agent>.json` is NEVER modified by bridge; only per-origin `<agent>.<hostname>.json` files are written
+- Integration tests with mock transport simulating 2-node sync (verify local inbox untouched)
+
+**Files**:
+- `crates/atm-daemon/src/plugins/bridge/sync.rs`
+- `crates/atm-daemon/src/plugins/bridge/dedup.rs`
+- `crates/atm-daemon/tests/bridge_sync.rs`
+
+### Sprint 8.5 — Team Config Sync + Hardening
+**Goal**: Production hardening, CLI commands, and documentation.
+**Branch**: `feature/p8-s5-hardening`
+**Depends on**: Sprint 8.4
+
+**Deliverables**:
+- Sync team config from hub to spokes
+- Hostname registry warnings on config sync
+- Logging and operational metrics
+- Failure handling and retry policy for partial syncs
+- Retention extension: `RetentionConfig` handles per-origin files
+- Stale `.bridge-tmp` file cleanup on startup
+- `atm bridge status` / `atm bridge sync` CLI commands
+- **Invariant**: local `<agent>.json` is NEVER modified by bridge; only per-origin files are written
+- End-to-end integration test: 3-node simulated topology with mock transport (verify local inbox untouched)
+- Documentation and ops checklist
+
+**Files**:
+- `crates/atm-daemon/src/plugins/bridge/`
+- `crates/atm/src/commands/bridge.rs`
+- `crates/atm-daemon/tests/bridge_e2e.rs`
+- `docs/`
+
+### Phase 8 Dependency Graph
+
+```
+Sprint 8.1 (Config + Scaffold)
+    │
+    ├──→ Sprint 8.2 (Read Path + Watcher)  ──→ Sprint 8.4 (Sync Engine)
+    │                                              │
+    └──→ Sprint 8.3 (SSH Transport)  ─────────────┘
+                                                   │
+                                              Sprint 8.5 (Config Sync + Hardening)
+```
+
+- 8.2 and 8.3 can run **in parallel** after 8.1 completes
+- 8.4 depends on both 8.2 (read path) and 8.3 (transport)
+- 8.5 depends on 8.4
 
 ---
 
@@ -1516,21 +1641,24 @@ Additional plugins planned (each is a self-contained sprint series):
 | **6** | 6.2 | CI Monitor Plugin Core | ✅ | [#36](https://github.com/randlee/agent-team-mail/pull/36) |
 | **6** | 6.3 | CI Monitor Testing + Azure External | ✅ | [#37](https://github.com/randlee/agent-team-mail/pull/37) |
 | **6.4** | — | Design Reconciliation | ✅ | [#40](https://github.com/randlee/agent-team-mail/pull/40) |
-| **7** | 7.1 | Worker Adapter Trait + Codex Backend | — | — |
-| **7** | 7.2 | Message Routing + Response Capture + Activity Tracking | — | — |
-| **7** | 7.3 | Worker Lifecycle + Health Monitoring | — | — |
-| **7** | 7.4 | Integration Testing + Config Validation | — | — |
-| **7** | 7.5 | Phase 7 Review + Phase 8 Bridge Design | — | — |
+| **7** | 7.1–7.4 | Worker Adapter + Integration Tests | ✅ | [#44](https://github.com/randlee/agent-team-mail/pull/44), [#49](https://github.com/randlee/agent-team-mail/pull/49) |
+| **7** | 7.5 | Phase 7 Review + Phase 8 Bridge Design | ✅ | [#52](https://github.com/randlee/agent-team-mail/pull/52) |
+| **8** | 8.1 | Bridge Config + Plugin Scaffold | — | — |
+| **8** | 8.2 | Per-Origin Read Path + Watcher Fix | — | — |
+| **8** | 8.3 | SSH/SFTP Transport | — | — |
+| **8** | 8.4 | Sync Engine + Dedup | — | — |
+| **8** | 8.5 | Team Config Sync + Hardening | — | — |
 
-**Completed**: 26 sprints + 1 design reconciliation across 6 phases (CI green)
-**Next**: Phase 7 — Async Agent Worker Adapter (5 sprints)
+**Completed**: 31 sprints + 1 design reconciliation across 7 phases (CI green)
+**Next**: Phase 8 — Cross-Computer Bridge Plugin (5 sprints, 8.2/8.3 parallel)
 
 **Phase integration PRs**:
 | Phase | Integration PR | Status |
 |-------|---------------|--------|
 | Phase 3 | [#20](https://github.com/randlee/agent-team-mail/pull/20) | ✅ Merged |
 | Phase 4 | [#25](https://github.com/randlee/agent-team-mail/pull/25) | ✅ Merged |
-| Phase 5 | [#30](https://github.com/randlee/agent-team-mail/pull/30), [#33](https://github.com/randlee/agent-team-mail/pull/33) | ✅ Merged / Pending |
+| Phase 5 | [#30](https://github.com/randlee/agent-team-mail/pull/30), [#33](https://github.com/randlee/agent-team-mail/pull/33) | ✅ Merged |
+| Phase 7 | [#50](https://github.com/randlee/agent-team-mail/pull/50), [#51](https://github.com/randlee/agent-team-mail/pull/51) | ✅ Merged |
 
 ---
 
