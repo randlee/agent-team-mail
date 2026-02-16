@@ -35,6 +35,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Ensure cross-compilation target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
