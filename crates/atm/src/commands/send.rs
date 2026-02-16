@@ -75,6 +75,10 @@ pub fn execute(args: SendArgs) -> Result<()> {
     // Override sender identity if --from provided
     if let Some(ref from) = args.from {
         config.core.identity = from.clone();
+    } else if config.core.identity == "human" {
+        // If identity is still "human" (default), try to auto-detect from team context
+        config.core.identity = detect_sender_identity(&config.core.default_team, &home_dir)
+            .unwrap_or_else(|| "human".to_string());
     }
 
     // Parse addressing (agent@team or just agent)
@@ -350,6 +354,50 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     atomic_swap(team_config_path, &tmp_path)?;
 
     Ok(())
+}
+
+/// Detect sender identity from team context
+///
+/// Attempts to match the current process with a team member by checking:
+/// 1. ATM_IDENTITY env var (already checked by config resolution)
+/// 2. Team config members list (checks for session ID or process context)
+///
+/// Returns None if no match found (caller should default to "human")
+fn detect_sender_identity(team_name: &str, home_dir: &Path) -> Option<String> {
+    // Load team config
+    let team_config_path = home_dir
+        .join(".claude/teams")
+        .join(team_name)
+        .join("config.json");
+
+    if !team_config_path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&team_config_path).ok()?;
+    let team_config: TeamConfig = serde_json::from_str(&content).ok()?;
+
+    // Try to match by session ID (from env)
+    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID") {
+        for member in &team_config.members {
+            if member.agent_id.starts_with(&format!("{session_id}@")) {
+                return Some(member.name.clone());
+            }
+        }
+    }
+
+    // Try to match by CWD (if agent's cwd matches current dir)
+    if let Ok(current_dir) = std::env::current_dir() {
+        let current_path = current_dir.to_string_lossy();
+        for member in &team_config.members {
+            if member.cwd == current_path {
+                return Some(member.name.clone());
+            }
+        }
+    }
+
+    // No match found
+    None
 }
 
 #[cfg(test)]

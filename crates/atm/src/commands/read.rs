@@ -10,6 +10,8 @@ use crate::util::addressing::parse_address;
 use crate::util::settings::get_home_dir;
 use crate::util::state::{get_last_seen, load_seen_state, save_seen_state, update_last_seen};
 
+use super::wait::{wait_for_message, WaitResult};
+
 /// Read messages from an inbox
 ///
 /// By default, shows unread messages from your own inbox and marks them as read.
@@ -58,6 +60,10 @@ pub struct ReadArgs {
     /// Output as JSON
     #[arg(long)]
     json: bool,
+
+    /// Wait for new messages (timeout in seconds). Exit 0 if message received, 1 if timeout
+    #[arg(long)]
+    timeout: Option<u64>,
 }
 
 /// Execute the read command
@@ -158,6 +164,89 @@ pub fn execute(args: ReadArgs) -> Result<()> {
     if let Some(limit) = args.limit {
         let start = filtered_messages.len().saturating_sub(limit);
         filtered_messages = filtered_messages[start..].to_vec();
+    }
+
+    // If timeout specified and no messages found, wait for new messages
+    if filtered_messages.is_empty() && let Some(timeout_secs) = args.timeout {
+        let inboxes_dir = team_dir.join("inboxes");
+
+        // Extract hostnames for bridge-synced messages
+        let hostnames: Option<Vec<String>> = hostname_registry.as_ref().map(|reg| {
+            reg.remotes().map(|r| r.hostname.clone()).collect()
+        });
+
+        eprintln!("Waiting for new messages (timeout: {timeout_secs}s)...");
+
+        match wait_for_message(
+            &inboxes_dir,
+            &agent_name,
+            timeout_secs,
+            hostnames.as_ref(),
+        )? {
+            WaitResult::MessageReceived => {
+                // Re-read messages and apply filters
+                let new_messages = atm_core::io::inbox::inbox_read_merged(
+                    &team_dir,
+                    &agent_name,
+                    hostname_registry.as_ref(),
+                )?;
+
+                let mut new_filtered = new_messages.clone();
+
+                // Re-apply the same filters
+                if !args.all && !use_since_last_seen {
+                    new_filtered.retain(|m| !m.read);
+                }
+
+                if let Some(last_seen_dt) = last_seen {
+                    new_filtered.retain(|m| {
+                        DateTime::parse_from_rfc3339(&m.timestamp)
+                            .map(|dt| dt > last_seen_dt)
+                            .unwrap_or(false)
+                    });
+                }
+
+                if let Some(ref from_name) = args.from {
+                    new_filtered.retain(|m| m.from == *from_name);
+                }
+
+                if let Some(ref since_ts) = args.since {
+                    let since_dt = DateTime::parse_from_rfc3339(since_ts)
+                        .map_err(|e| anyhow::anyhow!("Invalid timestamp format: {e}"))?;
+                    new_filtered.retain(|m| {
+                        if let Ok(msg_dt) = DateTime::parse_from_rfc3339(&m.timestamp) {
+                            msg_dt > since_dt
+                        } else {
+                            false
+                        }
+                    });
+                }
+
+                if let Some(limit) = args.limit {
+                    let start = new_filtered.len().saturating_sub(limit);
+                    new_filtered = new_filtered[start..].to_vec();
+                }
+
+                // Use the new filtered messages
+                filtered_messages = new_filtered;
+            }
+            WaitResult::Timeout => {
+                if args.json {
+                    let output = serde_json::json!({
+                        "action": "read",
+                        "agent": agent_name,
+                        "team": team_name,
+                        "messages": [],
+                        "count": 0,
+                        "timeout": true,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    println!("Timeout: No new messages for {agent_name}@{team_name}");
+                }
+                std::process::exit(1);
+            }
+        }
     }
 
     // Mark messages as read (unless --no-mark specified)

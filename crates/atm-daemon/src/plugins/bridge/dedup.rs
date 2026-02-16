@@ -5,12 +5,88 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use uuid::Uuid;
 
 use atm_core::schema::InboxMessage;
+
+/// Maximum number of message_ids to keep in dedup cache
+const MAX_SYNCED_MESSAGE_IDS: usize = 10_000;
+
+/// LRU cache for synced message IDs
+///
+/// Maintains a bounded set of recently synced message IDs with LRU eviction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LruMessageIdCache {
+    /// Set of synced message IDs for fast lookup
+    #[serde(default)]
+    ids: HashSet<String>,
+
+    /// Queue of message IDs in insertion order (oldest first)
+    #[serde(default)]
+    queue: VecDeque<String>,
+
+    /// Maximum cache size
+    #[serde(default = "default_max_size")]
+    max_size: usize,
+}
+
+fn default_max_size() -> usize {
+    MAX_SYNCED_MESSAGE_IDS
+}
+
+impl LruMessageIdCache {
+    /// Create a new LRU cache with default size
+    pub fn new() -> Self {
+        Self {
+            ids: HashSet::new(),
+            queue: VecDeque::new(),
+            max_size: MAX_SYNCED_MESSAGE_IDS,
+        }
+    }
+
+    /// Check if a message_id has been synced
+    pub fn contains(&self, message_id: &str) -> bool {
+        self.ids.contains(message_id)
+    }
+
+    /// Insert a message_id, evicting oldest if necessary
+    pub fn insert(&mut self, message_id: String) {
+        // If already present, don't duplicate in queue
+        if self.ids.contains(&message_id) {
+            return;
+        }
+
+        // Add to set and queue
+        self.ids.insert(message_id.clone());
+        self.queue.push_back(message_id);
+
+        // Evict oldest if over capacity
+        while self.queue.len() > self.max_size {
+            if let Some(oldest) = self.queue.pop_front() {
+                self.ids.remove(&oldest);
+            }
+        }
+    }
+
+    /// Get current cache size
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Check if cache is empty
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
+
+impl Default for LruMessageIdCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Sync state for bridge plugin
 ///
@@ -25,11 +101,12 @@ pub struct SyncState {
     #[serde(default)]
     pub per_file_cursors: HashMap<PathBuf, usize>,
 
-    /// Set of all message_ids that have been synced
+    /// LRU cache of synced message_ids
     ///
-    /// Used for deduplication across multiple sync cycles
+    /// Used for deduplication across multiple sync cycles.
+    /// Bounded to MAX_SYNCED_MESSAGE_IDS entries with LRU eviction.
     #[serde(default)]
-    pub synced_message_ids: HashSet<String>,
+    pub synced_message_ids: LruMessageIdCache,
 }
 
 impl SyncState {
@@ -37,7 +114,7 @@ impl SyncState {
     pub fn new() -> Self {
         Self {
             per_file_cursors: HashMap::new(),
-            synced_message_ids: HashSet::new(),
+            synced_message_ids: LruMessageIdCache::new(),
         }
     }
 
@@ -117,6 +194,11 @@ impl SyncState {
     pub fn mark_synced(&mut self, message_id: String) {
         self.synced_message_ids.insert(message_id);
     }
+
+    /// Get the number of synced message IDs in cache
+    pub fn synced_count(&self) -> usize {
+        self.synced_message_ids.len()
+    }
 }
 
 impl Default for SyncState {
@@ -147,7 +229,7 @@ mod tests {
     fn test_sync_state_new() {
         let state = SyncState::new();
         assert!(state.per_file_cursors.is_empty());
-        assert!(state.synced_message_ids.is_empty());
+        assert_eq!(state.synced_count(), 0);
     }
 
     #[test]
@@ -213,7 +295,7 @@ mod tests {
         // Load should succeed and return empty state
         let state = SyncState::load(&state_path).await.unwrap();
         assert!(state.per_file_cursors.is_empty());
-        assert!(state.synced_message_ids.is_empty());
+        assert_eq!(state.synced_count(), 0);
     }
 
     #[tokio::test]
@@ -296,5 +378,84 @@ mod tests {
 
         assert_eq!(deserialized.get_cursor(Path::new("inboxes/agent-1.json")), 5);
         assert!(deserialized.is_synced("msg-001"));
+    }
+
+    #[test]
+    fn test_lru_cache_basic() {
+        let mut cache = LruMessageIdCache::new();
+        assert!(cache.is_empty());
+
+        cache.insert("msg-001".to_string());
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains("msg-001"));
+        assert!(!cache.contains("msg-002"));
+
+        cache.insert("msg-002".to_string());
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains("msg-001"));
+        assert!(cache.contains("msg-002"));
+    }
+
+    #[test]
+    fn test_lru_cache_duplicate_insert() {
+        let mut cache = LruMessageIdCache::new();
+        cache.insert("msg-001".to_string());
+        cache.insert("msg-001".to_string());
+
+        // Should only have 1 entry (no duplication)
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains("msg-001"));
+    }
+
+    #[test]
+    fn test_lru_cache_eviction() {
+        // Create a small cache for testing eviction
+        let mut cache = LruMessageIdCache {
+            ids: HashSet::new(),
+            queue: VecDeque::new(),
+            max_size: 3,
+        };
+
+        // Insert 3 items
+        cache.insert("msg-001".to_string());
+        cache.insert("msg-002".to_string());
+        cache.insert("msg-003".to_string());
+        assert_eq!(cache.len(), 3);
+
+        // Insert 4th item - should evict oldest (msg-001)
+        cache.insert("msg-004".to_string());
+        assert_eq!(cache.len(), 3);
+        assert!(!cache.contains("msg-001")); // Evicted
+        assert!(cache.contains("msg-002"));
+        assert!(cache.contains("msg-003"));
+        assert!(cache.contains("msg-004"));
+
+        // Insert 5th item - should evict msg-002
+        cache.insert("msg-005".to_string());
+        assert_eq!(cache.len(), 3);
+        assert!(!cache.contains("msg-002")); // Evicted
+        assert!(cache.contains("msg-003"));
+        assert!(cache.contains("msg-004"));
+        assert!(cache.contains("msg-005"));
+    }
+
+    #[test]
+    fn test_lru_cache_serialization() {
+        let mut cache = LruMessageIdCache::new();
+        cache.insert("msg-001".to_string());
+        cache.insert("msg-002".to_string());
+
+        let json = serde_json::to_string(&cache).unwrap();
+        let deserialized: LruMessageIdCache = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.len(), 2);
+        assert!(deserialized.contains("msg-001"));
+        assert!(deserialized.contains("msg-002"));
+    }
+
+    #[test]
+    fn test_lru_cache_default_max_size() {
+        let cache = LruMessageIdCache::new();
+        assert_eq!(cache.max_size, MAX_SYNCED_MESSAGE_IDS);
     }
 }

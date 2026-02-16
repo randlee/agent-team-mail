@@ -98,16 +98,12 @@ impl Plugin for BridgePlugin {
             );
         }
 
-        // Select transport implementation
-        let transport: Arc<dyn super::transport::Transport> = {
-            let has_remotes = !config.core.remotes.is_empty();
-            if has_remotes {
+        // Create transport implementations for each remote
+        let mut transports = std::collections::HashMap::new();
+        for remote in &config.core.remotes {
+            let transport: Arc<dyn super::transport::Transport> = {
                 #[cfg(feature = "ssh")]
                 {
-                    let remote = &config.core.remotes[0];
-                    if config.core.remotes.len() > 1 {
-                        warn!("SSH transport currently uses the first remote only; additional remotes will be ignored.");
-                    }
                     let ssh_config = super::ssh::SshConfig {
                         address: remote.address.clone(),
                         key_path: remote.ssh_key_path.as_ref().map(PathBuf::from),
@@ -117,13 +113,11 @@ impl Plugin for BridgePlugin {
                 }
                 #[cfg(not(feature = "ssh"))]
                 {
-                    warn!("SSH feature disabled; falling back to MockTransport.");
                     Arc::new(super::mock_transport::MockTransport::new())
                 }
-            } else {
-                Arc::new(super::mock_transport::MockTransport::new())
-            }
-        };
+            };
+            transports.insert(remote.hostname.clone(), transport);
+        }
 
         // Get team directory from mail service
         let team_dir = ctx.mail.teams_root().join(&ctx.system.default_team);
@@ -135,7 +129,7 @@ impl Plugin for BridgePlugin {
 
         let sync_engine = SyncEngine::new(
             Arc::new(config.clone()),
-            transport,
+            transports,
             team_dir.clone(),
             self.self_write_filter.clone(),
         )

@@ -102,7 +102,9 @@ async fn test_sync_push_with_mock_transport() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport.clone(), team_dir.clone(), new_filter())
+    let mut transports = HashMap::new();
+    transports.insert("desktop".to_string(), transport);
+    let mut engine = SyncEngine::new(config, transports, team_dir.clone(), new_filter())
         .await
         .unwrap();
 
@@ -113,9 +115,9 @@ async fn test_sync_push_with_mock_transport() {
     assert_eq!(stats.messages_pushed, 2);
     assert_eq!(stats.errors, 0);
 
-    // Verify cursor advanced
+    // Verify cursor advanced (per-remote cursor key)
     assert_eq!(
-        engine.state().get_cursor(&PathBuf::from("inboxes/agent-1.json")),
+        engine.state().get_cursor(&PathBuf::from("inboxes/agent-1.json:desktop")),
         2
     );
 
@@ -147,7 +149,9 @@ async fn test_sync_push_dedup() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir.clone(), new_filter())
+    let mut transports = HashMap::new();
+    transports.insert("desktop".to_string(), transport);
+    let mut engine = SyncEngine::new(config, transports, team_dir.clone(), new_filter())
         .await
         .unwrap();
 
@@ -184,7 +188,9 @@ async fn test_sync_push_assigns_message_ids() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir.clone(), new_filter())
+    let mut transports = HashMap::new();
+    transports.insert("desktop".to_string(), transport);
+    let mut engine = SyncEngine::new(config, transports, team_dir.clone(), new_filter())
         .await
         .unwrap();
 
@@ -208,7 +214,9 @@ async fn test_sync_engine_empty_inbox() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir, new_filter())
+    let mut transports = HashMap::new();
+    transports.insert("desktop".to_string(), transport);
+    let mut engine = SyncEngine::new(config, transports, team_dir, new_filter())
         .await
         .unwrap();
 
@@ -241,7 +249,9 @@ async fn test_sync_cycle() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir, new_filter())
+    let mut transports = HashMap::new();
+    transports.insert("desktop".to_string(), transport);
+    let mut engine = SyncEngine::new(config, transports, team_dir, new_filter())
         .await
         .unwrap();
 
@@ -280,7 +290,9 @@ async fn test_sync_cursor_advancement() {
     transport_mut.connect().await.unwrap();
     let transport = Arc::new(transport_mut) as Arc<dyn atm_daemon::plugins::bridge::Transport>;
 
-    let mut engine = SyncEngine::new(config, transport, team_dir.clone(), new_filter())
+    let mut transports = HashMap::new();
+    transports.insert("desktop".to_string(), transport);
+    let mut engine = SyncEngine::new(config, transports, team_dir.clone(), new_filter())
         .await
         .unwrap();
 
@@ -298,9 +310,9 @@ async fn test_sync_cursor_advancement() {
     let stats2 = engine.sync_push().await.unwrap();
     assert_eq!(stats2.messages_pushed, 1);
 
-    // Verify cursor advanced to 3
+    // Verify cursor advanced to 3 (per-remote cursor key)
     assert_eq!(
-        engine.state().get_cursor(&PathBuf::from("inboxes/agent-1.json")),
+        engine.state().get_cursor(&PathBuf::from("inboxes/agent-1.json:desktop")),
         3
     );
 }
