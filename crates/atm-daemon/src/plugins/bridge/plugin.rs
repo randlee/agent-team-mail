@@ -1,20 +1,41 @@
 //! Bridge plugin implementation
 
 use super::config::BridgePluginConfig;
+use super::self_write_filter::SelfWriteFilter;
+use super::sync::SyncEngine;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Bridge plugin — synchronizes agent inbox queues across machines
 pub struct BridgePlugin {
     /// Plugin configuration (populated during init)
     config: Option<BridgePluginConfig>,
+
+    /// Sync engine (populated during init if enabled)
+    sync_engine: Option<Arc<Mutex<SyncEngine>>>,
+
+    /// Self-write filter to prevent feedback loops
+    /// TODO: Wire up with watcher events once event handling is implemented
+    #[allow(dead_code)]
+    self_write_filter: Arc<Mutex<SelfWriteFilter>>,
+
+    /// Team directory
+    team_dir: Option<std::path::PathBuf>,
 }
 
 impl BridgePlugin {
     /// Create a new Bridge plugin instance
     pub fn new() -> Self {
-        Self { config: None }
+        Self {
+            config: None,
+            sync_engine: None,
+            self_write_filter: Arc::new(Mutex::new(SelfWriteFilter::default())),
+            team_dir: None,
+        }
     }
 }
 
@@ -75,7 +96,28 @@ impl Plugin for BridgePlugin {
             );
         }
 
+        // Create sync engine with mock transport for now
+        // TODO: Sprint 8.3 will replace this with SSH transport
+        let transport = Arc::new(super::mock_transport::MockTransport::new()) as Arc<dyn super::transport::Transport>;
+
+        // Get team directory from mail service
+        let team_dir = ctx.mail.teams_root().join(&ctx.system.default_team);
+
+        let sync_engine = SyncEngine::new(
+            Arc::new(config.clone()),
+            transport,
+            team_dir.clone(),
+        )
+        .await
+        .map_err(|e| PluginError::Runtime {
+            message: format!("Failed to create sync engine: {e}"),
+            source: None,
+        })?;
+
+        self.sync_engine = Some(Arc::new(Mutex::new(sync_engine)));
+        self.team_dir = Some(team_dir);
         self.config = Some(config);
+
         Ok(())
     }
 
@@ -91,11 +133,42 @@ impl Plugin for BridgePlugin {
             return Ok(());
         }
 
-        info!("Bridge plugin running (sync logic will be implemented in Sprint 8.4)");
+        let sync_engine = self.sync_engine.as_ref().ok_or_else(|| PluginError::Runtime {
+            message: "Sync engine not initialized".to_string(),
+            source: None,
+        })?;
 
-        // For now, just wait for cancellation
-        // Sprint 8.4 will add the actual sync engine here
-        cancel.cancelled().await;
+        info!("Bridge plugin running with sync interval: {} seconds", config.core.sync_interval_secs);
+
+        let mut interval = tokio::time::interval(Duration::from_secs(config.core.sync_interval_secs));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("Bridge plugin stopping");
+                    break;
+                }
+                _ = interval.tick() => {
+                    debug!("Running sync cycle");
+
+                    let mut engine = sync_engine.lock().await;
+                    match engine.sync_cycle().await {
+                        Ok(stats) => {
+                            if stats.messages_pushed > 0 || stats.messages_pulled > 0 || stats.errors > 0 {
+                                info!(
+                                    "Sync cycle: pushed={}, pulled={}, errors={}",
+                                    stats.messages_pushed, stats.messages_pulled, stats.errors
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!("Sync cycle failed: {}", e);
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
