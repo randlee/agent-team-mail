@@ -78,11 +78,12 @@ The Bridge plugin synchronizes agent inbox queues across machines. It does **not
 ```
 
 ### File Merge Strategy
-- On read, glob `inboxes/<agent>.json` + `inboxes/<agent>.*.json`.
-- Parse each file, collect all `InboxMessage` entries.
+- On read, list the `inboxes/` directory. For each file starting with `<agent>.` and ending with `.json`, check the suffix against known hostnames from the bridge's hostname registry. Include only files whose suffix is a registered hostname (or the base `<agent>.json` with no suffix). This avoids naive glob matching that could misparse dotted agent names.
+- Parse each matched file, collect all `InboxMessage` entries.
 - Dedup by `message_id` (first occurrence wins).
 - Sort by `timestamp` (stable tie-breaker: `message_id`, then origin filename).
 - Messages without `message_id` are included but cannot be deduplicated — bridge ensures all synced messages have one.
+- When bridge is not configured (no hostname registry), fall back to reading only `<agent>.json` (backward-compatible).
 
 ### Conflict Avoidance
 - Never write to a file owned by another host.
@@ -93,7 +94,7 @@ The Bridge plugin synchronizes agent inbox queues across machines. It does **not
 ### Watcher Compatibility
 - The daemon's `parse_event` uses `file_stem()` to extract agent names.
 - For `dev-agent.mac-studio.json`, `file_stem()` returns `dev-agent.mac-studio`.
-- **Fix**: Add `origin` field to `InboxEvent`. Parse filenames as `<agent>.<hostname>.json` — split on first `.` after the agent name. Fall back to `None` origin for plain `<agent>.json`.
+- **Fix**: Add `origin: Option<String>` field to `InboxEvent`. Do NOT split on `.` blindly — match the filename suffix against known hostnames from the bridge's hostname registry. If the suffix matches a registered hostname, strip it to recover the agent name. Otherwise treat the full file stem as the agent name (supports dots in agent names).
 - The `InboxEvent.agent` field must contain the normalized agent name (e.g., `dev-agent`), not the full file stem.
 
 ### CI Testing
