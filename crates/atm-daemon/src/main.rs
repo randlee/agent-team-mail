@@ -56,14 +56,8 @@ async fn main() -> Result<()> {
     }
 
     // Determine home and current directories for config resolution
-    // Check ATM_HOME first (useful for testing and custom deployments),
-    // then fall back to dirs::home_dir()
-    let home_dir = if let Ok(home) = std::env::var("ATM_HOME") {
-        PathBuf::from(home)
-    } else {
-        dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-    };
+    let home_dir = agent_team_mail_core::home::get_home_dir()
+        .context("Failed to determine home directory")?;
 
     let current_dir = std::env::current_dir()
         .context("Failed to get current directory")?;

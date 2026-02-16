@@ -207,13 +207,11 @@ fn determine_archive_dir(policy: &RetentionConfig) -> Result<PathBuf> {
         Ok(PathBuf::from(dir_str))
     } else {
         // Default: ~/.config/atm/archive/
-        // Check ATM_HOME first for test compatibility and custom deployments
-        let home = if let Ok(atm_home) = std::env::var("ATM_HOME") {
-            PathBuf::from(atm_home)
-        } else {
-            dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-        };
+        // When ATM_HOME is set, use it directly (test-friendly)
+        if let Ok(atm_home) = std::env::var("ATM_HOME") {
+            return Ok(PathBuf::from(atm_home).join("archive"));
+        }
+        let home = crate::home::get_home_dir()?;
         Ok(home.join(".config/atm/archive"))
     }
 }

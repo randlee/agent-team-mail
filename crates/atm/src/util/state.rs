@@ -56,12 +56,15 @@ pub fn update_last_seen(state: &mut SeenState, team: &str, agent: &str, timestam
 }
 
 pub fn state_path() -> Result<PathBuf> {
+    // When ATM_HOME is set, use it directly for state.json (test-friendly)
+    // When not set, use platform config directory
     if let Ok(atm_home) = std::env::var("ATM_HOME") {
         return Ok(PathBuf::from(atm_home).join("state.json"));
     }
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
-    Ok(config_dir.join("atm").join("state.json"))
+
+    // Use platform config directory for production
+    let home = agent_team_mail_core::home::get_home_dir()?;
+    Ok(home.join(".config/atm/state.json"))
 }
 
 #[cfg(test)]

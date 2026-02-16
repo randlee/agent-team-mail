@@ -144,9 +144,9 @@ impl Transport for SshTransport {
             let key_path = if let Some(ref path) = config.key_path {
                 path.clone()
             } else {
-                let home_dir =
-                    dirs::home_dir().ok_or_else(|| TransportError::AuthenticationFailed {
-                        message: "Could not determine home directory".to_string(),
+                let home_dir = agent_team_mail_core::home::get_home_dir()
+                    .map_err(|e| TransportError::AuthenticationFailed {
+                        message: format!("Could not determine home directory: {e}"),
                     })?;
                 home_dir.join(".ssh").join("id_rsa")
             };
