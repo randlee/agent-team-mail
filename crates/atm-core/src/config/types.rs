@@ -108,6 +108,12 @@ pub struct RetentionConfig {
     /// Archive directory path (default: ~/.config/atm/archive/)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_dir: Option<String>,
+    /// Enable daemon periodic retention (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+    /// Interval in seconds between daemon retention runs (default: 300 = 5 minutes)
+    #[serde(default = "default_interval_secs")]
+    pub interval_secs: u64,
 }
 
 impl Default for RetentionConfig {
@@ -117,6 +123,8 @@ impl Default for RetentionConfig {
             max_count: None,
             strategy: CleanupStrategy::Delete,
             archive_dir: None,
+            enabled: false,
+            interval_secs: default_interval_secs(),
         }
     }
 }
@@ -133,6 +141,10 @@ pub enum CleanupStrategy {
 
 fn default_strategy() -> CleanupStrategy {
     CleanupStrategy::Delete
+}
+
+fn default_interval_secs() -> u64 {
+    300 // 5 minutes
 }
 
 impl Config {
@@ -241,5 +253,70 @@ identity = "test-user"
 
         // Config without [plugins] section should have empty HashMap
         assert!(config.plugins.is_empty());
+    }
+
+    #[test]
+    fn test_retention_config_defaults() {
+        let config = RetentionConfig::default();
+        assert_eq!(config.max_age, None);
+        assert_eq!(config.max_count, None);
+        assert_eq!(config.strategy, CleanupStrategy::Delete);
+        assert_eq!(config.archive_dir, None);
+        assert!(!config.enabled, "Retention should be disabled by default");
+        assert_eq!(config.interval_secs, 300, "Default interval should be 5 minutes");
+    }
+
+    #[test]
+    fn test_retention_config_serialization() {
+        let toml_str = r#"
+[retention]
+max_age = "7d"
+max_count = 1000
+strategy = "archive"
+archive_dir = "/tmp/archive"
+enabled = true
+interval_secs = 600
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.retention.max_age, Some("7d".to_string()));
+        assert_eq!(config.retention.max_count, Some(1000));
+        assert_eq!(config.retention.strategy, CleanupStrategy::Archive);
+        assert_eq!(config.retention.archive_dir, Some("/tmp/archive".to_string()));
+        assert!(config.retention.enabled);
+        assert_eq!(config.retention.interval_secs, 600);
+    }
+
+    #[test]
+    fn test_retention_config_backward_compatibility() {
+        // Old config without enabled and interval_secs should still parse
+        let toml_str = r#"
+[retention]
+max_age = "7d"
+strategy = "delete"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.retention.max_age, Some("7d".to_string()));
+        assert_eq!(config.retention.strategy, CleanupStrategy::Delete);
+        // New fields should use defaults
+        assert!(!config.retention.enabled);
+        assert_eq!(config.retention.interval_secs, 300);
+    }
+
+    #[test]
+    fn test_retention_config_partial() {
+        let toml_str = r#"
+[retention]
+enabled = true
+interval_secs = 120
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.retention.enabled);
+        assert_eq!(config.retention.interval_secs, 120);
+        assert_eq!(config.retention.max_age, None);
+        assert_eq!(config.retention.max_count, None);
+        assert_eq!(config.retention.strategy, CleanupStrategy::Delete);
     }
 }
