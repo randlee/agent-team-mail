@@ -179,7 +179,7 @@ fn is_expired_by_age(message: &InboxMessage, max_age: &Duration, now: DateTime<U
 /// - "24h" -> 24 hours
 /// - "30d" -> 30 days
 /// - "168h" -> 168 hours (7 days)
-fn parse_duration(s: &str) -> Result<Duration> {
+pub fn parse_duration(s: &str) -> Result<Duration> {
     let s = s.trim();
     if s.is_empty() {
         anyhow::bail!("Empty duration string");
@@ -241,6 +241,109 @@ fn archive_messages(
         .with_context(|| format!("Failed to write archive file: {}", archive_file.display()))?;
 
     Ok(())
+}
+
+/// Result of cleaning report files
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanReportResult {
+    /// Number of files deleted
+    pub deleted_count: usize,
+    /// Number of files skipped (not expired)
+    pub skipped_count: usize,
+}
+
+impl CleanReportResult {
+    /// Create a new clean report result
+    pub fn new(deleted_count: usize, skipped_count: usize) -> Self {
+        Self {
+            deleted_count,
+            skipped_count,
+        }
+    }
+}
+
+/// Clean old report files from the CI monitor report directory
+///
+/// Scans `report_dir` for `*.json` and `*.md` files older than `max_age`
+/// and deletes them.
+///
+/// # Arguments
+///
+/// * `report_dir` - Directory containing report files
+/// * `max_age` - Maximum age for report files (files older than this are deleted)
+///
+/// # Returns
+///
+/// Returns `CleanReportResult` with counts of deleted and skipped files.
+///
+/// # Errors
+///
+/// Returns error if directory operations fail or if file metadata cannot be read.
+pub fn clean_report_files(report_dir: &Path, max_age: &Duration) -> Result<CleanReportResult> {
+    // If directory doesn't exist, nothing to do
+    if !report_dir.exists() {
+        return Ok(CleanReportResult::new(0, 0));
+    }
+
+    let now = Utc::now();
+    let mut deleted = 0;
+    let mut skipped = 0;
+
+    // Read directory entries
+    let entries = fs::read_dir(report_dir)
+        .with_context(|| format!("Failed to read report directory: {}", report_dir.display()))?;
+
+    for entry in entries {
+        let entry = entry.context("Failed to read directory entry")?;
+        let path = entry.path();
+
+        // Only process .json and .md files
+        if let Some(ext) = path.extension() {
+            let ext_str = ext.to_string_lossy();
+            if ext_str != "json" && ext_str != "md" {
+                continue;
+            }
+        } else {
+            // No extension, skip
+            continue;
+        }
+
+        // Get file metadata to check modification time
+        let metadata = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                // File might have been deleted concurrently, just warn and continue
+                tracing::warn!("Failed to get metadata for {}: {}", path.display(), e);
+                continue;
+            }
+        };
+
+        // Check if file is old enough to delete
+        let modified = metadata
+            .modified()
+            .context("Failed to get file modification time")?;
+
+        let modified_datetime: DateTime<Utc> = modified.into();
+        let age = now.signed_duration_since(modified_datetime);
+
+        if age > *max_age {
+            // Delete the file
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    deleted += 1;
+                    tracing::debug!("Deleted old report file: {}", path.display());
+                }
+                Err(e) => {
+                    // Log but don't fail the entire operation
+                    tracing::warn!("Failed to delete report file {}: {}", path.display(), e);
+                }
+            }
+        } else {
+            skipped += 1;
+        }
+    }
+
+    Ok(CleanReportResult::new(deleted, skipped))
 }
 
 #[cfg(test)]
@@ -312,5 +415,132 @@ mod tests {
         assert_eq!(result.kept, 10);
         assert_eq!(result.removed, 5);
         assert_eq!(result.archived, 5);
+    }
+
+    #[test]
+    fn test_clean_report_files_deletes_old_files() {
+        use tempfile::TempDir;
+        use std::fs::File;
+        use std::io::Write;
+
+        let temp_dir = TempDir::new().unwrap();
+        let report_dir = temp_dir.path().join("reports");
+        fs::create_dir_all(&report_dir).unwrap();
+
+        // Create old report files
+        let old_json = report_dir.join("old.json");
+        let old_md = report_dir.join("old.md");
+        File::create(&old_json).unwrap().write_all(b"{}").unwrap();
+        File::create(&old_md).unwrap().write_all(b"# Report").unwrap();
+
+        // Wait a bit to ensure files have a measurable age
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Clean files older than 50ms (both should be deleted)
+        let max_age = Duration::milliseconds(50);
+        let result = super::clean_report_files(&report_dir, &max_age).unwrap();
+
+        assert_eq!(result.deleted_count, 2);
+        assert_eq!(result.skipped_count, 0);
+        assert!(!old_json.exists());
+        assert!(!old_md.exists());
+    }
+
+    #[test]
+    fn test_clean_report_files_skips_recent_files() {
+        use tempfile::TempDir;
+        use std::fs::File;
+        use std::io::Write;
+
+        let temp_dir = TempDir::new().unwrap();
+        let report_dir = temp_dir.path().join("reports");
+        fs::create_dir_all(&report_dir).unwrap();
+
+        // Create recent report files
+        let recent_json = report_dir.join("recent.json");
+        let recent_md = report_dir.join("recent.md");
+        File::create(&recent_json).unwrap().write_all(b"{}").unwrap();
+        File::create(&recent_md).unwrap().write_all(b"# Report").unwrap();
+
+        // Clean files older than 1 hour (both should be skipped)
+        let max_age = Duration::hours(1);
+        let result = super::clean_report_files(&report_dir, &max_age).unwrap();
+
+        assert_eq!(result.deleted_count, 0);
+        assert_eq!(result.skipped_count, 2);
+        assert!(recent_json.exists());
+        assert!(recent_md.exists());
+    }
+
+    #[test]
+    fn test_clean_report_files_empty_directory() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let report_dir = temp_dir.path().join("reports");
+        fs::create_dir_all(&report_dir).unwrap();
+
+        let max_age = Duration::hours(1);
+        let result = super::clean_report_files(&report_dir, &max_age).unwrap();
+
+        assert_eq!(result.deleted_count, 0);
+        assert_eq!(result.skipped_count, 0);
+    }
+
+    #[test]
+    fn test_clean_report_files_nonexistent_directory() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let report_dir = temp_dir.path().join("nonexistent");
+
+        let max_age = Duration::hours(1);
+        let result = super::clean_report_files(&report_dir, &max_age).unwrap();
+
+        assert_eq!(result.deleted_count, 0);
+        assert_eq!(result.skipped_count, 0);
+    }
+
+    #[test]
+    fn test_clean_report_files_only_targets_json_and_md() {
+        use tempfile::TempDir;
+        use std::fs::File;
+        use std::io::Write;
+
+        let temp_dir = TempDir::new().unwrap();
+        let report_dir = temp_dir.path().join("reports");
+        fs::create_dir_all(&report_dir).unwrap();
+
+        // Create various file types
+        let json_file = report_dir.join("report.json");
+        let md_file = report_dir.join("report.md");
+        let txt_file = report_dir.join("report.txt");
+        let log_file = report_dir.join("report.log");
+
+        File::create(&json_file).unwrap().write_all(b"{}").unwrap();
+        File::create(&md_file).unwrap().write_all(b"# Report").unwrap();
+        File::create(&txt_file).unwrap().write_all(b"text").unwrap();
+        File::create(&log_file).unwrap().write_all(b"log").unwrap();
+
+        // Wait for files to age
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Clean files older than 50ms
+        let max_age = Duration::milliseconds(50);
+        let result = super::clean_report_files(&report_dir, &max_age).unwrap();
+
+        // Only json and md should be deleted
+        assert_eq!(result.deleted_count, 2);
+        assert!(!json_file.exists());
+        assert!(!md_file.exists());
+        assert!(txt_file.exists()); // Should still exist
+        assert!(log_file.exists()); // Should still exist
+    }
+
+    #[test]
+    fn test_clean_report_result() {
+        let result = CleanReportResult::new(5, 10);
+        assert_eq!(result.deleted_count, 5);
+        assert_eq!(result.skipped_count, 10);
     }
 }

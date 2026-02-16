@@ -177,6 +177,19 @@ pub async fn run(
         info!("Event dispatch loop stopped");
     });
 
+    // Start retention task if enabled
+    let retention_task = if ctx.config.retention.enabled {
+        info!("Starting retention task (interval: {}s)", ctx.config.retention.interval_secs);
+        let retention_cancel = cancel.clone();
+        let retention_ctx = ctx.clone();
+        Some(tokio::spawn(async move {
+            retention_loop(retention_ctx, retention_cancel).await;
+        }))
+    } else {
+        info!("Retention task disabled in config");
+        None
+    };
+
     info!("Daemon event loop running. Waiting for cancellation signal...");
 
     // Wait for cancellation
@@ -194,6 +207,12 @@ pub async fn run(
 
     if let Err(e) = tokio::time::timeout(Duration::from_secs(5), dispatch_task).await {
         error!("Dispatch task did not complete in time: {}", e);
+    }
+
+    if let Some(task) = retention_task {
+        if let Err(e) = tokio::time::timeout(Duration::from_secs(5), task).await {
+            error!("Retention task did not complete in time: {}", e);
+        }
     }
 
     // Graceful shutdown of all plugins
@@ -286,6 +305,186 @@ fn extract_hostname_registry(config: &agent_team_mail_core::config::Config) -> O
     }
 
     Some(std::sync::Arc::new(registry))
+}
+
+/// Periodic retention task
+///
+/// Runs retention on all team inbox files at configured intervals.
+/// Also cleans up old CI report files if CI monitor plugin is configured.
+async fn retention_loop(ctx: PluginContext, cancel: CancellationToken) {
+    use agent_team_mail_core::retention::{apply_retention, clean_report_files};
+    use std::path::PathBuf;
+
+    // Extract retention config
+    let config = &ctx.config.retention;
+    let interval_secs = config.interval_secs;
+
+    // Set up defaults for daemon mode
+    let max_age = config.max_age.clone().or_else(|| Some("30d".to_string()));
+    let max_count = config.max_count.or(Some(1000));
+
+    let retention_policy = agent_team_mail_core::config::RetentionConfig {
+        max_age,
+        max_count,
+        strategy: config.strategy,
+        archive_dir: config.archive_dir.clone(),
+        enabled: config.enabled,
+        interval_secs: config.interval_secs,
+    };
+
+    let teams_root = ctx.mail.teams_root().clone();
+
+    // Extract report_dir from CI monitor plugin config if present
+    let report_dir: Option<PathBuf> = ctx
+        .config
+        .plugin_config("ci-monitor")
+        .and_then(|table| table.get("report_dir"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+
+    info!("Retention loop started (interval: {}s)", interval_secs);
+
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("Retention loop cancelled");
+                break;
+            }
+            _ = interval.tick() => {
+                debug!("Running periodic retention");
+
+                // Enumerate team directories
+                let team_dirs = match std::fs::read_dir(&teams_root) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        error!("Failed to read teams directory {}: {}", teams_root.display(), e);
+                        continue;
+                    }
+                };
+
+                for team_entry in team_dirs {
+                    let team_entry = match team_entry {
+                        Ok(e) => e,
+                        Err(e) => {
+                            warn!("Failed to read team directory entry: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let team_path = team_entry.path();
+                    if !team_path.is_dir() {
+                        continue;
+                    }
+
+                    let team_name = match team_path.file_name() {
+                        Some(name) => name.to_string_lossy().to_string(),
+                        None => continue,
+                    };
+
+                    // Enumerate agent inbox files in this team
+                    let agents = match std::fs::read_dir(&team_path) {
+                        Ok(entries) => entries,
+                        Err(e) => {
+                            warn!("Failed to read team directory {}: {}", team_path.display(), e);
+                            continue;
+                        }
+                    };
+
+                    for agent_entry in agents {
+                        let agent_entry = match agent_entry {
+                            Ok(e) => e,
+                            Err(e) => {
+                                warn!("Failed to read agent entry: {}", e);
+                                continue;
+                            }
+                        };
+
+                        let agent_path = agent_entry.path();
+
+                        // Look for inbox files: agent.json or agent.hostname.json
+                        if !agent_path.is_file() {
+                            continue;
+                        }
+
+                        let file_name = match agent_path.file_name() {
+                            Some(name) => name.to_string_lossy().to_string(),
+                            None => continue,
+                        };
+
+                        // Parse agent name from filename
+                        // Format: <agent>.json or <agent>.<hostname>.json
+                        let agent_name = if file_name.ends_with(".json") {
+                            let base = &file_name[..file_name.len() - 5]; // Remove .json
+                            // Extract first component before any dots
+                            base.split('.').next().unwrap_or(base).to_string()
+                        } else {
+                            continue;
+                        };
+
+                        // Apply retention to this inbox
+                        debug!("Applying retention to {}/{}/{}", team_name, agent_name, file_name);
+                        match apply_retention(
+                            &agent_path,
+                            &team_name,
+                            &agent_name,
+                            &retention_policy,
+                            false, // Not a dry run
+                        ) {
+                            Ok(result) => {
+                                if result.removed > 0 {
+                                    info!(
+                                        "Retention: {}/{}/{}: kept={}, removed={}, archived={}",
+                                        team_name, agent_name, file_name,
+                                        result.kept, result.removed, result.archived
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Retention failed for {}/{}/{}: {}",
+                                    team_name, agent_name, file_name, e
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Clean up old report files if configured
+                if let Some(ref dir) = report_dir {
+                    debug!("Cleaning old report files from {}", dir.display());
+
+                    // Use max_age for report files (default 30 days)
+                    let max_age_str = retention_policy.max_age.as_deref().unwrap_or("30d");
+                    let max_age_duration = match agent_team_mail_core::retention::parse_duration(max_age_str) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            error!("Invalid max_age duration '{}': {}", max_age_str, e);
+                            continue;
+                        }
+                    };
+
+                    match clean_report_files(dir, &max_age_duration) {
+                        Ok(result) => {
+                            if result.deleted_count > 0 {
+                                info!(
+                                    "Report cleanup: deleted={}, skipped={}",
+                                    result.deleted_count, result.skipped_count
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!("Report cleanup failed: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    info!("Retention loop stopped");
 }
 
 #[cfg(test)]

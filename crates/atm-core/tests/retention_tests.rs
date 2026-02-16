@@ -61,6 +61,8 @@ fn test_retention_by_max_age() {
         max_count: None,
         strategy: CleanupStrategy::Delete,
         archive_dir: None,
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
@@ -95,6 +97,8 @@ fn test_retention_by_max_count() {
         max_count: Some(5),
         strategy: CleanupStrategy::Delete,
         archive_dir: None,
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
@@ -131,6 +135,8 @@ fn test_retention_combined_age_and_count() {
         max_count: Some(3),
         strategy: CleanupStrategy::Delete,
         archive_dir: None,
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
@@ -172,6 +178,8 @@ fn test_archive_strategy() {
         max_count: None,
         strategy: CleanupStrategy::Archive,
         archive_dir: Some(archive_dir.to_str().unwrap().to_string()),
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
@@ -228,6 +236,8 @@ fn test_delete_strategy() {
         max_count: None,
         strategy: CleanupStrategy::Delete,
         archive_dir: Some(archive_dir.to_str().unwrap().to_string()),
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
@@ -263,6 +273,8 @@ fn test_dry_run() {
         max_count: None,
         strategy: CleanupStrategy::Delete,
         archive_dir: None,
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, true).unwrap();
@@ -291,6 +303,8 @@ fn test_empty_inbox() {
         max_count: None,
         strategy: CleanupStrategy::Delete,
         archive_dir: None,
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
@@ -316,6 +330,8 @@ fn test_nonexistent_inbox() {
         max_count: None,
         strategy: CleanupStrategy::Delete,
         archive_dir: None,
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
@@ -346,6 +362,8 @@ fn test_no_data_loss_within_policy() {
         max_count: None,
         strategy: CleanupStrategy::Delete,
         archive_dir: None,
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
@@ -398,6 +416,8 @@ fn test_retention_hours_duration() {
         max_count: None,
         strategy: CleanupStrategy::Delete,
         archive_dir: None,
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
@@ -432,6 +452,8 @@ fn test_no_retention_policy_keeps_all() {
         max_count: None,
         strategy: CleanupStrategy::Delete,
         archive_dir: None,
+        enabled: false,
+        interval_secs: 300,
     };
 
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
