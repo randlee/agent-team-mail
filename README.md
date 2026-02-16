@@ -35,6 +35,12 @@ brew tap randlee/tap
 brew install agent-team-mail
 ```
 
+### crates.io
+
+```bash
+cargo install agent-team-mail
+```
+
 ### Build from Source
 
 ```bash

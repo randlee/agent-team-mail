@@ -48,31 +48,45 @@ brew tap randlee/tap
 brew install agent-team-mail
 ```
 
-### 3. crates.io (Not Yet Published)
+### 3. crates.io (Automated)
 
-**Status**: Not published. All three crate names are available on crates.io.
+**Trigger**: Runs automatically as part of the release workflow after the GitHub Release is created.
 
-**Crates to publish** (in dependency order):
+**Crates published** (in dependency order, with 60s indexing delay between each):
 1. `agent-team-mail-core` — core library
 2. `agent-team-mail` — CLI binary
 3. `agent-team-mail-daemon` — daemon binary
 
-**Prerequisites**:
-- Create a crates.io account and generate an API token at https://crates.io/settings/tokens
-- Login: `cargo login <token>`
-- Ensure all `Cargo.toml` files have required metadata (already present):
-  - `description`, `license`, `repository`, `homepage`, `keywords`, `categories`
-- The workspace `Cargo.toml` uses path dependencies with version pinning (`version = "=0.8.0"`), which is correct for publishing
+**Setup** (one-time):
+1. Create a crates.io account at https://crates.io (login with GitHub)
+2. Generate an API token at https://crates.io/settings/tokens with publish scope
+3. Add the token as a GitHub repository secret named `CARGO_REGISTRY_TOKEN`:
+   - Go to https://github.com/randlee/agent-team-mail/settings/secrets/actions
+   - Click "New repository secret"
+   - Name: `CARGO_REGISTRY_TOKEN`, Value: your crates.io token
+4. Create a GitHub environment named `crates-io`:
+   - Go to https://github.com/randlee/agent-team-mail/settings/environments
+   - Click "New environment", name it `crates-io`
+   - Optionally add protection rules (e.g., required reviewers)
 
-**Publishing commands** (must be run in order):
-```bash
-cargo publish -p agent-team-mail-core
-# Wait for crates.io to index (~1-2 minutes)
-cargo publish -p agent-team-mail
-cargo publish -p agent-team-mail-daemon
-```
+**What happens**:
+- The `publish-crates` job in `.github/workflows/release.yml` runs after the GitHub Release is created
+- Publishes each crate in dependency order with 60s delays for crates.io indexing
+- Uses the `crates-io` environment for deployment protection
+
+**Cargo.toml metadata**: All required fields (`description`, `license`, `repository`, `homepage`, `keywords`, `categories`) are already present in workspace config.
 
 **Note**: The `atm-daemon` crate has an optional `ssh` feature (depends on `ssh2`). This is fine for crates.io — optional dependencies are not required at install time.
+
+**Manual publishing** (fallback if automated publish fails):
+```bash
+cargo login <your-crates-io-token>
+cargo publish -p agent-team-mail-core
+# Wait ~60s for crates.io indexing
+cargo publish -p agent-team-mail
+# Wait ~60s
+cargo publish -p agent-team-mail-daemon
+```
 
 ---
 
@@ -106,17 +120,11 @@ cargo publish -p agent-team-mail-daemon
 
 ### After Release
 
-4. **Update Homebrew tap**:
+4. **Verify crates.io publish**: The `publish-crates` job runs automatically after the GitHub Release is created. Check the Actions tab for status. If it fails, use the manual fallback commands in the crates.io section above.
+
+5. **Update Homebrew tap**:
    - Get SHA256s from `checksums.txt`
    - Update `Formula/agent-team-mail.rb` in `randlee/homebrew-tap`
-
-5. **Publish to crates.io** (when ready):
-   ```bash
-   cargo publish -p agent-team-mail-core
-   # wait ~2 minutes
-   cargo publish -p agent-team-mail
-   cargo publish -p agent-team-mail-daemon
-   ```
 
 6. **Announce**: Update any relevant documentation or channels
 
