@@ -884,6 +884,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_is_launch_command_detection() {
         assert!(is_launch_command(
             r#"{"version":1,"request_id":"r1","command":"launch","payload":{}}"#
