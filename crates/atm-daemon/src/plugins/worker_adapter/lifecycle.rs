@@ -457,6 +457,82 @@ pub async fn graceful_shutdown(
     backend.shutdown(handle).await
 }
 
+// ── PID-based process monitoring (Unix only) ─────────────────────────────────
+
+/// Get the PID of the process running in a tmux pane.
+///
+/// Runs `tmux display-message -t <pane_id> -p "#{pane_pid}"` and parses the
+/// output as a u32 PID.
+///
+/// # Returns
+///
+/// `Some(pid)` if the tmux pane is found and its PID is parseable, `None`
+/// otherwise.
+#[cfg(unix)]
+pub fn get_pane_pid(pane_id: &str) -> Option<u32> {
+    let output = std::process::Command::new("tmux")
+        .args(["display-message", "-t", pane_id, "-p", "#{pane_pid}"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    trimmed.parse::<u32>().ok()
+}
+
+/// Check whether a PID corresponds to a running process.
+///
+/// Uses `kill(pid, 0)` (signal 0) which checks process existence without
+/// sending a real signal. Returns `true` if the process exists and is
+/// accessible.
+#[cfg(unix)]
+pub fn is_pid_running(pid: u32) -> bool {
+    // SAFETY: kill(pid, 0) is a standard POSIX call that only probes
+    // process existence. It does not modify process state.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Poll the PID for a worker to detect if it has been killed.
+///
+/// Returns `true` if the worker is still running, `false` if the PID is gone.
+///
+/// # Arguments
+///
+/// * `handle` - Worker handle with `backend_id` set to the tmux pane ID
+///
+/// # Platform
+///
+/// Only available on Unix. Returns `true` on non-Unix platforms (conservative).
+#[cfg(unix)]
+pub fn poll_worker_pid(handle: &WorkerHandle) -> bool {
+    let Some(pid) = get_pane_pid(&handle.backend_id) else {
+        debug!(
+            "Could not determine PID for worker {} (pane {})",
+            handle.agent_id, handle.backend_id
+        );
+        return false;
+    };
+    let alive = is_pid_running(pid);
+    if !alive {
+        debug!(
+            "Worker {} (pane {}, PID {}) is no longer running",
+            handle.agent_id, handle.backend_id, pid
+        );
+    }
+    alive
+}
+
+/// Non-Unix stub: always reports the worker as running.
+#[cfg(not(unix))]
+pub fn poll_worker_pid(_handle: &WorkerHandle) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

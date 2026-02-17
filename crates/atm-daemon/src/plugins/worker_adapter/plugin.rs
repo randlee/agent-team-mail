@@ -1,9 +1,11 @@
 //! Worker Adapter plugin implementation
 
 use super::activity::ActivityTracker;
+use super::agent_state::{AgentState, AgentStateTracker};
 use super::capture::LogTailer;
 use super::codex_tmux::CodexTmuxBackend;
 use super::config::WorkersConfig;
+use super::hook_watcher::HookWatcher;
 use super::lifecycle::{self, LifecycleManager, WorkerState};
 use super::router::{ConcurrencyPolicy, MessageRouter};
 use super::trait_def::{WorkerAdapter, WorkerHandle};
@@ -12,10 +14,15 @@ use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use chrono::Utc;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tokio::time::{interval, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// Interval for PID-based process health polling (5 seconds per acceptance criteria).
+const PID_POLL_INTERVAL_SECS: u64 = 5;
 
 /// Worker Adapter plugin — manages async agent teammates in tmux panes
 pub struct WorkerAdapterPlugin {
@@ -33,6 +40,8 @@ pub struct WorkerAdapterPlugin {
     log_tailer: LogTailer,
     /// Lifecycle manager for worker health and restart
     lifecycle: LifecycleManager,
+    /// Turn-level agent state tracker (Launching/Busy/Idle/Killed)
+    agent_state: Arc<Mutex<AgentStateTracker>>,
     /// Cached context for runtime use
     ctx: Option<PluginContext>,
 }
@@ -48,6 +57,7 @@ impl WorkerAdapterPlugin {
             activity_tracker: ActivityTracker::default(),
             log_tailer: LogTailer::new(),
             lifecycle: LifecycleManager::new(),
+            agent_state: Arc::new(Mutex::new(AgentStateTracker::new())),
             ctx: None,
         }
     }
@@ -56,6 +66,23 @@ impl WorkerAdapterPlugin {
     #[allow(dead_code)]
     pub fn get_worker_states(&self) -> HashMap<String, WorkerState> {
         self.lifecycle.get_all_states()
+    }
+
+    /// Get turn-level agent states
+    #[allow(dead_code)]
+    pub fn get_agent_states(&self) -> HashMap<String, AgentState> {
+        self.agent_state.lock().unwrap().all_states()
+    }
+
+    /// Build the path to the hook events file.
+    ///
+    /// Path: `${ATM_HOME}/.claude/daemon/hooks/events.jsonl`
+    fn hook_events_path(ctx: &PluginContext) -> PathBuf {
+        ctx.system
+            .claude_root
+            .join("daemon")
+            .join("hooks")
+            .join("events.jsonl")
     }
 
     fn resolve_team_name<'a>(
@@ -218,6 +245,12 @@ impl WorkerAdapterPlugin {
 
         debug!("Sent message to worker {member_name}");
 
+        // Mark agent as Busy now that we've sent a message
+        {
+            let mut state = self.agent_state.lock().unwrap();
+            state.set_state(&member_name, AgentState::Busy);
+        }
+
         // Record activity after successful message send
         let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
             message: "Plugin context not initialized".to_string(),
@@ -331,6 +364,8 @@ impl WorkerAdapterPlugin {
 
         let handle = backend.spawn(member_name, command).await?;
         self.lifecycle.register_worker(member_name);
+        // Register agent in turn-level state tracker
+        self.agent_state.lock().unwrap().register_agent(member_name);
         self.workers.insert(member_name.to_string(), handle);
         debug!("Spawned worker for agent {config_key} (member: {member_name})");
 
@@ -373,6 +408,30 @@ impl WorkerAdapterPlugin {
         }
 
         Ok(())
+    }
+
+    /// Poll PIDs of all registered workers and mark killed agents.
+    ///
+    /// Runs every `PID_POLL_INTERVAL_SECS` seconds. On Unix, uses
+    /// `lifecycle::poll_worker_pid`. On other platforms is a no-op.
+    fn poll_pids_for_killed_agents(&self) {
+        let handles: Vec<(String, WorkerHandle)> = self
+            .workers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (member_name, handle) in handles {
+            if !lifecycle::poll_worker_pid(&handle) {
+                // PID is gone — transition to Killed if not already
+                let mut state = self.agent_state.lock().unwrap();
+                let current = state.get_state(&member_name);
+                if !matches!(current, Some(AgentState::Killed) | None) {
+                    warn!("Worker {member_name} PID gone — marking as Killed");
+                    state.set_state(&member_name, AgentState::Killed);
+                }
+            }
+        }
     }
 
     /// Rotate log files for all workers if needed
@@ -495,6 +554,11 @@ impl Plugin for WorkerAdapterPlugin {
                 &mut self.workers,
             )
             .await?;
+
+            // Register all auto-started workers in the turn-level state tracker
+            for member_name in self.workers.keys() {
+                self.agent_state.lock().unwrap().register_agent(member_name);
+            }
         }
 
         Ok(())
@@ -509,12 +573,32 @@ impl Plugin for WorkerAdapterPlugin {
 
         debug!("Worker Adapter plugin running with lifecycle management enabled");
 
+        // Start hook event watcher as a background task
+        if let Some(ctx) = &self.ctx {
+            let events_path = Self::hook_events_path(ctx);
+            // Ensure parent directory exists
+            if let Some(parent) = events_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    warn!("Could not create hook events directory {}: {e}", parent.display());
+                }
+            }
+            let watcher = HookWatcher::new(events_path, Arc::clone(&self.agent_state));
+            let watcher_cancel = cancel.clone();
+            tokio::spawn(async move {
+                watcher.run(watcher_cancel).await;
+            });
+            debug!("Hook event watcher started");
+        }
+
         // Set up periodic inactivity check (every 30 seconds)
         let mut inactivity_timer = interval(Duration::from_secs(30));
 
         // Set up periodic health check (configurable, default 30 seconds)
         let health_check_interval = Duration::from_secs(self.config.health_check_interval_secs);
         let mut health_check_timer = interval(health_check_interval);
+
+        // Set up periodic PID poll (every 5 seconds — detects killed agents)
+        let mut pid_poll_timer = interval(Duration::from_secs(PID_POLL_INTERVAL_SECS));
 
         // Set up periodic log rotation check (every 5 minutes)
         let mut log_rotation_timer = interval(Duration::from_secs(300));
@@ -534,6 +618,9 @@ impl Plugin for WorkerAdapterPlugin {
                     if let Err(e) = self.health_check_all_workers().await {
                         error!("Failed to perform health checks: {e}");
                     }
+                }
+                _ = pid_poll_timer.tick() => {
+                    self.poll_pids_for_killed_agents();
                 }
                 _ = log_rotation_timer.tick() => {
                     self.rotate_logs_if_needed();
@@ -561,8 +648,9 @@ impl Plugin for WorkerAdapterPlugin {
                     error!("Failed to shut down worker for {member_name}: {e}");
                 }
 
-                // Unregister from lifecycle manager
+                // Unregister from lifecycle manager and state tracker
                 self.lifecycle.unregister_worker(&member_name);
+                self.agent_state.lock().unwrap().unregister_agent(&member_name);
             }
 
             info!("All workers shut down");
@@ -673,5 +761,12 @@ mod tests {
 
         let formatted = plugin.format_message(&msg, "test-agent");
         assert_eq!(formatted, "Hello, agent!");
+    }
+
+    #[test]
+    fn test_agent_state_initially_empty() {
+        let plugin = WorkerAdapterPlugin::new();
+        let states = plugin.get_agent_states();
+        assert!(states.is_empty());
     }
 }

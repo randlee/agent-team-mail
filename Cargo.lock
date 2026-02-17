@@ -55,6 +55,7 @@ dependencies = [
  "dirs",
  "globset",
  "hostname",
+ "libc",
  "libloading",
  "notify",
  "rand",

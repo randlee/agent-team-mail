@@ -1004,7 +1004,6 @@ notify_target = "team-lead"
         use agent_team_mail_core::config::Config;
         use agent_team_mail_core::context::{Platform, RepoContext, SystemContext};
         use std::sync::Arc;
-        use std::collections::HashMap;
 
         let repo = RepoContext::new(
             "test-repo".to_string(),
