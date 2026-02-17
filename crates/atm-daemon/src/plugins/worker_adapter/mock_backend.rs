@@ -10,6 +10,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::debug;
 
+/// Mock backend payload for testing
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockPayload {
+    /// Fake process ID
+    pub process_id: u32,
+    /// Arbitrary test metadata
+    pub metadata: String,
+}
+
 /// Call record for mock backend operations
 #[derive(Debug, Clone)]
 pub enum MockCall {
@@ -147,10 +156,19 @@ impl WorkerAdapter for MockTmuxBackend {
             source: Some(Box::new(e)),
         })?;
 
+        // Create mock payload with test data
+        // Use a simple hash of agent_id for deterministic process_id
+        let process_id = agent_id.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32));
+        let mock_payload = MockPayload {
+            process_id,
+            metadata: format!("mock-worker-{agent_id}"),
+        };
+
         let handle = WorkerHandle {
             agent_id: agent_id.to_string(),
             backend_id: format!("mock-pane-{agent_id}"),
             log_file_path: log_path,
+            payload: Some(Arc::new(mock_payload)),
         };
 
         state.spawned_workers.insert(agent_id.to_string(), handle.clone());
@@ -310,5 +328,62 @@ mod tests {
 
         let content = std::fs::read_to_string(&handle.log_file_path).unwrap();
         assert_eq!(content, "Mock response text");
+    }
+
+    #[tokio::test]
+    async fn test_payload_present_on_spawn() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut backend = MockTmuxBackend::new(temp_dir.path().to_path_buf());
+
+        let handle = backend.spawn("test-agent", "{}").await.unwrap();
+
+        // Payload should be present
+        assert!(handle.payload.is_some());
+
+        // Downcast should work
+        let payload = handle.payload_ref::<MockPayload>();
+        assert!(payload.is_some());
+
+        let payload = payload.unwrap();
+        assert_eq!(payload.metadata, "mock-worker-test-agent");
+    }
+
+    #[tokio::test]
+    async fn test_payload_downcast_ref() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut backend = MockTmuxBackend::new(temp_dir.path().to_path_buf());
+
+        let handle = backend.spawn("test-agent", "{}").await.unwrap();
+
+        // Correct type
+        let payload = handle.payload_ref::<MockPayload>();
+        assert!(payload.is_some());
+        assert_eq!(payload.unwrap().metadata, "mock-worker-test-agent");
+
+        // Wrong type
+        #[derive(Debug)]
+        struct WrongPayload {}
+        let wrong = handle.payload_ref::<WrongPayload>();
+        assert!(wrong.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_payload_survives_registry_operations() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut backend = MockTmuxBackend::new(temp_dir.path().to_path_buf());
+
+        let handle = backend.spawn("test-agent", "{}").await.unwrap();
+
+        // Store in a map (simulating registry)
+        let mut registry = std::collections::HashMap::new();
+        registry.insert("test-agent".to_string(), handle);
+
+        // Retrieve from registry
+        let retrieved = registry.get("test-agent").unwrap();
+
+        // Payload should still be accessible (no clones involved)
+        let payload = retrieved.payload_ref::<MockPayload>();
+        assert!(payload.is_some());
+        assert_eq!(payload.unwrap().metadata, "mock-worker-test-agent");
     }
 }

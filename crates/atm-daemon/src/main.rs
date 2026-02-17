@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use agent_team_mail_daemon::daemon;
+use agent_team_mail_daemon::daemon::StatusWriter;
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
 use agent_team_mail_daemon::roster::RosterService;
 use clap::Parser;
@@ -56,14 +57,8 @@ async fn main() -> Result<()> {
     }
 
     // Determine home and current directories for config resolution
-    // Check ATM_HOME first (useful for testing and custom deployments),
-    // then fall back to dirs::home_dir()
-    let home_dir = if let Ok(home) = std::env::var("ATM_HOME") {
-        PathBuf::from(home)
-    } else {
-        dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-    };
+    let home_dir = agent_team_mail_core::home::get_home_dir()
+        .context("Failed to determine home directory")?;
 
     let current_dir = std::env::current_dir()
         .context("Failed to get current directory")?;
@@ -152,6 +147,13 @@ async fn main() -> Result<()> {
 
     info!("Registered {} plugin(s)", registry.len());
 
+    // Create status writer
+    let status_writer = Arc::new(StatusWriter::new(
+        home_dir.clone(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    ));
+    info!("Status writer initialized: {}", status_writer.status_path().display());
+
     // Create cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();
 
@@ -185,7 +187,7 @@ async fn main() -> Result<()> {
     });
 
     // Run the daemon event loop
-    daemon::run(&mut registry, &plugin_ctx, cancel_token)
+    daemon::run(&mut registry, &plugin_ctx, cancel_token, status_writer)
         .await
         .context("Daemon event loop failed")?;
 

@@ -15,13 +15,47 @@ Mail-like messaging for Claude agent teams.
 
 ## Installation
 
-Build and install from source:
+### Pre-built Binaries (GitHub Releases)
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/randlee/agent-team-mail/releases):
+
+| Platform | Archive |
+|----------|---------|
+| Linux (x86_64) | `atm_<version>_x86_64-unknown-linux-gnu.tar.gz` |
+| macOS (Intel) | `atm_<version>_x86_64-apple-darwin.tar.gz` |
+| macOS (Apple Silicon) | `atm_<version>_aarch64-apple-darwin.tar.gz` |
+| Windows (x86_64) | `atm_<version>_x86_64-pc-windows-msvc.zip` |
+
+Extract and place `atm` (and optionally `atm-daemon`) somewhere in your `$PATH`.
+
+### Homebrew (macOS/Linux)
 
 ```bash
-cargo install --path crates/atm
+brew tap randlee/tap
+brew install agent-team-mail
 ```
 
-The `atm` binary will be available in your `$PATH`.
+### crates.io
+
+```bash
+# Install the CLI
+cargo install agent-team-mail
+
+# Install the daemon (optional)
+cargo install agent-team-mail-daemon
+```
+
+### Build from Source
+
+```bash
+git clone https://github.com/randlee/agent-team-mail.git
+cd agent-team-mail
+cargo install --path crates/atm
+# Optionally install the daemon:
+cargo install --path crates/atm-daemon
+```
+
+The `atm` (and `atm-daemon`) binaries will be available in your `$PATH`.
 
 ## Quick Start
 

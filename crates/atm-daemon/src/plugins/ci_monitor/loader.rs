@@ -127,11 +127,7 @@ impl CiProviderLoader {
         if let Some(s) = path.to_str()
             && let Some(stripped) = s.strip_prefix("~/")
         {
-            // Try ATM_HOME first, then fall back to dirs::home_dir()
-            if let Ok(atm_home) = std::env::var("ATM_HOME") {
-                return PathBuf::from(atm_home).join(stripped);
-            }
-            if let Some(home) = dirs::home_dir() {
+            if let Ok(home) = agent_team_mail_core::home::get_home_dir() {
                 return home.join(stripped);
             }
         }

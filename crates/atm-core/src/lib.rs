@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod context;
+pub mod home;
 pub mod io;
 pub mod retention;
 pub mod schema;
