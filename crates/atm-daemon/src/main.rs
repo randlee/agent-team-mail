@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use agent_team_mail_daemon::daemon;
-use agent_team_mail_daemon::daemon::{new_pubsub_store, new_state_store, StatusWriter};
+use agent_team_mail_daemon::daemon::{new_launch_sender, new_pubsub_store, new_state_store, StatusWriter};
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
 use agent_team_mail_daemon::roster::RosterService;
 use clap::Parser;
@@ -142,10 +142,17 @@ async fn main() -> Result<()> {
     let state_store = new_state_store();
 
     // Create the shared pub/sub store.  When the worker adapter plugin is
-    // enabled, the plugin's internal store is extracted before registration
+    // enabled, the plugin's internal pub/sub Arc is captured before registration
     // and used here so CLI subscribe requests and notification delivery share
     // the same registry.  When the plugin is absent an empty store is used.
     let mut pubsub_store = new_pubsub_store();
+
+    // Create the launch channel.  When the worker adapter plugin is enabled we
+    // wire the receiver into the plugin and store the sender in the shared
+    // LaunchSender so the socket server can forward launch requests.  When the
+    // plugin is absent, the sender stays None and the socket server returns
+    // LAUNCH_UNAVAILABLE for any "launch" commands.
+    let launch_tx = new_launch_sender();
 
     // Register Worker Adapter plugin if configured
     if let Some(workers_config) = plugin_ctx.plugin_config("workers")
@@ -154,15 +161,25 @@ async fn main() -> Result<()> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+
+        // Store the sender in the shared LaunchSender so the socket server
+        // can forward launch requests.
+        {
+            let mut guard = launch_tx.lock().await;
+            *guard = Some(tx);
+        }
+
         // Build the plugin with the shared state store, then capture its
         // internal pub/sub Arc before registering (registration moves the plugin).
-        let plugin =
+        let mut worker_plugin =
             agent_team_mail_daemon::plugins::worker_adapter::WorkerAdapterPlugin::with_state_store(
                 Arc::clone(&state_store),
             );
-        pubsub_store = plugin.pubsub_store();
-        registry.register(plugin);
-        info!("Registered Worker Adapter plugin");
+        pubsub_store = worker_plugin.pubsub_store();
+        worker_plugin.set_launch_receiver(rx);
+        registry.register(worker_plugin);
+        info!("Registered Worker Adapter plugin with launch channel");
     }
 
     info!("Registered {} plugin(s)", registry.len());
@@ -214,6 +231,7 @@ async fn main() -> Result<()> {
         status_writer,
         state_store,
         pubsub_store,
+        launch_tx,
     )
     .await
     .context("Daemon event loop failed")?;

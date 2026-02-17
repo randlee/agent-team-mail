@@ -10,6 +10,7 @@ mod config_cmd;
 mod daemon;
 mod error;
 mod inbox;
+pub mod launch;
 mod members;
 mod read;
 mod request;
@@ -79,6 +80,9 @@ enum Commands {
 
     /// Tail recent output from a Codex agent's log
     Tail(tail::TailArgs),
+
+    /// Launch a new Codex agent via the daemon
+    Launch(launch::LaunchArgs),
 }
 
 impl Cli {
@@ -100,6 +104,7 @@ impl Cli {
             Commands::Subscribe(args) => subscribe::execute_subscribe(args),
             Commands::Unsubscribe(args) => subscribe::execute_unsubscribe(args),
             Commands::Tail(args) => tail::execute(args),
+            Commands::Launch(args) => launch::execute(args),
         }
     }
 }

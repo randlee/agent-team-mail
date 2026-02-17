@@ -9,8 +9,8 @@ pub use event_loop::run;
 pub use shutdown::graceful_shutdown;
 pub use spool_task::spool_drain_loop;
 pub use socket::{
-    new_pubsub_store, new_state_store, start_socket_server, SharedPubSubStore, SharedStateStore,
-    SocketServerHandle,
+    new_launch_sender, new_pubsub_store, new_state_store, start_socket_server, LaunchRequest,
+    LaunchSender, SharedPubSubStore, SharedStateStore, SocketServerHandle,
 };
 pub use status::{DaemonStatus, PluginStatus, PluginStatusKind, StatusWriter};
 pub use watcher::{watch_inboxes, InboxEvent, InboxEventKind};

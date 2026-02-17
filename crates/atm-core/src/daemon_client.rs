@@ -101,6 +101,100 @@ pub struct AgentSummary {
     pub state: String,
 }
 
+/// Configuration for launching a new agent via the daemon.
+///
+/// Sent as the payload of a `"launch"` socket command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchConfig {
+    /// Agent identity name (e.g., `"arch-ctm"`).
+    pub agent: String,
+    /// Team name (e.g., `"atm-dev"`).
+    pub team: String,
+    /// Command to run in the tmux pane (e.g., `"codex --yolo"`).
+    pub command: String,
+    /// Optional initial prompt to send after the agent reaches the `Idle` state.
+    pub prompt: Option<String>,
+    /// Readiness timeout in seconds. The daemon waits up to this long for the
+    /// agent state to transition to `Idle` before sending the initial prompt.
+    /// Defaults to 30 if omitted.
+    pub timeout_secs: u32,
+    /// Extra environment variables to export in the pane before starting the agent.
+    ///
+    /// `ATM_IDENTITY` and `ATM_TEAM` are always set automatically and do not
+    /// need to be included here.
+    pub env_vars: std::collections::HashMap<String, String>,
+}
+
+/// Result of a successful agent launch returned by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchResult {
+    /// Agent identity name.
+    pub agent: String,
+    /// tmux pane ID assigned to the new agent (e.g., `"%42"`).
+    pub pane_id: String,
+    /// Agent state string immediately after launch (`"launching"`, `"idle"`, etc.).
+    pub state: String,
+    /// Non-fatal warning, e.g., readiness timeout was reached before the agent
+    /// transitioned to `Idle`.
+    pub warning: Option<String>,
+}
+
+/// Request the daemon to launch a new agent.
+///
+/// This is a synchronous call: the function blocks until the daemon responds
+/// (the daemon itself may respond before full readiness, but the round-trip
+/// completes within the socket timeout).
+///
+/// Returns `Ok(None)` when:
+/// - The daemon is not running.
+/// - The platform does not support Unix sockets.
+/// - A connection-level I/O error occurs before any response is read.
+///
+/// Returns `Ok(Some(result))` on success.
+///
+/// Returns `Err` only for unexpected I/O errors *after* a connection is
+/// established and a request has been written.
+///
+/// # Arguments
+///
+/// * `config` - Launch configuration for the new agent.
+pub fn launch_agent(config: &LaunchConfig) -> anyhow::Result<Option<LaunchResult>> {
+    let payload = match serde_json::to_value(config) {
+        Ok(v) => v,
+        Err(e) => anyhow::bail!("Failed to serialize LaunchConfig: {e}"),
+    };
+
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "launch".to_string(),
+        payload,
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    if !response.is_ok() {
+        let msg = response
+            .error
+            .map(|e| format!("{}: {}", e.code, e.message))
+            .unwrap_or_else(|| "unknown daemon error".to_string());
+        anyhow::bail!("Daemon returned error for launch command: {msg}");
+    }
+
+    let payload = match response.payload {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    match serde_json::from_value::<LaunchResult>(payload) {
+        Ok(result) => Ok(Some(result)),
+        Err(e) => anyhow::bail!("Failed to parse LaunchResult from daemon response: {e}"),
+    }
+}
+
 /// Compute the well-known socket path for the ATM daemon.
 ///
 /// The path is `${ATM_HOME}/.claude/daemon/atm-daemon.sock`, where `ATM_HOME`
@@ -549,6 +643,103 @@ mod tests {
         let result = query_agent_pane("arch-ctm");
         assert!(result.is_ok());
         // Result is None unless daemon happens to be running
+    }
+
+    #[test]
+    fn test_launch_config_serialization() {
+        let mut env_vars = std::collections::HashMap::new();
+        env_vars.insert("EXTRA_VAR".to_string(), "value".to_string());
+
+        let config = LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: Some("Review the bridge module".to_string()),
+            timeout_secs: 30,
+            env_vars,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: LaunchConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.agent, "arch-ctm");
+        assert_eq!(decoded.team, "atm-dev");
+        assert_eq!(decoded.command, "codex --yolo");
+        assert_eq!(decoded.prompt.as_deref(), Some("Review the bridge module"));
+        assert_eq!(decoded.timeout_secs, 30);
+        assert_eq!(decoded.env_vars.get("EXTRA_VAR").map(String::as_str), Some("value"));
+    }
+
+    #[test]
+    fn test_launch_config_no_prompt_serialization() {
+        let config = LaunchConfig {
+            agent: "worker-1".to_string(),
+            team: "my-team".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 60,
+            env_vars: std::collections::HashMap::new(),
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: LaunchConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.agent, "worker-1");
+        assert!(decoded.prompt.is_none());
+        assert!(decoded.env_vars.is_empty());
+    }
+
+    #[test]
+    fn test_launch_result_serialization() {
+        let result = LaunchResult {
+            agent: "arch-ctm".to_string(),
+            pane_id: "%42".to_string(),
+            state: "launching".to_string(),
+            warning: None,
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: LaunchResult = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.agent, "arch-ctm");
+        assert_eq!(decoded.pane_id, "%42");
+        assert_eq!(decoded.state, "launching");
+        assert!(decoded.warning.is_none());
+    }
+
+    #[test]
+    fn test_launch_result_with_warning_serialization() {
+        let result = LaunchResult {
+            agent: "arch-ctm".to_string(),
+            pane_id: "%7".to_string(),
+            state: "launching".to_string(),
+            warning: Some("Readiness timeout reached".to_string()),
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: LaunchResult = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.warning.as_deref(), Some("Readiness timeout reached"));
+    }
+
+    #[test]
+    fn test_launch_agent_no_daemon_returns_none() {
+        let config = LaunchConfig {
+            agent: "test-agent".to_string(),
+            team: "test-team".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 5,
+            env_vars: std::collections::HashMap::new(),
+        };
+        // Without a running daemon the call should gracefully return Ok(None).
+        // On non-Unix platforms it always returns None.
+        // On Unix with no daemon socket present it also returns None.
+        let result = launch_agent(&config);
+        // The result should be Ok (no I/O error on missing socket)
+        assert!(result.is_ok());
+        // Result is None unless daemon happens to be running and handling "launch"
+        // (which it won't be in a unit test environment)
     }
 
     #[test]

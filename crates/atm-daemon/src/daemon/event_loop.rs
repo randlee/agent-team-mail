@@ -42,6 +42,11 @@ use tracing::{debug, error, info, warn};
 ///   Pass the same `Arc` from `WorkerAdapterPlugin::pubsub_store()` so that
 ///   CLI subscriptions are routed to the same registry that delivers notifications.
 ///   Pass `new_pubsub_store()` when the worker adapter is absent.
+/// * `launch_tx` - Shared sender for the agent launch channel.
+///   When the worker adapter plugin is enabled the caller should populate
+///   the inner `Option` with the sender half of the channel and pass the
+///   receiver to `WorkerAdapterPlugin::set_launch_receiver`.  Pass
+///   `new_launch_sender()` (with empty inner) when the plugin is absent.
 pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
@@ -49,6 +54,7 @@ pub async fn run(
     status_writer: Arc<StatusWriter>,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
+    launch_tx: crate::daemon::LaunchSender,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -106,7 +112,7 @@ pub async fn run(
             agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
         });
     let socket_cancel = cancel.clone();
-    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, socket_cancel).await {
+    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, socket_cancel).await {
         Ok(handle) => {
             if handle.is_some() {
                 info!("Unix socket server started successfully");
