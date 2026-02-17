@@ -10,9 +10,14 @@ use tempfile::TempDir;
 /// platform-specific differences in how `dirs::home_dir()` resolves.
 /// Also sets current_dir to avoid .atm.toml config leak from repo root.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
+    // Use a subdirectory as CWD to avoid:
+    // 1. .atm.toml config leak from the repo root
+    // 2. auto-identity CWD matching against team member CWD (temp_dir root)
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
         .env_remove("ATM_IDENTITY")
-        .current_dir(temp_dir.path());
+        .current_dir(&workdir);
 }
 
 /// Create a test team structure with multiple agents

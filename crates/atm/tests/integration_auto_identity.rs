@@ -61,6 +61,9 @@ fn setup_team() -> (TempDir, PathBuf) {
     fs::write(team_dir.join("inboxes/alice.json"), "[]").unwrap();
     fs::write(team_dir.join("inboxes/bob.json"), "[]").unwrap();
 
+    // Create workdir subdirectory for CWD isolation in tests
+    fs::create_dir_all(temp_dir.path().join("workdir")).unwrap();
+
     (temp_dir, team_dir)
 }
 
@@ -74,7 +77,7 @@ fn test_send_defaults_to_human_when_no_identity() {
     cmd.env("ATM_HOME", temp_dir.path())
         .env("ATM_TEAM", "test-team")
         .env_remove("ATM_IDENTITY") // Ensure no identity env var
-        .current_dir(temp_dir.path()) // Avoid .atm.toml in repo root
+        .current_dir(temp_dir.path().join("workdir")) // Avoid .atm.toml in repo root
         .arg("send")
         .arg("alice")
         .arg("Hello from human");
@@ -179,14 +182,15 @@ fn test_send_without_team_context_defaults_to_human() {
     .unwrap();
 
     fs::write(team_dir.join("inboxes/alice.json"), "[]").unwrap();
+    fs::create_dir_all(temp_dir.path().join("workdir")).unwrap();
 
     // Send without matching identity should default to "human"
-    // Set current_dir to temp_dir so .atm.toml in the repo root doesn't leak identity
+    // Set current_dir to workdir so .atm.toml in the repo root doesn't leak identity
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", temp_dir.path())
         .env("ATM_TEAM", "external-team")
         .env_remove("ATM_IDENTITY")
-        .current_dir(temp_dir.path()) // Avoid .atm.toml in repo root
+        .current_dir(temp_dir.path().join("workdir")) // Avoid .atm.toml in repo root
         .arg("send")
         .arg("alice")
         .arg("Message from outside");
