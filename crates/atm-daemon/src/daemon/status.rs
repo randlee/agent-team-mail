@@ -36,8 +36,8 @@ pub struct PluginStatus {
     pub status: PluginStatusKind,
     /// Last error message (if any)
     pub last_error: Option<String>,
-    /// ISO 8601 timestamp of last successful run
-    pub last_run: Option<String>,
+    /// ISO 8601 timestamp of last status update
+    pub last_updated: Option<String>,
 }
 
 /// Plugin status values
@@ -124,9 +124,16 @@ impl StatusWriter {
             .context("Failed to serialize daemon status")?;
 
         // Atomic write: temp file + rename
+        // On Windows, std::fs::rename doesn't replace existing files, so we remove first
         let temp_path = self.status_path.with_extension("json.tmp");
         std::fs::write(&temp_path, json.as_bytes())
             .context("Failed to write status temp file")?;
+
+        // Remove existing file if present (required for Windows compatibility)
+        if self.status_path.exists() {
+            std::fs::remove_file(&self.status_path)
+                .context("Failed to remove existing status file")?;
+        }
 
         std::fs::rename(&temp_path, &self.status_path)
             .context("Failed to rename status temp file to final path")?;
@@ -171,7 +178,7 @@ mod tests {
             enabled: true,
             status: PluginStatusKind::Running,
             last_error: None,
-            last_run: Some(format_timestamp(SystemTime::now())),
+            last_updated: Some(format_timestamp(SystemTime::now())),
         }];
 
         let teams = vec!["test-team".to_string()];
@@ -214,14 +221,14 @@ mod tests {
                 enabled: true,
                 status: PluginStatusKind::Running,
                 last_error: None,
-                last_run: Some(format_timestamp(SystemTime::now())),
+                last_updated: Some(format_timestamp(SystemTime::now())),
             },
             PluginStatus {
                 name: "issues".to_string(),
                 enabled: false,
                 status: PluginStatusKind::Disabled,
                 last_error: None,
-                last_run: None,
+                last_updated: None,
             },
         ];
 
@@ -292,7 +299,7 @@ mod tests {
             enabled: true,
             status: PluginStatusKind::Running,
             last_error: Some("test error".to_string()),
-            last_run: Some("2026-02-16T23:30:00Z".to_string()),
+            last_updated: Some("2026-02-16T23:30:00Z".to_string()),
         };
 
         let json = serde_json::to_string(&status).unwrap();

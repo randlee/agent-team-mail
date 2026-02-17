@@ -8,6 +8,7 @@ use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
 use agent_team_mail_daemon::roster::RosterService;
+use serial_test::serial;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -91,6 +92,7 @@ fn create_test_context() -> (PluginContext, TempDir) {
     std::fs::create_dir_all(&teams_root).unwrap();
 
     // Set ATM_HOME for cross-platform testing
+    // SAFETY: Tests are serialized via #[serial], so no parallel mutation
     unsafe {
         std::env::set_var("ATM_HOME", temp_dir.path());
     }
@@ -129,6 +131,7 @@ fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_daemon_starts_and_loads_mock_plugin() {
     let (ctx, temp_dir) = create_test_context();
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -176,6 +179,7 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_signal_triggers_graceful_shutdown() {
     let (ctx, temp_dir) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
@@ -207,6 +211,7 @@ async fn test_signal_triggers_graceful_shutdown() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_plugin_lifecycle_order() {
     let (ctx, temp_dir) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
@@ -242,6 +247,7 @@ async fn test_plugin_lifecycle_order() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_spool_drain_runs_on_interval() {
     let (ctx, temp_dir) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
@@ -267,6 +273,7 @@ async fn test_spool_drain_runs_on_interval() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_graceful_shutdown_with_timeout() {
     let (ctx, temp_dir) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
@@ -315,6 +322,7 @@ async fn test_graceful_shutdown_with_timeout() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_empty_registry_runs_successfully() {
     let (ctx, temp_dir) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
@@ -335,6 +343,7 @@ async fn test_empty_registry_runs_successfully() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_multiple_plugins_run_concurrently() {
     let (ctx, temp_dir) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);

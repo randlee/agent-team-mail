@@ -562,7 +562,7 @@ async fn status_writer_loop(
 
     // Write initial status at startup
     let plugin_statuses = build_plugin_statuses(&plugins).await;
-    let teams = get_active_teams(&ctx);
+    let teams = get_active_teams(&ctx).await;
     if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone()) {
         error!("Failed to write initial daemon status: {}", e);
     }
@@ -580,7 +580,7 @@ async fn status_writer_loop(
                 debug!("Writing daemon status");
 
                 let plugin_statuses = build_plugin_statuses(&plugins).await;
-                let teams = get_active_teams(&ctx);
+                let teams = get_active_teams(&ctx).await;
 
                 if let Err(e) = status_writer.write_status(plugin_statuses, teams) {
                     error!("Failed to write daemon status: {}", e);
@@ -606,31 +606,37 @@ async fn build_plugin_statuses(
             enabled: true,
             status: PluginStatusKind::Running,
             last_error: None,
-            last_run: Some(format_timestamp(SystemTime::now())),
+            last_updated: Some(format_timestamp(SystemTime::now())),
         });
     }
 
     statuses
 }
 
-/// Get list of active teams from the teams directory
-fn get_active_teams(ctx: &PluginContext) -> Vec<String> {
-    let teams_root = ctx.mail.teams_root();
-    let mut teams = Vec::new();
+/// Get list of active teams from the teams directory (async wrapper)
+async fn get_active_teams(ctx: &PluginContext) -> Vec<String> {
+    let teams_root = ctx.mail.teams_root().clone();
 
-    if let Ok(entries) = std::fs::read_dir(teams_root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(name) = path.file_name() {
-                    teams.push(name.to_string_lossy().to_string());
+    // Use spawn_blocking to avoid blocking the async runtime
+    tokio::task::spawn_blocking(move || {
+        let mut teams = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&teams_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(name) = path.file_name() {
+                        teams.push(name.to_string_lossy().to_string());
+                    }
                 }
             }
         }
-    }
 
-    teams.sort();
-    teams
+        teams.sort();
+        teams
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Format timestamp as ISO 8601 string
