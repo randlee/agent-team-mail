@@ -1,4 +1,7 @@
 agents:
+  ci-monitor:
+    version: 1.0.0
+    path: .claude/agents/ci-monitor.md
   rust-architect:
     version: 1.0.0
     path: .claude/agents/rust-architect.md
