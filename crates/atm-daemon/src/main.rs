@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use agent_team_mail_daemon::daemon;
-use agent_team_mail_daemon::daemon::StatusWriter;
+use agent_team_mail_daemon::daemon::{new_state_store, StatusWriter};
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
 use agent_team_mail_daemon::roster::RosterService;
 use clap::Parser;
@@ -134,6 +134,13 @@ async fn main() -> Result<()> {
         info!("Registered Issues plugin");
     }
 
+    // Create the shared agent state store.  When the worker adapter plugin is
+    // enabled we hand the same Arc to both the plugin and the event loop so
+    // that the socket server reads live state.  When the plugin is absent the
+    // store stays empty; the socket server still starts but returns
+    // AGENT_NOT_FOUND for all agent-state queries.
+    let state_store = new_state_store();
+
     // Register Worker Adapter plugin if configured
     if let Some(workers_config) = plugin_ctx.plugin_config("workers")
         && workers_config
@@ -141,7 +148,11 @@ async fn main() -> Result<()> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     {
-        registry.register(agent_team_mail_daemon::plugins::worker_adapter::WorkerAdapterPlugin::new());
+        registry.register(
+            agent_team_mail_daemon::plugins::worker_adapter::WorkerAdapterPlugin::with_state_store(
+                Arc::clone(&state_store),
+            ),
+        );
         info!("Registered Worker Adapter plugin");
     }
 
@@ -187,7 +198,7 @@ async fn main() -> Result<()> {
     });
 
     // Run the daemon event loop
-    daemon::run(&mut registry, &plugin_ctx, cancel_token, status_writer)
+    daemon::run(&mut registry, &plugin_ctx, cancel_token, status_writer, state_store)
         .await
         .context("Daemon event loop failed")?;
 

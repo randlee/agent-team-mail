@@ -1,6 +1,6 @@
 //! Main daemon event loop
 
-use crate::daemon::{graceful_shutdown, new_state_store, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind};
+use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedStateStore};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use anyhow::{Context, Result};
@@ -18,11 +18,12 @@ use tracing::{debug, error, info, warn};
 /// This function:
 /// 1. Initializes all plugins via the registry
 /// 2. Spawns each plugin's run() method in its own task
-/// 3. Starts the spool drain background task
-/// 4. Starts the file system watcher
-/// 5. Writes daemon status periodically
-/// 6. Waits for cancellation signal
-/// 7. Performs graceful shutdown of all plugins
+/// 3. Starts the Unix socket server backed by `state_store`
+/// 4. Starts the spool drain background task
+/// 5. Starts the file system watcher
+/// 6. Writes daemon status periodically
+/// 7. Waits for cancellation signal
+/// 8. Performs graceful shutdown of all plugins
 ///
 /// # Arguments
 ///
@@ -30,11 +31,19 @@ use tracing::{debug, error, info, warn};
 /// * `ctx` - Shared plugin context
 /// * `cancel` - Cancellation token for shutdown coordination
 /// * `status_writer` - Status file writer for daemon state tracking
+/// * `state_store` - Shared agent state store for the socket server.
+///   When the worker adapter plugin is enabled the caller should pass the
+///   same `Arc` that was given to `WorkerAdapterPlugin::with_state_store`
+///   so that the socket server sees live agent state.  When the worker
+///   adapter is absent, pass a fresh `new_state_store()`; the socket
+///   server will still accept connections but return `AGENT_NOT_FOUND`
+///   for all agent-state queries.
 pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
     cancel: CancellationToken,
     status_writer: Arc<StatusWriter>,
+    state_store: SharedStateStore,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -81,16 +90,16 @@ pub async fn run(
     // (e.g., claude_root is the filesystem root, which should never happen in
     // practice).
     //
-    // If the worker adapter plugin is not enabled, we provide an empty state
-    // store. The socket server still accepts connections but returns
-    // AGENT_NOT_FOUND for all agent-state queries.
+    // `state_store` is the same Arc that the WorkerAdapterPlugin was given at
+    // construction time, so the socket server reads live agent state. When the
+    // worker adapter is not enabled the caller passes a fresh empty store; the
+    // socket server still accepts connections but returns AGENT_NOT_FOUND.
     let socket_home_dir = ctx.system.claude_root
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| {
             agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
         });
-    let state_store = new_state_store();
     let socket_cancel = cancel.clone();
     let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, socket_cancel).await {
         Ok(handle) => {

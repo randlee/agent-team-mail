@@ -238,8 +238,7 @@ async fn handle_connection(
     response_json.push('\n');
 
     // Recover the stream from the BufReader to write the response
-    let stream = reader.into_inner();
-    let mut stream = stream;
+    let mut stream = reader.into_inner();
     stream.write_all(response_json.as_bytes()).await?;
     stream.flush().await?;
 
