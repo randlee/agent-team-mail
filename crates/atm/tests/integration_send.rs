@@ -10,7 +10,9 @@ use tempfile::TempDir;
 /// platform-specific differences in how `dirs::home_dir()` resolves
 /// (HOME on Unix, Windows API on Windows).
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
-    cmd.env("ATM_HOME", temp_dir.path());
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_IDENTITY")
+        .current_dir(temp_dir.path());
 }
 
 /// Create a test team structure

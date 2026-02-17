@@ -12,7 +12,9 @@ use tempfile::TempDir;
 /// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
 /// platform-specific differences in how `dirs::home_dir()` resolves.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
-    cmd.env("ATM_HOME", temp_dir.path());
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_IDENTITY")
+        .current_dir(temp_dir.path());
 }
 
 /// Create a test team structure with multiple agents
