@@ -50,8 +50,25 @@ pub struct WorkerAdapterPlugin {
 }
 
 impl WorkerAdapterPlugin {
-    /// Create a new Worker Adapter plugin instance
+    /// Create a new Worker Adapter plugin instance with a fresh state store.
     pub fn new() -> Self {
+        Self::with_state_store(Arc::new(Mutex::new(AgentStateTracker::new())))
+    }
+
+    /// Create a new Worker Adapter plugin instance that shares the given state
+    /// store.
+    ///
+    /// Use this when the socket server or another component needs to read
+    /// live agent state from the same tracker that the plugin populates:
+    ///
+    /// ```rust,ignore
+    /// let store = new_state_store();
+    /// let plugin = WorkerAdapterPlugin::with_state_store(Arc::clone(&store));
+    /// // pass `store` to the socket server
+    /// ```
+    pub fn with_state_store(
+        state_store: std::sync::Arc<std::sync::Mutex<AgentStateTracker>>,
+    ) -> Self {
         let config = WorkersConfig::default();
         let nudge_engine = NudgeEngine::new(config.nudge.clone());
         Self {
@@ -62,10 +79,21 @@ impl WorkerAdapterPlugin {
             activity_tracker: ActivityTracker::default(),
             log_tailer: LogTailer::new(),
             lifecycle: LifecycleManager::new(),
-            agent_state: Arc::new(Mutex::new(AgentStateTracker::new())),
+            agent_state: state_store,
             nudge_engine,
             ctx: None,
         }
+    }
+
+    /// Return a clone of the shared agent state store.
+    ///
+    /// The returned `Arc` points to the same tracker that the `HookWatcher`
+    /// populates, so the socket server can read live state without a fresh
+    /// empty store.
+    pub fn state_store(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<AgentStateTracker>> {
+        Arc::clone(&self.agent_state)
     }
 
     /// Get worker status for all configured agents

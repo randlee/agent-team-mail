@@ -185,9 +185,16 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     let outcome = inbox_append(&inbox_path, &inbox_message, &team_name, &agent_name)?;
 
+    // Query the daemon for agent state to enrich the output (best-effort, silent fallback).
+    let agent_state_info = agent_team_mail_core::daemon_client::query_agent_state(
+        &agent_name,
+        &team_name,
+    )
+    .unwrap_or(None); // Ignore errors; daemon may not be running
+
     // Output result
     if args.json {
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "action": "send",
             "agent": agent_name,
             "team": team_name,
@@ -198,6 +205,12 @@ pub fn execute(args: SendArgs) -> Result<()> {
             },
             "message_id": inbox_message.message_id,
         });
+        if let Some(ref info) = agent_state_info {
+            output["agent_state"] = serde_json::json!({
+                "state": info.state,
+                "last_transition": info.last_transition,
+            });
+        }
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         match outcome {
@@ -211,6 +224,10 @@ pub fn execute(args: SendArgs) -> Result<()> {
                 eprintln!("Warning: Message queued for delivery (could not write to inbox immediately)");
                 eprintln!("Spool path: {spool_path:?}");
             }
+        }
+        // Print enriched agent state info when daemon is running
+        if let Some(ref info) = agent_state_info {
+            println!("  agent-state: {}", info.state);
         }
     }
 
