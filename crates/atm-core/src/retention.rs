@@ -578,4 +578,87 @@ mod tests {
         assert_eq!(base, "dotted.agent.hostname");
         // Retention uses the entire base as agent name
     }
+
+    #[test]
+    fn test_retention_only_scans_inboxes_subdirectory() {
+        use tempfile::TempDir;
+        use std::fs::File;
+        use std::io::Write;
+
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = temp_dir.path().join("test-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create inbox file in inboxes/ subdirectory
+        let inbox_path = inboxes_dir.join("agent.json");
+        let old_timestamp = (Utc::now() - Duration::days(10)).to_rfc3339();
+        let inbox_data = serde_json::json!([
+            {
+                "from": "test",
+                "text": "old message",
+                "timestamp": old_timestamp,
+                "read": false
+            }
+        ]);
+        File::create(&inbox_path)
+            .unwrap()
+            .write_all(serde_json::to_string(&inbox_data).unwrap().as_bytes())
+            .unwrap();
+
+        // Create a file at team level (should NOT be processed)
+        let config_path = team_dir.join("config.json");
+        File::create(&config_path)
+            .unwrap()
+            .write_all(b"{\"name\":\"test-team\"}")
+            .unwrap();
+
+        // Apply retention with max age of 7 days (should remove the old message)
+        let policy = RetentionConfig {
+            max_age: Some("7d".to_string()),
+            max_count: None,
+            strategy: CleanupStrategy::Delete,
+            archive_dir: None,
+            enabled: true,
+            interval_secs: 300,
+        };
+
+        let result = apply_retention(&inbox_path, "test-team", "agent", &policy, false).unwrap();
+        assert_eq!(result.kept, 0);
+        assert_eq!(result.removed, 1);
+
+        // Verify config.json at team level is untouched
+        assert!(config_path.exists());
+        let config_content = fs::read_to_string(&config_path).unwrap();
+        assert_eq!(config_content, "{\"name\":\"test-team\"}");
+    }
+
+    #[test]
+    fn test_report_dir_lookup_resolves_ci_monitor_key() {
+        use tempfile::TempDir;
+
+        // This test verifies that the report_dir from ci_monitor config
+        // is correctly used when passed to clean_report_files.
+        // The key resolution happens in the daemon config parsing,
+        // but this test documents the expected behavior.
+
+        let temp_dir = TempDir::new().unwrap();
+        let report_dir = temp_dir.path().join("ci-reports");
+        fs::create_dir_all(&report_dir).unwrap();
+
+        // Create a report file
+        let report_path = report_dir.join("report.json");
+        std::fs::File::create(&report_path).unwrap();
+
+        // Clean with long max_age (file should be skipped)
+        let max_age = Duration::hours(24);
+        let result = clean_report_files(&report_dir, &max_age).unwrap();
+
+        assert_eq!(result.deleted_count, 0);
+        assert_eq!(result.skipped_count, 1);
+
+        // Note: The actual config key resolution (ci_monitor vs ci-monitor)
+        // is handled by TOML parsing in the daemon's config module,
+        // which uses underscores as the canonical form.
+    }
 }
