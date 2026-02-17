@@ -18,6 +18,7 @@
 //! - `mock_backend.rs` — Mock backend for testing without tmux/Codex
 //! - `agent_state.rs` — Turn-level agent state machine (Launching/Busy/Idle/Killed)
 //! - `hook_watcher.rs` — Incremental events.jsonl watcher for Codex hook events
+//! - `nudge.rs` — NudgeEngine: auto-nudge idle agents with unread messages
 
 pub mod activity;
 pub mod agent_state;
@@ -27,6 +28,7 @@ pub mod config;
 pub mod hook_watcher;
 pub mod lifecycle;
 pub mod mock_backend;
+pub mod nudge;
 pub mod plugin;
 pub mod router;
 pub mod trait_def;
@@ -35,10 +37,11 @@ pub use activity::ActivityTracker;
 pub use agent_state::{AgentState, AgentStateTracker};
 pub use capture::{CaptureConfig, CapturedResponse, LogTailer};
 pub use codex_tmux::CodexTmuxBackend;
-pub use config::{AgentConfig, WorkersConfig, DEFAULT_COMMAND};
+pub use config::{AgentConfig, NudgeConfig, WorkersConfig, DEFAULT_COMMAND, DEFAULT_NUDGE_TEXT};
 pub use hook_watcher::HookWatcher;
 pub use lifecycle::{LifecycleManager, WorkerState};
 pub use mock_backend::{MockCall, MockTmuxBackend};
+pub use nudge::{InboxEntry, NudgeDecision, NudgeEngine};
 pub use plugin::WorkerAdapterPlugin;
 pub use router::{ConcurrencyPolicy, MessageRouter};
 pub use trait_def::{WorkerAdapter, WorkerHandle};
