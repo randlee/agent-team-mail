@@ -1,6 +1,6 @@
 //! Main daemon event loop
 
-use crate::daemon::{graceful_shutdown, spool_drain_loop, watch_inboxes, InboxEvent, InboxEventKind};
+use crate::daemon::{graceful_shutdown, new_state_store, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use anyhow::{Context, Result};
@@ -72,6 +72,38 @@ pub async fn run(
 
         plugin_tasks.push(task);
     }
+
+    // Start the Unix socket server (CLI↔daemon IPC).
+    //
+    // The socket path is ${ATM_HOME}/.claude/daemon/atm-daemon.sock.
+    // ctx.system.claude_root is ${ATM_HOME}/.claude, so the home_dir is its
+    // parent. We fall back to get_home_dir() if the parent cannot be determined
+    // (e.g., claude_root is the filesystem root, which should never happen in
+    // practice).
+    //
+    // If the worker adapter plugin is not enabled, we provide an empty state
+    // store. The socket server still accepts connections but returns
+    // AGENT_NOT_FOUND for all agent-state queries.
+    let socket_home_dir = ctx.system.claude_root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| {
+            agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
+        });
+    let state_store = new_state_store();
+    let socket_cancel = cancel.clone();
+    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, socket_cancel).await {
+        Ok(handle) => {
+            if handle.is_some() {
+                info!("Unix socket server started successfully");
+            }
+            handle
+        }
+        Err(e) => {
+            warn!("Failed to start Unix socket server (daemon will continue without it): {e}");
+            None
+        }
+    };
 
     // Start spool drain loop
     let teams_root = ctx.mail.teams_root().clone();
