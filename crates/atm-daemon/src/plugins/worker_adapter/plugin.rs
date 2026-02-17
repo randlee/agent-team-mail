@@ -8,6 +8,7 @@ use super::config::WorkersConfig;
 use super::hook_watcher::HookWatcher;
 use super::lifecycle::{self, LifecycleManager, WorkerState};
 use super::nudge::NudgeEngine;
+use super::pubsub::PubSub;
 use super::router::{ConcurrencyPolicy, MessageRouter};
 use super::trait_def::{WorkerAdapter, WorkerHandle};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
@@ -24,6 +25,9 @@ use uuid::Uuid;
 
 /// Interval for PID-based process health polling (5 seconds per acceptance criteria).
 const PID_POLL_INTERVAL_SECS: u64 = 5;
+
+/// Interval for PubSub GC (60 seconds).
+const PUBSUB_GC_INTERVAL_SECS: u64 = 60;
 
 /// Worker Adapter plugin — manages async agent teammates in tmux panes
 pub struct WorkerAdapterPlugin {
@@ -43,8 +47,12 @@ pub struct WorkerAdapterPlugin {
     lifecycle: LifecycleManager,
     /// Turn-level agent state tracker (Launching/Busy/Idle/Killed)
     agent_state: Arc<Mutex<AgentStateTracker>>,
+    /// Ephemeral pub/sub registry for agent state change notifications
+    pubsub: Arc<Mutex<PubSub>>,
     /// Nudge engine — auto-nudges idle agents with unread messages
     nudge_engine: NudgeEngine,
+    /// Snapshot of last-notified agent states for change detection
+    last_notified_states: HashMap<String, AgentState>,
     /// Cached context for runtime use
     ctx: Option<PluginContext>,
 }
@@ -80,7 +88,9 @@ impl WorkerAdapterPlugin {
             log_tailer: LogTailer::new(),
             lifecycle: LifecycleManager::new(),
             agent_state: state_store,
+            pubsub: Arc::new(Mutex::new(PubSub::new())),
             nudge_engine,
+            last_notified_states: HashMap::new(),
             ctx: None,
         }
     }
@@ -94,6 +104,15 @@ impl WorkerAdapterPlugin {
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<AgentStateTracker>> {
         Arc::clone(&self.agent_state)
+    }
+
+    /// Return a clone of the shared pub/sub registry.
+    ///
+    /// Pass this `Arc` to the socket server so that `subscribe` and
+    /// `unsubscribe` requests from the CLI are stored in the same registry
+    /// that the plugin uses for notification delivery.
+    pub fn pubsub_store(&self) -> Arc<Mutex<PubSub>> {
+        Arc::clone(&self.pubsub)
     }
 
     /// Get worker status for all configured agents
@@ -564,6 +583,79 @@ impl WorkerAdapterPlugin {
         }
     }
 
+    /// Deliver pub/sub notifications for `agent` transitioning to `new_state`.
+    ///
+    /// Looks up all non-expired subscribers interested in the event, then writes
+    /// an [`InboxMessage`] to each subscriber's inbox using the standard
+    /// [`inbox_append`] atomic writer.
+    ///
+    /// This is best-effort: individual delivery failures are logged as warnings
+    /// but do not stop delivery to other subscribers.
+    fn deliver_pubsub_notifications(&self, agent: &str, new_state: &str) {
+        let subscribers = {
+            self.pubsub
+                .lock()
+                .unwrap()
+                .matching_subscribers(agent, new_state)
+        };
+
+        if subscribers.is_empty() {
+            return;
+        }
+
+        let ctx = match &self.ctx {
+            Some(c) => c,
+            None => return,
+        };
+
+        let team_name = if self.config.team_name.is_empty() {
+            ctx.system.default_team.as_str()
+        } else {
+            self.config.team_name.as_str()
+        };
+
+        for subscriber in &subscribers {
+            let notification_text = format!("[AGENT STATE] {} is now {}", agent, new_state);
+            let msg = InboxMessage {
+                from: "daemon".to_string(),
+                text: notification_text,
+                timestamp: Utc::now().to_rfc3339(),
+                read: false,
+                summary: Some(format!("Agent {} → {}", agent, new_state)),
+                message_id: Some(Uuid::new_v4().to_string()),
+                unknown_fields: HashMap::new(),
+            };
+            let inbox_path = self.agent_inbox_path(ctx, team_name, subscriber);
+            if let Err(e) = inbox_append(&inbox_path, &msg, team_name, subscriber) {
+                warn!(
+                    "Failed to deliver pubsub notification to {subscriber}: {e}"
+                );
+            } else {
+                debug!(
+                    "Delivered pubsub notification to {subscriber}: {agent} → {new_state}"
+                );
+            }
+        }
+    }
+
+    /// Scan current agent states against the last-notified snapshot and deliver
+    /// notifications for any changes.
+    ///
+    /// Called periodically from the `run()` loop (every 5 s, sharing the nudge
+    /// scan timer) to catch state transitions driven by [`HookWatcher`] or
+    /// PID polling that happen asynchronously without going through
+    /// `process_message`.
+    fn scan_and_deliver_pubsub_notifications(&mut self) {
+        let current_states = self.agent_state.lock().unwrap().all_states();
+        for (agent, state) in &current_states {
+            let changed = self.last_notified_states.get(agent) != Some(state);
+            if changed {
+                self.deliver_pubsub_notifications(agent, &state.to_string());
+                self.last_notified_states.insert(agent.clone(), *state);
+            }
+        }
+    }
+
     /// Check for inactive agents and mark them as offline
     async fn check_inactivity(&self) -> Result<(), PluginError> {
         let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
@@ -736,6 +828,10 @@ impl Plugin for WorkerAdapterPlugin {
         // to the plugin main loop.
         let mut nudge_scan_timer = interval(Duration::from_secs(5));
 
+        // Set up periodic pub/sub GC (every 60 seconds) to evict expired
+        // subscriptions and keep memory usage bounded.
+        let mut pubsub_gc_timer = interval(Duration::from_secs(PUBSUB_GC_INTERVAL_SECS));
+
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -760,6 +856,13 @@ impl Plugin for WorkerAdapterPlugin {
                 }
                 _ = nudge_scan_timer.tick() => {
                     self.scan_and_nudge_idle_agents().await;
+                    self.scan_and_deliver_pubsub_notifications();
+                }
+                _ = pubsub_gc_timer.tick() => {
+                    let removed = self.pubsub.lock().unwrap().gc();
+                    if removed > 0 {
+                        debug!("PubSub GC: removed {removed} expired subscription(s)");
+                    }
                 }
             }
         }

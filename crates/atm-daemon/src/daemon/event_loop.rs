@@ -1,6 +1,6 @@
 //! Main daemon event loop
 
-use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedStateStore};
+use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedPubSubStore, SharedStateStore};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use anyhow::{Context, Result};
@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 /// This function:
 /// 1. Initializes all plugins via the registry
 /// 2. Spawns each plugin's run() method in its own task
-/// 3. Starts the Unix socket server backed by `state_store`
+/// 3. Starts the Unix socket server backed by `state_store` and `pubsub_store`
 /// 4. Starts the spool drain background task
 /// 5. Starts the file system watcher
 /// 6. Writes daemon status periodically
@@ -38,12 +38,17 @@ use tracing::{debug, error, info, warn};
 ///   adapter is absent, pass a fresh `new_state_store()`; the socket
 ///   server will still accept connections but return `AGENT_NOT_FOUND`
 ///   for all agent-state queries.
+/// * `pubsub_store` - Shared pub/sub registry for subscribe/unsubscribe requests.
+///   Pass the same `Arc` from `WorkerAdapterPlugin::pubsub_store()` so that
+///   CLI subscriptions are routed to the same registry that delivers notifications.
+///   Pass `new_pubsub_store()` when the worker adapter is absent.
 pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
     cancel: CancellationToken,
     status_writer: Arc<StatusWriter>,
     state_store: SharedStateStore,
+    pubsub_store: SharedPubSubStore,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -101,7 +106,7 @@ pub async fn run(
             agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
         });
     let socket_cancel = cancel.clone();
-    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, socket_cancel).await {
+    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, socket_cancel).await {
         Ok(handle) => {
             if handle.is_some() {
                 info!("Unix socket server started successfully");

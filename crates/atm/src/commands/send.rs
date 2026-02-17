@@ -185,6 +185,16 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     let outcome = inbox_append(&inbox_path, &inbox_message, &team_name, &agent_name)?;
 
+    // Auto-subscribe the sender to the target agent's idle event (upsert — refreshes TTL
+    // if a subscription already exists). This is best-effort: errors are silently ignored
+    // because the daemon may not be running.
+    let _ = agent_team_mail_core::daemon_client::subscribe_to_agent(
+        &config.core.identity,
+        &agent_name,
+        &team_name,
+        &["idle".to_string()],
+    );
+
     // Query the daemon for agent state to enrich the output (best-effort, silent fallback).
     let agent_state_info = agent_team_mail_core::daemon_client::query_agent_state(
         &agent_name,

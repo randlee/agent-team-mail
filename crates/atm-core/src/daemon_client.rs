@@ -212,6 +212,66 @@ pub fn query_agent_state(agent: &str, team: &str) -> anyhow::Result<Option<Agent
     }
 }
 
+/// Send a subscribe request to the daemon.
+///
+/// Registers the subscriber's interest in state changes for `agent`. This is a
+/// best-effort operation: `Ok(None)` is returned when the daemon is not running.
+///
+/// # Arguments
+///
+/// * `subscriber` - ATM identity of the subscribing agent (e.g., `"team-lead"`)
+/// * `agent`      - Agent to watch (e.g., `"arch-ctm"`)
+/// * `team`       - Team name (informational; used for routing context)
+/// * `events`     - State events to subscribe to (e.g., `&["idle"]`);
+///   pass an empty slice to subscribe to all events.
+pub fn subscribe_to_agent(
+    subscriber: &str,
+    agent: &str,
+    team: &str,
+    events: &[String],
+) -> anyhow::Result<Option<SocketResponse>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "subscribe".to_string(),
+        payload: serde_json::json!({
+            "subscriber": subscriber,
+            "agent": agent,
+            "team": team,
+            "events": events,
+        }),
+    };
+    query_daemon(&request)
+}
+
+/// Send an unsubscribe request to the daemon.
+///
+/// Removes the subscription for `(subscriber, agent)`. This is a best-effort
+/// operation: `Ok(None)` is returned when the daemon is not running.
+///
+/// # Arguments
+///
+/// * `subscriber` - ATM identity of the subscribing agent
+/// * `agent`      - Agent to stop watching
+/// * `team`       - Team name (informational)
+pub fn unsubscribe_from_agent(
+    subscriber: &str,
+    agent: &str,
+    team: &str,
+) -> anyhow::Result<Option<SocketResponse>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "unsubscribe".to_string(),
+        payload: serde_json::json!({
+            "subscriber": subscriber,
+            "agent": agent,
+            "team": team,
+        }),
+    };
+    query_daemon(&request)
+}
+
 /// Query the daemon for the list of all tracked agents.
 ///
 /// Returns `Ok(None)` when the daemon is not reachable.

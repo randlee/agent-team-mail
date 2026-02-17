@@ -19,6 +19,7 @@
 //! - `agent_state.rs` — Turn-level agent state machine (Launching/Busy/Idle/Killed)
 //! - `hook_watcher.rs` — Incremental events.jsonl watcher for Codex hook events
 //! - `nudge.rs` — NudgeEngine: auto-nudge idle agents with unread messages
+//! - `pubsub.rs` — Ephemeral in-memory pub/sub for agent state change notifications
 
 pub mod activity;
 pub mod agent_state;
@@ -30,6 +31,7 @@ pub mod lifecycle;
 pub mod mock_backend;
 pub mod nudge;
 pub mod plugin;
+pub mod pubsub;
 pub mod router;
 pub mod trait_def;
 
@@ -43,5 +45,6 @@ pub use lifecycle::{LifecycleManager, WorkerState};
 pub use mock_backend::{MockCall, MockTmuxBackend};
 pub use nudge::{InboxEntry, NudgeDecision, NudgeEngine};
 pub use plugin::WorkerAdapterPlugin;
+pub use pubsub::{PubSub, PubSubError, Subscription};
 pub use router::{ConcurrencyPolicy, MessageRouter};
 pub use trait_def::{WorkerAdapter, WorkerHandle};
