@@ -443,6 +443,25 @@ impl Plugin for CiMonitorPlugin {
                 source: None,
             })?;
 
+        // Log configured notify targets (validation would require reading team config files)
+        if !self.config.notify_target.is_empty() {
+            let targets: Vec<String> = self.config.notify_target
+                .iter()
+                .map(|t| {
+                    let team = t.team.as_ref().unwrap_or(&self.config.team);
+                    format!("{}@{}", t.agent, team)
+                })
+                .collect();
+            debug!(
+                "CI Monitor will route notifications to: {}",
+                targets.join(", ")
+            );
+            debug!(
+                "Note: Target agents are not validated at init time. \
+                 If a target doesn't exist, runtime warnings will be logged."
+            );
+        }
+
         // Store context for runtime use
         self.ctx = Some(ctx.clone());
 
@@ -542,6 +561,17 @@ impl Plugin for CiMonitorPlugin {
                                         let mut sent_count = 0;
                                         for target in &self.config.notify_target {
                                             let target_team = target.team.as_ref().unwrap_or(&self.config.team);
+
+                                            // Check if target inbox exists (warns on first message if not found)
+                                            let inbox_path = ctx.mail.teams_root().join(target_team).join("inboxes").join(format!("{}.json", target.agent));
+                                            if !inbox_path.exists() {
+                                                warn!(
+                                                    "CI Monitor: Target inbox '{}@{}' not found at {}. \
+                                                     Target may not exist or hasn't joined the team yet.",
+                                                    target.agent, target_team, inbox_path.display()
+                                                );
+                                            }
+
                                             if let Err(e) = ctx.mail.send(target_team, &target.agent, &msg) {
                                                 warn!("CI Monitor: Failed to send message to {}@{}: {e}", target.agent, target_team);
                                             } else {

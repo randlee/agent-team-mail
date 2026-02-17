@@ -7,6 +7,7 @@ use super::trait_def::{WorkerAdapter, WorkerHandle};
 use crate::plugin::PluginError;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Codex TMUX backend payload with tmux-specific metadata
@@ -225,7 +226,7 @@ impl WorkerAdapter for CodexTmuxBackend {
             agent_id: agent_id.to_string(),
             backend_id: pane_id,
             log_file_path: log_path,
-            payload: Some(Box::new(tmux_payload)),
+            payload: Some(Arc::new(tmux_payload)),
         })
     }
 

@@ -168,7 +168,7 @@ impl WorkerAdapter for MockTmuxBackend {
             agent_id: agent_id.to_string(),
             backend_id: format!("mock-pane-{agent_id}"),
             log_file_path: log_path,
-            payload: Some(Box::new(mock_payload)),
+            payload: Some(Arc::new(mock_payload)),
         };
 
         state.spawned_workers.insert(agent_id.to_string(), handle.clone());
@@ -365,27 +365,6 @@ mod tests {
         struct WrongPayload {}
         let wrong = handle.payload_ref::<WrongPayload>();
         assert!(wrong.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_payload_downcast_mut() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut backend = MockTmuxBackend::new(temp_dir.path().to_path_buf());
-
-        let mut handle = backend.spawn("test-agent", "{}").await.unwrap();
-
-        // Get mutable reference and modify
-        let payload = handle.payload_mut::<MockPayload>();
-        assert!(payload.is_some());
-
-        let payload = payload.unwrap();
-        payload.metadata = "modified".to_string();
-        payload.process_id = 12345;
-
-        // Verify modification
-        let payload = handle.payload_ref::<MockPayload>();
-        assert_eq!(payload.unwrap().metadata, "modified");
-        assert_eq!(payload.unwrap().process_id, 12345);
     }
 
     #[tokio::test]
