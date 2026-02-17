@@ -11,7 +11,9 @@ use super::nudge::NudgeEngine;
 use super::pubsub::PubSub;
 use super::router::{ConcurrencyPolicy, MessageRouter};
 use super::trait_def::{WorkerAdapter, WorkerHandle};
+use crate::daemon::socket::{LaunchRequest};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
+use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use chrono::Utc;
@@ -55,6 +57,11 @@ pub struct WorkerAdapterPlugin {
     last_notified_states: HashMap<String, AgentState>,
     /// Cached context for runtime use
     ctx: Option<PluginContext>,
+    /// Receiver for launch requests from the socket server.
+    ///
+    /// Set via [`set_launch_receiver`] before `run()` is called.  When `None`,
+    /// remote launch requests are silently ignored.
+    launch_rx: Option<tokio::sync::mpsc::Receiver<LaunchRequest>>,
 }
 
 impl WorkerAdapterPlugin {
@@ -92,7 +99,18 @@ impl WorkerAdapterPlugin {
             nudge_engine,
             last_notified_states: HashMap::new(),
             ctx: None,
+            launch_rx: None,
         }
+    }
+
+    /// Connect the plugin to the launch request channel.
+    ///
+    /// Must be called before [`Plugin::run`] to enable remote agent launching
+    /// via the Unix socket.  The matching sender end should be stored in the
+    /// [`LaunchSender`](crate::daemon::socket::LaunchSender) passed to
+    /// [`start_socket_server`](crate::daemon::socket::start_socket_server).
+    pub fn set_launch_receiver(&mut self, rx: tokio::sync::mpsc::Receiver<LaunchRequest>) {
+        self.launch_rx = Some(rx);
     }
 
     /// Return a clone of the shared agent state store.
@@ -656,6 +674,139 @@ impl WorkerAdapterPlugin {
         }
     }
 
+    /// Handle a remote launch request from the socket server.
+    ///
+    /// 1. Validates the config.
+    /// 2. Builds the full env var map (`ATM_IDENTITY`, `ATM_TEAM`, plus any extras).
+    /// 3. Calls `backend.spawn_with_env()` to create the tmux pane.
+    /// 4. Registers the agent in the state tracker (`Launching` state).
+    /// 5. Polls for `Idle` state transition (up to `config.timeout_secs`).
+    /// 6. If a prompt is provided, sends it via `send_message`.
+    /// 7. Returns [`LaunchResult`].
+    ///
+    /// A timeout is treated as a warning rather than an error: the result still
+    /// contains the pane ID and a warning message, but the initial prompt is
+    /// still sent.
+    async fn handle_launch(
+        &mut self,
+        config: LaunchConfig,
+    ) -> Result<LaunchResult, String> {
+        // Validate
+        if config.agent.trim().is_empty() {
+            return Err("Launch config missing required field: 'agent'".to_string());
+        }
+        if config.team.trim().is_empty() {
+            return Err("Launch config missing required field: 'team'".to_string());
+        }
+
+        let backend = match self.backend.as_mut() {
+            Some(b) => b,
+            None => return Err("Worker backend not initialized".to_string()),
+        };
+
+        // Build env var map: ATM_IDENTITY + ATM_TEAM + extras
+        let mut env_vars = config.env_vars.clone();
+        env_vars
+            .entry("ATM_IDENTITY".to_string())
+            .or_insert_with(|| config.agent.clone());
+        env_vars
+            .entry("ATM_TEAM".to_string())
+            .or_insert_with(|| config.team.clone());
+
+        debug!(
+            "Launching agent '{}' in team '{}' with command '{}'",
+            config.agent, config.team, config.command
+        );
+
+        // Spawn the pane with env vars
+        let handle = backend
+            .spawn_with_env(&config.agent, &config.command, &env_vars)
+            .await
+            .map_err(|e| format!("Failed to spawn worker pane: {e}"))?;
+
+        let pane_id = handle.backend_id.clone();
+
+        // Register agent in lifecycle and state tracker
+        self.lifecycle.register_worker(&config.agent);
+        {
+            let mut state = self.agent_state.lock().unwrap();
+            state.register_agent(&config.agent);
+            state.set_state(&config.agent, AgentState::Launching);
+        }
+        self.workers.insert(config.agent.clone(), handle.clone());
+
+        info!(
+            "Agent '{}' launched in pane {} (team: {})",
+            config.agent, pane_id, config.team
+        );
+
+        // Poll for Idle state transition
+        let timeout = Duration::from_secs(u64::from(config.timeout_secs));
+        let poll_interval = Duration::from_millis(500);
+        let start = tokio::time::Instant::now();
+        let mut reached_idle = false;
+
+        loop {
+            {
+                let state = self.agent_state.lock().unwrap();
+                if matches!(state.get_state(&config.agent), Some(AgentState::Idle)) {
+                    reached_idle = true;
+                    break;
+                }
+            }
+            if start.elapsed() >= timeout {
+                break;
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        let warning = if !reached_idle {
+            warn!(
+                "Agent '{}' did not reach Idle within {}s; proceeding with prompt send",
+                config.agent, config.timeout_secs
+            );
+            Some(format!(
+                "Readiness timeout reached after {}s; agent may not be ready",
+                config.timeout_secs
+            ))
+        } else {
+            None
+        };
+
+        // Send initial prompt if provided
+        if let Some(ref prompt) = config.prompt {
+            if !prompt.is_empty() {
+                let backend = match self.backend.as_mut() {
+                    Some(b) => b,
+                    None => {
+                        return Err("Worker backend disappeared after spawn".to_string());
+                    }
+                };
+                backend
+                    .send_message(&handle, prompt)
+                    .await
+                    .map_err(|e| format!("Failed to send initial prompt: {e}"))?;
+                debug!("Sent initial prompt to agent '{}'", config.agent);
+            }
+        }
+
+        let current_state = {
+            self.agent_state
+                .lock()
+                .unwrap()
+                .get_state(&config.agent)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "launching".to_string())
+        };
+
+        Ok(LaunchResult {
+            agent: config.agent.clone(),
+            pane_id,
+            state: current_state,
+            warning,
+        })
+    }
+
     /// Check for inactive agents and mark them as offline
     async fn check_inactivity(&self) -> Result<(), PluginError> {
         let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
@@ -864,6 +1015,20 @@ impl Plugin for WorkerAdapterPlugin {
                         debug!("PubSub GC: removed {removed} expired subscription(s)");
                     }
                 }
+                // Handle remote launch requests from the socket server.
+                // The `if` guard keeps this arm disabled when no receiver is wired up.
+                Some(launch_req) = async {
+                    if let Some(rx) = self.launch_rx.as_mut() {
+                        rx.recv().await
+                    } else {
+                        // Never resolves when launch_rx is None
+                        std::future::pending::<Option<LaunchRequest>>().await
+                    }
+                } => {
+                    let result = self.handle_launch(launch_req.config).await;
+                    // Best-effort: ignore send error (CLI may have timed out)
+                    let _ = launch_req.response_tx.send(result);
+                }
             }
         }
 
@@ -960,6 +1125,71 @@ impl Plugin for WorkerAdapterPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper to create a plugin that has a backend but no launch receiver.
+    fn make_plugin_without_backend() -> WorkerAdapterPlugin {
+        WorkerAdapterPlugin::new()
+    }
+
+    #[tokio::test]
+    async fn test_handle_launch_no_backend_returns_error() {
+        let mut plugin = make_plugin_without_backend();
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 5,
+            env_vars: std::collections::HashMap::new(),
+        };
+        let result = plugin.handle_launch(config).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("backend"), "Expected error about backend: {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_handle_launch_empty_agent_returns_error() {
+        let mut plugin = make_plugin_without_backend();
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "".to_string(),
+            team: "atm-dev".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 5,
+            env_vars: std::collections::HashMap::new(),
+        };
+        let result = plugin.handle_launch(config).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("agent"), "Expected error about 'agent': {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_handle_launch_empty_team_returns_error() {
+        let mut plugin = make_plugin_without_backend();
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 5,
+            env_vars: std::collections::HashMap::new(),
+        };
+        let result = plugin.handle_launch(config).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("team"), "Expected error about 'team': {msg}");
+    }
+
+    #[test]
+    fn test_set_launch_receiver_stores_receiver() {
+        let mut plugin = WorkerAdapterPlugin::new();
+        assert!(plugin.launch_rx.is_none());
+        let (_, rx) = tokio::sync::mpsc::channel(8);
+        plugin.set_launch_receiver(rx);
+        assert!(plugin.launch_rx.is_some());
+    }
 
     #[test]
     fn test_plugin_metadata() {

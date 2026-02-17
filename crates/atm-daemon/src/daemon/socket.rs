@@ -21,6 +21,7 @@
 //! The socket server is only compiled and active on Unix platforms.
 //! On non-Unix platforms the module exposes stub functions that do nothing.
 
+use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use anyhow::Result;
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
@@ -35,6 +36,11 @@ use tracing::{debug, error, info, warn};
 /// * `home_dir` - ATM home directory used to locate the socket path
 /// * `state_store` - Shared access to the agent state tracker
 /// * `pubsub_store` - Shared pub/sub registry for subscribe/unsubscribe requests
+/// * `launch_tx` - Shared sender for forwarding `"launch"` commands to the
+///   [`WorkerAdapterPlugin`](crate::plugins::worker_adapter::WorkerAdapterPlugin).
+///   Pass [`new_launch_sender()`] (with an empty inner `Option`) when the
+///   worker adapter is disabled; the socket server will return a
+///   `LAUNCH_UNAVAILABLE` error for any `"launch"` requests.
 /// * `cancel` - Cancellation token; server stops accepting when cancelled
 ///
 /// # Platform Behaviour
@@ -45,11 +51,12 @@ pub async fn start_socket_server(
     home_dir: PathBuf,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
+    launch_tx: LaunchSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
     {
-        start_unix_socket_server(home_dir, state_store, pubsub_store, cancel)
+        start_unix_socket_server(home_dir, state_store, pubsub_store, launch_tx, cancel)
             .await
             .map(Some)
     }
@@ -122,6 +129,34 @@ pub fn new_pubsub_store() -> SharedPubSubStore {
     std::sync::Arc::new(std::sync::Mutex::new(PubSub::new()))
 }
 
+// ── Launch channel types ──────────────────────────────────────────────────────
+
+/// A request to launch a new agent, sent from the socket handler to the
+/// [`WorkerAdapterPlugin`](crate::plugins::worker_adapter::WorkerAdapterPlugin)
+/// via an mpsc channel.
+pub struct LaunchRequest {
+    /// Launch configuration received from the CLI.
+    pub config: LaunchConfig,
+    /// One-shot channel for the plugin to send the launch result back.
+    pub response_tx: tokio::sync::oneshot::Sender<Result<LaunchResult, String>>,
+}
+
+/// Shared sender end of the launch channel.
+///
+/// The socket server holds this handle.  When it receives a `"launch"` command,
+/// it acquires the lock, clones the inner `Sender`, and forwards a
+/// [`LaunchRequest`] to the `WorkerAdapterPlugin` run loop.
+///
+/// The `Option` is `None` when the worker adapter plugin is not enabled (i.e.,
+/// no one is listening on the receiver end).
+pub type LaunchSender =
+    std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<LaunchRequest>>>>;
+
+/// Create a new, empty [`LaunchSender`] (no receiver connected yet).
+pub fn new_launch_sender() -> LaunchSender {
+    std::sync::Arc::new(tokio::sync::Mutex::new(None))
+}
+
 // ── Unix implementation ───────────────────────────────────────────────────────
 
 #[cfg(unix)]
@@ -129,6 +164,7 @@ async fn start_unix_socket_server(
     home_dir: PathBuf,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
+    launch_tx: LaunchSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -162,8 +198,16 @@ async fn start_unix_socket_server(
     let accept_socket_path = socket_path.clone();
     let accept_pid_path = pid_path.clone();
     tokio::spawn(async move {
-        run_accept_loop(listener, state_store, pubsub_store, cancel, &accept_socket_path, &accept_pid_path)
-            .await;
+        run_accept_loop(
+            listener,
+            state_store,
+            pubsub_store,
+            launch_tx,
+            cancel,
+            &accept_socket_path,
+            &accept_pid_path,
+        )
+        .await;
     });
 
     Ok(SocketServerHandle {
@@ -177,6 +221,7 @@ async fn run_accept_loop(
     listener: tokio::net::UnixListener,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
+    launch_tx: LaunchSender,
     cancel: tokio_util::sync::CancellationToken,
     socket_path: &std::path::Path,
     _pid_path: &std::path::Path,
@@ -194,8 +239,9 @@ async fn run_accept_loop(
                     Ok((stream, _addr)) => {
                         let store = state_store.clone();
                         let ps = pubsub_store.clone();
+                        let tx = launch_tx.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, store, ps).await {
+                            if let Err(e) = handle_connection(stream, store, ps, tx).await {
                                 error!("Socket connection handler error: {e}");
                             }
                         });
@@ -218,6 +264,7 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
+    launch_tx: LaunchSender,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -240,15 +287,22 @@ async fn handle_connection(
     }
 
     let request_str = request_line.trim();
-    let response = match parse_and_dispatch(request_str, &state_store, &pubsub_store) {
-        Ok(resp) => resp,
-        Err(e) => {
-            error!("Failed to dispatch socket request: {e}");
-            make_error_response(
-                "unknown",
-                "INTERNAL_ERROR",
-                &format!("Internal server error: {e}"),
-            )
+
+    // Check whether this is a launch command before sync dispatch so we can
+    // use async channel communication with the WorkerAdapterPlugin.
+    let response = if is_launch_command(request_str) {
+        handle_launch_command(request_str, &launch_tx).await
+    } else {
+        match parse_and_dispatch(request_str, &state_store, &pubsub_store) {
+            Ok(resp) => resp,
+            Err(e) => {
+                error!("Failed to dispatch socket request: {e}");
+                make_error_response(
+                    "unknown",
+                    "INTERNAL_ERROR",
+                    &format!("Internal server error: {e}"),
+                )
+            }
         }
     };
 
@@ -265,7 +319,149 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Parse a raw JSON request line and dispatch to the appropriate handler.
+/// Quickly determine if a raw JSON line is a `"launch"` command without full
+/// parsing — used to decide whether to take the async launch path.
+#[cfg(unix)]
+fn is_launch_command(request_str: &str) -> bool {
+    // Fast path: only parse the "command" field.  A full parse happens inside
+    // handle_launch_command.
+    request_str.contains(r#""command":"launch""#)
+        || request_str.contains(r#""command": "launch""#)
+}
+
+/// Handle the `"launch"` command asynchronously by forwarding it through the
+/// [`LaunchSender`] channel to the [`WorkerAdapterPlugin`].
+///
+/// Times out after 35 seconds so a stalled plugin does not block the
+/// connection indefinitely.
+#[cfg(unix)]
+async fn handle_launch_command(
+    request_str: &str,
+    launch_tx: &LaunchSender,
+) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
+
+    // Parse the full request envelope
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Malformed launch request: {e}");
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse launch request: {e}"),
+            );
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    // Deserialize LaunchConfig from the payload
+    let launch_config: LaunchConfig = match serde_json::from_value(request.payload.clone()) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INVALID_PAYLOAD",
+                &format!("Failed to parse launch payload: {e}"),
+            );
+        }
+    };
+
+    // Validate required fields
+    if launch_config.agent.trim().is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'agent'",
+        );
+    }
+    if launch_config.team.trim().is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'team'",
+        );
+    }
+
+    // Acquire the launch sender
+    let maybe_sender = {
+        let guard = launch_tx.lock().await;
+        guard.clone()
+    };
+
+    let sender = match maybe_sender {
+        Some(s) => s,
+        None => {
+            return make_error_response(
+                &request.request_id,
+                "LAUNCH_UNAVAILABLE",
+                "Agent launch is not available (worker adapter plugin not enabled)",
+            );
+        }
+    };
+
+    // Create a oneshot channel for the response
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    let launch_req = LaunchRequest {
+        config: launch_config,
+        response_tx,
+    };
+
+    // Send the launch request to the plugin
+    if sender.send(launch_req).await.is_err() {
+        return make_error_response(
+            &request.request_id,
+            "LAUNCH_UNAVAILABLE",
+            "Launch channel closed (worker adapter plugin may have stopped)",
+        );
+    }
+
+    // Wait for the plugin to respond (with timeout)
+    let timeout = std::time::Duration::from_secs(35);
+    match tokio::time::timeout(timeout, response_rx).await {
+        Ok(Ok(Ok(result))) => {
+            debug!(
+                "Launch succeeded for agent {} (pane {})",
+                result.agent, result.pane_id
+            );
+            make_ok_response(
+                &request.request_id,
+                serde_json::to_value(&result).unwrap_or_default(),
+            )
+        }
+        Ok(Ok(Err(err_msg))) => make_error_response(
+            &request.request_id,
+            "LAUNCH_FAILED",
+            &err_msg,
+        ),
+        Ok(Err(_)) => make_error_response(
+            &request.request_id,
+            "LAUNCH_FAILED",
+            "Launch response channel dropped unexpectedly",
+        ),
+        Err(_) => make_error_response(
+            &request.request_id,
+            "LAUNCH_TIMEOUT",
+            "Agent did not become ready within the timeout period",
+        ),
+    }
+}
+
+/// Parse a raw JSON request line and dispatch to the appropriate synchronous handler.
+///
+/// Note: the `"launch"` command is handled asynchronously before this function
+/// is called (see `handle_launch_command`).
 fn parse_and_dispatch(
     request_str: &str,
     state_store: &SharedStateStore,
@@ -309,6 +505,13 @@ fn parse_and_dispatch(
         "agent-pane" => handle_agent_pane(&request, state_store),
         "subscribe" => handle_subscribe(&request, pubsub_store),
         "unsubscribe" => handle_unsubscribe(&request, pubsub_store),
+        // "launch" is handled asynchronously before parse_and_dispatch is called.
+        // If it somehow reaches here, return a clear internal error.
+        "launch" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "Launch command should have been handled by the async path",
+        ),
         other => make_error_response(
             &request.request_id,
             "UNKNOWN_COMMAND",
@@ -668,6 +871,35 @@ mod tests {
     }
 
     #[test]
+    fn test_launch_command_missing_agent() {
+        // parse_and_dispatch receives a "launch" command — it should return INTERNAL_ERROR
+        // because the async path should have handled it, but the payload may be inspected.
+        let store = make_store();
+        let ps = make_ps();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"launch","payload":{"agent":"","team":"atm-dev","command":"codex","timeout_secs":30,"env_vars":{}}}"#;
+        let resp = parse_and_dispatch(req_json, &store, &ps).unwrap();
+        // In parse_and_dispatch the "launch" arm returns INTERNAL_ERROR
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn test_is_launch_command_detection() {
+        assert!(is_launch_command(
+            r#"{"version":1,"request_id":"r1","command":"launch","payload":{}}"#
+        ));
+        assert!(is_launch_command(
+            r#"{"version":1,"request_id":"r1","command": "launch","payload":{}}"#
+        ));
+        assert!(!is_launch_command(
+            r#"{"version":1,"request_id":"r1","command":"agent-state","payload":{}}"#
+        ));
+        assert!(!is_launch_command(
+            r#"{"version":1,"request_id":"r1","command":"list-agents","payload":{}}"#
+        ));
+    }
+
+    #[test]
     fn test_parse_and_dispatch_unknown_command() {
         let store = make_store();
         let ps = make_ps();
@@ -891,7 +1123,8 @@ mod tests {
         }
 
         // Start the socket server
-        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), cancel.clone())
+        let launch_tx = new_launch_sender();
+        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
             .await
             .unwrap()
             .expect("Expected socket server handle on unix");
@@ -948,7 +1181,8 @@ mod tests {
             tracker.set_state("agent-b", AgentState::Busy);
         }
 
-        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), cancel.clone())
+        let launch_tx = new_launch_sender();
+        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
             .await
             .unwrap()
             .expect("Expected socket server handle on unix");
@@ -992,10 +1226,12 @@ mod tests {
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
 
+        let launch_tx = new_launch_sender();
         let _handle = start_socket_server(
             home_dir.clone(),
             make_store(),
             new_pubsub_store(),
+            launch_tx,
             cancel.clone(),
         )
         .await
@@ -1044,7 +1280,8 @@ mod tests {
         let cancel = CancellationToken::new();
         let state_store = make_store();
 
-        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), cancel.clone())
+        let launch_tx = new_launch_sender();
+        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
             .await
             .unwrap()
             .expect("Expected socket server handle on unix");
@@ -1072,7 +1309,8 @@ mod tests {
         let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
 
         {
-            let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), cancel.clone())
+            let launch_tx = new_launch_sender();
+            let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
                 .await
                 .unwrap()
                 .expect("Expected handle");

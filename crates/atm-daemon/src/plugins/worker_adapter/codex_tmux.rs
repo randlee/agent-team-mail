@@ -238,6 +238,147 @@ impl WorkerAdapter for CodexTmuxBackend {
         })
     }
 
+    /// Spawn a worker with environment variables exported before the command.
+    ///
+    /// Creates a new tmux window, exports `ATM_IDENTITY`, `ATM_TEAM`, and any
+    /// extra `env_vars`, then starts the main command.  Each variable is sent
+    /// with a separate `export KEY=VALUE` send-keys call to avoid shell quoting
+    /// issues with complex values.
+    async fn spawn_with_env(
+        &mut self,
+        agent_id: &str,
+        command: &str,
+        env_vars: &std::collections::HashMap<String, String>,
+    ) -> Result<WorkerHandle, PluginError> {
+        if !Self::tmux_available() {
+            return Err(PluginError::Runtime {
+                message: "tmux is not available on this system".to_string(),
+                source: None,
+            });
+        }
+
+        self.ensure_session()?;
+
+        // Create log directory
+        let log_dir_display = self.log_dir.display();
+        std::fs::create_dir_all(&self.log_dir).map_err(|e| PluginError::Runtime {
+            message: format!("Failed to create log directory: {log_dir_display}"),
+            source: Some(Box::new(e)),
+        })?;
+
+        let log_path = self.log_path(agent_id);
+
+        // Create a new window (empty shell, no command yet)
+        let output = std::process::Command::new("tmux")
+            .arg("new-window")
+            .arg("-t")
+            .arg(&self.tmux_session)
+            .arg("-n")
+            .arg(agent_id)
+            .arg("-P")
+            .arg("-F")
+            .arg("#{pane_id}")
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to create tmux window: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(PluginError::Runtime {
+                message: format!("Failed to create tmux window: {stderr}"),
+                source: None,
+            });
+        }
+
+        let pane_id = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_string();
+
+        debug!("Created tmux pane {pane_id} for agent {agent_id} (with env)");
+
+        // Export all environment variables.
+        // Each export is sent as a separate send-keys call with the -l flag to
+        // avoid special-character interpretation.
+        for (key, value) in env_vars {
+            // Validate key to prevent shell injection via variable name
+            if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                let export_cmd = format!("export {key}={value}");
+                std::process::Command::new("tmux")
+                    .arg("send-keys")
+                    .arg("-t")
+                    .arg(&pane_id)
+                    .arg("-l")
+                    .arg(&export_cmd)
+                    .output()
+                    .map_err(|e| PluginError::Runtime {
+                        message: format!("Failed to send env export to tmux pane: {e}"),
+                        source: Some(Box::new(e)),
+                    })?;
+
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                std::process::Command::new("tmux")
+                    .arg("send-keys")
+                    .arg("-t")
+                    .arg(&pane_id)
+                    .arg("Enter")
+                    .output()
+                    .map_err(|e| PluginError::Runtime {
+                        message: format!("Failed to send Enter after env export: {e}"),
+                        source: Some(Box::new(e)),
+                    })?;
+            } else {
+                warn!("Skipping env var with invalid key name: {key}");
+            }
+        }
+
+        // Start the main command with log capture
+        let log_display = log_path.display();
+        let startup = format!("{command} 2>&1 | tee -a '{log_display}'");
+
+        debug!("Starting worker {agent_id} with: {startup}");
+
+        std::process::Command::new("tmux")
+            .arg("send-keys")
+            .arg("-t")
+            .arg(&pane_id)
+            .arg("-l")
+            .arg(&startup)
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to send startup command to tmux pane: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        std::process::Command::new("tmux")
+            .arg("send-keys")
+            .arg("-t")
+            .arg(&pane_id)
+            .arg("Enter")
+            .output()
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to send Enter key to tmux pane: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        let tmux_payload = TmuxPayload {
+            session: self.tmux_session.clone(),
+            pane_id: pane_id.clone(),
+            window_name: agent_id.to_string(),
+        };
+
+        Ok(WorkerHandle {
+            agent_id: agent_id.to_string(),
+            backend_id: pane_id,
+            log_file_path: log_path,
+            payload: Some(std::sync::Arc::new(tmux_payload)),
+        })
+    }
+
     async fn send_message(
         &mut self,
         handle: &WorkerHandle,
