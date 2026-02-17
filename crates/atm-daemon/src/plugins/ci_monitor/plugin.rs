@@ -262,7 +262,21 @@ impl CiMonitorPlugin {
         Ok(())
     }
 
+    /// Check if a branch matches the configured branch filter
+    ///
+    /// Returns true if:
+    /// - No branch patterns configured (match all)
+    /// - Branch matches any configured glob pattern
+    fn matches_branch(&self, branch: &str) -> bool {
+        match &self.config.branch_matcher {
+            None => true, // No filter = match all
+            Some(matcher) => matcher.is_match(branch),
+        }
+    }
+
     /// Transform a CI failure into an InboxMessage for delivery
+    ///
+    /// If multiple notify_targets are configured, includes a note listing all recipients.
     fn run_to_message(&self, run: &super::types::CiRun) -> InboxMessage {
         let conclusion_display = match run.conclusion {
             Some(CiRunConclusion::Failure) => "failed",
@@ -288,7 +302,7 @@ impl CiMonitorPlugin {
             })
             .unwrap_or_else(|| "(job details not available)".to_string());
 
-        let content = format!(
+        let mut content = format!(
             "[ci:{}] CI {} on {}: {}\nCommit: {}\nFailed jobs: {}\nURL: {}",
             run.id,
             conclusion_display,
@@ -298,6 +312,18 @@ impl CiMonitorPlugin {
             failed_jobs,
             run.url
         );
+
+        // Add multi-recipient note if multiple targets configured
+        if self.config.notify_target.len() > 1 {
+            let recipients: Vec<String> = self.config.notify_target
+                .iter()
+                .map(|t| {
+                    let team = t.team.as_ref().unwrap_or(&self.config.team);
+                    format!("{}@{}", t.agent, team)
+                })
+                .collect();
+            content.push_str(&format!("\n\nNotified: {}", recipients.join(", ")));
+        }
 
         let message_id = self.dedup_key(run);
 
@@ -363,15 +389,16 @@ impl Plugin for CiMonitorPlugin {
         }
 
         // Determine ATM home directory
+        // When ATM_HOME is set, use it directly (test-friendly)
         let atm_home = if let Ok(atm_home_env) = std::env::var("ATM_HOME") {
             PathBuf::from(atm_home_env)
         } else {
-            dirs::config_dir()
-                .ok_or_else(|| PluginError::Init {
-                    message: "Could not determine config directory".to_string(),
+            agent_team_mail_core::home::get_home_dir()
+                .map_err(|e| PluginError::Init {
+                    message: format!("Could not determine home directory: {e}"),
                     source: None,
                 })?
-                .join("atm")
+                .join(".config/atm")
         };
 
         // Build the provider registry
@@ -430,6 +457,68 @@ impl Plugin for CiMonitorPlugin {
                 source: None,
             })?;
 
+        // Validate notify targets exist in team config (warn if not found)
+        if !self.config.notify_target.is_empty() {
+            let targets: Vec<String> = self.config.notify_target
+                .iter()
+                .map(|t| {
+                    let team = t.team.as_ref().unwrap_or(&self.config.team);
+                    format!("{}@{}", t.agent, team)
+                })
+                .collect();
+            debug!(
+                "CI Monitor will route notifications to: {}",
+                targets.join(", ")
+            );
+
+            // Validate each target exists in its team config
+            for target in &self.config.notify_target {
+                let target_team = target.team.as_ref().unwrap_or(&self.config.team);
+                let team_config_path = ctx.mail.teams_root()
+                    .join(target_team)
+                    .join("config.json");
+
+                if team_config_path.exists() {
+                    // Try to read team config and check if agent exists
+                    match std::fs::read_to_string(&team_config_path) {
+                        Ok(content) => {
+                            match serde_json::from_str::<agent_team_mail_core::schema::TeamConfig>(&content) {
+                                Ok(team_config) => {
+                                    let agent_exists = team_config.members.iter()
+                                        .any(|m| m.name == target.agent);
+                                    if !agent_exists {
+                                        warn!(
+                                            "CI Monitor: notify_target '{}@{}' not found in team config. \
+                                             Target may join later or may be a typo.",
+                                            target.agent, target_team
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "CI Monitor: Failed to parse team config for '{}': {}",
+                                        target_team, e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "CI Monitor: Failed to read team config for '{}': {}",
+                                target_team, e
+                            );
+                        }
+                    }
+                } else {
+                    warn!(
+                        "CI Monitor: Team '{}' config not found at {}. \
+                         Team may not exist yet.",
+                        target_team, team_config_path.display()
+                    );
+                }
+            }
+        }
+
         // Store context for runtime use
         self.ctx = Some(ctx.clone());
 
@@ -469,69 +558,94 @@ impl Plugin for CiMonitorPlugin {
                         }
                     };
 
-                    // Build filter from config
-                    let mut filter = CiFilter {
+                    // Build filter from config (no branch filter - we'll filter client-side)
+                    let filter = CiFilter {
                         status: Some(CiRunStatus::Completed),
                         per_page: Some(20),
                         ..Default::default()
                     };
 
-                    // If watched_branches is specified, check each branch
-                    let branches = if self.config.watched_branches.is_empty() {
-                        vec![None]
-                    } else {
-                        self.config.watched_branches.iter().map(|b| Some(b.clone())).collect()
-                    };
+                    // Fetch all completed runs
+                    match provider.list_runs(&filter).await {
+                        Ok(runs) => {
+                            // Process each run
+                            for run in runs {
+                                // Filter by branch using glob patterns (client-side)
+                                if !self.matches_branch(&run.head_branch) {
+                                    continue;
+                                }
 
-                    for branch in branches {
-                        filter.branch = branch;
-
-                        // Fetch runs
-                        match provider.list_runs(&filter).await {
-                            Ok(runs) => {
-                                // Process each run
-                                for run in runs {
-                                    // Check if this run matches our notification criteria
-                                    if let Some(conclusion) = run.conclusion
-                                        && self.config.notify_on.contains(&conclusion)
-                                    {
-                                        // Fetch full run details with jobs
-                                        let full_run = match provider.get_run(run.id).await {
-                                            Ok(r) => r,
-                                            Err(e) => {
-                                                warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
-                                                continue;
-                                            }
-                                        };
-
-                                        // Generate dedup key
-                                        let key = self.dedup_key(&full_run);
-
-                                        // Skip if we've already seen this run+conclusion
-                                        if self.seen_runs.contains_key(&key) {
+                                // Check if this run matches our notification criteria
+                                if let Some(conclusion) = run.conclusion
+                                    && self.config.notify_on.contains(&conclusion)
+                                {
+                                    // Fetch full run details with jobs
+                                    let full_run = match provider.get_run(run.id).await {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
                                             continue;
                                         }
+                                    };
 
-                                        // Generate failure reports
-                                        if let Err(e) = self.generate_reports(&full_run) {
-                                            warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
-                                        }
+                                    // Generate dedup key
+                                    let key = self.dedup_key(&full_run);
 
-                                        // Create and send notification
-                                        let msg = self.run_to_message(&full_run);
+                                    // Skip if we've already seen this run+conclusion
+                                    if self.seen_runs.contains_key(&key) {
+                                        continue;
+                                    }
+
+                                    // Generate failure reports
+                                    if let Err(e) = self.generate_reports(&full_run) {
+                                        warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
+                                    }
+
+                                    // Create notification message
+                                    let msg = self.run_to_message(&full_run);
+
+                                    // Send to configured targets or default to ci-monitor agent
+                                    if self.config.notify_target.is_empty() {
+                                        // Default: send as ci-monitor agent to its own inbox
                                         if let Err(e) = ctx.mail.send(&self.config.team, &self.config.agent, &msg) {
                                             warn!("CI Monitor: Failed to send message for run #{}: {e}", run.id);
                                         } else {
                                             debug!("CI Monitor: Notified about run #{} ({:?})", run.id, conclusion);
+                                            self.seen_runs.insert(key.clone(), Utc::now());
+                                        }
+                                    } else {
+                                        // Send to each configured target
+                                        let mut sent_count = 0;
+                                        for target in &self.config.notify_target {
+                                            let target_team = target.team.as_ref().unwrap_or(&self.config.team);
+
+                                            // Check if target inbox exists (warns on first message if not found)
+                                            let inbox_path = ctx.mail.teams_root().join(target_team).join("inboxes").join(format!("{}.json", target.agent));
+                                            if !inbox_path.exists() {
+                                                warn!(
+                                                    "CI Monitor: Target inbox '{}@{}' not found at {}. \
+                                                     Target may not exist or hasn't joined the team yet.",
+                                                    target.agent, target_team, inbox_path.display()
+                                                );
+                                            }
+
+                                            if let Err(e) = ctx.mail.send(target_team, &target.agent, &msg) {
+                                                warn!("CI Monitor: Failed to send message to {}@{}: {e}", target.agent, target_team);
+                                            } else {
+                                                sent_count += 1;
+                                            }
+                                        }
+                                        if sent_count > 0 {
+                                            debug!("CI Monitor: Notified {} targets about run #{} ({:?})", sent_count, run.id, conclusion);
                                             self.seen_runs.insert(key, Utc::now());
                                         }
                                     }
                                 }
                             }
-                            Err(e) => {
-                                warn!("CI Monitor: Failed to fetch runs: {e}");
-                                // Continue polling after error
-                            }
+                        }
+                        Err(e) => {
+                            warn!("CI Monitor: Failed to fetch runs: {e}");
+                            // Continue polling after error
                         }
                     }
                 }
@@ -654,5 +768,476 @@ mod tests {
         let key2 = plugin.dedup_key(&run2);
 
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_matches_branch_no_filter() {
+        let plugin = CiMonitorPlugin::new();
+        assert!(plugin.matches_branch("main"));
+        assert!(plugin.matches_branch("develop"));
+        assert!(plugin.matches_branch("any-branch"));
+    }
+
+    #[test]
+    fn test_matches_branch_exact_match() {
+        use globset::GlobSetBuilder;
+        let mut builder = GlobSetBuilder::new();
+        builder.add(globset::Glob::new("main").unwrap());
+        let matcher = builder.build().unwrap();
+
+        let config = CiMonitorConfig {
+            branch_matcher: Some(matcher),
+            ..Default::default()
+        };
+        let plugin = CiMonitorPlugin::new().with_config(config);
+
+        assert!(plugin.matches_branch("main"));
+        assert!(!plugin.matches_branch("develop"));
+    }
+
+    #[test]
+    fn test_matches_branch_wildcard() {
+        use globset::GlobSetBuilder;
+        let mut builder = GlobSetBuilder::new();
+        builder.add(globset::Glob::new("release/*").unwrap());
+        let matcher = builder.build().unwrap();
+
+        let config = CiMonitorConfig {
+            branch_matcher: Some(matcher),
+            ..Default::default()
+        };
+        let plugin = CiMonitorPlugin::new().with_config(config);
+
+        assert!(plugin.matches_branch("release/v1.0"));
+        assert!(plugin.matches_branch("release/v2.5"));
+        assert!(!plugin.matches_branch("main"));
+    }
+
+    #[test]
+    fn test_matches_branch_multiple_patterns() {
+        use globset::GlobSetBuilder;
+        let mut builder = GlobSetBuilder::new();
+        builder.add(globset::Glob::new("main").unwrap());
+        builder.add(globset::Glob::new("release/*").unwrap());
+        let matcher = builder.build().unwrap();
+
+        let config = CiMonitorConfig {
+            branch_matcher: Some(matcher),
+            ..Default::default()
+        };
+        let plugin = CiMonitorPlugin::new().with_config(config);
+
+        assert!(plugin.matches_branch("main"));
+        assert!(plugin.matches_branch("release/v1.0"));
+        assert!(!plugin.matches_branch("develop"));
+    }
+
+    // E2E routing and filtering tests
+    #[tokio::test]
+    async fn test_e2e_branch_filter_and_routing() {
+        use crate::plugins::ci_monitor::{create_test_job, create_test_run, MockCiProvider};
+        use tempfile::TempDir;
+
+        // Setup: Create temporary teams directory
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+
+        // Create test runs on different branches
+        let run1 = create_test_run(1, "CI", "main", CiRunStatus::Completed, Some(CiRunConclusion::Failure));
+        let run2 = create_test_run(2, "CI", "release/v1.0", CiRunStatus::Completed, Some(CiRunConclusion::Failure));
+        let run3 = create_test_run(3, "CI", "feature/test", CiRunStatus::Completed, Some(CiRunConclusion::Failure));
+
+        let jobs = vec![create_test_job(101, "test-job", CiRunStatus::Completed, Some(CiRunConclusion::Failure))];
+        let provider = MockCiProvider::with_runs_and_jobs(vec![run1, run2, run3], jobs);
+
+        // Configure with branch filter and routing target
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["main", "release/*"]
+notify_target = "team-lead"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        // Verify config
+        assert!(config.branch_matcher.is_some());
+        assert_eq!(config.notify_target.len(), 1);
+        assert_eq!(config.notify_target[0].agent, "team-lead");
+
+        // Create plugin with mock provider
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(provider))
+            .with_config(config.clone());
+
+        // Setup minimal context
+        let ctx = create_mock_context(teams_root.clone());
+        plugin.ctx = Some(ctx);
+
+        // Simulate one poll cycle by manually processing runs
+        let provider_ref = plugin.provider.as_ref().unwrap();
+        let filter = CiFilter {
+            status: Some(CiRunStatus::Completed),
+            per_page: Some(20),
+            ..Default::default()
+        };
+
+        let runs = provider_ref.list_runs(&filter).await.unwrap();
+
+        // Process runs with branch filtering
+        for run in runs {
+            if !plugin.matches_branch(&run.head_branch) {
+                continue;
+            }
+
+            if let Some(conclusion) = run.conclusion {
+                if config.notify_on.contains(&conclusion) {
+                    let full_run = provider_ref.get_run(run.id).await.unwrap();
+                    let key = plugin.dedup_key(&full_run);
+
+                    if !plugin.seen_runs.contains_key(&key) {
+                        let msg = plugin.run_to_message(&full_run);
+
+                        // Send to routing target
+                        let ctx = plugin.ctx.as_ref().unwrap();
+                        for target in &plugin.config.notify_target {
+                            let target_team = target.team.as_ref().unwrap_or(&plugin.config.team);
+                            ctx.mail.send(target_team, &target.agent, &msg).unwrap();
+                        }
+
+                        plugin.seen_runs.insert(key, Utc::now());
+                    }
+                }
+            }
+        }
+
+        // Verify: Only main and release/v1.0 should have been processed
+        assert_eq!(plugin.seen_runs.len(), 2);
+
+        // Verify: Messages were sent to team-lead
+        let mail = crate::plugin::MailService::new(teams_root);
+        let inbox = mail.read_inbox("dev-team", "team-lead").unwrap();
+        assert_eq!(inbox.len(), 2);
+        assert!(inbox[0].text.contains("main"));
+        assert!(inbox[1].text.contains("release/v1.0"));
+    }
+
+    #[tokio::test]
+    async fn test_e2e_branch_filter_excludes_non_matching() {
+        use crate::plugins::ci_monitor::{create_test_run, MockCiProvider};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+
+        // Create runs that should NOT match
+        let run1 = create_test_run(1, "CI", "develop", CiRunStatus::Completed, Some(CiRunConclusion::Failure));
+        let run2 = create_test_run(2, "CI", "feature/other", CiRunStatus::Completed, Some(CiRunConclusion::Failure));
+
+        let provider = MockCiProvider::with_runs(vec![run1, run2]);
+
+        let toml_str = r#"
+team = "dev-team"
+watched_branches = ["main"]
+notify_target = "team-lead"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(provider))
+            .with_config(config.clone());
+
+        let ctx = create_mock_context(teams_root.clone());
+        plugin.ctx = Some(ctx);
+
+        // Process runs
+        let provider_ref = plugin.provider.as_ref().unwrap();
+        let filter = CiFilter {
+            status: Some(CiRunStatus::Completed),
+            per_page: Some(20),
+            ..Default::default()
+        };
+
+        let runs = provider_ref.list_runs(&filter).await.unwrap();
+
+        for run in runs {
+            if !plugin.matches_branch(&run.head_branch) {
+                continue;
+            }
+
+            if let Some(conclusion) = run.conclusion {
+                if config.notify_on.contains(&conclusion) {
+                    let full_run = provider_ref.get_run(run.id).await.unwrap();
+                    let key = plugin.dedup_key(&full_run);
+
+                    if !plugin.seen_runs.contains_key(&key) {
+                        let msg = plugin.run_to_message(&full_run);
+                        let ctx = plugin.ctx.as_ref().unwrap();
+                        for target in &plugin.config.notify_target {
+                            let target_team = target.team.as_ref().unwrap_or(&plugin.config.team);
+                            ctx.mail.send(target_team, &target.agent, &msg).unwrap();
+                        }
+                        plugin.seen_runs.insert(key, Utc::now());
+                    }
+                }
+            }
+        }
+
+        // Verify: No runs processed
+        assert_eq!(plugin.seen_runs.len(), 0);
+
+        // Verify: No messages sent
+        let mail = crate::plugin::MailService::new(teams_root);
+        let inbox = mail.read_inbox("dev-team", "team-lead").unwrap();
+        assert_eq!(inbox.len(), 0);
+    }
+
+    // Helper to create minimal plugin context for testing
+    fn create_mock_context(teams_root: PathBuf) -> PluginContext {
+        create_mock_context_with_config(teams_root, None)
+    }
+
+    // Helper to create mock context with optional plugin config
+    fn create_mock_context_with_config(teams_root: PathBuf, ci_monitor_config: Option<toml::Table>) -> PluginContext {
+        use crate::plugin::MailService;
+        use crate::roster::RosterService;
+        use agent_team_mail_core::config::Config;
+        use agent_team_mail_core::context::{Platform, RepoContext, SystemContext};
+        use std::sync::Arc;
+        use std::collections::HashMap;
+
+        let repo = RepoContext::new(
+            "test-repo".to_string(),
+            PathBuf::from("/tmp/test-repo"),
+        )
+        .with_remote("git@github.com:test/repo.git".to_string());
+
+        let system = SystemContext::new(
+            "test-host".to_string(),
+            Platform::Linux,
+            PathBuf::from("/tmp/.claude"),
+            "2.1.39".to_string(),
+            "default-team".to_string(),
+        )
+        .with_repo(repo);
+
+        let mut config = Config::default();
+        if let Some(table) = ci_monitor_config {
+            config.plugins.insert("ci_monitor".to_string(), table);
+        }
+
+        PluginContext {
+            system: Arc::new(system),
+            mail: Arc::new(MailService::new(teams_root.clone())),
+            config: Arc::new(config),
+            roster: Arc::new(RosterService::new(teams_root)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_target_validation_warns_on_missing_agent() {
+        use tempfile::TempDir;
+        use agent_team_mail_core::schema::{TeamConfig, AgentMember};
+        use crate::plugins::ci_monitor::MockCiProvider;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create ci-monitor inbox (required for synthetic member registration)
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Create team config with only one member (not the notify target)
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![
+                AgentMember {
+                    agent_id: "lead@dev-team".to_string(),
+                    name: "lead".to_string(),
+                    agent_type: "general-purpose".to_string(),
+                    model: "claude-opus-4-6".to_string(),
+                    prompt: None,
+                    color: None,
+                    plan_mode_required: None,
+                    joined_at: 1234567890,
+                    tmux_pane_id: None,
+                    cwd: "/tmp".to_string(),
+                    subscriptions: Vec::new(),
+                    backend_type: None,
+                    is_active: None,
+                    last_active: None,
+                    unknown_fields: std::collections::HashMap::new(),
+                }
+            ],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+
+        // Write team config
+        let config_path = team_dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string(&team_config).unwrap()).unwrap();
+
+        // Create plugin config table
+        let toml_str = r#"
+team = "dev-team"
+notify_target = "nonexistent-agent"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(MockCiProvider::new()));
+
+        let ctx = create_mock_context_with_config(teams_root, Some(table));
+
+        // Init should succeed but log a warning (we can't easily test logging here,
+        // but we verify it doesn't fail)
+        let result = plugin.init(&ctx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_notify_target_validation_passes_on_existing_agent() {
+        use tempfile::TempDir;
+        use agent_team_mail_core::schema::{TeamConfig, AgentMember};
+        use crate::plugins::ci_monitor::MockCiProvider;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create ci-monitor inbox (required for synthetic member registration)
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Create team config with target agent
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![
+                AgentMember {
+                    agent_id: "lead@dev-team".to_string(),
+                    name: "lead".to_string(),
+                    agent_type: "general-purpose".to_string(),
+                    model: "claude-opus-4-6".to_string(),
+                    prompt: None,
+                    color: None,
+                    plan_mode_required: None,
+                    joined_at: 1234567890,
+                    tmux_pane_id: None,
+                    cwd: "/tmp".to_string(),
+                    subscriptions: Vec::new(),
+                    backend_type: None,
+                    is_active: None,
+                    last_active: None,
+                    unknown_fields: std::collections::HashMap::new(),
+                },
+                AgentMember {
+                    agent_id: "team-lead@dev-team".to_string(),
+                    name: "team-lead".to_string(),
+                    agent_type: "general-purpose".to_string(),
+                    model: "claude-opus-4-6".to_string(),
+                    prompt: None,
+                    color: None,
+                    plan_mode_required: None,
+                    joined_at: 1234567890,
+                    tmux_pane_id: None,
+                    cwd: "/tmp".to_string(),
+                    subscriptions: Vec::new(),
+                    backend_type: None,
+                    is_active: None,
+                    last_active: None,
+                    unknown_fields: std::collections::HashMap::new(),
+                }
+            ],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+
+        // Write team config
+        let config_path = team_dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string(&team_config).unwrap()).unwrap();
+
+        // Create plugin config table
+        let toml_str = r#"
+team = "dev-team"
+notify_target = "team-lead"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(MockCiProvider::new()));
+
+        let ctx = create_mock_context_with_config(teams_root, Some(table));
+
+        // Init should succeed without warnings
+        let result = plugin.init(&ctx).await;
+        if let Err(ref e) = result {
+            eprintln!("Init failed: {}", e);
+        }
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_to_message_includes_multi_recipient_note() {
+        use crate::plugins::ci_monitor::{create_test_run, CiRunConclusion, CiRunStatus};
+
+        // Create plugin with multiple notify targets
+        let toml_str = r#"
+team = "dev-team"
+notify_target = ["lead", "qa-bot@qa-team"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let plugin = CiMonitorPlugin::new().with_config(config);
+
+        let run = create_test_run(
+            123,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+
+        let msg = plugin.run_to_message(&run);
+
+        // Verify multi-recipient note is included
+        assert!(msg.text.contains("Notified: lead@dev-team, qa-bot@qa-team"));
+    }
+
+    #[test]
+    fn test_run_to_message_no_multi_recipient_note_for_single_target() {
+        use crate::plugins::ci_monitor::{create_test_run, CiRunConclusion, CiRunStatus};
+
+        // Create plugin with single notify target
+        let toml_str = r#"
+team = "dev-team"
+notify_target = "lead"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let plugin = CiMonitorPlugin::new().with_config(config);
+
+        let run = create_test_run(
+            123,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+
+        let msg = plugin.run_to_message(&run);
+
+        // Verify no multi-recipient note for single target
+        assert!(!msg.text.contains("Notified:"));
     }
 }

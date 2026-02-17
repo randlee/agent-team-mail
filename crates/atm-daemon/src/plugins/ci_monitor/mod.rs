@@ -9,7 +9,7 @@ mod provider;
 mod registry;
 mod types;
 
-pub use config::{CiMonitorConfig, DedupStrategy};
+pub use config::{CiMonitorConfig, DedupStrategy, NotifyTarget};
 pub use github::GitHubActionsProvider;
 pub use loader::CiProviderLoader;
 pub use mock_provider::{create_test_job, create_test_run, create_test_step, MockCall, MockCiProvider};

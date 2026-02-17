@@ -1,10 +1,13 @@
 //! Main daemon event loop
 
 use crate::daemon::{graceful_shutdown, spool_drain_loop, watch_inboxes, InboxEvent, InboxEventKind};
+use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -17,18 +20,21 @@ use tracing::{debug, error, info, warn};
 /// 2. Spawns each plugin's run() method in its own task
 /// 3. Starts the spool drain background task
 /// 4. Starts the file system watcher
-/// 5. Waits for cancellation signal
-/// 6. Performs graceful shutdown of all plugins
+/// 5. Writes daemon status periodically
+/// 6. Waits for cancellation signal
+/// 7. Performs graceful shutdown of all plugins
 ///
 /// # Arguments
 ///
 /// * `registry` - Mutable plugin registry (plugins will be taken out for task spawning)
 /// * `ctx` - Shared plugin context
 /// * `cancel` - Cancellation token for shutdown coordination
+/// * `status_writer` - Status file writer for daemon state tracking
 pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
     cancel: CancellationToken,
+    status_writer: Arc<StatusWriter>,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -177,6 +183,28 @@ pub async fn run(
         info!("Event dispatch loop stopped");
     });
 
+    // Start retention task if enabled
+    let retention_task = if ctx.config.retention.enabled {
+        info!("Starting retention task (interval: {}s)", ctx.config.retention.interval_secs);
+        let retention_cancel = cancel.clone();
+        let retention_ctx = ctx.clone();
+        Some(tokio::spawn(async move {
+            retention_loop(retention_ctx, retention_cancel).await;
+        }))
+    } else {
+        info!("Retention task disabled in config");
+        None
+    };
+
+    // Start status writer task
+    let status_cancel = cancel.clone();
+    let status_writer_clone = status_writer.clone();
+    let status_plugins = plugins.clone();
+    let status_ctx = ctx.clone();
+    let status_task = tokio::spawn(async move {
+        status_writer_loop(status_writer_clone, status_plugins, status_ctx, status_cancel).await;
+    });
+
     info!("Daemon event loop running. Waiting for cancellation signal...");
 
     // Wait for cancellation
@@ -194,6 +222,16 @@ pub async fn run(
 
     if let Err(e) = tokio::time::timeout(Duration::from_secs(5), dispatch_task).await {
         error!("Dispatch task did not complete in time: {}", e);
+    }
+
+    if let Some(task) = retention_task {
+        if let Err(e) = tokio::time::timeout(Duration::from_secs(5), task).await {
+            error!("Retention task did not complete in time: {}", e);
+        }
+    }
+
+    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), status_task).await {
+        error!("Status writer task did not complete in time: {}", e);
     }
 
     // Graceful shutdown of all plugins
@@ -286,6 +324,334 @@ fn extract_hostname_registry(config: &agent_team_mail_core::config::Config) -> O
     }
 
     Some(std::sync::Arc::new(registry))
+}
+
+/// Periodic retention task
+///
+/// Runs retention on all team inbox files at configured intervals.
+/// Also cleans up old CI report files if CI monitor plugin is configured.
+async fn retention_loop(ctx: PluginContext, cancel: CancellationToken) {
+    // Extract retention config
+    let config = &ctx.config.retention;
+    let interval_secs = config.interval_secs;
+
+    // Set up defaults for daemon mode
+    let max_age = config.max_age.clone().or_else(|| Some("30d".to_string()));
+    let max_count = config.max_count.or(Some(1000));
+
+    let retention_policy = agent_team_mail_core::config::RetentionConfig {
+        max_age,
+        max_count,
+        strategy: config.strategy,
+        archive_dir: config.archive_dir.clone(),
+        enabled: config.enabled,
+        interval_secs: config.interval_secs,
+    };
+
+    let teams_root = ctx.mail.teams_root().clone();
+
+    // Extract report_dir from CI monitor plugin config if present
+    let report_dir: Option<PathBuf> = ctx
+        .config
+        .plugin_config("ci_monitor")
+        .and_then(|table| table.get("report_dir"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+
+    info!("Retention loop started (interval: {}s)", interval_secs);
+
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("Retention loop cancelled");
+                break;
+            }
+            _ = interval.tick() => {
+                debug!("Running periodic retention");
+
+                // Run retention work in spawn_blocking to avoid blocking the tokio runtime
+                let teams_root_clone = teams_root.clone();
+                let retention_policy_clone = retention_policy.clone();
+                let report_dir_clone = report_dir.clone();
+
+                let result = tokio::task::spawn_blocking(move || {
+                    retention_work(&teams_root_clone, &retention_policy_clone, report_dir_clone.as_ref())
+                }).await;
+
+                if let Err(e) = result {
+                    error!("Retention task panicked: {}", e);
+                }
+            }
+        }
+    }
+
+    info!("Retention loop stopped");
+}
+
+/// Perform retention work synchronously (called from spawn_blocking)
+fn retention_work(
+    teams_root: &PathBuf,
+    retention_policy: &agent_team_mail_core::config::RetentionConfig,
+    report_dir: Option<&PathBuf>,
+) {
+    use agent_team_mail_core::retention::{apply_retention, clean_report_files};
+    use agent_team_mail_core::retention::parse_duration;
+
+    // Enumerate team directories
+    let team_dirs = match std::fs::read_dir(teams_root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::error!("Failed to read teams directory {}: {}", teams_root.display(), e);
+            return;
+        }
+    };
+
+    for team_entry in team_dirs {
+        let team_entry = match team_entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Failed to read team directory entry: {}", e);
+                continue;
+            }
+        };
+
+        let team_path = team_entry.path();
+        if !team_path.is_dir() {
+            continue;
+        }
+
+        let team_name = match team_path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => continue,
+        };
+
+        // Enumerate agent inbox files in the inboxes/ subdirectory
+        let inboxes_path = team_path.join("inboxes");
+        if !inboxes_path.is_dir() {
+            // No inboxes subdirectory, skip this team
+            continue;
+        }
+
+        let agents = match std::fs::read_dir(&inboxes_path) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!("Failed to read inboxes directory {}: {}", inboxes_path.display(), e);
+                continue;
+            }
+        };
+
+        for agent_entry in agents {
+            let agent_entry = match agent_entry {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("Failed to read agent entry: {}", e);
+                    continue;
+                }
+            };
+
+            let agent_path = agent_entry.path();
+
+            // Look for inbox files: agent.json or agent.hostname.json
+            if !agent_path.is_file() {
+                continue;
+            }
+
+            let file_name = match agent_path.file_name() {
+                Some(name) => name.to_string_lossy().to_string(),
+                None => continue,
+            };
+
+            // Parse agent name from filename
+            // Format: <agent>.json or <agent>.<hostname>.json
+            let agent_name = if file_name.ends_with(".json") {
+                let base = &file_name[..file_name.len() - 5]; // Remove .json
+
+                // Check if this is a bridge inbox (has hostname suffix)
+                // Bridge inboxes have format: agent.hostname.json
+                // Local inboxes have format: agent.json
+                // Agent names may contain dots, so we can't just split on dots.
+                //
+                // Heuristic: If the base contains a dot, assume the last component
+                // is the hostname (bridge inbox). Otherwise, use the whole base.
+                if base.contains('.') {
+                    // Has a dot — might be agent.hostname or just agent.with.dots
+                    // We'll use the entire base as the agent name for retention purposes.
+                    // Retention doesn't need to distinguish local vs bridge inboxes;
+                    // it just needs a stable identifier for the archive directory.
+                    base.to_string()
+                } else {
+                    // No dot — simple agent name
+                    base.to_string()
+                }
+            } else {
+                continue;
+            };
+
+            // Apply retention to this inbox
+            tracing::debug!("Applying retention to {}/{}/{}", team_name, agent_name, file_name);
+            match apply_retention(
+                &agent_path,
+                &team_name,
+                &agent_name,
+                retention_policy,
+                false, // Not a dry run
+            ) {
+                Ok(result) => {
+                    if result.removed > 0 {
+                        tracing::info!(
+                            "Retention: {}/{}/{}: kept={}, removed={}, archived={}",
+                            team_name, agent_name, file_name,
+                            result.kept, result.removed, result.archived
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Retention failed for {}/{}/{}: {}",
+                        team_name, agent_name, file_name, e
+                    );
+                }
+            }
+        }
+    }
+
+    // Clean up old report files if configured
+    if let Some(dir) = report_dir {
+        tracing::debug!("Cleaning old report files from {}", dir.display());
+
+        // Use max_age for report files (default 30 days)
+        let max_age_str = retention_policy.max_age.as_deref().unwrap_or("30d");
+        let max_age_duration = match parse_duration(max_age_str) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("Invalid max_age duration '{}': {}", max_age_str, e);
+                return;
+            }
+        };
+
+        match clean_report_files(dir, &max_age_duration) {
+            Ok(result) => {
+                if result.deleted_count > 0 {
+                    tracing::info!(
+                        "Report cleanup: deleted={}, skipped={}",
+                        result.deleted_count, result.skipped_count
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!("Report cleanup failed: {}", e);
+            }
+        }
+    }
+}
+
+/// Periodic status writer task
+///
+/// Writes daemon status to status.json at regular intervals (every 30 seconds).
+/// Status includes plugin states, active teams, PID, and uptime.
+async fn status_writer_loop(
+    status_writer: Arc<StatusWriter>,
+    plugins: Vec<(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)>,
+    ctx: PluginContext,
+    cancel: CancellationToken,
+) {
+    info!("Status writer loop started (interval: 30s)");
+
+    // Write initial status at startup
+    let plugin_statuses = build_plugin_statuses(&plugins).await;
+    let teams = get_active_teams(&ctx).await;
+    if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone()) {
+        error!("Failed to write initial daemon status: {}", e);
+    }
+
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("Status writer loop cancelled");
+                break;
+            }
+            _ = interval.tick() => {
+                debug!("Writing daemon status");
+
+                let plugin_statuses = build_plugin_statuses(&plugins).await;
+                let teams = get_active_teams(&ctx).await;
+
+                if let Err(e) = status_writer.write_status(plugin_statuses, teams) {
+                    error!("Failed to write daemon status: {}", e);
+                }
+            }
+        }
+    }
+
+    info!("Status writer loop stopped");
+}
+
+/// Build plugin status list from running plugins
+async fn build_plugin_statuses(
+    plugins: &[(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)],
+) -> Vec<PluginStatus> {
+    let mut statuses = Vec::new();
+
+    for (metadata, _plugin_arc) in plugins {
+        // For now, all plugins are running (we don't track per-plugin errors yet)
+        // Future enhancement: track plugin-level errors via shared state
+        statuses.push(PluginStatus {
+            name: metadata.name.to_string(),
+            enabled: true,
+            status: PluginStatusKind::Running,
+            last_error: None,
+            last_updated: Some(format_timestamp(SystemTime::now())),
+        });
+    }
+
+    statuses
+}
+
+/// Get list of active teams from the teams directory (async wrapper)
+async fn get_active_teams(ctx: &PluginContext) -> Vec<String> {
+    let teams_root = ctx.mail.teams_root().clone();
+
+    // Use spawn_blocking to avoid blocking the async runtime
+    tokio::task::spawn_blocking(move || {
+        let mut teams = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&teams_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(name) = path.file_name() {
+                        teams.push(name.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+
+        teams.sort();
+        teams
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Format timestamp as ISO 8601 string
+fn format_timestamp(time: SystemTime) -> String {
+    use chrono::{DateTime, Utc};
+
+    let duration = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let secs = duration.as_secs();
+    let nanos = duration.subsec_nanos();
+
+    let dt = DateTime::<Utc>::from_timestamp(secs as i64, nanos)
+        .unwrap_or_else(Utc::now);
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]
