@@ -467,8 +467,12 @@ impl WorkerAdapterPlugin {
 
         let handle = backend.spawn(member_name, command).await?;
         self.lifecycle.register_worker(member_name);
-        // Register agent in turn-level state tracker
-        self.agent_state.lock().unwrap().register_agent(member_name);
+        // Register agent in turn-level state tracker and store pane info
+        {
+            let mut state = self.agent_state.lock().unwrap();
+            state.register_agent(member_name);
+            state.set_pane_info(member_name, &handle.backend_id, &handle.log_file_path);
+        }
         self.workers.insert(member_name.to_string(), handle);
         debug!("Spawned worker for agent {config_key} (member: {member_name})");
 
@@ -676,8 +680,11 @@ impl Plugin for WorkerAdapterPlugin {
             .await?;
 
             // Register all auto-started workers in the turn-level state tracker
-            for member_name in self.workers.keys() {
-                self.agent_state.lock().unwrap().register_agent(member_name);
+            // and store pane info so socket queries can locate their log files.
+            for (member_name, handle) in &self.workers {
+                let mut state = self.agent_state.lock().unwrap();
+                state.register_agent(member_name);
+                state.set_pane_info(member_name, &handle.backend_id, &handle.log_file_path);
             }
         }
 

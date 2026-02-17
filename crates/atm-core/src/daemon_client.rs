@@ -243,6 +243,51 @@ pub fn query_list_agents() -> anyhow::Result<Option<Vec<AgentSummary>>> {
     }
 }
 
+/// Pane and log file information returned by the `agent-pane` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPaneInfo {
+    /// Backend pane identifier (e.g., `"%42"`).
+    pub pane_id: String,
+    /// Absolute path to the agent's log file.
+    pub log_path: String,
+}
+
+/// Query the daemon for the pane ID and log file path of a specific agent.
+///
+/// Returns `Ok(None)` when the daemon is not reachable or the agent is not tracked.
+///
+/// # Arguments
+///
+/// * `agent` - Agent name (e.g., `"arch-ctm"`)
+pub fn query_agent_pane(agent: &str) -> anyhow::Result<Option<AgentPaneInfo>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "agent-pane".to_string(),
+        payload: serde_json::json!({ "agent": agent }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    if !response.is_ok() {
+        // Daemon returned an error (e.g., agent not found) — treat as no info
+        return Ok(None);
+    }
+
+    let payload = match response.payload {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    match serde_json::from_value::<AgentPaneInfo>(payload) {
+        Ok(info) => Ok(Some(info)),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Generate a compact request identifier (UUID v4 as a short string).
 fn new_request_id() -> String {
     // Use a simple monotonic counter for environments without UUID support.
@@ -426,6 +471,22 @@ mod tests {
     fn test_query_agent_state_no_daemon_returns_none() {
         // Graceful fallback: no daemon → Ok(None)
         let result = query_agent_state("arch-ctm", "atm-dev");
+        assert!(result.is_ok());
+        // Result is None unless daemon happens to be running
+    }
+
+    #[test]
+    fn test_agent_pane_info_deserialization() {
+        let json = r#"{"pane_id":"%42","log_path":"/home/user/.claude/logs/arch-ctm.log"}"#;
+        let info: AgentPaneInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.pane_id, "%42");
+        assert_eq!(info.log_path, "/home/user/.claude/logs/arch-ctm.log");
+    }
+
+    #[test]
+    fn test_query_agent_pane_no_daemon_returns_none() {
+        // Graceful fallback: no daemon → Ok(None)
+        let result = query_agent_pane("arch-ctm");
         assert!(result.is_ok());
         // Result is None unless daemon happens to be running
     }
