@@ -8,6 +8,75 @@ use std::path::PathBuf;
 /// Default startup command for worker agents
 pub const DEFAULT_COMMAND: &str = "codex --yolo";
 
+/// Default nudge message template.
+///
+/// `{count}` is replaced with the number of unread messages.
+pub const DEFAULT_NUDGE_TEXT: &str =
+    "You have {count} unread ATM messages. Run: atm read";
+
+/// Default nudge cooldown in seconds (30 seconds between nudges per agent).
+pub const DEFAULT_NUDGE_COOLDOWN_SECS: u64 = 30;
+
+/// Configuration for the NudgeEngine.
+///
+/// Controls automatic nudging of idle agents that have unread inbox messages.
+/// Nudging uses `tmux send-keys` (Unix only) and is gated on agent state.
+#[derive(Debug, Clone)]
+pub struct NudgeConfig {
+    /// Whether the nudge engine is enabled (default: true).
+    pub enabled: bool,
+    /// Minimum seconds between nudges for the same agent (default: 30).
+    pub cooldown_secs: u64,
+    /// Message template sent to the agent pane via send-keys.
+    ///
+    /// `{count}` is replaced with the number of unread messages.
+    pub text_template: String,
+}
+
+impl Default for NudgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cooldown_secs: DEFAULT_NUDGE_COOLDOWN_SECS,
+            text_template: DEFAULT_NUDGE_TEXT.to_string(),
+        }
+    }
+}
+
+impl NudgeConfig {
+    /// Parse nudge configuration from an optional `[workers.nudge]` TOML subtable.
+    ///
+    /// Missing keys fall back to defaults.
+    pub fn from_toml(table: Option<&toml::Value>) -> Self {
+        let Some(t) = table.and_then(|v| v.as_table()) else {
+            return Self::default();
+        };
+
+        let enabled = t
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let cooldown_secs = t
+            .get("cooldown_secs")
+            .and_then(|v| v.as_integer())
+            .map(|i| i as u64)
+            .unwrap_or(DEFAULT_NUDGE_COOLDOWN_SECS);
+
+        let text_template = t
+            .get("text_template")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_NUDGE_TEXT)
+            .to_string();
+
+        Self {
+            enabled,
+            cooldown_secs,
+            text_template,
+        }
+    }
+}
+
 /// Per-agent configuration
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -61,6 +130,8 @@ pub struct WorkersConfig {
     pub restart_backoff_secs: u64,
     /// Graceful shutdown timeout in seconds (default: 10)
     pub shutdown_timeout_secs: u64,
+    /// Nudge engine configuration
+    pub nudge: NudgeConfig,
     /// Per-agent configuration
     pub agents: HashMap<String, AgentConfig>,
 }
@@ -385,6 +456,9 @@ impl WorkersConfig {
             .map(|i| i as u64)
             .unwrap_or(10); // 10 seconds default
 
+        // Parse nudge configuration from [workers.nudge]
+        let nudge = NudgeConfig::from_toml(table.get("nudge"));
+
         // Parse per-agent configuration
         let mut agents = HashMap::new();
         if let Some(agents_table) = table.get("agents").and_then(|v| v.as_table()) {
@@ -434,6 +508,7 @@ impl WorkersConfig {
             max_restart_attempts,
             restart_backoff_secs,
             shutdown_timeout_secs,
+            nudge,
             agents,
         };
 
@@ -467,6 +542,7 @@ impl Default for WorkersConfig {
             max_restart_attempts: 3,
             restart_backoff_secs: 5,
             shutdown_timeout_secs: 10,
+            nudge: NudgeConfig::default(),
             agents: HashMap::new(),
         }
     }
@@ -477,11 +553,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_nudge_config_default() {
+        let nudge = NudgeConfig::default();
+        assert!(nudge.enabled);
+        assert_eq!(nudge.cooldown_secs, DEFAULT_NUDGE_COOLDOWN_SECS);
+        assert!(nudge.text_template.contains("{count}"));
+    }
+
+    #[test]
+    fn test_nudge_config_from_toml_none() {
+        let nudge = NudgeConfig::from_toml(None);
+        assert!(nudge.enabled);
+        assert_eq!(nudge.cooldown_secs, 30);
+    }
+
+    #[test]
+    fn test_nudge_config_from_toml_custom() {
+        let toml_str = r#"
+enabled = false
+cooldown_secs = 60
+text_template = "You have {count} messages waiting."
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let value = toml::Value::Table(table);
+        let nudge = NudgeConfig::from_toml(Some(&value));
+        assert!(!nudge.enabled);
+        assert_eq!(nudge.cooldown_secs, 60);
+        assert_eq!(nudge.text_template, "You have {count} messages waiting.");
+    }
+
+    #[test]
+    fn test_nudge_config_parsed_from_workers_table() {
+        let toml_str = r#"
+enabled = true
+team_name = "test-team"
+[nudge]
+cooldown_secs = 45
+enabled = true
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = WorkersConfig::from_toml(&table).unwrap();
+        assert_eq!(config.nudge.cooldown_secs, 45);
+        assert!(config.nudge.enabled);
+    }
+
+    #[test]
     fn test_config_default() {
         let config = WorkersConfig::default();
         assert!(!config.enabled);
         assert_eq!(config.backend, "codex-tmux");
         assert_eq!(config.tmux_session, "atm-workers");
+        // Nudge config should have defaults
+        assert!(config.nudge.enabled);
+        assert_eq!(config.nudge.cooldown_secs, 30);
     }
 
     #[test]

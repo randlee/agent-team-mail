@@ -1,6 +1,6 @@
 //! Main daemon event loop
 
-use crate::daemon::{graceful_shutdown, spool_drain_loop, watch_inboxes, InboxEvent, InboxEventKind};
+use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedPubSubStore, SharedStateStore};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use anyhow::{Context, Result};
@@ -18,11 +18,12 @@ use tracing::{debug, error, info, warn};
 /// This function:
 /// 1. Initializes all plugins via the registry
 /// 2. Spawns each plugin's run() method in its own task
-/// 3. Starts the spool drain background task
-/// 4. Starts the file system watcher
-/// 5. Writes daemon status periodically
-/// 6. Waits for cancellation signal
-/// 7. Performs graceful shutdown of all plugins
+/// 3. Starts the Unix socket server backed by `state_store` and `pubsub_store`
+/// 4. Starts the spool drain background task
+/// 5. Starts the file system watcher
+/// 6. Writes daemon status periodically
+/// 7. Waits for cancellation signal
+/// 8. Performs graceful shutdown of all plugins
 ///
 /// # Arguments
 ///
@@ -30,11 +31,30 @@ use tracing::{debug, error, info, warn};
 /// * `ctx` - Shared plugin context
 /// * `cancel` - Cancellation token for shutdown coordination
 /// * `status_writer` - Status file writer for daemon state tracking
+/// * `state_store` - Shared agent state store for the socket server.
+///   When the worker adapter plugin is enabled the caller should pass the
+///   same `Arc` that was given to `WorkerAdapterPlugin::with_state_store`
+///   so that the socket server sees live agent state.  When the worker
+///   adapter is absent, pass a fresh `new_state_store()`; the socket
+///   server will still accept connections but return `AGENT_NOT_FOUND`
+///   for all agent-state queries.
+/// * `pubsub_store` - Shared pub/sub registry for subscribe/unsubscribe requests.
+///   Pass the same `Arc` from `WorkerAdapterPlugin::pubsub_store()` so that
+///   CLI subscriptions are routed to the same registry that delivers notifications.
+///   Pass `new_pubsub_store()` when the worker adapter is absent.
+/// * `launch_tx` - Shared sender for the agent launch channel.
+///   When the worker adapter plugin is enabled the caller should populate
+///   the inner `Option` with the sender half of the channel and pass the
+///   receiver to `WorkerAdapterPlugin::set_launch_receiver`.  Pass
+///   `new_launch_sender()` (with empty inner) when the plugin is absent.
 pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
     cancel: CancellationToken,
     status_writer: Arc<StatusWriter>,
+    state_store: SharedStateStore,
+    pubsub_store: SharedPubSubStore,
+    launch_tx: crate::daemon::LaunchSender,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -72,6 +92,38 @@ pub async fn run(
 
         plugin_tasks.push(task);
     }
+
+    // Start the Unix socket server (CLI↔daemon IPC).
+    //
+    // The socket path is ${ATM_HOME}/.claude/daemon/atm-daemon.sock.
+    // ctx.system.claude_root is ${ATM_HOME}/.claude, so the home_dir is its
+    // parent. We fall back to get_home_dir() if the parent cannot be determined
+    // (e.g., claude_root is the filesystem root, which should never happen in
+    // practice).
+    //
+    // `state_store` is the same Arc that the WorkerAdapterPlugin was given at
+    // construction time, so the socket server reads live agent state. When the
+    // worker adapter is not enabled the caller passes a fresh empty store; the
+    // socket server still accepts connections but returns AGENT_NOT_FOUND.
+    let socket_home_dir = ctx.system.claude_root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| {
+            agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
+        });
+    let socket_cancel = cancel.clone();
+    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, socket_cancel).await {
+        Ok(handle) => {
+            if handle.is_some() {
+                info!("Unix socket server started successfully");
+            }
+            handle
+        }
+        Err(e) => {
+            warn!("Failed to start Unix socket server (daemon will continue without it): {e}");
+            None
+        }
+    };
 
     // Start spool drain loop
     let teams_root = ctx.mail.teams_root().clone();
