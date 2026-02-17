@@ -1622,19 +1622,19 @@ Sprint 8.1 (Config + Scaffold)
 **Branch prefix**: `feature/p9-*`
 **Integration branch**: `integrate/phase-9` (off `develop`)
 **Depends on**: Phase 8.6 verification gate
-**Status**: Planned
+**Status**: ✅ COMPLETE (v0.9.0)
 
 ### Phase 9 Sprint Summary
 
-| Sprint | Name | Track | Status |
-|--------|------|-------|--------|
-| 9.0 | Phase 8.6 Verification Gate | Foundation | Planned |
-| 9.1 | CI/Tooling Stabilization | Foundation | Planned |
-| 9.2 | Home Dir Resolution | Foundation | Planned |
-| 9.3 | CI Config & Routing | CI Monitor | Planned |
-| 9.4 | Daemon Operationalization | CI Monitor | Planned |
-| 9.5 | WorkerHandle Backend Payload | Worker Adapter | Planned |
-| 9.6 | Daemon Retention Tasks | Platform | Planned |
+| Sprint | Name | Track | Status | PR |
+|--------|------|-------|--------|----|
+| 9.0 | Phase 8.6 Verification Gate | Foundation | ✅ | (gate check) |
+| 9.1 | CI/Tooling Stabilization | Foundation | ✅ | [#63](https://github.com/randlee/agent-team-mail/pull/63) |
+| 9.2 | Home Dir Resolution | Foundation | ✅ | [#67](https://github.com/randlee/agent-team-mail/pull/67) |
+| 9.3 | CI Config & Routing | CI Monitor | ✅ | [#71](https://github.com/randlee/agent-team-mail/pull/71) |
+| 9.4 | Daemon Operationalization | CI Monitor | ✅ | [#73](https://github.com/randlee/agent-team-mail/pull/73) |
+| 9.5 | WorkerHandle Backend Payload | Worker Adapter | ✅ | [#69](https://github.com/randlee/agent-team-mail/pull/69) |
+| 9.6 | Daemon Retention Tasks | Platform | ✅ | [#70](https://github.com/randlee/agent-team-mail/pull/70) |
 
 ### Sprint 9.0: Phase 8.6 Verification Gate
 - Dependencies: Phase 8.6 merged to develop
@@ -1837,8 +1837,20 @@ Additional plugins planned (each is a self-contained sprint series):
 | **8** | 8.5.1 | Phase 8 Arch Review Fixes | ✅ | [#60](https://github.com/randlee/agent-team-mail/pull/60) |
 | **8** | 8.6 | Bridge Hardening + Blocking Read | ✅ | [#61](https://github.com/randlee/agent-team-mail/pull/61) |
 
-**Completed**: 36 sprints + 1 design reconciliation across 8 phases (CI green)
-**Next**: Phase 9 — CI Monitor Integration + Platform Stabilization
+**Completed**: 43 sprints + 1 design reconciliation across 9 phases (CI green)
+**Current version**: v0.9.0
+**Next**: Future plugins (Phase 10+)
+
+**Sprint PRs (Phase 9)**:
+| Sprint | PR | Description |
+|--------|----|-------------|
+| 9.1 | [#63](https://github.com/randlee/agent-team-mail/pull/63) | Separate clippy CI job |
+| 9.2 | [#67](https://github.com/randlee/agent-team-mail/pull/67) | Canonical `get_home_dir()` replacing 11 call sites |
+| 9.3 | [#71](https://github.com/randlee/agent-team-mail/pull/71) | Branch glob matching and notify_target routing |
+| 9.4 | [#73](https://github.com/randlee/agent-team-mail/pull/73) | Daemon status file and CLI subcommand |
+| 9.5 | [#69](https://github.com/randlee/agent-team-mail/pull/69) | Typed payload for WorkerHandle |
+| 9.6 | [#70](https://github.com/randlee/agent-team-mail/pull/70) | Periodic inbox trimming and CI report retention |
+| Review | [#72](https://github.com/randlee/agent-team-mail/pull/72), [#74](https://github.com/randlee/agent-team-mail/pull/74), [#77](https://github.com/randlee/agent-team-mail/pull/77), [#78](https://github.com/randlee/agent-team-mail/pull/78) | ARCH-CTM review fixes |
 
 **Phase integration PRs**:
 | Phase | Integration PR | Status |
@@ -1847,6 +1859,7 @@ Additional plugins planned (each is a self-contained sprint series):
 | Phase 4 | [#25](https://github.com/randlee/agent-team-mail/pull/25) | ✅ Merged |
 | Phase 5 | [#30](https://github.com/randlee/agent-team-mail/pull/30), [#33](https://github.com/randlee/agent-team-mail/pull/33) | ✅ Merged |
 | Phase 7 | [#50](https://github.com/randlee/agent-team-mail/pull/50), [#51](https://github.com/randlee/agent-team-mail/pull/51) | ✅ Merged |
+| Phase 9 | [#75](https://github.com/randlee/agent-team-mail/pull/75) | ✅ Merged |
 | Phase 8 | [#59](https://github.com/randlee/agent-team-mail/pull/59) | ✅ Merged |
 
 ---
