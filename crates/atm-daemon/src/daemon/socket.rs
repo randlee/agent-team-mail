@@ -286,6 +286,7 @@ fn parse_and_dispatch(
     let response = match request.command.as_str() {
         "agent-state" => handle_agent_state(&request, state_store),
         "list-agents" => handle_list_agents(&request, state_store),
+        "agent-pane" => handle_agent_pane(&request, state_store),
         other => make_error_response(
             &request.request_id,
             "UNKNOWN_COMMAND",
@@ -363,6 +364,49 @@ fn handle_list_agents(
         .collect();
 
     make_ok_response(&request.request_id, serde_json::json!(agents))
+}
+
+/// Handle the `agent-pane` command.
+///
+/// Returns the tmux pane ID and log file path for the given agent so that
+/// the CLI `atm tail` command can locate the log file.
+///
+/// Payload: `{"agent": "<name>"}`
+/// Response: `{"pane_id": "%42", "log_path": "/path/to/agent.log"}`
+fn handle_agent_pane(
+    request: &agent_team_mail_core::daemon_client::SocketRequest,
+    state_store: &SharedStateStore,
+) -> SocketResponse {
+    let agent = request
+        .payload
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if agent.is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'agent'",
+        );
+    }
+
+    let tracker = state_store.lock().unwrap();
+    match tracker.get_pane_info(&agent) {
+        Some(info) => make_ok_response(
+            &request.request_id,
+            serde_json::json!({
+                "pane_id": info.pane_id,
+                "log_path": info.log_path.to_string_lossy(),
+            }),
+        ),
+        None => make_error_response(
+            &request.request_id,
+            "AGENT_NOT_FOUND",
+            &format!("Agent '{agent}' is not tracked or has no pane info"),
+        ),
+    }
 }
 
 // ── Response helpers ──────────────────────────────────────────────────────────
@@ -514,6 +558,46 @@ mod tests {
         let store = make_store();
         let req = make_request("agent-state", serde_json::json!({}));
         let resp = handle_agent_state(&req, &store);
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
+    }
+
+    #[test]
+    fn test_agent_pane_not_found() {
+        let store = make_store();
+        let req = make_request("agent-pane", serde_json::json!({"agent": "ghost"}));
+        let resp = handle_agent_pane(&req, &store);
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "AGENT_NOT_FOUND");
+    }
+
+    #[test]
+    fn test_agent_pane_found() {
+        let store = make_store();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_pane_info(
+                "arch-ctm",
+                "%42",
+                std::path::Path::new("/tmp/arch-ctm.log"),
+            );
+        }
+
+        let req = make_request("agent-pane", serde_json::json!({"agent": "arch-ctm"}));
+        let resp = handle_agent_pane(&req, &store);
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["pane_id"].as_str().unwrap(), "%42");
+        assert_eq!(payload["log_path"].as_str().unwrap(), "/tmp/arch-ctm.log");
+    }
+
+    #[test]
+    fn test_agent_pane_missing_agent_field() {
+        let store = make_store();
+        let req = make_request("agent-pane", serde_json::json!({}));
+        let resp = handle_agent_pane(&req, &store);
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
     }

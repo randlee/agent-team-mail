@@ -29,6 +29,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 use tracing::debug;
 
@@ -75,12 +76,26 @@ impl AgentState {
     }
 }
 
+/// Pane and log file information for a running agent.
+///
+/// Stored in `AgentStateTracker` so the socket server can answer
+/// `agent-pane` queries without direct access to worker handles.
+#[derive(Debug, Clone)]
+pub struct AgentPaneInfo {
+    /// Backend pane identifier (e.g., tmux pane `"%42"`).
+    pub pane_id: String,
+    /// Absolute path to the agent's log file.
+    pub log_path: PathBuf,
+}
+
 /// Tracks per-agent turn-level state.
 ///
 /// Thread-safe via external `Arc<Mutex<AgentStateTracker>>` wrapping.
 pub struct AgentStateTracker {
     states: HashMap<String, AgentState>,
     last_transition: HashMap<String, Instant>,
+    /// Pane and log path information per agent, stored for socket queries.
+    pane_info: HashMap<String, AgentPaneInfo>,
 }
 
 impl AgentStateTracker {
@@ -89,6 +104,7 @@ impl AgentStateTracker {
         Self {
             states: HashMap::new(),
             last_transition: HashMap::new(),
+            pane_info: HashMap::new(),
         }
     }
 
@@ -102,6 +118,7 @@ impl AgentStateTracker {
     pub fn unregister_agent(&mut self, agent_id: &str) {
         self.states.remove(agent_id);
         self.last_transition.remove(agent_id);
+        self.pane_info.remove(agent_id);
         debug!("Agent {agent_id} unregistered from state tracker");
     }
 
@@ -133,6 +150,35 @@ impl AgentStateTracker {
     /// Snapshot of all current agent states.
     pub fn all_states(&self) -> HashMap<String, AgentState> {
         self.states.clone()
+    }
+
+    /// Store pane and log file information for an agent.
+    ///
+    /// Called by the worker adapter after spawning a worker so that the socket
+    /// server can answer `agent-pane` queries.
+    ///
+    /// # Arguments
+    ///
+    /// * `agent_id`  - Agent name (e.g., `"arch-ctm"`)
+    /// * `pane_id`   - Backend pane identifier (e.g., `"%42"`)
+    /// * `log_path`  - Absolute path to the agent's log file
+    pub fn set_pane_info(&mut self, agent_id: &str, pane_id: &str, log_path: &std::path::Path) {
+        self.pane_info.insert(
+            agent_id.to_string(),
+            AgentPaneInfo {
+                pane_id: pane_id.to_string(),
+                log_path: log_path.to_path_buf(),
+            },
+        );
+        debug!("Agent {agent_id} pane info stored: pane={pane_id} log={}", log_path.display());
+    }
+
+    /// Retrieve pane and log file information for an agent.
+    ///
+    /// Returns `None` if the agent has not been registered or no pane info has
+    /// been stored for it yet.
+    pub fn get_pane_info(&self, agent_id: &str) -> Option<&AgentPaneInfo> {
+        self.pane_info.get(agent_id)
     }
 }
 
@@ -222,6 +268,16 @@ mod tests {
     }
 
     #[test]
+    fn test_unregister_removes_pane_info() {
+        let mut tracker = AgentStateTracker::new();
+        tracker.register_agent("arch-ctm");
+        tracker.set_pane_info("arch-ctm", "%42", std::path::Path::new("/tmp/arch-ctm.log"));
+        assert!(tracker.get_pane_info("arch-ctm").is_some());
+        tracker.unregister_agent("arch-ctm");
+        assert!(tracker.get_pane_info("arch-ctm").is_none());
+    }
+
+    #[test]
     fn test_unknown_agent_returns_none() {
         let tracker = AgentStateTracker::new();
         assert!(tracker.get_state("unknown-agent").is_none());
@@ -271,5 +327,36 @@ mod tests {
         let elapsed = tracker.time_since_transition("arch-ctm");
         assert!(elapsed.is_some());
         assert!(elapsed.unwrap().as_secs() < 1);
+    }
+
+    // ── Pane info tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pane_info_set_and_get() {
+        let mut tracker = AgentStateTracker::new();
+        tracker.register_agent("arch-ctm");
+        tracker.set_pane_info("arch-ctm", "%42", std::path::Path::new("/tmp/arch-ctm.log"));
+
+        let info = tracker.get_pane_info("arch-ctm").expect("pane info should be set");
+        assert_eq!(info.pane_id, "%42");
+        assert_eq!(info.log_path, std::path::PathBuf::from("/tmp/arch-ctm.log"));
+    }
+
+    #[test]
+    fn test_pane_info_not_found() {
+        let tracker = AgentStateTracker::new();
+        assert!(tracker.get_pane_info("unregistered-agent").is_none());
+    }
+
+    #[test]
+    fn test_pane_info_overwrite() {
+        let mut tracker = AgentStateTracker::new();
+        tracker.register_agent("arch-ctm");
+        tracker.set_pane_info("arch-ctm", "%10", std::path::Path::new("/tmp/old.log"));
+        tracker.set_pane_info("arch-ctm", "%20", std::path::Path::new("/tmp/new.log"));
+
+        let info = tracker.get_pane_info("arch-ctm").unwrap();
+        assert_eq!(info.pane_id, "%20");
+        assert_eq!(info.log_path, std::path::PathBuf::from("/tmp/new.log"));
     }
 }

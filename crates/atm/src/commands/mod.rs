@@ -15,6 +15,7 @@ mod read;
 mod request;
 mod send;
 mod status;
+mod tail;
 mod teams;
 mod wait;
 
@@ -68,6 +69,9 @@ enum Commands {
 
     /// Daemon management commands (status)
     Daemon(daemon::DaemonArgs),
+
+    /// Tail recent output from a Codex agent's log
+    Tail(tail::TailArgs),
 }
 
 impl Cli {
@@ -86,6 +90,7 @@ impl Cli {
             Commands::Cleanup(args) => cleanup::execute(args),
             Commands::Bridge(args) => bridge::execute(args),
             Commands::Daemon(args) => daemon::execute(args),
+            Commands::Tail(args) => tail::execute(args),
         }
     }
 }
