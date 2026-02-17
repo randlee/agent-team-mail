@@ -34,6 +34,7 @@ use tracing::{debug, error, info, warn};
 ///
 /// * `home_dir` - ATM home directory used to locate the socket path
 /// * `state_store` - Shared access to the agent state tracker
+/// * `pubsub_store` - Shared pub/sub registry for subscribe/unsubscribe requests
 /// * `cancel` - Cancellation token; server stops accepting when cancelled
 ///
 /// # Platform Behaviour
@@ -43,11 +44,12 @@ use tracing::{debug, error, info, warn};
 pub async fn start_socket_server(
     home_dir: PathBuf,
     state_store: SharedStateStore,
+    pubsub_store: SharedPubSubStore,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
     {
-        start_unix_socket_server(home_dir, state_store, cancel)
+        start_unix_socket_server(home_dir, state_store, pubsub_store, cancel)
             .await
             .map(Some)
     }
@@ -101,10 +103,23 @@ fn cleanup_socket_files(socket_path: &PathBuf, pid_path: &PathBuf) {
 pub type SharedStateStore =
     std::sync::Arc<std::sync::Mutex<crate::plugins::worker_adapter::AgentStateTracker>>;
 
+/// Shared pub/sub registry accessible from socket request handlers.
+///
+/// Wraps an `Arc<Mutex<PubSub>>` from the worker adapter plugin. When the
+/// worker adapter plugin is not enabled, this is an empty registry.
+pub type SharedPubSubStore =
+    std::sync::Arc<std::sync::Mutex<crate::plugins::worker_adapter::PubSub>>;
+
 /// Create a new empty shared state store.
 pub fn new_state_store() -> SharedStateStore {
     use crate::plugins::worker_adapter::AgentStateTracker;
     std::sync::Arc::new(std::sync::Mutex::new(AgentStateTracker::new()))
+}
+
+/// Create a new empty shared pub/sub store.
+pub fn new_pubsub_store() -> SharedPubSubStore {
+    use crate::plugins::worker_adapter::PubSub;
+    std::sync::Arc::new(std::sync::Mutex::new(PubSub::new()))
 }
 
 // ── Unix implementation ───────────────────────────────────────────────────────
@@ -113,6 +128,7 @@ pub fn new_state_store() -> SharedStateStore {
 async fn start_unix_socket_server(
     home_dir: PathBuf,
     state_store: SharedStateStore,
+    pubsub_store: SharedPubSubStore,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -146,7 +162,7 @@ async fn start_unix_socket_server(
     let accept_socket_path = socket_path.clone();
     let accept_pid_path = pid_path.clone();
     tokio::spawn(async move {
-        run_accept_loop(listener, state_store, cancel, &accept_socket_path, &accept_pid_path)
+        run_accept_loop(listener, state_store, pubsub_store, cancel, &accept_socket_path, &accept_pid_path)
             .await;
     });
 
@@ -160,6 +176,7 @@ async fn start_unix_socket_server(
 async fn run_accept_loop(
     listener: tokio::net::UnixListener,
     state_store: SharedStateStore,
+    pubsub_store: SharedPubSubStore,
     cancel: tokio_util::sync::CancellationToken,
     socket_path: &std::path::Path,
     _pid_path: &std::path::Path,
@@ -176,8 +193,9 @@ async fn run_accept_loop(
                 match result {
                     Ok((stream, _addr)) => {
                         let store = state_store.clone();
+                        let ps = pubsub_store.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, store).await {
+                            if let Err(e) = handle_connection(stream, store, ps).await {
                                 error!("Socket connection handler error: {e}");
                             }
                         });
@@ -199,6 +217,7 @@ async fn run_accept_loop(
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     state_store: SharedStateStore,
+    pubsub_store: SharedPubSubStore,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -221,7 +240,7 @@ async fn handle_connection(
     }
 
     let request_str = request_line.trim();
-    let response = match parse_and_dispatch(request_str, &state_store) {
+    let response = match parse_and_dispatch(request_str, &state_store, &pubsub_store) {
         Ok(resp) => resp,
         Err(e) => {
             error!("Failed to dispatch socket request: {e}");
@@ -250,6 +269,7 @@ async fn handle_connection(
 fn parse_and_dispatch(
     request_str: &str,
     state_store: &SharedStateStore,
+    pubsub_store: &SharedPubSubStore,
 ) -> Result<SocketResponse> {
     use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
 
@@ -287,6 +307,8 @@ fn parse_and_dispatch(
         "agent-state" => handle_agent_state(&request, state_store),
         "list-agents" => handle_list_agents(&request, state_store),
         "agent-pane" => handle_agent_pane(&request, state_store),
+        "subscribe" => handle_subscribe(&request, pubsub_store),
+        "unsubscribe" => handle_unsubscribe(&request, pubsub_store),
         other => make_error_response(
             &request.request_id,
             "UNKNOWN_COMMAND",
@@ -409,6 +431,120 @@ fn handle_agent_pane(
     }
 }
 
+/// Handle the `subscribe` command.
+///
+/// Payload: `{"subscriber": "<identity>", "agent": "<name>", "events": ["idle"], "team": "<team>"}`
+/// Response: `{"subscribed": true, "subscriber": "...", "agent": "..."}`
+fn handle_subscribe(
+    request: &agent_team_mail_core::daemon_client::SocketRequest,
+    pubsub_store: &SharedPubSubStore,
+) -> SocketResponse {
+    let subscriber = match request
+        .payload
+        .get("subscriber")
+        .and_then(|v| v.as_str())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'subscriber'",
+            );
+        }
+    };
+
+    let agent = match request.payload.get("agent").and_then(|v| v.as_str()) {
+        Some(a) if !a.is_empty() => a.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'agent'",
+            );
+        }
+    };
+
+    // `events` is optional; empty list is a wildcard
+    let events: Vec<String> = request
+        .payload
+        .get("events")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut pubsub = pubsub_store.lock().unwrap();
+    match pubsub.subscribe(&subscriber, &agent, events) {
+        Ok(()) => {
+            debug!("Registered subscription: {subscriber} → {agent}");
+            make_ok_response(
+                &request.request_id,
+                serde_json::json!({
+                    "subscribed": true,
+                    "subscriber": subscriber,
+                    "agent": agent,
+                }),
+            )
+        }
+        Err(e) => make_error_response(
+            &request.request_id,
+            "CAP_EXCEEDED",
+            &e.to_string(),
+        ),
+    }
+}
+
+/// Handle the `unsubscribe` command.
+///
+/// Payload: `{"subscriber": "<identity>", "agent": "<name>", "team": "<team>"}`
+/// Response: `{"unsubscribed": true, "subscriber": "...", "agent": "..."}`
+fn handle_unsubscribe(
+    request: &agent_team_mail_core::daemon_client::SocketRequest,
+    pubsub_store: &SharedPubSubStore,
+) -> SocketResponse {
+    let subscriber = match request
+        .payload
+        .get("subscriber")
+        .and_then(|v| v.as_str())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'subscriber'",
+            );
+        }
+    };
+
+    let agent = match request.payload.get("agent").and_then(|v| v.as_str()) {
+        Some(a) if !a.is_empty() => a.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'agent'",
+            );
+        }
+    };
+
+    pubsub_store.lock().unwrap().unsubscribe(&subscriber, &agent);
+    debug!("Removed subscription: {subscriber} → {agent}");
+
+    make_ok_response(
+        &request.request_id,
+        serde_json::json!({
+            "unsubscribed": true,
+            "subscriber": subscriber,
+            "agent": agent,
+        }),
+    )
+}
+
 // ── Response helpers ──────────────────────────────────────────────────────────
 
 use agent_team_mail_core::daemon_client::{SocketError, SocketResponse, PROTOCOL_VERSION};
@@ -455,6 +591,10 @@ mod tests {
 
     fn make_store() -> SharedStateStore {
         std::sync::Arc::new(std::sync::Mutex::new(AgentStateTracker::new()))
+    }
+
+    fn make_ps() -> SharedPubSubStore {
+        new_pubsub_store()
     }
 
     fn make_request(command: &str, payload: serde_json::Value) -> SocketRequest {
@@ -530,8 +670,9 @@ mod tests {
     #[test]
     fn test_parse_and_dispatch_unknown_command() {
         let store = make_store();
+        let ps = make_ps();
         let req_json = r#"{"version":1,"request_id":"r1","command":"bogus","payload":{}}"#;
-        let resp = parse_and_dispatch(req_json, &store).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "UNKNOWN_COMMAND");
     }
@@ -539,7 +680,8 @@ mod tests {
     #[test]
     fn test_parse_and_dispatch_malformed_json() {
         let store = make_store();
-        let resp = parse_and_dispatch("not-json{{", &store).unwrap();
+        let ps = make_ps();
+        let resp = parse_and_dispatch("not-json{{", &store, &ps).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INVALID_REQUEST");
     }
@@ -547,8 +689,9 @@ mod tests {
     #[test]
     fn test_parse_and_dispatch_version_mismatch() {
         let store = make_store();
+        let ps = make_ps();
         let req_json = r#"{"version":99,"request_id":"r1","command":"agent-state","payload":{}}"#;
-        let resp = parse_and_dispatch(req_json, &store).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
     }
@@ -621,6 +764,111 @@ mod tests {
         assert_eq!(err.message, "Something went wrong");
     }
 
+    // ── subscribe / unsubscribe handler tests ──────────────────────────────────
+
+    #[test]
+    fn test_handle_subscribe_success() {
+        let ps = make_ps();
+        let req = make_request(
+            "subscribe",
+            serde_json::json!({"subscriber": "team-lead", "agent": "arch-ctm", "events": ["idle"], "team": "atm-dev"}),
+        );
+        let resp = handle_subscribe(&req, &ps);
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["subscribed"].as_bool().unwrap());
+        assert_eq!(payload["subscriber"].as_str().unwrap(), "team-lead");
+        assert_eq!(payload["agent"].as_str().unwrap(), "arch-ctm");
+
+        // Confirm subscription is in the store
+        let matches = ps.lock().unwrap().matching_subscribers("arch-ctm", "idle");
+        assert_eq!(matches, vec!["team-lead"]);
+    }
+
+    #[test]
+    fn test_handle_subscribe_missing_subscriber() {
+        let ps = make_ps();
+        let req = make_request(
+            "subscribe",
+            serde_json::json!({"agent": "arch-ctm", "events": ["idle"]}),
+        );
+        let resp = handle_subscribe(&req, &ps);
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
+    }
+
+    #[test]
+    fn test_handle_subscribe_missing_agent() {
+        let ps = make_ps();
+        let req = make_request(
+            "subscribe",
+            serde_json::json!({"subscriber": "team-lead", "events": ["idle"]}),
+        );
+        let resp = handle_subscribe(&req, &ps);
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
+    }
+
+    #[test]
+    fn test_handle_unsubscribe_success() {
+        let ps = make_ps();
+        // First subscribe
+        {
+            ps.lock()
+                .unwrap()
+                .subscribe("team-lead", "arch-ctm", vec!["idle".to_string()])
+                .unwrap();
+        }
+
+        let req = make_request(
+            "unsubscribe",
+            serde_json::json!({"subscriber": "team-lead", "agent": "arch-ctm", "team": "atm-dev"}),
+        );
+        let resp = handle_unsubscribe(&req, &ps);
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["unsubscribed"].as_bool().unwrap());
+
+        // Confirm subscription is gone
+        let matches = ps.lock().unwrap().matching_subscribers("arch-ctm", "idle");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_handle_unsubscribe_missing_fields() {
+        let ps = make_ps();
+        let req = make_request("unsubscribe", serde_json::json!({"subscriber": "team-lead"}));
+        let resp = handle_unsubscribe(&req, &ps);
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
+    }
+
+    #[test]
+    fn test_subscribe_cap_exceeded_returns_error() {
+        use crate::plugins::worker_adapter::PubSub;
+        use std::time::Duration;
+
+        // Create a pub/sub store with cap=1
+        let ps: SharedPubSubStore = std::sync::Arc::new(std::sync::Mutex::new(
+            PubSub::with_config(Duration::from_secs(3600), 1),
+        ));
+
+        let req1 = make_request(
+            "subscribe",
+            serde_json::json!({"subscriber": "team-lead", "agent": "agent-a", "events": ["idle"]}),
+        );
+        let resp1 = handle_subscribe(&req1, &ps);
+        assert_eq!(resp1.status, "ok");
+
+        let req2 = make_request(
+            "subscribe",
+            serde_json::json!({"subscriber": "team-lead", "agent": "agent-b", "events": ["idle"]}),
+        );
+        let resp2 = handle_subscribe(&req2, &ps);
+        assert_eq!(resp2.status, "error");
+        assert_eq!(resp2.error.unwrap().code, "CAP_EXCEEDED");
+    }
+
     /// Integration-style test: start server, connect, exchange request/response.
     #[cfg(unix)]
     #[tokio::test]
@@ -643,7 +891,7 @@ mod tests {
         }
 
         // Start the socket server
-        let _handle = start_socket_server(home_dir.clone(), state_store, cancel.clone())
+        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), cancel.clone())
             .await
             .unwrap()
             .expect("Expected socket server handle on unix");
@@ -700,7 +948,7 @@ mod tests {
             tracker.set_state("agent-b", AgentState::Busy);
         }
 
-        let _handle = start_socket_server(home_dir.clone(), state_store, cancel.clone())
+        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), cancel.clone())
             .await
             .unwrap()
             .expect("Expected socket server handle on unix");
@@ -735,6 +983,59 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn test_socket_server_subscribe_roundtrip() {
+        use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio_util::sync::CancellationToken;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let home_dir = temp_dir.path().to_path_buf();
+        let cancel = CancellationToken::new();
+
+        let _handle = start_socket_server(
+            home_dir.clone(),
+            make_store(),
+            new_pubsub_store(),
+            cancel.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected socket server handle on unix");
+
+        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+
+        let request = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "sub-test-1".to_string(),
+            command: "subscribe".to_string(),
+            payload: serde_json::json!({
+                "subscriber": "team-lead",
+                "agent": "arch-ctm",
+                "events": ["idle"],
+                "team": "atm-dev"
+            }),
+        };
+        let req_line = format!("{}\n", serde_json::to_string(&request).unwrap());
+
+        let mut reader = BufReader::new(stream);
+        reader.get_mut().write_all(req_line.as_bytes()).await.unwrap();
+
+        let mut resp_line = String::new();
+        reader.read_line(&mut resp_line).await.unwrap();
+
+        let resp: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line.trim()).unwrap();
+
+        assert!(resp.is_ok(), "Expected ok, got: {:?}", resp.error);
+        let payload = resp.payload.unwrap();
+        assert!(payload["subscribed"].as_bool().unwrap());
+
+        cancel.cancel();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn test_socket_server_pid_file_written() {
         use tokio_util::sync::CancellationToken;
 
@@ -743,7 +1044,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let state_store = make_store();
 
-        let _handle = start_socket_server(home_dir.clone(), state_store, cancel.clone())
+        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), cancel.clone())
             .await
             .unwrap()
             .expect("Expected socket server handle on unix");
@@ -771,7 +1072,7 @@ mod tests {
         let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
 
         {
-            let _handle = start_socket_server(home_dir.clone(), state_store, cancel.clone())
+            let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), cancel.clone())
                 .await
                 .unwrap()
                 .expect("Expected handle");

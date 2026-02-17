@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use agent_team_mail_daemon::daemon;
-use agent_team_mail_daemon::daemon::{new_state_store, StatusWriter};
+use agent_team_mail_daemon::daemon::{new_pubsub_store, new_state_store, StatusWriter};
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
 use agent_team_mail_daemon::roster::RosterService;
 use clap::Parser;
@@ -141,6 +141,12 @@ async fn main() -> Result<()> {
     // AGENT_NOT_FOUND for all agent-state queries.
     let state_store = new_state_store();
 
+    // Create the shared pub/sub store.  When the worker adapter plugin is
+    // enabled, the plugin's internal store is extracted before registration
+    // and used here so CLI subscribe requests and notification delivery share
+    // the same registry.  When the plugin is absent an empty store is used.
+    let mut pubsub_store = new_pubsub_store();
+
     // Register Worker Adapter plugin if configured
     if let Some(workers_config) = plugin_ctx.plugin_config("workers")
         && workers_config
@@ -148,11 +154,14 @@ async fn main() -> Result<()> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     {
-        registry.register(
+        // Build the plugin with the shared state store, then capture its
+        // internal pub/sub Arc before registering (registration moves the plugin).
+        let plugin =
             agent_team_mail_daemon::plugins::worker_adapter::WorkerAdapterPlugin::with_state_store(
                 Arc::clone(&state_store),
-            ),
-        );
+            );
+        pubsub_store = plugin.pubsub_store();
+        registry.register(plugin);
         info!("Registered Worker Adapter plugin");
     }
 
@@ -198,9 +207,16 @@ async fn main() -> Result<()> {
     });
 
     // Run the daemon event loop
-    daemon::run(&mut registry, &plugin_ctx, cancel_token, status_writer, state_store)
-        .await
-        .context("Daemon event loop failed")?;
+    daemon::run(
+        &mut registry,
+        &plugin_ctx,
+        cancel_token,
+        status_writer,
+        state_store,
+        pubsub_store,
+    )
+    .await
+    .context("Daemon event loop failed")?;
 
     info!("ATM Daemon shutdown complete");
     Ok(())
