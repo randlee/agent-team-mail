@@ -127,6 +127,69 @@ main
 
 ---
 
+## Agent Team Mail (ATM) Communication
+
+### Team Configuration
+
+- **Team**: `atm-dev` (persistent across sessions)
+- **ARCH-ATM** (you) is `team-lead` — start and maintain the `atm-dev` team for the session duration
+- **ARCH-CTM** is a Codex agent — communicates **exclusively** via ATM CLI messages (not Claude Code team API)
+- **All other Claude agents** communicate using Claude Code's built-in team messaging API (`SendMessage` tool)
+
+### Identity
+
+`.atm.toml` at repo root sets `identity = "team-lead"` and `default_team = "atm-dev"`, so all ATM CLI commands automatically use the correct identity and team. No need to prefix with `ATM_IDENTITY=` or `--team`.
+
+**Note**: ARCH-CTM gets his identity from `ATM_IDENTITY=arch-ctm` set in his tmux session via `launch-worker.sh`.
+
+### Communicating with ARCH-CTM (Codex)
+
+ARCH-CTM does **not** monitor Claude Code messages. Use ATM CLI only:
+
+**Send a message:**
+```bash
+atm send arch-ctm "your message here"
+```
+
+**Check your inbox for replies:**
+```bash
+atm read
+```
+
+**Check team inbox summary (who has unread messages):**
+```bash
+atm inbox
+```
+
+**Nudge ARCH-CTM to check inbox** (when he hasn't replied):
+
+ARCH-CTM runs in a tmux pane. Discover the pane, then send-keys:
+```bash
+# Find arch-ctm's pane
+tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_title} #{pane_current_command}'
+
+# Send nudge (use the correct pane ID from above)
+tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --team atm-dev" && sleep 0.5 && tmux send-keys -t <pane-id> Enter
+```
+
+### Communication Rules
+
+1. **No broadcast messages** — all communications are direct (team-lead ↔ specific agent)
+2. **Poll for replies** — after sending to arch-ctm, wait 30-60s then `atm read`. If no reply after 2 minutes, nudge via tmux send-keys
+3. **arch-ctm is async** — he processes messages on his next turn. Do not block waiting; continue other work and check back
+
+### ATM CLI Quick Reference
+
+| Action | Command |
+|--------|---------|
+| Send message | `atm send <agent> "msg"` |
+| Read inbox | `atm read` |
+| Inbox summary | `atm inbox` |
+| List teams | `atm teams` |
+| Team members | `atm members` |
+
+---
+
 ## Initialization Process
 - Read project plan (`docs/project-plan.md`)
 - Check current status (branches, PRs, worktrees)
