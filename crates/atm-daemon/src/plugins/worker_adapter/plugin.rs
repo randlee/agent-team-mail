@@ -7,6 +7,7 @@ use super::codex_tmux::CodexTmuxBackend;
 use super::config::WorkersConfig;
 use super::hook_watcher::HookWatcher;
 use super::lifecycle::{self, LifecycleManager, WorkerState};
+use super::nudge::NudgeEngine;
 use super::router::{ConcurrencyPolicy, MessageRouter};
 use super::trait_def::{WorkerAdapter, WorkerHandle};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
@@ -42,6 +43,8 @@ pub struct WorkerAdapterPlugin {
     lifecycle: LifecycleManager,
     /// Turn-level agent state tracker (Launching/Busy/Idle/Killed)
     agent_state: Arc<Mutex<AgentStateTracker>>,
+    /// Nudge engine — auto-nudges idle agents with unread messages
+    nudge_engine: NudgeEngine,
     /// Cached context for runtime use
     ctx: Option<PluginContext>,
 }
@@ -49,8 +52,10 @@ pub struct WorkerAdapterPlugin {
 impl WorkerAdapterPlugin {
     /// Create a new Worker Adapter plugin instance
     pub fn new() -> Self {
+        let config = WorkersConfig::default();
+        let nudge_engine = NudgeEngine::new(config.nudge.clone());
         Self {
-            config: WorkersConfig::default(),
+            config,
             backend: None,
             workers: HashMap::new(),
             router: MessageRouter::new(),
@@ -58,6 +63,7 @@ impl WorkerAdapterPlugin {
             log_tailer: LogTailer::new(),
             lifecycle: LifecycleManager::new(),
             agent_state: Arc::new(Mutex::new(AgentStateTracker::new())),
+            nudge_engine,
             ctx: None,
         }
     }
@@ -154,6 +160,71 @@ impl WorkerAdapterPlugin {
             if let Err(e) = inbox_append(&lead_inbox, &warn_msg, team_name, "team-lead") {
                 error!("Failed to warn team-lead: {e}");
             }
+        }
+    }
+
+    /// Build the inbox path for an agent member by name.
+    ///
+    /// Path: `{claude_root}/teams/{team_name}/inboxes/{member_name}.json`
+    fn agent_inbox_path(&self, ctx: &PluginContext, team_name: &str, member_name: &str) -> PathBuf {
+        ctx.system
+            .claude_root
+            .join("teams")
+            .join(team_name)
+            .join("inboxes")
+            .join(format!("{member_name}.json"))
+    }
+
+    /// Trigger a nudge for `member_name` if it is currently `Idle` and has
+    /// unread messages. Called after a `Busy → Idle` state transition.
+    ///
+    /// This is a best-effort operation; errors are logged but not propagated.
+    async fn trigger_nudge_if_idle(&mut self, member_name: &str) {
+        // Only nudge if config is enabled
+        if !self.config.nudge.enabled {
+            return;
+        }
+
+        // Verify the agent is actually Idle right now
+        let current_state = {
+            self.agent_state
+                .lock()
+                .unwrap()
+                .get_state(member_name)
+        };
+
+        let Some(AgentState::Idle) = current_state else {
+            return;
+        };
+
+        // Resolve pane ID from the worker handle
+        let pane_id = match self.workers.get(member_name) {
+            Some(h) => h.backend_id.clone(),
+            None => {
+                debug!("Nudge: no worker handle for {member_name}, skipping");
+                return;
+            }
+        };
+
+        let ctx = match &self.ctx {
+            Some(c) => c.clone(),
+            None => return,
+        };
+
+        let team_name = if self.config.team_name.is_empty() {
+            ctx.system.default_team.clone()
+        } else {
+            self.config.team_name.clone()
+        };
+
+        let inbox_path = self.agent_inbox_path(&ctx, &team_name, member_name);
+
+        if let Err(e) = self
+            .nudge_engine
+            .on_idle_transition(member_name, &pane_id, &inbox_path)
+            .await
+        {
+            warn!("Nudge engine error for {member_name}: {e}");
         }
     }
 
@@ -337,6 +408,10 @@ impl WorkerAdapterPlugin {
             Box::pin(self.process_message(config_key, next_message)).await?;
         }
 
+        // Trigger nudge scan after this agent finishes (it may be Idle now
+        // from a hook event that arrived while we were capturing the response).
+        self.trigger_nudge_if_idle(&member_name).await;
+
         Ok(())
     }
 
@@ -443,6 +518,20 @@ impl WorkerAdapterPlugin {
         }
     }
 
+    /// Scan all registered workers and nudge those that are `Idle` with unread mail.
+    ///
+    /// Called periodically from the `run()` loop to catch hook-driven `Busy → Idle`
+    /// transitions that happen while the plugin is idle (no `process_message` in flight).
+    async fn scan_and_nudge_idle_agents(&mut self) {
+        if !self.config.nudge.enabled {
+            return;
+        }
+        let member_names: Vec<String> = self.workers.keys().cloned().collect();
+        for member_name in member_names {
+            self.trigger_nudge_if_idle(&member_name).await;
+        }
+    }
+
     /// Check for inactive agents and mark them as offline
     async fn check_inactivity(&self) -> Result<(), PluginError> {
         let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
@@ -495,6 +584,9 @@ impl Plugin for WorkerAdapterPlugin {
         } else {
             WorkersConfig::default()
         };
+
+        // Reinitialize nudge engine with the parsed config
+        self.nudge_engine = NudgeEngine::new(self.config.nudge.clone());
 
         // If disabled, skip backend setup
         if !self.config.enabled {
@@ -603,6 +695,12 @@ impl Plugin for WorkerAdapterPlugin {
         // Set up periodic log rotation check (every 5 minutes)
         let mut log_rotation_timer = interval(Duration::from_secs(300));
 
+        // Set up periodic nudge scan (every 5 seconds).
+        // This catches Busy → Idle transitions driven by hook events, which
+        // arrive asynchronously via HookWatcher and are not otherwise signalled
+        // to the plugin main loop.
+        let mut nudge_scan_timer = interval(Duration::from_secs(5));
+
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -624,6 +722,9 @@ impl Plugin for WorkerAdapterPlugin {
                 }
                 _ = log_rotation_timer.tick() => {
                     self.rotate_logs_if_needed();
+                }
+                _ = nudge_scan_timer.tick() => {
+                    self.scan_and_nudge_idle_agents().await;
                 }
             }
         }
