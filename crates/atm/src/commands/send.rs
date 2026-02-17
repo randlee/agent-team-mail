@@ -1,7 +1,7 @@
 //! Send command implementation
 
 use anyhow::Result;
-use agent_team_mail_core::config::{resolve_config, Config, ConfigOverrides};
+use agent_team_mail_core::config::{resolve_alias, resolve_config, Config, ConfigOverrides};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{inbox_append, WriteOutcome};
 use agent_team_mail_core::io::lock::acquire_lock;
@@ -81,8 +81,14 @@ pub fn execute(args: SendArgs) -> Result<()> {
             .unwrap_or_else(|| "human".to_string());
     }
 
+    // Resolve identity alias before addressing (alias may include @team suffix)
+    let resolved_agent = resolve_alias(&args.agent, &config.aliases);
+    if resolved_agent != args.agent {
+        eprintln!("Note: '{}' resolved via alias to '{}'", args.agent, resolved_agent);
+    }
+
     // Parse addressing (agent@team or just agent)
-    let (agent_name, team_name) = parse_address(&args.agent, &args.team, &config.core.default_team)?;
+    let (agent_name, team_name) = parse_address(&resolved_agent, &args.team, &config.core.default_team)?;
 
     // Resolve team directory
     let team_dir = home_dir.join(".claude/teams").join(&team_name);

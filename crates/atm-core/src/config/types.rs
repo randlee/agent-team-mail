@@ -18,6 +18,12 @@ pub struct Config {
     /// Retention configuration
     #[serde(default)]
     pub retention: RetentionConfig,
+    /// Identity aliases: map role-based names to actual inbox identities.
+    ///
+    /// For example, `arch-atm = "team-lead"` causes `atm send arch-atm …`
+    /// to deliver to the `team-lead` inbox instead.
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
     /// Plugin-specific configuration sections: [plugins.<name>]
     #[serde(default)]
     pub plugins: HashMap<String, toml::Table>,
