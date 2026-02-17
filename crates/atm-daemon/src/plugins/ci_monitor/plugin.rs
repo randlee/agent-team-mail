@@ -275,6 +275,8 @@ impl CiMonitorPlugin {
     }
 
     /// Transform a CI failure into an InboxMessage for delivery
+    ///
+    /// If multiple notify_targets are configured, includes a note listing all recipients.
     fn run_to_message(&self, run: &super::types::CiRun) -> InboxMessage {
         let conclusion_display = match run.conclusion {
             Some(CiRunConclusion::Failure) => "failed",
@@ -300,7 +302,7 @@ impl CiMonitorPlugin {
             })
             .unwrap_or_else(|| "(job details not available)".to_string());
 
-        let content = format!(
+        let mut content = format!(
             "[ci:{}] CI {} on {}: {}\nCommit: {}\nFailed jobs: {}\nURL: {}",
             run.id,
             conclusion_display,
@@ -310,6 +312,18 @@ impl CiMonitorPlugin {
             failed_jobs,
             run.url
         );
+
+        // Add multi-recipient note if multiple targets configured
+        if self.config.notify_target.len() > 1 {
+            let recipients: Vec<String> = self.config.notify_target
+                .iter()
+                .map(|t| {
+                    let team = t.team.as_ref().unwrap_or(&self.config.team);
+                    format!("{}@{}", t.agent, team)
+                })
+                .collect();
+            content.push_str(&format!("\n\nNotified: {}", recipients.join(", ")));
+        }
 
         let message_id = self.dedup_key(run);
 
@@ -443,7 +457,7 @@ impl Plugin for CiMonitorPlugin {
                 source: None,
             })?;
 
-        // Log configured notify targets (validation would require reading team config files)
+        // Validate notify targets exist in team config (warn if not found)
         if !self.config.notify_target.is_empty() {
             let targets: Vec<String> = self.config.notify_target
                 .iter()
@@ -456,10 +470,53 @@ impl Plugin for CiMonitorPlugin {
                 "CI Monitor will route notifications to: {}",
                 targets.join(", ")
             );
-            debug!(
-                "Note: Target agents are not validated at init time. \
-                 If a target doesn't exist, runtime warnings will be logged."
-            );
+
+            // Validate each target exists in its team config
+            for target in &self.config.notify_target {
+                let target_team = target.team.as_ref().unwrap_or(&self.config.team);
+                let team_config_path = ctx.mail.teams_root()
+                    .join(target_team)
+                    .join("config.json");
+
+                if team_config_path.exists() {
+                    // Try to read team config and check if agent exists
+                    match std::fs::read_to_string(&team_config_path) {
+                        Ok(content) => {
+                            match serde_json::from_str::<agent_team_mail_core::schema::TeamConfig>(&content) {
+                                Ok(team_config) => {
+                                    let agent_exists = team_config.members.iter()
+                                        .any(|m| m.name == target.agent);
+                                    if !agent_exists {
+                                        warn!(
+                                            "CI Monitor: notify_target '{}@{}' not found in team config. \
+                                             Target may join later or may be a typo.",
+                                            target.agent, target_team
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "CI Monitor: Failed to parse team config for '{}': {}",
+                                        target_team, e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "CI Monitor: Failed to read team config for '{}': {}",
+                                target_team, e
+                            );
+                        }
+                    }
+                } else {
+                    warn!(
+                        "CI Monitor: Team '{}' config not found at {}. \
+                         Team may not exist yet.",
+                        target_team, team_config_path.display()
+                    );
+                }
+            }
         }
 
         // Store context for runtime use
@@ -937,11 +994,17 @@ notify_target = "team-lead"
 
     // Helper to create minimal plugin context for testing
     fn create_mock_context(teams_root: PathBuf) -> PluginContext {
+        create_mock_context_with_config(teams_root, None)
+    }
+
+    // Helper to create mock context with optional plugin config
+    fn create_mock_context_with_config(teams_root: PathBuf, ci_monitor_config: Option<toml::Table>) -> PluginContext {
         use crate::plugin::MailService;
         use crate::roster::RosterService;
         use agent_team_mail_core::config::Config;
         use agent_team_mail_core::context::{Platform, RepoContext, SystemContext};
         use std::sync::Arc;
+        use std::collections::HashMap;
 
         let repo = RepoContext::new(
             "test-repo".to_string(),
@@ -958,11 +1021,223 @@ notify_target = "team-lead"
         )
         .with_repo(repo);
 
+        let mut config = Config::default();
+        if let Some(table) = ci_monitor_config {
+            config.plugins.insert("ci_monitor".to_string(), table);
+        }
+
         PluginContext {
             system: Arc::new(system),
             mail: Arc::new(MailService::new(teams_root.clone())),
-            config: Arc::new(Config::default()),
+            config: Arc::new(config),
             roster: Arc::new(RosterService::new(teams_root)),
         }
+    }
+
+    #[tokio::test]
+    async fn test_notify_target_validation_warns_on_missing_agent() {
+        use tempfile::TempDir;
+        use agent_team_mail_core::schema::{TeamConfig, AgentMember};
+        use crate::plugins::ci_monitor::MockCiProvider;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create ci-monitor inbox (required for synthetic member registration)
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Create team config with only one member (not the notify target)
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![
+                AgentMember {
+                    agent_id: "lead@dev-team".to_string(),
+                    name: "lead".to_string(),
+                    agent_type: "general-purpose".to_string(),
+                    model: "claude-opus-4-6".to_string(),
+                    prompt: None,
+                    color: None,
+                    plan_mode_required: None,
+                    joined_at: 1234567890,
+                    tmux_pane_id: None,
+                    cwd: "/tmp".to_string(),
+                    subscriptions: Vec::new(),
+                    backend_type: None,
+                    is_active: None,
+                    last_active: None,
+                    unknown_fields: std::collections::HashMap::new(),
+                }
+            ],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+
+        // Write team config
+        let config_path = team_dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string(&team_config).unwrap()).unwrap();
+
+        // Create plugin config table
+        let toml_str = r#"
+team = "dev-team"
+notify_target = "nonexistent-agent"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(MockCiProvider::new()));
+
+        let ctx = create_mock_context_with_config(teams_root, Some(table));
+
+        // Init should succeed but log a warning (we can't easily test logging here,
+        // but we verify it doesn't fail)
+        let result = plugin.init(&ctx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_notify_target_validation_passes_on_existing_agent() {
+        use tempfile::TempDir;
+        use agent_team_mail_core::schema::{TeamConfig, AgentMember};
+        use crate::plugins::ci_monitor::MockCiProvider;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create ci-monitor inbox (required for synthetic member registration)
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Create team config with target agent
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![
+                AgentMember {
+                    agent_id: "lead@dev-team".to_string(),
+                    name: "lead".to_string(),
+                    agent_type: "general-purpose".to_string(),
+                    model: "claude-opus-4-6".to_string(),
+                    prompt: None,
+                    color: None,
+                    plan_mode_required: None,
+                    joined_at: 1234567890,
+                    tmux_pane_id: None,
+                    cwd: "/tmp".to_string(),
+                    subscriptions: Vec::new(),
+                    backend_type: None,
+                    is_active: None,
+                    last_active: None,
+                    unknown_fields: std::collections::HashMap::new(),
+                },
+                AgentMember {
+                    agent_id: "team-lead@dev-team".to_string(),
+                    name: "team-lead".to_string(),
+                    agent_type: "general-purpose".to_string(),
+                    model: "claude-opus-4-6".to_string(),
+                    prompt: None,
+                    color: None,
+                    plan_mode_required: None,
+                    joined_at: 1234567890,
+                    tmux_pane_id: None,
+                    cwd: "/tmp".to_string(),
+                    subscriptions: Vec::new(),
+                    backend_type: None,
+                    is_active: None,
+                    last_active: None,
+                    unknown_fields: std::collections::HashMap::new(),
+                }
+            ],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+
+        // Write team config
+        let config_path = team_dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string(&team_config).unwrap()).unwrap();
+
+        // Create plugin config table
+        let toml_str = r#"
+team = "dev-team"
+notify_target = "team-lead"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(MockCiProvider::new()));
+
+        let ctx = create_mock_context_with_config(teams_root, Some(table));
+
+        // Init should succeed without warnings
+        let result = plugin.init(&ctx).await;
+        if let Err(ref e) = result {
+            eprintln!("Init failed: {}", e);
+        }
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_to_message_includes_multi_recipient_note() {
+        use crate::plugins::ci_monitor::{create_test_run, CiRunConclusion, CiRunStatus};
+
+        // Create plugin with multiple notify targets
+        let toml_str = r#"
+team = "dev-team"
+notify_target = ["lead", "qa-bot@qa-team"]
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let plugin = CiMonitorPlugin::new().with_config(config);
+
+        let run = create_test_run(
+            123,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+
+        let msg = plugin.run_to_message(&run);
+
+        // Verify multi-recipient note is included
+        assert!(msg.text.contains("Notified: lead@dev-team, qa-bot@qa-team"));
+    }
+
+    #[test]
+    fn test_run_to_message_no_multi_recipient_note_for_single_target() {
+        use crate::plugins::ci_monitor::{create_test_run, CiRunConclusion, CiRunStatus};
+
+        // Create plugin with single notify target
+        let toml_str = r#"
+team = "dev-team"
+notify_target = "lead"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+
+        let plugin = CiMonitorPlugin::new().with_config(config);
+
+        let run = create_test_run(
+            123,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+
+        let msg = plugin.run_to_message(&run);
+
+        // Verify no multi-recipient note for single target
+        assert!(!msg.text.contains("Notified:"));
     }
 }
