@@ -40,6 +40,16 @@ if ! command -v "$BASE_CMD" &>/dev/null; then
     exit 1
 fi
 
+# Check if Codex notify hook is configured (only warn for codex commands)
+if [[ "$WORKER_CMD" == *"codex"* ]]; then
+    CODEX_CONFIG="$HOME/.codex/config.toml"
+    if [[ ! -f "$CODEX_CONFIG" ]] || ! grep -q '^notify' "$CODEX_CONFIG" 2>/dev/null; then
+        echo "⚠️  Codex notify hook not configured."
+        echo "    Run: ./scripts/setup-codex-hooks.sh --agent $AGENT_NAME --team $TEAM"
+        echo ""
+    fi
+fi
+
 # Check if session already exists
 if tmux has-session -t "$AGENT_NAME" 2>/dev/null; then
     echo "tmux session '$AGENT_NAME' already exists."
