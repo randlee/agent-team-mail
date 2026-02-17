@@ -109,8 +109,8 @@ fn execute_status(args: StatusArgs) -> Result<()> {
                     print!(" - Error: {}", error);
                 }
 
-                if let Some(ref last_run) = plugin.last_run {
-                    print!(" - Last run: {}", last_run);
+                if let Some(ref last_updated) = plugin.last_updated {
+                    print!(" - Last updated: {}", last_updated);
                 }
 
                 println!();
@@ -182,7 +182,7 @@ struct PluginStatus {
     enabled: bool,
     status: PluginStatusKind,
     last_error: Option<String>,
-    last_run: Option<String>,
+    last_updated: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

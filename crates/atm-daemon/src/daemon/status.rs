@@ -1,6 +1,6 @@
 //! Daemon status file writer
 //!
-//! Writes daemon status to `${ATM_HOME}/daemon/status.json` for CLI consumption.
+//! Writes daemon status to `${ATM_HOME}/.claude/daemon/status.json` for CLI consumption.
 //! Status includes daemon PID, uptime, plugin states, and last update timestamp.
 
 use anyhow::{Context, Result};
