@@ -1,11 +1,13 @@
 //! Main daemon event loop
 
 use crate::daemon::{graceful_shutdown, spool_drain_loop, watch_inboxes, InboxEvent, InboxEventKind};
+use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -18,18 +20,21 @@ use tracing::{debug, error, info, warn};
 /// 2. Spawns each plugin's run() method in its own task
 /// 3. Starts the spool drain background task
 /// 4. Starts the file system watcher
-/// 5. Waits for cancellation signal
-/// 6. Performs graceful shutdown of all plugins
+/// 5. Writes daemon status periodically
+/// 6. Waits for cancellation signal
+/// 7. Performs graceful shutdown of all plugins
 ///
 /// # Arguments
 ///
 /// * `registry` - Mutable plugin registry (plugins will be taken out for task spawning)
 /// * `ctx` - Shared plugin context
 /// * `cancel` - Cancellation token for shutdown coordination
+/// * `status_writer` - Status file writer for daemon state tracking
 pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
     cancel: CancellationToken,
+    status_writer: Arc<StatusWriter>,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -191,6 +196,15 @@ pub async fn run(
         None
     };
 
+    // Start status writer task
+    let status_cancel = cancel.clone();
+    let status_writer_clone = status_writer.clone();
+    let status_plugins = plugins.clone();
+    let status_ctx = ctx.clone();
+    let status_task = tokio::spawn(async move {
+        status_writer_loop(status_writer_clone, status_plugins, status_ctx, status_cancel).await;
+    });
+
     info!("Daemon event loop running. Waiting for cancellation signal...");
 
     // Wait for cancellation
@@ -214,6 +228,10 @@ pub async fn run(
         if let Err(e) = tokio::time::timeout(Duration::from_secs(5), task).await {
             error!("Retention task did not complete in time: {}", e);
         }
+    }
+
+    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), status_task).await {
+        error!("Status writer task did not complete in time: {}", e);
     }
 
     // Graceful shutdown of all plugins
@@ -528,6 +546,106 @@ fn retention_work(
             }
         }
     }
+}
+
+/// Periodic status writer task
+///
+/// Writes daemon status to status.json at regular intervals (every 30 seconds).
+/// Status includes plugin states, active teams, PID, and uptime.
+async fn status_writer_loop(
+    status_writer: Arc<StatusWriter>,
+    plugins: Vec<(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)>,
+    ctx: PluginContext,
+    cancel: CancellationToken,
+) {
+    info!("Status writer loop started (interval: 30s)");
+
+    // Write initial status at startup
+    let plugin_statuses = build_plugin_statuses(&plugins).await;
+    let teams = get_active_teams(&ctx);
+    if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone()) {
+        error!("Failed to write initial daemon status: {}", e);
+    }
+
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("Status writer loop cancelled");
+                break;
+            }
+            _ = interval.tick() => {
+                debug!("Writing daemon status");
+
+                let plugin_statuses = build_plugin_statuses(&plugins).await;
+                let teams = get_active_teams(&ctx);
+
+                if let Err(e) = status_writer.write_status(plugin_statuses, teams) {
+                    error!("Failed to write daemon status: {}", e);
+                }
+            }
+        }
+    }
+
+    info!("Status writer loop stopped");
+}
+
+/// Build plugin status list from running plugins
+async fn build_plugin_statuses(
+    plugins: &[(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)],
+) -> Vec<PluginStatus> {
+    let mut statuses = Vec::new();
+
+    for (metadata, _plugin_arc) in plugins {
+        // For now, all plugins are running (we don't track per-plugin errors yet)
+        // Future enhancement: track plugin-level errors via shared state
+        statuses.push(PluginStatus {
+            name: metadata.name.to_string(),
+            enabled: true,
+            status: PluginStatusKind::Running,
+            last_error: None,
+            last_run: Some(format_timestamp(SystemTime::now())),
+        });
+    }
+
+    statuses
+}
+
+/// Get list of active teams from the teams directory
+fn get_active_teams(ctx: &PluginContext) -> Vec<String> {
+    let teams_root = ctx.mail.teams_root();
+    let mut teams = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(teams_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name() {
+                    teams.push(name.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    teams.sort();
+    teams
+}
+
+/// Format timestamp as ISO 8601 string
+fn format_timestamp(time: SystemTime) -> String {
+    use chrono::{DateTime, Utc};
+
+    let duration = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let secs = duration.as_secs();
+    let nanos = duration.subsec_nanos();
+
+    let dt = DateTime::<Utc>::from_timestamp(secs as i64, nanos)
+        .unwrap_or_else(Utc::now);
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]

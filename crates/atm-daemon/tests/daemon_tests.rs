@@ -3,6 +3,7 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
 use agent_team_mail_daemon::daemon;
+use agent_team_mail_daemon::daemon::StatusWriter;
 use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
@@ -119,10 +120,19 @@ fn create_test_context() -> (PluginContext, TempDir) {
     (ctx, temp_dir)
 }
 
+/// Create a test status writer
+fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
+    Arc::new(StatusWriter::new(
+        temp_dir.path().to_path_buf(),
+        "test-version".to_string(),
+    ))
+}
+
 #[tokio::test]
 async fn test_daemon_starts_and_loads_mock_plugin() {
-    let (ctx, _temp_dir) = create_test_context();
+    let (ctx, temp_dir) = create_test_context();
     let events = Arc::new(Mutex::new(Vec::new()));
+    let status_writer = create_test_status_writer(&temp_dir);
 
     let mut registry = PluginRegistry::new();
     registry.register(MockPlugin::new("test-plugin", events.clone()));
@@ -132,7 +142,7 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
 
     // Run daemon in background, cancel after a short delay
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer).await
     });
 
     // Wait a bit for daemon to start
@@ -167,7 +177,8 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
 
 #[tokio::test]
 async fn test_signal_triggers_graceful_shutdown() {
-    let (ctx, _temp_dir) = create_test_context();
+    let (ctx, temp_dir) = create_test_context();
+    let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
     let mut registry = PluginRegistry::new();
@@ -178,7 +189,7 @@ async fn test_signal_triggers_graceful_shutdown() {
     let cancel_clone = cancel.clone();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone()).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -197,7 +208,8 @@ async fn test_signal_triggers_graceful_shutdown() {
 
 #[tokio::test]
 async fn test_plugin_lifecycle_order() {
-    let (ctx, _temp_dir) = create_test_context();
+    let (ctx, temp_dir) = create_test_context();
+    let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
     let mut registry = PluginRegistry::new();
@@ -207,7 +219,7 @@ async fn test_plugin_lifecycle_order() {
     let cancel_clone = cancel.clone();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone()).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -231,14 +243,15 @@ async fn test_plugin_lifecycle_order() {
 
 #[tokio::test]
 async fn test_spool_drain_runs_on_interval() {
-    let (ctx, _temp_dir) = create_test_context();
+    let (ctx, temp_dir) = create_test_context();
+    let status_writer = create_test_status_writer(&temp_dir);
     let mut registry = PluginRegistry::new();
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone()).await
     });
 
     // Let the daemon run for a bit to allow spool drain to run
@@ -255,7 +268,8 @@ async fn test_spool_drain_runs_on_interval() {
 
 #[tokio::test]
 async fn test_graceful_shutdown_with_timeout() {
-    let (ctx, _temp_dir) = create_test_context();
+    let (ctx, temp_dir) = create_test_context();
+    let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
     let mut registry = PluginRegistry::new();
@@ -270,7 +284,7 @@ async fn test_graceful_shutdown_with_timeout() {
     let cancel_clone = cancel.clone();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone()).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -302,14 +316,15 @@ async fn test_graceful_shutdown_with_timeout() {
 
 #[tokio::test]
 async fn test_empty_registry_runs_successfully() {
-    let (ctx, _temp_dir) = create_test_context();
+    let (ctx, temp_dir) = create_test_context();
+    let status_writer = create_test_status_writer(&temp_dir);
     let mut registry = PluginRegistry::new();
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone()).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -321,7 +336,8 @@ async fn test_empty_registry_runs_successfully() {
 
 #[tokio::test]
 async fn test_multiple_plugins_run_concurrently() {
-    let (ctx, _temp_dir) = create_test_context();
+    let (ctx, temp_dir) = create_test_context();
+    let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
     let mut registry = PluginRegistry::new();
@@ -333,7 +349,7 @@ async fn test_multiple_plugins_run_concurrently() {
     let cancel_clone = cancel.clone();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone()).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
