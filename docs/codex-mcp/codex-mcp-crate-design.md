@@ -82,7 +82,7 @@ codex_bin = "codex"
 identity = "codex-architect"
 
 # Model override (optional). If omitted, no model is passed and Codex uses its latest default.
-model = ""
+# model = "o3"
 
 # Optional fast profile model (for --fast)
 fast_model = "gpt-5.3-codex-spark"
@@ -123,7 +123,7 @@ approval_policy = "never"
 
 Config resolution follows the same priority chain as `atm`:
 1. CLI flags (`--identity`, `--role`, `--model`, `--fast`, `--subagents`, `--readonly|--explore`, `--sandbox`, `--approval-policy`)
-2. Environment variables (`CODEX_MCP_IDENTITY`, `CODEX_MCP_MODEL`, `CODEX_MCP_SANDBOX`, etc.)
+2. Environment variables (`ATM_AGENT_MCP_IDENTITY`, `ATM_AGENT_MCP_MODEL`, `ATM_AGENT_MCP_SANDBOX`, etc.)
 3. `[plugins.atm-agent-mcp]` in repo-local `.atm.toml`
 4. `[plugins.atm-agent-mcp]` in `~/.config/atm/config.toml`
 5. Defaults

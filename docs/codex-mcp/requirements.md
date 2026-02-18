@@ -89,7 +89,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 ### FR-5: Thread Registry and Persistence
 
 - **FR-5.1**: Proxy MUST track all active sessions in an in-memory registry, persisted to disk on every session creation/update.
-- **FR-5.2**: Registry entries MUST include: agent_id, thread_id (Codex native), identity, team, repo_root, repo_name, branch, cwd, started_at, last_active, status, tag.
+- **FR-5.2**: Registry entries MUST include: agent_id, backend_id (Codex threadId), identity, team, repo_root, repo_name, branch, cwd, started_at, last_active, status, tag (optional, for organizational labeling).
 - **FR-5.3**: Registry MUST use a single file at `~/.config/atm/agent-sessions/<team>/registry.json` since the proxy is the sole writer for that team namespace. Atomic writes (via `atm-core`) prevent corruption on crash, but no file locking or CAS is needed.
 - **FR-5.4**: On `codex`/`codex-reply` response, proxy MUST extract the Codex `threadId`, assign an `agent_id`, and register the mapping.
 - **FR-5.5**: Registry MUST be persisted atomically on every state change (thread create, update, close) to survive proxy crashes.
@@ -148,7 +148,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ### FR-10: Proxy Management MCP Tools
 
-- **FR-10.1**: Proxy MUST expose `agent_sessions` tool — returns active and resumable sessions with fields: `agent_id`, `backend`, `backend_id` (Codex threadId), `team`, `identity`, `agent_name` (if prompt file used), `agent_source` (prompt file path if applicable), `status`, `last_active_at`, and `resumable`.
+- **FR-10.1**: Proxy MUST expose `agent_sessions` tool — returns active and resumable sessions with fields: `agent_id`, `backend`, `backend_id` (Codex threadId), `team`, `identity`, `agent_name` (if prompt file used), `agent_source` (prompt file path if applicable), `status`, `last_active_at`, `tag` (if set), and `resumable`.
 - **FR-10.2**: Proxy MUST expose `agent_status` tool — returns proxy health (child process alive, team, uptime, active thread count, identity→thread mapping, aggregate pending mail count).
 
 ### FR-11: Codex Process Health
