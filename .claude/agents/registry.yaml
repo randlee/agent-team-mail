@@ -17,6 +17,9 @@ agents:
   rust-qa-agent:
     version: 1.0.0
     path: .claude/agents/rust-qa-agent.md
+  atm-qa-agent:
+    version: 1.0.0
+    path: .claude/agents/atm-qa-agent.md
 
 skills:
   rust-development:
