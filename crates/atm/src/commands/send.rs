@@ -81,14 +81,16 @@ pub fn execute(args: SendArgs) -> Result<()> {
             .unwrap_or_else(|| "human".to_string());
     }
 
-    // Resolve identity alias before addressing (alias may include @team suffix)
-    let resolved_agent = resolve_alias(&args.agent, &config.aliases);
-    if resolved_agent != args.agent {
-        eprintln!("Note: '{}' resolved via alias to '{}'", args.agent, resolved_agent);
+    // Parse addressing (agent@team or just agent) first so alias lookup runs on
+    // only the agent token, even when input uses @team suffix.
+    let (parsed_agent, team_name) = parse_address(&args.agent, &args.team, &config.core.default_team)?;
+    let agent_name = resolve_alias(&parsed_agent, &config.aliases);
+    if agent_name != parsed_agent {
+        eprintln!(
+            "Note: '{}' resolved via alias to '{}'",
+            parsed_agent, agent_name
+        );
     }
-
-    // Parse addressing (agent@team or just agent)
-    let (agent_name, team_name) = parse_address(&resolved_agent, &args.team, &config.core.default_team)?;
 
     // Resolve team directory
     let team_dir = home_dir.join(".claude/teams").join(&team_name);
