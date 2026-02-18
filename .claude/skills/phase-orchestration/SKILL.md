@@ -98,13 +98,14 @@ After each scrum-master reports completion:
    ```
    atm send arch-ctm "Sprint {P}.{S} merged (PR #{N}). Critical design review requested. Review: gh pr diff {N} --repo randlee/agent-team-mail. Focus: correctness bugs, architectural violations, missing edge cases."
    ```
-2. Wait for arch-ctm reply (use delay agent, nudge via tmux if no reply in 2 min)
-3. Track arch-ctm findings:
+2. Start the next eligible sprint immediately (dependency permitting) — do NOT wait for arch-ctm review before continuing development
+3. Run arch-ctm review in parallel (use delay agent, nudge via tmux if no reply in 2 min)
+4. Track arch-ctm findings:
    - **No issues**: Continue to next sprint
    - **Issues found**: Create/update a **parallel arch-ctm fix track** in a separate worktree (`feature/{P}-fixes-arch-review`) to address findings while later sprint waves continue
-4. arch-ctm is authorized to implement fixes directly in the fix worktree for review findings
-5. Every arch-ctm fix PR MUST be validated by QA agents (`rust-qa-agent` and `atm-qa-agent`) before merge
-6. Do NOT block ongoing sprint execution unless arch-ctm marks findings as critical/blocking
+5. arch-ctm is authorized to implement fixes directly in the fix worktree for review findings
+6. Every arch-ctm fix PR MUST be validated by QA agents (`rust-qa-agent` and `atm-qa-agent`) before merge
+7. Do NOT block ongoing sprint execution unless arch-ctm marks findings as critical/blocking
 
 ### 5. Arch-CTM Fix Sprint (if needed)
 
