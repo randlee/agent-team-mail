@@ -266,6 +266,49 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 - Structured logging via `tracing` crate.
 - Log levels: ERROR (crashes, data loss), WARN (stale identity, timeout), INFO (session start/stop, mail delivery), DEBUG (MCP traffic), TRACE (raw bytes).
 
+### NFR-6: Error Response Format
+
+All proxy errors MUST use standard JSON-RPC 2.0 error responses. The proxy defines application-specific error codes in the range -32000 to -32099 (reserved for implementation-defined server errors per JSON-RPC spec):
+
+| Code | Constant | Description |
+|------|----------|-------------|
+| -32001 | `IDENTITY_CONFLICT` | Requested identity already bound to an active session |
+| -32002 | `SESSION_NOT_FOUND` | agent_id does not exist in registry |
+| -32003 | `SESSION_CLOSED` | Operation on a closed session (queued request after close) |
+| -32004 | `MAX_SESSIONS_EXCEEDED` | `max_concurrent_threads` limit reached |
+| -32005 | `CHILD_PROCESS_DEAD` | Codex child process is not running |
+| -32006 | `REQUEST_TIMEOUT` | Downstream request exceeded configured timeout |
+| -32007 | `INVALID_SESSION_PARAMS` | Mutually exclusive params (e.g., agent_file + prompt) |
+| -32008 | `AGENT_FILE_NOT_FOUND` | Specified agent_file does not exist or is not readable |
+| -32009 | `IDENTITY_REQUIRED` | ATM tool called outside thread context without explicit identity |
+
+Notes:
+- Use JSON-RPC standard `-32602` for protocol/schema-level invalid params.
+- Use `-32007 INVALID_SESSION_PARAMS` for domain-level/session semantic validation after basic JSON-RPC validation (for example, mutually exclusive mode combinations that are valid JSON shape but invalid session intent).
+
+**Error response format:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "error": {
+    "code": -32001,
+    "message": "Identity conflict: 'arch-ctm' is already bound to agent_id 'codex:thread_abc123'",
+    "data": {
+      "error_source": "proxy",
+      "conflicting_agent_id": "codex:thread_abc123",
+      "identity": "arch-ctm"
+    }
+  }
+}
+```
+
+**Distinguishing proxy vs child errors:**
+- `error.data.error_source = "proxy"` — error originated in atm-agent-mcp
+- `error.data.error_source = "child"` — error forwarded from Codex child process (preserves original error code/message, wraps in proxy envelope with `child_error` field)
+- Standard JSON-RPC errors (-32700 parse error, -32600 invalid request, -32601 method not found, -32602 invalid params, -32603 internal error) are used for protocol-level issues
+
 ---
 
 ## 5. Out of Scope (Future)
@@ -303,27 +346,34 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ## 8. Implementation Plan
 
-### Phase A: MVP — Proxy + ATM Tools + Registry (4-5 sprints)
+### Phase A: MVP — Proxy + ATM Tools + Registry (8 sprints)
 
 | Sprint | Deliverable | Dependencies |
 |--------|-------------|--------------|
-| A.1 | **Crate scaffold + config** — workspace integration, CLI skeleton (`serve`, `config`, `threads`), config resolution from `.atm.toml` via `atm-core`, default identity + role preset resolution | atm-core config |
-| A.2 | **MCP stdio proxy** — spawn `codex mcp-server` child, JSON-RPC pass-through (content-length framing, partial reads), `tools/list` interception to add synthetic tools, child health monitoring | A.1 |
-| A.3 | **Context injection + ATM tools** — per-thread identity binding on `codex` calls, inject `developer-instructions` (with per-call context refresh), implement `atm_send`/`atm_read`/`atm_broadcast`/`atm_pending_count` via atm-core with thread-bound identity routing, mail envelope sanitization, at-least-once read semantics, auto mail injection (post-turn + idle polling) | A.2 |
-| A.4 | **Session registry** — persist agent_id→identity mapping on `codex`/`codex-reply` response (agent_id maps to Codex threadId internally), single registry file with atomic writes, `agent_sessions`/`agent_status`/`agent_close` MCP tools, per-session cwd tracking, `max_concurrent_threads` enforcement, lifecycle state machine | A.3 |
-| A.5 | **Shutdown + resume** — graceful shutdown with bounded summary requests (10s timeout), emergency snapshot on timeout, `--resume` flag with summary prepend, fallback for missing summaries, audit log (append-only JSONL) | A.4 |
+| A.1 | **Crate scaffold + config** — workspace integration, CLI skeleton (`serve`, `config`, `sessions`), config resolution from `.atm.toml` via `atm-core`, default identity + role preset structs, `atm-agent-mcp config` subcommand | atm-core config |
+| A.2 | **MCP stdio proxy** — lazy-spawn `codex mcp-server` child on first request, JSON-RPC pass-through (Content-Length framing, partial reads, interleaved messages), `tools/list` interception to inject synthetic tool definitions, child process health monitoring (crash detection, exit code capture), request timeout (FR-14) | A.1 |
+| A.3 | **Identity binding + context injection** — per-session identity assignment on `codex` calls (FR-2.1–2.8), identity→agent_id namespace management (FR-3), `developer-instructions` injection with per-turn context refresh (repo_root, repo_name, branch, cwd — null when outside git), session initialization modes: agent_file, inline prompt, resume (FR-16) | A.2 |
+| A.4 | **ATM communication tools** — implement `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` as MCP tools via atm-core (FR-4), thread-bound identity enforcement (no spoofing), mail envelope wrapping for injection (FR-8.4–8.5), `max_messages` and `max_message_length` truncation | A.3 |
+| A.5 | **Session registry + persistence** — in-memory registry with atomic disk persistence (FR-5), agent_id→backend_id mapping, per-session cwd tracking, stale-session detection on startup (FR-3.2), `max_concurrent_threads` enforcement (FR-3.3), `agent_sessions` and `agent_status` MCP tools (FR-10) | A.4 |
+| A.6 | **Lifecycle state machine + agent_close** — thread states: busy/idle/closed (FR-17.1–17.2), `agent_close` MCP tool with summary timeout (FR-17.3–17.4), resume after close (FR-17.7), identity replacement after close (FR-17.8), idempotent close (FR-17.9), close/cancel/queue precedence (FR-17.10–17.11) | A.5 |
+| A.7 | **Auto mail injection + turn serialization** — post-turn mail check (FR-8.1), idle mail polling (FR-8.2), deterministic identity routing (FR-8.3), single-flight rule per thread (FR-8.9), FIFO queue with priority dispatch: close > cancel > Claude > auto-mail (FR-8.10–8.11), delivery ack boundary (FR-8.12–8.13), configurable auto_mail toggle (FR-8.8) | A.6 |
+| A.8 | **Shutdown + resume + audit** — graceful shutdown with bounded summary requests per thread (FR-7), emergency snapshot on timeout, `--resume` flag with summary prepend (FR-6), fallback for missing summaries, audit log as append-only JSONL (FR-9), parent disconnect (stdio EOF) as SIGTERM equivalent | A.7 |
 
 **MVP exit criteria:**
-- [ ] `atm-agent-mcp serve` starts proxy, forwards all MCP traffic correctly
-- [ ] Per-thread identity binding with uniqueness enforcement
-- [ ] `developer-instructions` injected with session context on every `codex` call
-- [ ] `atm_send`/`atm_read`/`atm_broadcast`/`atm_pending_count` work as MCP tools
-- [ ] Thread registry persists across restarts with atomic writes
-- [ ] Multiple concurrent threads with different identities work correctly
-- [ ] `agent_sessions`/`agent_status` return accurate session info
+- [ ] `atm-agent-mcp serve` starts proxy, lazily spawns child, forwards all MCP traffic correctly
+- [ ] Per-session identity binding with uniqueness enforcement
+- [ ] `developer-instructions` injected with session context on every `codex`/`codex-reply` call
+- [ ] `atm_send`/`atm_read`/`atm_broadcast`/`atm_pending_count` work as MCP tools with thread-bound identity
+- [ ] Session registry persists across restarts with atomic writes
+- [ ] Multiple concurrent sessions with different identities work correctly
+- [ ] `agent_sessions`/`agent_status`/`agent_close` return accurate session info
+- [ ] Lifecycle state machine enforced (busy→idle→closed with correct transitions)
+- [ ] Auto mail injection works post-turn and on idle, with turn serialization
+- [ ] Turn priority: close > cancel > Claude > auto-mail (verified under concurrent load)
+- [ ] Delivery ack: messages marked read only after codex-reply written to child stdin
 - [ ] Graceful shutdown writes summary, `--resume` restores context
 - [ ] Audit log captures all tool calls with correlation IDs
-- [ ] Child process crash detected and reported
+- [ ] Child process crash detected and reported with exit code
 - [ ] Request timeout with configurable limit
 - [ ] All tests pass on macOS + Linux
 - [ ] `cargo clippy -- -D warnings` clean
@@ -341,6 +391,29 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 |--------|-------------|--------------|
 | C.1 | **Conformance testing** — MCP protocol conformance test suite (initialize, capabilities, notifications, cancellation, streaming), proxy latency benchmarks, registry stress tests | Phase B |
 | C.2 | **Cross-platform + packaging** — Windows support (if feasible), `atm-agent-mcp` added to release workflow, Homebrew formula update, documentation | C.1 |
+
+### Test Strategy
+
+**Unit tests** (per sprint, in-crate):
+- Config resolution, identity namespace logic, registry serialization, mail envelope formatting, state machine transitions
+- No child process needed — test proxy logic in isolation with mock JSON-RPC streams
+
+**Integration tests** (A.2+, `tests/` directory):
+- **Mock child**: A simple `echo-mcp-server` binary (in `tests/fixtures/`) that speaks JSON-RPC and returns canned responses. Used for proxy pass-through, tool interception, framing, and timeout tests. Avoids dependency on real `codex` binary.
+- **Real child** (optional, CI-gated): If `codex` binary is available, run end-to-end tests. Gated behind `--features integration-codex` or env var `CODEX_BIN` to avoid CI failures on machines without Codex.
+
+**Test boundaries:**
+| Layer | Mock | Real |
+|-------|------|------|
+| JSON-RPC framing | In-memory streams | stdio pipe to mock child |
+| Tool interception | Canned tool_list response | Mock child |
+| Identity/context | Unit test (no IO) | Mock child + verify injected JSON |
+| ATM tools | atm-core with temp dirs | Same |
+| Registry | Temp dir + atomic writes | Same |
+| Mail injection | Mock inbox + mock child | Same |
+| Shutdown/resume | Mock child + SIGTERM | Same |
+
+**Cross-platform**: All tests must pass on macOS + Linux. Use `ATM_HOME` for test isolation (existing pattern). Windows is stretch goal (Phase C).
 
 ---
 
@@ -433,3 +506,172 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 | 2026-02-18 | team-lead + arch-ctm | Address 3 blockers: turn serialization (FR-8.9-8.11), delivery ack (FR-8.12-8.13), close/cancel precedence (FR-17.10-17.11). Fix FR-4.5, FR-9.3 per nits. |
 | 2026-02-18 | team-lead | Rename MCP tool parameter from thread_id to agent_id to avoid collision with Claude Code agentId namespace |
 | 2026-02-18 | arch-ctm | Rename design to atm-agent-mcp, clarify one-to-many lifecycle, adopt team-scoped storage paths, set model-default policy to upstream latest, and align MCP session APIs on `agent_id`/`agent_sessions`. |
+| 2026-02-18 | team-lead | Split A.3/A.4 into 8 focused sprints, add NFR-6 error response format with error codes, add test strategy, add Codex MCP protocol reference appendix. |
+
+---
+
+## Appendix A: Codex MCP Protocol Reference
+
+> Source: `codex` CLI source code at `/Users/randlee/Documents/github/codex`. This appendix documents the actual wire protocol that `atm-agent-mcp` must proxy.
+
+### A.1 Server Startup
+
+```bash
+codex mcp-server                                    # default
+codex -m o3 -c model_reasoning_effort=high mcp-server  # with overrides
+```
+
+Server name: `codex-mcp-server`, protocol version: `2024-11-05`.
+
+### A.2 Tool Schemas
+
+#### `codex` — Start New Session
+
+**Input:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `prompt` | string | **yes** | Initial user prompt / task instruction |
+| `cwd` | string | no | Working directory (resolved against server's cwd if relative) |
+| `model` | string | no | Model override (e.g., `o3`, `gpt-5.2-codex`) |
+| `approval-policy` | enum | no | `untrusted` \| `on-failure` \| `on-request` \| `never` |
+| `sandbox` | enum | no | `read-only` \| `workspace-write` \| `danger-full-access` |
+| `base-instructions` | string | no | Replace default system instructions entirely |
+| `developer-instructions` | string | no | Injected as developer role message (appended, not replaced) |
+| `compact-prompt` | string | no | Prompt used when compacting the conversation |
+| `profile` | string | no | Config profile from `~/.codex/config.toml` |
+| `config` | object | no | Arbitrary config overrides (key/value, same as `-c` flags) |
+
+**Output:**
+
+```json
+{
+  "threadId": "string",
+  "content": "string"
+}
+```
+
+#### `codex-reply` — Continue Existing Session
+
+**Input:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `prompt` | string | **yes** | Next user message |
+| `threadId` | string | no* | Thread ID from prior `codex` response |
+
+\* Optional for backward compatibility but SHOULD always be provided.
+
+**Output:** Same as `codex`.
+
+### A.3 JSON-RPC Framing
+
+Standard MCP stdio transport: HTTP-style `Content-Length` header followed by `\r\n\r\n` and JSON body.
+
+```
+Content-Length: 123\r\n
+\r\n
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{...}}
+```
+
+Response follows the same framing. Proxy MUST handle partial reads and interleaved messages.
+
+### A.4 Thread Persistence
+
+- `threadId` is durable across sessions — survives server restarts
+- Threads stored by Codex internally (not filesystem-visible to proxy)
+- Resume via `codex-reply` with stored `threadId`
+- No explicit thread cleanup API — threads persist until Codex garbage-collects them
+
+### A.5 Capabilities
+
+_(To be updated from explore agent results — capabilities declared in initialize response, notification support, cancellation support, streaming behavior)_
+
+### A.6 Error Behavior
+
+_(To be updated from explore agent results — Codex-specific error codes, error response format from child process)_
+
+---
+
+## Appendix B: Sequence Diagrams
+
+### B.1 Turn Serialization (Claude request arrives while auto-mail turn is in-flight)
+
+```mermaid
+sequenceDiagram
+    participant C as Claude
+    participant P as atm-agent-mcp
+    participant Q as Per-thread Queue
+    participant X as Codex child
+
+    Note over P,Q: Session S is busy with auto-mail turn A1
+    P->>X: codex-reply(auto-mail, req=A1)
+    X-->>P: processing A1
+
+    C->>P: codex-reply(agent_id=S, req=C1)
+    P->>Q: enqueue C1 (FIFO)
+    Note over P,Q: FR-8.10: Claude request queued when auto-mail in-flight
+
+    X-->>P: response A1
+    P->>Q: dequeue next
+    Q-->>P: C1
+    Note over P,Q: FR-8.11 priority: Claude > auto-mail
+    P->>X: codex-reply(Claude, req=C1)
+    X-->>P: response C1
+    P-->>C: result C1
+```
+
+### B.2 Post-turn mail injection at busy->idle transition
+
+```mermaid
+sequenceDiagram
+    participant C as Claude
+    participant P as atm-agent-mcp
+    participant X as Codex child
+    participant M as ATM inbox
+
+    C->>P: codex-reply(agent_id=S, req=C2)
+    P->>X: forward C2
+    X-->>P: response C2
+    P-->>C: result C2
+
+    Note over P: Session S transitions busy -> idle
+    P->>M: read unread mail(identity=S)
+    M-->>P: [m1,m2]
+    alt messages found and session idle
+        P->>X: codex-reply(auto-mail envelope, req=A2)
+        Note over P: FR-8.12 ack boundary before mark-read
+        P->>M: mark [m1,m2] read
+        X-->>P: response A2
+    else no messages
+        Note over P: remain idle
+    end
+```
+
+### B.3 `agent_close` while busy (cancel, timeout, queue discard, identity release)
+
+```mermaid
+sequenceDiagram
+    participant C as Claude
+    participant P as atm-agent-mcp
+    participant Q as Per-thread Queue
+    participant X as Codex child
+    participant R as Session Registry
+
+    Note over P: Session S busy, queued requests present
+    C->>P: agent_close(agent_id=S)
+    P->>Q: elevate close command (highest precedence)
+    P->>Q: discard queued auto-mail + queued Claude turns
+    P-->>C: queued requests fail with SESSION_CLOSED
+
+    P->>X: cancel in-flight turn
+    P->>X: request summary (10s timeout)
+    alt summary returns
+        X-->>P: summary
+        P->>R: persist summary + state=closed
+    else timeout
+        P->>R: persist state=closed, interrupted=true
+    end
+    P->>R: release identity binding
+    P-->>C: agent_close success
+```
