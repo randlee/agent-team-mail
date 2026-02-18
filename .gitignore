@@ -30,6 +30,7 @@ temp/
 
 # Sprint prompt staging (not committed)
 .tmp/
+.temp/
 
 # macOS system files
 .DS_Store
