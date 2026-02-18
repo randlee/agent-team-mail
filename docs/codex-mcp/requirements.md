@@ -52,7 +52,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 ### FR-1: MCP Proxy Pass-Through
 
 - **FR-1.1**: Proxy MUST forward all standard MCP requests/responses between Claude and `codex mcp-server` without modification, except for intercepted tool calls listed below.
-- **FR-1.2**: Proxy MUST correctly handle JSON-RPC framing. The Codex child uses **newline-delimited JSON** (one message per `\n`-terminated line). The upstream MCP client (Claude) may use Content-Length framing or newline framing depending on transport; proxy MUST handle both.
+- **FR-1.2**: Proxy MUST implement protocol-compliant JSON-RPC transport handling, including Content-Length framed messages where applicable. Newline-delimited JSON MAY be supported as a compatibility mode for the downstream child process, but the normative framing behavior MUST follow the MCP stdio transport specification. Proxy MUST handle both framing styles on the upstream (Claude) side.
 - **FR-1.3**: Proxy MUST handle `codex mcp-server` process lifecycle (lazy spawn on first Codex request, terminate on shutdown, detect crashes).
 
 ### FR-2: Per-Thread Identity and Context Injection
@@ -240,6 +240,26 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
   3. Any queued Claude requests for the closed thread MUST return an error indicating the thread was closed.
 - **FR-17.11**: Precedence order for thread operations: `close` > `cancel` (timeout) > Claude-initiated turn > auto-mail turn. This ordering is deterministic and MUST be enforced by the proxy's per-thread command queue.
 
+### FR-18: Approval/Elicitation Bridging
+
+> **Design Decision**: Codex's `elicitation/create` is a **server-initiated request** (not a notification). The proxy MUST bridge this bidirectional flow between the Codex child and the upstream MCP client.
+
+- **FR-18.1**: When the Codex child sends an `elicitation/create` request, the proxy MUST forward it to the upstream MCP client (Claude) as a server-initiated request with a correlated `request_id`.
+- **FR-18.2**: The proxy MUST track the correlation between the upstream `request_id` (assigned by proxy) and the downstream `request_id` (from Codex child) to route the response back correctly.
+- **FR-18.3**: Approval requests MUST include the `agent_id` of the session that triggered them, so the MCP client can identify which agent is requesting approval.
+- **FR-18.4**: If the upstream client does not respond within a configurable timeout (default: 300s), the proxy MUST send a rejection response back to the Codex child and log the timeout.
+- **FR-18.5**: If the session is closed (via `agent_close`) while an elicitation is pending, the proxy MUST send a rejection response back to the Codex child before completing the close.
+
+### FR-19: Event Forwarding and Subscription
+
+> **Design Decision**: Codex emits `codex/event` notifications during tool execution. The proxy MUST forward these to the MCP client for observability without requiring the client to subscribe.
+
+- **FR-19.1**: The proxy MUST forward all `codex/event` notifications from the child process to the upstream MCP client.
+- **FR-19.2**: Forwarded events MUST include the `agent_id` of the originating session, so the client can correlate events to specific agents.
+- **FR-19.3**: Event forwarding MUST NOT block or delay the proxy's request/response processing. Events are fire-and-forget to the upstream client.
+- **FR-19.4**: If the upstream client disconnects or the write buffer is full, the proxy MUST drop events (not queue indefinitely). A dropped-event counter SHOULD be tracked per session for diagnostics.
+- **FR-19.5**: The proxy MUST NOT filter or transform event content — all events from the child are forwarded as-is (with `agent_id` metadata added).
+
 ---
 
 ## 4. Non-Functional Requirements
@@ -351,11 +371,11 @@ Notes:
 | Sprint | Deliverable | Dependencies |
 |--------|-------------|--------------|
 | A.1 | **Crate scaffold + config** — workspace integration, CLI skeleton (`serve`, `config`, `sessions`), config resolution from `.atm.toml` via `atm-core`, default identity + role preset structs, `atm-agent-mcp config` subcommand | atm-core config |
-| A.2 | **MCP stdio proxy** — lazy-spawn `codex mcp-server` child on first request, JSON-RPC pass-through (Content-Length framing, partial reads, interleaved messages), `tools/list` interception to inject synthetic tool definitions, child process health monitoring (crash detection, exit code capture), request timeout (FR-14) | A.1 |
+| A.2 | **MCP stdio proxy** — lazy-spawn `codex mcp-server` child on first request, JSON-RPC pass-through (Content-Length framing with newline-delimited compatibility, partial reads, interleaved messages), `tools/list` interception to inject synthetic tool definitions, child process health monitoring (crash detection, exit code capture), request timeout (FR-14), `codex/event` notification forwarding to upstream client with agent_id metadata (FR-19) | A.1 |
 | A.3 | **Identity binding + context injection** — per-session identity assignment on `codex` calls (FR-2.1–2.8), identity→agent_id namespace management (FR-3), `developer-instructions` injection with per-turn context refresh (repo_root, repo_name, branch, cwd — null when outside git), session initialization modes: agent_file, inline prompt, resume (FR-16) | A.2 |
 | A.4 | **ATM communication tools** — implement `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` as MCP tools via atm-core (FR-4), thread-bound identity enforcement (no spoofing), mail envelope wrapping for injection (FR-8.4–8.5), `max_messages` and `max_message_length` truncation | A.3 |
 | A.5 | **Session registry + persistence** — in-memory registry with atomic disk persistence (FR-5), agent_id→backend_id mapping, per-session cwd tracking, stale-session detection on startup (FR-3.2), `max_concurrent_threads` enforcement (FR-3.3), `agent_sessions` and `agent_status` MCP tools (FR-10) | A.4 |
-| A.6 | **Lifecycle state machine + agent_close** — thread states: busy/idle/closed (FR-17.1–17.2), `agent_close` MCP tool with summary timeout (FR-17.3–17.4), resume after close (FR-17.7), identity replacement after close (FR-17.8), idempotent close (FR-17.9), close/cancel/queue precedence (FR-17.10–17.11) | A.5 |
+| A.6 | **Lifecycle state machine + agent_close + approval bridging** — thread states: busy/idle/closed (FR-17.1–17.2), `agent_close` MCP tool with summary timeout (FR-17.3–17.4), resume after close (FR-17.7), identity replacement after close (FR-17.8), idempotent close (FR-17.9), close/cancel/queue precedence (FR-17.10–17.11), `elicitation/create` request bridging with correlation and timeout (FR-18) | A.5 |
 | A.7 | **Auto mail injection + turn serialization** — post-turn mail check (FR-8.1), idle mail polling (FR-8.2), deterministic identity routing (FR-8.3), single-flight rule per thread (FR-8.9), FIFO queue with priority dispatch: close > cancel > Claude > auto-mail (FR-8.10–8.11), delivery ack boundary (FR-8.12–8.13), configurable auto_mail toggle (FR-8.8) | A.6 |
 | A.8 | **Shutdown + resume + audit** — graceful shutdown with bounded summary requests per thread (FR-7), emergency snapshot on timeout, `--resume` flag with summary prepend (FR-6), fallback for missing summaries, audit log as append-only JSONL (FR-9), parent disconnect (stdio EOF) as SIGTERM equivalent | A.7 |
 
@@ -375,6 +395,8 @@ Notes:
 - [ ] Audit log captures all tool calls with correlation IDs
 - [ ] Child process crash detected and reported with exit code
 - [ ] Request timeout with configurable limit
+- [ ] `codex/event` notifications forwarded to upstream with agent_id metadata
+- [ ] `elicitation/create` bridged bidirectionally with request correlation and timeout
 - [ ] All tests pass on macOS + Linux
 - [ ] `cargo clippy -- -D warnings` clean
 
@@ -483,6 +505,20 @@ Notes:
 - [ ] Provide `developer-instructions` in caller's `codex` call, verify proxy appends (not replaces)
 - [ ] Provide `base-instructions` in caller's `codex` call, verify proxy only uses `developer-instructions`
 
+### Approval/Elicitation Bridging
+- [ ] Codex child sends `elicitation/create` → verify proxy forwards to upstream client with `agent_id` metadata
+- [ ] Upstream client responds to elicitation → verify proxy routes response back to correct Codex child request
+- [ ] Elicitation timeout (300s) → verify proxy sends rejection to child and logs timeout
+- [ ] `agent_close` while elicitation pending → verify proxy sends rejection before completing close
+- [ ] Two sessions have concurrent elicitations → verify request correlation routes each response correctly
+
+### Event Forwarding
+- [ ] Codex child emits `codex/event` notification → verify proxy forwards to upstream client with `agent_id` added
+- [ ] Multiple concurrent sessions emit events → verify each event tagged with correct `agent_id`
+- [ ] Event forwarding during active request/response → verify no delay or blocking of MCP traffic
+- [ ] Upstream client disconnects → verify events dropped (not queued) and counter incremented
+- [ ] Verify event content is forwarded unmodified (no filtering or transformation)
+
 ### Session Initialization
 - [ ] Start thread with `agent_file: ".claude/agents/rust-dev.md"`, verify file contents used as prompt
 - [ ] Start thread with `agent_file` pointing to nonexistent file, verify clear error returned
@@ -507,6 +543,7 @@ Notes:
 | 2026-02-18 | team-lead | Rename MCP tool parameter from thread_id to agent_id to avoid collision with Claude Code agentId namespace |
 | 2026-02-18 | arch-ctm | Rename design to atm-agent-mcp, clarify one-to-many lifecycle, adopt team-scoped storage paths, set model-default policy to upstream latest, and align MCP session APIs on `agent_id`/`agent_sessions`. |
 | 2026-02-18 | team-lead | Split A.3/A.4 into 8 focused sprints, add NFR-6 error response format with error codes, add test strategy, add Codex MCP protocol reference appendix. |
+| 2026-02-18 | team-lead + arch-ctm | FR-18 (approval/elicitation bridging), FR-19 (event forwarding), fix FR-1.2 framing to protocol-compliant (not newline-only), confirm error codes -32001..-32009 as authoritative. |
 
 ---
 
