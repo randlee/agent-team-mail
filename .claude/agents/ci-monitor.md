@@ -190,10 +190,10 @@ Final PASS broadcast template:
 
 ## Error Handling
 
-- If `gh` is not authenticated, output: `ERROR: gh CLI not authenticated. Run: gh auth login`
-- If the PR does not exist, output: `ERROR: PR #<N> not found in <REPO>`
-- If no checks are configured, output: `INFO: No CI checks found for PR #<N>. Repository may not have GitHub Actions configured.`
-- If timeout is exceeded before completion, report current status and mark as `PENDING (timed out)`
+- If `gh` is not authenticated, return JSON with `status: "FAIL"` and `error.code: "GH.AUTH"`.
+- If the PR does not exist, return JSON with `status: "FAIL"` and `error.code: "PR.NOT_FOUND"`.
+- If no checks are configured, return JSON with `status: "PASS"` and empty checks/failures plus an informational note.
+- If timeout is exceeded before completion, return JSON with `status: "PENDING_TIMEOUT"`.
 - For transient API errors/rate limits, retry with bounded backoff before failing.
 
 ## Critical Rules
