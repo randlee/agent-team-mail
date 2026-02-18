@@ -93,7 +93,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 > **Design Decision**: Multiple proxy instances may run in the same repo (e.g., two Claude teammates each with their own `atm-agent-mcp`). Codex subagents are invisible to the team — only the proxy's bound identity is a team member.
 
-- **FR-20.1**: Each proxy instance MUST have a distinct identity. Two instances with the same identity in the same team MUST be rejected (identity conflict per FR-2).
+- **FR-20.1**: Each proxy instance MUST have a distinct identity. Two instances with the same identity in the same team MUST be rejected (identity conflict per FR-2). On startup, the proxy MUST check for existing identity claims via a lock file or registry marker at `~/.config/atm/agent-sessions/<team>/<identity>.lock` to prevent cross-process races.
 - **FR-20.2**: Multiple proxy instances in the same repo MUST share the same `~/.claude/teams/` inbox files. Shared message history is expected and correct — each instance reads/writes the same team directory.
 - **FR-20.3**: Each proxy instance maintains its own independent session registry. Thread-to-identity mappings are per-instance, not shared.
 - **FR-20.4**: Codex subagents spawned via `spawn_agent` within a session MUST NOT receive their own ATM identity, inbox, or team membership. They are invisible to the team — analogous to Claude Code's background sub-agents.
@@ -385,9 +385,9 @@ Notes:
 |--------|-------------|--------------|
 | A.1 | **Crate scaffold + config** — workspace integration, CLI skeleton (`serve`, `config`, `sessions`), config resolution from `.atm.toml` via `atm-core`, default identity + role preset structs, `atm-agent-mcp config` subcommand | atm-core config |
 | A.2 | **MCP stdio proxy** — lazy-spawn `codex mcp-server` child on first request, JSON-RPC pass-through (Content-Length framing with newline-delimited compatibility, partial reads, interleaved messages), `tools/list` interception to inject synthetic tool definitions, child process health monitoring (crash detection, exit code capture), request timeout (FR-14), `codex/event` notification forwarding to upstream client with agent_id metadata (FR-19) | A.1 |
-| A.3 | **Identity binding + context injection** — per-session identity assignment on `codex` calls (FR-2.1–2.8), identity→agent_id namespace management (FR-3), `developer-instructions` injection with per-turn context refresh (repo_root, repo_name, branch, cwd — null when outside git), session initialization modes: agent_file, inline prompt, resume (FR-16) | A.2 |
-| A.4 | **ATM communication tools** — implement `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` as MCP tools via atm-core (FR-4), thread-bound identity enforcement (no spoofing), mail envelope wrapping for injection (FR-8.4–8.5), `max_messages` and `max_message_length` truncation | A.3 |
-| A.5 | **Session registry + persistence** — in-memory registry with atomic disk persistence (FR-5), agent_id→backend_id mapping, per-session cwd tracking, stale-session detection on startup (FR-3.2), `max_concurrent_threads` enforcement (FR-3.3), `agent_sessions` and `agent_status` MCP tools (FR-10) | A.4 |
+| A.3 | **Identity binding + context injection** — per-session identity assignment on `codex` calls (FR-2.1–2.8), identity→agent_id namespace management (FR-3), cross-process identity-collision lock (FR-20.1), `developer-instructions` injection with per-turn context refresh (repo_root, repo_name, branch, cwd — null when outside git), session initialization modes: agent_file, inline prompt, resume (FR-16) | A.2 |
+| A.4 | **ATM communication tools** — implement `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` as MCP tools via atm-core (FR-4), thread-bound identity enforcement (no spoofing, subagent invisibility FR-20.4–20.5), mail envelope wrapping for injection (FR-8.4–8.5), `max_messages` and `max_message_length` truncation | A.3 |
+| A.5 | **Session registry + persistence** — in-memory registry with atomic disk persistence (FR-5), agent_id→backend_id mapping, per-session cwd tracking, stale-session detection on startup (FR-3.2), `max_concurrent_threads` enforcement (FR-3.3), per-instance independent registry (FR-20.2–20.3), `agent_sessions` and `agent_status` MCP tools (FR-10) | A.4 |
 | A.6 | **Lifecycle state machine + agent_close + approval bridging** — thread states: busy/idle/closed (FR-17.1–17.2), `agent_close` MCP tool with summary timeout (FR-17.3–17.4), resume after close (FR-17.7), identity replacement after close (FR-17.8), idempotent close (FR-17.9), close/cancel/queue precedence (FR-17.10–17.11), `elicitation/create` request bridging with correlation and timeout (FR-18) | A.5 |
 | A.7 | **Auto mail injection + turn serialization** — post-turn mail check (FR-8.1), idle mail polling (FR-8.2), deterministic identity routing (FR-8.3), single-flight rule per thread (FR-8.9), FIFO queue with priority dispatch: close > cancel > Claude > auto-mail (FR-8.10–8.11), delivery ack boundary (FR-8.12–8.13), configurable auto_mail toggle (FR-8.8) | A.6 |
 | A.8 | **Shutdown + resume + audit** — graceful shutdown with bounded summary requests per thread (FR-7), emergency snapshot on timeout, `--resume` flag with summary prepend (FR-6), fallback for missing summaries, audit log as append-only JSONL (FR-9), parent disconnect (stdio EOF) as SIGTERM equivalent | A.7 |
@@ -408,6 +408,8 @@ Notes:
 - [ ] Audit log captures all tool calls with correlation IDs
 - [ ] Child process crash detected and reported with exit code
 - [ ] Request timeout with configurable limit
+- [ ] Multi-instance: two proxies with different identities coexist; same identity rejected via lock file
+- [ ] Codex subagents invisible to team (no ATM identity, messages sent under parent identity)
 - [ ] `codex/event` notifications forwarded to upstream with agent_id metadata
 - [ ] `elicitation/create` bridged bidirectionally with request correlation and timeout
 - [ ] All tests pass on macOS + Linux
