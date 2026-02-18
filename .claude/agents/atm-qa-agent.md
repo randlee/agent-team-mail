@@ -28,7 +28,12 @@ Input must be fenced JSON. Do not proceed with free-form input.
     "sprint": "sprint identifier or null"
   },
   "phase_or_sprint_docs": [
-    "docs/path/to/design-or-plan-doc.md"
+    "docs/path/to/design-or-plan-doc-1.md",
+    "docs/path/to/design-or-plan-doc-2.md"
+  ],
+  "phase_sprint_documents": [
+    "docs/path/to/design-or-plan-doc-1.md",
+    "docs/path/to/design-or-plan-doc-2.md"
   ],
   "review_targets": [
     "optional file/dir paths to inspect for implementation compliance"
@@ -38,7 +43,8 @@ Input must be fenced JSON. Do not proceed with free-form input.
 ```
 
 Rules:
-- `phase_or_sprint_docs` is required and must contain one or more repo-relative paths.
+- `phase_or_sprint_docs` is an array and must contain one or more repo-relative paths.
+- `phase_sprint_documents` is a supported alias (also array); if both are provided, merge and de-duplicate.
 - Treat provided phase/sprint docs as in-scope constraints that must align with baseline sources.
 - If required inputs are missing or malformed, return `FAIL` with an `INPUT.INVALID` error.
 
