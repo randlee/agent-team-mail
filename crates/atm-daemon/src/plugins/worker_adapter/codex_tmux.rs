@@ -6,12 +6,12 @@
 //! to ensure tmux has fully buffered the text before submission.
 
 use super::trait_def::{WorkerAdapter, WorkerHandle};
+use super::tmux_sender::{DefaultTmuxSender, DeliveryMethod, TmuxSender};
 use crate::plugin::PluginError;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Codex TMUX backend payload with tmux-specific metadata
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +30,10 @@ pub struct CodexTmuxBackend {
     pub tmux_session: String,
     /// Base directory for log files
     pub log_dir: PathBuf,
+    /// Shared tmux sender with reliability protections
+    sender: DefaultTmuxSender,
+    /// Delivery method for text injection
+    delivery_method: DeliveryMethod,
 }
 
 impl CodexTmuxBackend {
@@ -40,9 +44,12 @@ impl CodexTmuxBackend {
     /// * `tmux_session` - Name of the tmux session to create worker panes in
     /// * `log_dir` - Directory for worker log files
     pub fn new(tmux_session: String, log_dir: PathBuf) -> Self {
+        let delivery_method = DeliveryMethod::from_env().unwrap_or(DeliveryMethod::PasteBuffer);
         Self {
             tmux_session,
             log_dir,
+            sender: DefaultTmuxSender,
+            delivery_method,
         }
     }
 
@@ -192,36 +199,14 @@ impl WorkerAdapter for CodexTmuxBackend {
 
         debug!("Starting worker {agent_id} with: {startup}");
 
-        // Send the startup command using literal mode (-l) to prevent
-        // shell interpretation of special chars in the command string.
-        Command::new("tmux")
-            .arg("send-keys")
-            .arg("-t")
-            .arg(&pane_id)
-            .arg("-l") // LITERAL MODE - prevents command injection
-            .arg(&startup)
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Failed to send startup command to tmux pane: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        // 500ms delay between literal text and Enter ensures tmux has fully
-        // buffered the text before the keypress is sent. Validated in Phase 10
-        // testing: send-keys -l + immediate Enter causes dropped characters.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // Send Enter to execute the command (not literal — this is a key press)
-        Command::new("tmux")
-            .arg("send-keys")
-            .arg("-t")
-            .arg(&pane_id)
-            .arg("Enter")
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Failed to send Enter key to tmux pane: {e}"),
-                source: Some(Box::new(e)),
-            })?;
+        self.sender
+            .send_text_and_enter(
+                &pane_id,
+                &startup,
+                self.delivery_method,
+                "spawn-startup",
+            )
+            .await?;
 
         // Create tmux-specific payload
         let tmux_payload = TmuxPayload {
@@ -305,32 +290,16 @@ impl WorkerAdapter for CodexTmuxBackend {
             // Validate key to prevent shell injection via variable name
             if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 let export_cmd = format!("export {key}={value}");
-                std::process::Command::new("tmux")
-                    .arg("send-keys")
-                    .arg("-t")
-                    .arg(&pane_id)
-                    .arg("-l")
-                    .arg(&export_cmd)
-                    .output()
-                    .map_err(|e| PluginError::Runtime {
-                        message: format!("Failed to send env export to tmux pane: {e}"),
-                        source: Some(Box::new(e)),
-                    })?;
-
-                tokio::time::sleep(Duration::from_millis(500)).await;
-
-                std::process::Command::new("tmux")
-                    .arg("send-keys")
-                    .arg("-t")
-                    .arg(&pane_id)
-                    .arg("Enter")
-                    .output()
-                    .map_err(|e| PluginError::Runtime {
-                        message: format!("Failed to send Enter after env export: {e}"),
-                        source: Some(Box::new(e)),
-                    })?;
+                self.sender
+                    .send_text_and_enter(
+                        &pane_id,
+                        &export_cmd,
+                        self.delivery_method,
+                        "spawn-env-export",
+                    )
+                    .await?;
             } else {
-                warn!("Skipping env var with invalid key name: {key}");
+                tracing::warn!("Skipping env var with invalid key name: {key}");
             }
         }
 
@@ -340,30 +309,14 @@ impl WorkerAdapter for CodexTmuxBackend {
 
         debug!("Starting worker {agent_id} with: {startup}");
 
-        std::process::Command::new("tmux")
-            .arg("send-keys")
-            .arg("-t")
-            .arg(&pane_id)
-            .arg("-l")
-            .arg(&startup)
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Failed to send startup command to tmux pane: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        std::process::Command::new("tmux")
-            .arg("send-keys")
-            .arg("-t")
-            .arg(&pane_id)
-            .arg("Enter")
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Failed to send Enter key to tmux pane: {e}"),
-                source: Some(Box::new(e)),
-            })?;
+        self.sender
+            .send_text_and_enter(
+                &pane_id,
+                &startup,
+                self.delivery_method,
+                "spawn-with-env-startup",
+            )
+            .await?;
 
         let tmux_payload = TmuxPayload {
             session: self.tmux_session.clone(),
@@ -384,51 +337,14 @@ impl WorkerAdapter for CodexTmuxBackend {
         handle: &WorkerHandle,
         message: &str,
     ) -> Result<(), PluginError> {
-        // CRITICAL: Use literal mode (-l) to prevent command injection
-        // This ensures message content is not interpreted as shell commands
-        let output = Command::new("tmux")
-            .arg("send-keys")
-            .arg("-t")
-            .arg(&handle.backend_id)
-            .arg("-l") // LITERAL MODE - mandatory for safety
-            .arg(message)
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Failed to send message to tmux pane: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        if !output.status.success() {
-            let pane_id = &handle.backend_id;
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(PluginError::Runtime {
-                message: format!("Failed to send message to pane {pane_id}: {stderr}"),
-                source: None,
-            });
-        }
-
-        // 500ms delay between literal text and Enter ensures tmux has fully
-        // buffered the message before the keypress is sent. Validated in Phase 10
-        // testing: send-keys -l + immediate Enter causes dropped characters.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // Send Enter key separately (not as literal text)
-        let output = Command::new("tmux")
-            .arg("send-keys")
-            .arg("-t")
-            .arg(&handle.backend_id)
-            .arg("Enter")
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Failed to send Enter key: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        if !output.status.success() {
-            let pane_id = &handle.backend_id;
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Failed to send Enter key to pane {pane_id}: {stderr}");
-        }
+        self.sender
+            .send_text_and_enter(
+                &handle.backend_id,
+                message,
+                self.delivery_method,
+                "send-message",
+            )
+            .await?;
 
         let agent_id = &handle.agent_id;
         let pane_id = &handle.backend_id;
@@ -453,7 +369,7 @@ impl WorkerAdapter for CodexTmuxBackend {
             let pane_id = &handle.backend_id;
             let agent_id = &handle.agent_id;
             let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Failed to kill pane {pane_id} for agent {agent_id}: {stderr}");
+            tracing::warn!("Failed to kill pane {pane_id} for agent {agent_id}: {stderr}");
             // Don't return error — pane may already be gone
         } else {
             let pane_id = &handle.backend_id;
@@ -468,6 +384,7 @@ impl WorkerAdapter for CodexTmuxBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// Verify the 500ms delay constant is set to the correct value.
     ///

@@ -310,3 +310,53 @@ async fn tmux_worker_receives_message() {
 
     backend.shutdown(&handle).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore]
+async fn tmux_delivery_method_comparison() {
+    if !should_run() {
+        return;
+    }
+
+    async fn run_method(method: &str) -> (u128, usize, usize) {
+        unsafe {
+            std::env::set_var("ATM_TMUX_DELIVERY_METHOD", method);
+        }
+        let env = DaemonEnv::new();
+        let _session = SessionGuard {
+            session: env.session.clone(),
+        };
+        let mut backend = CodexTmuxBackend::new(env.session.clone(), env.log_dir.clone());
+        let handle = backend.spawn(&env.agent, "sleep 300").await.unwrap();
+        assert!(
+            wait_for_tmux_pane(&env.session, &handle.backend_id, Duration::from_secs(2)),
+            "tmux pane did not appear for {method}"
+        );
+
+        let start = Instant::now();
+        let mut ok = 0usize;
+        let mut failed = 0usize;
+        for i in 0..10 {
+            let payload = format!("ATM-DELIVERY-COMPARE-{method}-{i}");
+            match backend.send_message(&handle, &payload).await {
+                Ok(()) => ok += 1,
+                Err(_) => failed += 1,
+            }
+        }
+        let elapsed_ms = start.elapsed().as_millis();
+        let _ = backend.shutdown(&handle).await;
+        (elapsed_ms, ok, failed)
+    }
+
+    use std::time::Instant;
+    let (send_keys_ms, send_keys_ok, send_keys_failed) = run_method("send-keys").await;
+    let (paste_ms, paste_ok, paste_failed) = run_method("paste-buffer").await;
+    unsafe {
+        std::env::remove_var("ATM_TMUX_DELIVERY_METHOD");
+    }
+
+    eprintln!(
+        "delivery comparison: send-keys={}ms ok={} fail={}, paste-buffer={}ms ok={} fail={}",
+        send_keys_ms, send_keys_ok, send_keys_failed, paste_ms, paste_ok, paste_failed
+    );
+}

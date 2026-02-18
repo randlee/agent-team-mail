@@ -29,6 +29,7 @@
 
 use super::agent_state::AgentState;
 use super::config::NudgeConfig;
+use super::tmux_sender::{DefaultTmuxSender, DeliveryMethod, TmuxSender};
 use crate::plugin::PluginError;
 use std::collections::HashMap;
 use std::path::Path;
@@ -81,6 +82,10 @@ pub struct NudgeEngine {
     /// Prevents re-nudging the same unread message if the agent goes idle
     /// multiple times without reading it.
     last_nudged_message_id: HashMap<String, String>,
+    /// Shared tmux sender for reliability protections.
+    sender: DefaultTmuxSender,
+    /// Delivery method for nudges.
+    delivery_method: DeliveryMethod,
 }
 
 impl NudgeEngine {
@@ -90,6 +95,8 @@ impl NudgeEngine {
             config,
             last_nudge: HashMap::new(),
             last_nudged_message_id: HashMap::new(),
+            sender: DefaultTmuxSender,
+            delivery_method: DeliveryMethod::from_env().unwrap_or(DeliveryMethod::PasteBuffer),
         }
     }
 
@@ -210,14 +217,22 @@ impl NudgeEngine {
                 info!(
                     "Nudging {agent_id} ({unread_count} unread messages) via pane {pane_id}"
                 );
-                send_nudge_keys(pane_id, &text).await?;
+                self.sender
+                    .send_text_and_enter(
+                        pane_id,
+                        &text,
+                        self.delivery_method,
+                        "nudge-primary",
+                    )
+                    .await?;
                 self.record_nudge(agent_id, newest_message_id);
 
                 // One retry: after 3 seconds, send Enter only.
                 let pane_owned = pane_id.to_string();
+                let sender = self.sender.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(3)).await;
-                    if let Err(e) = send_enter_retry(&pane_owned).await {
+                    if let Err(e) = sender.send_enter(&pane_owned, "nudge-retry").await {
                         warn!("Nudge retry Enter failed for pane {pane_owned}: {e}");
                     } else {
                         debug!("Nudge retry Enter sent to pane {pane_owned}");
@@ -294,99 +309,6 @@ fn load_inbox_entries(path: &Path) -> Vec<InboxEntry> {
                 .map(String::from),
         })
         .collect()
-}
-
-// ---------------------------------------------------------------------------
-// tmux send-keys helpers (Unix only for tmux, no-op on Windows)
-// ---------------------------------------------------------------------------
-
-/// Send the nudge text and Enter via `tmux send-keys`, with the required
-/// 500 ms delay between literal text and Enter.
-///
-/// On non-Unix platforms this is a compile-time no-op.
-async fn send_nudge_keys(pane_id: &str, text: &str) -> Result<(), PluginError> {
-    #[cfg(unix)]
-    {
-        use std::process::Command;
-
-        // Send literal text (no shell interpretation)
-        let output = Command::new("tmux")
-            .arg("send-keys")
-            .arg("-t")
-            .arg(pane_id)
-            .arg("-l")
-            .arg(text)
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Nudge: failed to send-keys literal: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Nudge send-keys literal failed for pane {pane_id}: {stderr}");
-        }
-
-        // 500 ms delay (validated pattern from Phase 10 testing)
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // Send Enter (not literal — this is a key press)
-        let output = Command::new("tmux")
-            .arg("send-keys")
-            .arg("-t")
-            .arg(pane_id)
-            .arg("Enter")
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Nudge: failed to send Enter: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Nudge Enter failed for pane {pane_id}: {stderr}");
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        // tmux is not available on Windows; nudging is a no-op.
-        let _ = pane_id;
-        let _ = text;
-        debug!("Nudge no-op on non-Unix platform");
-    }
-
-    Ok(())
-}
-
-/// Send a retry Enter to the pane (one retry, 3 s after original nudge).
-async fn send_enter_retry(pane_id: &str) -> Result<(), PluginError> {
-    #[cfg(unix)]
-    {
-        use std::process::Command;
-        let output = Command::new("tmux")
-            .arg("send-keys")
-            .arg("-t")
-            .arg(pane_id)
-            .arg("Enter")
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Nudge retry: failed to send Enter: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Nudge retry Enter failed for pane {pane_id}: {stderr}");
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = pane_id;
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
