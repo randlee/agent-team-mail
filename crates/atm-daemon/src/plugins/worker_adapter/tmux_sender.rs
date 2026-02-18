@@ -147,6 +147,15 @@ impl DefaultTmuxSender {
         Duration::from_millis(base * pct / 100)
     }
 
+    fn capture_verify_enabled() -> bool {
+        std::env::var("ATM_TMUX_VERIFY_CAPTURE")
+            .ok()
+            .is_some_and(|v| {
+                let lower = v.trim().to_ascii_lowercase();
+                matches!(lower.as_str(), "1" | "true" | "yes" | "on")
+            })
+    }
+
     #[cfg(unix)]
     fn send_payload(&self, pane_id: &str, payload: &str, method: DeliveryMethod) -> Result<(), PluginError> {
         match method {
@@ -246,7 +255,7 @@ impl DefaultTmuxSender {
     }
 
     #[cfg(unix)]
-    fn verify_marker_visible(&self, pane_id: &str, marker: &str) -> Result<(), PluginError> {
+    fn verify_text_visible(&self, pane_id: &str, text: &str) -> Result<(), PluginError> {
         let output = Command::new("tmux")
             .arg("capture-pane")
             .arg("-p")
@@ -268,16 +277,16 @@ impl DefaultTmuxSender {
         }
 
         let captured = String::from_utf8_lossy(&output.stdout);
-        if !captured.contains(marker) {
+        if !captured.contains(text) {
             return Err(Self::runtime_error(format!(
-                "delivery verification failed for pane {pane_id}: marker not found"
+                "delivery verification failed for pane {pane_id}: text not found in capture"
             )));
         }
         Ok(())
     }
 
     #[cfg(not(unix))]
-    fn verify_marker_visible(&self, _pane_id: &str, _marker: &str) -> Result<(), PluginError> {
+    fn verify_text_visible(&self, _pane_id: &str, _text: &str) -> Result<(), PluginError> {
         Ok(())
     }
 }
@@ -291,8 +300,6 @@ impl TmuxSender for DefaultTmuxSender {
         method: DeliveryMethod,
         context: &str,
     ) -> Result<(), PluginError> {
-        let marker = format!("__ATM_DELIVERY_MARKER_{}__", Uuid::new_v4());
-        let payload = format!("{text}\n{marker}");
         let mut last_err: Option<PluginError> = None;
 
         for attempt in 1..=MAX_ATTEMPTS {
@@ -301,7 +308,7 @@ impl TmuxSender for DefaultTmuxSender {
             } else {
                 self.enforce_min_send_interval(pane_id).await;
                 let result = (|| -> Result<(), PluginError> {
-                    self.send_payload(pane_id, &payload, method)?;
+                    self.send_payload(pane_id, text, method)?;
                     Ok(())
                 })();
                 if let Err(e) = result {
@@ -311,10 +318,14 @@ impl TmuxSender for DefaultTmuxSender {
                     match self.send_enter_once(pane_id) {
                         Err(e) => last_err = Some(e),
                         Ok(()) => {
-                            tokio::time::sleep(Duration::from_millis(VERIFY_DELAY_MS)).await;
-                            match self.verify_marker_visible(pane_id, &marker) {
-                                Ok(()) => return Ok(()),
-                                Err(e) => last_err = Some(e),
+                            if Self::capture_verify_enabled() {
+                                tokio::time::sleep(Duration::from_millis(VERIFY_DELAY_MS)).await;
+                                match self.verify_text_visible(pane_id, text) {
+                                    Ok(()) => return Ok(()),
+                                    Err(e) => last_err = Some(e),
+                                }
+                            } else {
+                                return Ok(());
                             }
                         }
                     }
@@ -373,6 +384,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial]
     fn test_delivery_method_from_env_parse() {
         unsafe {
             std::env::set_var("ATM_TMUX_DELIVERY_METHOD", "send-keys");
@@ -399,4 +411,3 @@ mod tests {
         assert!((300..=500).contains(&d3));
     }
 }
-

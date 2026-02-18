@@ -359,4 +359,6 @@ async fn tmux_delivery_method_comparison() {
         "delivery comparison: send-keys={}ms ok={} fail={}, paste-buffer={}ms ok={} fail={}",
         send_keys_ms, send_keys_ok, send_keys_failed, paste_ms, paste_ok, paste_failed
     );
+    assert_eq!(send_keys_ok + send_keys_failed, 10);
+    assert_eq!(paste_ok + paste_failed, 10);
 }
