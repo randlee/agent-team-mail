@@ -225,7 +225,15 @@ WHILE ci_iteration <= 3:
         ci_iteration += 1
 
 IF ci_iteration > 3 and CI still FAIL:
-    ESCALATE to team-lead with full CI failure details
+    Spawn rust-architect background agent for root-cause analysis:
+      - subagent_type: "rust-architect"
+      - model: "opus" or "codex-high"
+      - prompt includes full CI failure history, attempted fixes, and current branch/worktree context
+      - request: root cause, corrective plan, and risk notes
+    Wait for rust-architect output via TaskOutput
+    ESCALATE to team-lead with:
+      - full CI failure details
+      - rust-architect root-cause analysis and recommended corrective plan
     STOP
 ```
 
