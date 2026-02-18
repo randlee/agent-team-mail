@@ -20,6 +20,7 @@
 //! - `hook_watcher.rs` — Incremental events.jsonl watcher for Codex hook events
 //! - `nudge.rs` — NudgeEngine: auto-nudge idle agents with unread messages
 //! - `pubsub.rs` — Ephemeral in-memory pub/sub for agent state change notifications
+//! - `tmux_sender.rs` — Shared tmux delivery with retries + verification
 
 pub mod activity;
 pub mod agent_state;
@@ -33,6 +34,7 @@ pub mod nudge;
 pub mod plugin;
 pub mod pubsub;
 pub mod router;
+pub mod tmux_sender;
 pub mod trait_def;
 
 pub use activity::ActivityTracker;
@@ -47,4 +49,5 @@ pub use nudge::{InboxEntry, NudgeDecision, NudgeEngine};
 pub use plugin::WorkerAdapterPlugin;
 pub use pubsub::{PubSub, PubSubError, Subscription};
 pub use router::{ConcurrencyPolicy, MessageRouter};
+pub use tmux_sender::{DefaultTmuxSender, DeliveryMethod, TmuxSender};
 pub use trait_def::{WorkerAdapter, WorkerHandle};
