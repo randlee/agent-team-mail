@@ -163,8 +163,8 @@ atm-agent-mcp (proxy)
     ├── idle detection:
     │     after turn completes, start mail poll timer
     │     every poll_interval_ms: atm-core inbox read for this identity
-    │     if messages → format digest, inject as codex-reply on active thread
-    │     if no active thread → start new codex session with mail as prompt
+    │     if messages → format digest, inject as codex-reply on active session
+    │     if no active session for identity → keep mail unread
     │     if idle_timeout_ms expires with no mail → stop polling
     │     mail arriving during active turn → queue, deliver after turn completes
     │
@@ -314,7 +314,7 @@ Written to: `~/.config/atm/agent-sessions/<team>/<identity>/<backend-id>/summary
 # Resume most recent session for this identity
 atm-agent-mcp serve --resume
 
-# Resume a specific thread by ID
+# Resume a specific session by ID
 atm-agent-mcp serve --resume <agent-id>
 
 # Resume by identity name (picks most recent session for that identity)
