@@ -21,6 +21,10 @@ Purpose: implementation reference for `atm-agent-mcp` while preserving clear gui
   - Use conversion layer from tool params into runtime config.
 - `test_mcp_process.rs`, `test_mock_model_server.rs`
   - Use harness patterns for end-to-end MCP process testing and deterministic mock responses.
+- `test_responses.rs`, `test_suite_codex_tool.rs`, `test_all.rs`
+  - Use real fixture payloads and suite structure to bootstrap `atm-agent-mcp` integration tests quickly.
+- `rmcp_test_server.rs`, `rmcp_test_stdio_server.rs`, `rmcp_test_streamable_http_server.rs`
+  - Use these as protocol test servers for stdio/streamable MCP behavior and conformance checks.
 
 ## Do Not Use As-Is
 
@@ -37,3 +41,4 @@ Purpose: implementation reference for `atm-agent-mcp` while preserving clear gui
 
 - This is a docs/reference copy only. These files are not compiled in this repo.
 - Keep this folder in sync manually when upstream patterns materially change.
+- File name prefixes (`test_`, `rmcp_`) were added for readability in this reference folder only.
