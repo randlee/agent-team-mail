@@ -1,8 +1,8 @@
-# codex-mcp Requirements
+# atm-agent-mcp Requirements
 
 > **Status**: APPROVED by team-lead + arch-ctm (2026-02-18, updated: single-proxy-multi-session model)
-> **Crate**: `crates/codex-mcp`
-> **Binary**: `codex-mcp`
+> **Crate**: `crates/atm-agent-mcp`
+> **Binary**: `atm-agent-mcp`
 
 ---
 
@@ -18,11 +18,20 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 - No session resume — context is lost on shutdown/crash
 - No subagent awareness — Codex's native multi-agent tools are disconnected from ATM
 
-**Goal:** A thin Rust MCP proxy that wraps a single `codex mcp-server` child process, managing multiple concurrent Codex sessions (threads) with per-thread identity, team context, communication, and lifecycle — making one or many Codex agents first-class ATM team members through a single MCP connection.
+**Goal:** A thin Rust MCP proxy that wraps a single `codex mcp-server` child process, managing multiple concurrent Codex sessions (threads) with per-session identity, team context, communication, and lifecycle. `atm-agent-mcp` is the general name for this agent-oriented proxy layer; Codex is the first supported backend.
 
-> **Architecture Decision**: One proxy instance manages all Codex sessions. Each session has a `codex_id` (proxy-assigned, exposed to Claude) which maps internally to a Codex `threadId`. Each `codex_id` maps 1:1 to an ATM identity. The proxy owns the identity namespace — no external collision detection needed. Claude opens one MCP connection and can run N concurrent Codex agents through it.
+> **Architecture Decision**: One proxy instance manages one Codex child process and 0..N concurrent agent sessions. Each session has an `agent_id` (proxy-assigned, exposed to Claude) which maps internally to a Codex `threadId`. Each `agent_id` maps 1:1 to an ATM identity while active. The proxy owns the identity namespace — no external collision detection needed.
 >
-> **Naming Convention**: `codex_id` is the MCP tool parameter Claude uses to reference sessions. Internally, the proxy maps `codex_id` → Codex `threadId`. This avoids collision with Claude Code's `agentId` (Task tool) namespace.
+> **Naming Convention**: `agent_id` is the MCP tool parameter Claude uses to reference sessions. Internally, the proxy maps `agent_id` -> Codex `threadId`. This avoids collision with Claude Code's `agentId` (Task tool) namespace.
+
+### Lifecycle Overview
+
+1. Claude starts `atm-agent-mcp` and calls `codex` (new session) or `codex-reply` (existing session).
+2. Proxy lazily starts the Codex child process on first request.
+3. Proxy assigns or resolves `agent_id`, binds identity, refreshes runtime context, and forwards the turn.
+4. Session state transitions through `busy` -> `idle` until `agent_close` or shutdown.
+5. ATM messages addressed to bound identities are delivered by deterministic identity routing.
+6. Registry/audit/summaries persist under team-scoped paths for resume and review.
 
 ---
 
@@ -31,7 +40,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 | Actor | Description |
 |-------|-------------|
 | **Claude** | MCP client (orchestrator). Sends `codex`/`codex-reply` tool calls. |
-| **codex-mcp** | MCP proxy server. Intercepts, augments, and forwards requests. |
+| **atm-agent-mcp** | MCP proxy server. Intercepts, augments, and forwards requests. |
 | **codex mcp-server** | Downstream Codex MCP server (child process). |
 | **Codex subagents** | Native subagents spawned by Codex via `spawn_agent`. |
 | **ATM team members** | Other agents (Claude teammates, humans, CI) communicating via ATM. |
@@ -44,26 +53,26 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 - **FR-1.1**: Proxy MUST forward all standard MCP requests/responses between Claude and `codex mcp-server` without modification, except for intercepted tool calls listed below.
 - **FR-1.2**: Proxy MUST correctly handle JSON-RPC framing (content-length headers, partial reads, interleaved messages).
-- **FR-1.3**: Proxy MUST handle `codex mcp-server` process lifecycle (spawn on startup, terminate on shutdown, detect crashes).
+- **FR-1.3**: Proxy MUST handle `codex mcp-server` process lifecycle (lazy spawn on first Codex request, terminate on shutdown, detect crashes).
 
 ### FR-2: Per-Thread Identity and Context Injection
 
-> **Design Decision**: Identity is per-session, not per-proxy. Each `codex` call specifies (or defaults) an identity. The proxy maintains a 1:1 mapping of codex_id→identity and enforces uniqueness.
+> **Design Decision**: Identity is per-session, not per-proxy. Each `codex` call specifies (or defaults) an identity. The proxy maintains a 1:1 mapping of agent_id→identity and enforces uniqueness.
 
-- **FR-2.1**: On every `codex` tool call, proxy MUST inject `developer-instructions` containing session context (identity, team, repo_root, repo_name, branch, cwd). Identity is determined from the caller's `codex` parameters (see FR-2.5).
+- **FR-2.1**: On `codex` and `codex-reply` calls, proxy MUST inject `developer-instructions` containing session context (identity, team, repo_root, repo_name, branch, cwd). Identity is determined from session binding rules (see FR-2.5 / FR-2.8).
 - **FR-2.2**: If caller already provides `developer-instructions`, proxy MUST append (not replace) its context.
 - **FR-2.3**: If caller provides `base-instructions`, proxy MUST respect it and only inject via `developer-instructions`.
-- **FR-2.4**: Proxy MUST set `cwd` to `repo_root` (or caller-supplied `cwd` if provided).
-- **FR-2.5**: Identity for a new session is determined by: explicit `identity` parameter in the `codex` call → proxy default from config (`[plugins.codex-mcp].default_identity`) → "codex". The proxy MUST reject a `codex` call that requests an identity already bound to an active session (return error with the conflicting `codex_id`).
-- **FR-2.6**: Session context (branch, repo_root) MUST be refreshed on each `codex` call (not captured once at startup). Context injected into `developer-instructions` MUST reflect current state, or be explicitly labeled as "launch-time" values if refresh is impractical.
+- **FR-2.4**: Proxy MUST set `cwd` to caller-supplied `cwd` when present, otherwise to `repo_root` if available. If not in a git repo, `repo_root` and `repo_name` MUST be `null` (not derived from `cwd`).
+- **FR-2.5**: Identity for a new session is determined by: explicit `identity` parameter in the `codex` call → proxy default from config (`[plugins.atm-agent-mcp].default_identity`) → "codex". The proxy MUST reject a `codex` call that requests an identity already bound to an active session (return error with the conflicting `agent_id`).
+- **FR-2.6**: Runtime context (branch, repo_root, repo_name, cwd) MUST be refreshed on each turn (`codex` and `codex-reply`). If launch-time values are also included, they MUST be explicitly labeled as launch-time snapshots.
 - **FR-2.7**: Per-thread `cwd` MUST be persisted in the registry so that `codex-reply` calls can restore the correct working directory for each thread.
-- **FR-2.8**: On `codex-reply`, proxy MUST look up the `codex_id` in the registry to resolve the bound identity. ATM tools called within that session use that identity automatically.
+- **FR-2.8**: On `codex-reply`, proxy MUST look up the `agent_id` in the registry to resolve the bound identity. ATM tools called within that session use that identity automatically.
 
 ### FR-3: Identity Namespace Management
 
 > **Design Decision**: The proxy owns the identity namespace for all threads it manages. Since there is one proxy instance per MCP connection, identity uniqueness is guaranteed in-process — no PID files, liveness checks, or collision suffixes needed.
 
-- **FR-3.1**: Proxy MUST maintain an in-memory map of identity→codex_id. A `codex` call requesting an identity already bound to an active session MUST be rejected with an error indicating the conflict.
+- **FR-3.1**: Proxy MUST maintain an in-memory map of identity→agent_id. A `codex` call requesting an identity already bound to an active session MUST be rejected with an error indicating the conflict.
 - **FR-3.2**: On startup, proxy MUST load the persisted registry and mark all previously-active threads as "stale" (since the previous proxy process is gone). Stale threads may be resumed via `--resume` or their identities reused by new threads.
 - **FR-3.3**: Proxy MUST support a `max_concurrent_threads` config (default: 10) to prevent unbounded resource consumption.
 - **FR-3.4**: When a thread completes or is explicitly closed, its identity MUST be released and available for reuse by a new `codex` call.
@@ -79,18 +88,18 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ### FR-5: Thread Registry and Persistence
 
-- **FR-5.1**: Proxy MUST track all active threadIds in an in-memory registry, persisted to disk on every thread creation/update.
-- **FR-5.2**: Registry entries MUST include: codex_id, thread_id (Codex native), identity, team, repo_root, repo_name, branch, cwd, started_at, last_active, status, tag.
-- **FR-5.3**: Registry MUST use a single file (`registry.json`) since the proxy is the sole writer. Atomic writes (via `atm-core`) prevent corruption on crash, but no file locking or CAS is needed.
-- **FR-5.4**: On `codex`/`codex-reply` response, proxy MUST extract the Codex `threadId`, assign a `codex_id`, and register the mapping.
+- **FR-5.1**: Proxy MUST track all active sessions in an in-memory registry, persisted to disk on every session creation/update.
+- **FR-5.2**: Registry entries MUST include: agent_id, thread_id (Codex native), identity, team, repo_root, repo_name, branch, cwd, started_at, last_active, status, tag.
+- **FR-5.3**: Registry MUST use a single file at `~/.config/atm/agent-sessions/<team>/registry.json` since the proxy is the sole writer for that team namespace. Atomic writes (via `atm-core`) prevent corruption on crash, but no file locking or CAS is needed.
+- **FR-5.4**: On `codex`/`codex-reply` response, proxy MUST extract the Codex `threadId`, assign an `agent_id`, and register the mapping.
 - **FR-5.5**: Registry MUST be persisted atomically on every state change (thread create, update, close) to survive proxy crashes.
 
 ### FR-6: Session Resume
 
-- **FR-6.1**: `codex-mcp serve --resume` MUST resume the most recent session for this identity by prepending the saved summary to `developer-instructions` on the first turn.
-- **FR-6.2**: `codex-mcp serve --resume <thread-id>` MUST resume a specific thread.
+- **FR-6.1**: `atm-agent-mcp serve --resume` MUST resume the most recent session for this identity by prepending the saved summary to `developer-instructions` on the first turn.
+- **FR-6.2**: `atm-agent-mcp serve --resume <agent-id>` MUST resume a specific session.
 - **FR-6.3**: If no summary exists for the resumed thread (crash/SIGKILL), proxy MUST resume without summary context and log a warning.
-- **FR-6.4**: Summary files written to `~/.config/atm/codex-sessions/<identity>/<thread-id>/summary.md`.
+- **FR-6.4**: Summary files written to `~/.config/atm/agent-sessions/<team>/<identity>/<backend-id>/summary.md`.
 
 ### FR-7: Graceful Shutdown
 
@@ -129,18 +138,18 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 **Pull model (supplementary):**
 
 - **FR-8.7**: Proxy MUST still expose `atm_read` and `atm_pending_count` as MCP tools for Claude to explicitly check/read mail when needed (e.g., before deciding whether to start a new thread).
-- **FR-8.8**: Auto-injection (FR-8.1/8.2) MUST be configurable and can be disabled per-thread or globally via `[plugins.codex-mcp].auto_mail = false`.
+- **FR-8.8**: Auto-injection (FR-8.1/8.2) MUST be configurable and can be disabled per-thread or globally via `[plugins.atm-agent-mcp].auto_mail = false`.
 
 ### FR-9: Audit Log
 
 - **FR-9.1**: Proxy MUST log all ATM tool calls (send, read, broadcast) with timestamp, identity, recipient, and message summary.
-- **FR-9.2**: Proxy MUST log all `codex`/`codex-reply` forwards with timestamp, codex_id, and prompt summary (first 200 chars).
-- **FR-9.3**: Audit log written to `~/.config/atm/codex-sessions/audit.jsonl` (single proxy-wide log). Each entry includes `codex_id` and `identity` fields for per-session filtering. Per-identity views are derived, not stored separately.
+- **FR-9.2**: Proxy MUST log all `codex`/`codex-reply` forwards with timestamp, agent_id, and prompt summary (first 200 chars).
+- **FR-9.3**: Audit log written to `~/.config/atm/agent-sessions/<team>/audit.jsonl` (single proxy-wide log per team). Each entry includes `agent_id` and `identity` fields for per-session filtering. Per-identity views are derived, not stored separately.
 
 ### FR-10: Proxy Management MCP Tools
 
-- **FR-10.1**: Proxy MUST expose `codex_threads` tool — returns list of all active/recent threads with their bound identity, status, last_active, tag.
-- **FR-10.2**: Proxy MUST expose `codex_status` tool — returns proxy health (child process alive, team, uptime, active thread count, identity→thread mapping, aggregate pending mail count).
+- **FR-10.1**: Proxy MUST expose `agent_sessions` tool — returns active and resumable sessions with fields: `agent_id`, `backend`, `backend_id` (Codex threadId), `team`, `identity`, `agent_name` (if prompt file used), `agent_source` (prompt file path if applicable), `status`, `last_active_at`, and `resumable`.
+- **FR-10.2**: Proxy MUST expose `agent_status` tool — returns proxy health (child process alive, team, uptime, active thread count, identity→thread mapping, aggregate pending mail count).
 
 ### FR-11: Codex Process Health
 
@@ -150,29 +159,32 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ### FR-12: Configuration
 
-- **FR-12.1**: Plugin config in `.atm.toml` under `[plugins.codex-mcp]` — codex_bin, identity, model, reasoning_effort, sandbox, approval_policy, prompt files.
-- **FR-12.2**: Role presets in `[plugins.codex-mcp.roles.<name>]` — model, sandbox, approval_policy overrides.
+- **FR-12.1**: Plugin config in `.atm.toml` under `[plugins.atm-agent-mcp]` — codex_bin, identity, model, reasoning_effort, sandbox, approval_policy, prompt files.
+- **FR-12.2**: Role presets in `[plugins.atm-agent-mcp.roles.<name>]` — model, sandbox, approval_policy overrides.
 - **FR-12.3**: Config resolution: CLI flags → env vars → repo-local `.atm.toml` → global `~/.config/atm/config.toml` → defaults.
+- **FR-12.4**: If model is not explicitly set by CLI/env/config, proxy MUST forward no model override so Codex uses its current default (latest upstream model).
+- **FR-12.5**: Proxy SHOULD support `fast_model` config for quick profile selection (for example via `--fast`) without changing explicit `model` pins.
 
 ### FR-13: CLI Interface
 
-- **FR-13.1**: `codex-mcp serve` — start MCP server (stdio mode).
-- **FR-13.2**: `codex-mcp serve --identity <name> --role <preset>` — with overrides.
-- **FR-13.3**: `codex-mcp serve --resume [<codex-id>]` — resume previous session.
-- **FR-13.4**: `codex-mcp config` — show resolved configuration.
-- **FR-13.5**: `codex-mcp threads [--repo <name>] [--identity <name>] [--prune]` — list/manage sessions.
-- **FR-13.6**: `codex-mcp summary <codex-id>` — display saved summary.
+- **FR-13.1**: `atm-agent-mcp serve` — start MCP server (stdio mode).
+- **FR-13.2**: `atm-agent-mcp serve --identity <name> --role <preset>` — with overrides.
+- **FR-13.3**: `atm-agent-mcp serve --resume [<agent-id>]` — resume previous session.
+- **FR-13.4**: `atm-agent-mcp config` — show resolved configuration.
+- **FR-13.5**: `atm-agent-mcp sessions [--repo <name>] [--identity <name>] [--prune]` — list/manage sessions.
+- **FR-13.6**: `atm-agent-mcp summary <agent-id>` — display saved summary.
+- **FR-13.7**: High-level flags SHOULD be supported for common profiles: `--fast`, `--subagents`, and `--readonly`/`--explore`.
 
 ### FR-14: Request Timeouts
 
 - **FR-14.1**: Proxy MUST support a configurable timeout per `codex`/`codex-reply` forward (default: 300s).
 - **FR-14.2**: On timeout, proxy MUST cancel the downstream request if possible and return a timeout error to Claude with partial result if available.
-- **FR-14.3**: Timeout is configurable via `[plugins.codex-mcp].request_timeout_secs` and CLI `--timeout`.
+- **FR-14.3**: Timeout is configurable via `[plugins.atm-agent-mcp].request_timeout_secs` and CLI `--timeout`.
 
 ### FR-15: Tool Naming
 
 - **FR-15.1**: ATM tools SHOULD use namespaced names (`atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count`) to avoid collision with future upstream Codex tools.
-- **FR-15.2**: Proxy management tools SHOULD use namespaced names (`codex_threads`, `codex_status`, `codex_close`).
+- **FR-15.2**: Proxy management tools SHOULD use namespaced names (`agent_sessions`, `agent_status`, `agent_close`).
 
 ### FR-16: Session Initialization Modes
 
@@ -180,24 +192,24 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 - **FR-16.1**: **Agent prompt file** — caller provides a file path (e.g., `.claude/agents/rust-dev.md`). Proxy reads the file and injects its contents as the agent's `prompt` (or `base-instructions`). This mirrors Claude Code's agent frontmatter pattern.
 - **FR-16.2**: **Inline prompt** — caller provides arbitrary text as the `prompt` parameter. Proxy forwards it directly. Used when Claude constructs a task-specific prompt at runtime.
-- **FR-16.3**: **Session resume** — caller provides a `codex_id` (optionally with a continuation `prompt`). This maps to a `codex-reply` under the hood. The proxy restores the session's bound identity, cwd, and context from the registry. If a saved summary exists, it is prepended to the continuation prompt.
-- **FR-16.4**: The `codex` tool schema MUST include: `identity` (optional, string), `prompt` (required unless `codex_id` provided), `agent_file` (optional, file path — mutually exclusive with `prompt`), `codex_id` (optional — if present, treat as resume), `role` (optional — selects a role preset), `cwd` (optional).
+- **FR-16.3**: **Session resume** — caller provides an `agent_id` (optionally with a continuation `prompt`). This maps to a `codex-reply` under the hood. The proxy restores the session's bound identity, cwd, and context from the registry. If a saved summary exists, it is prepended to the continuation prompt.
+- **FR-16.4**: The `codex` tool schema MUST include: `identity` (optional, string), `prompt` (required unless `agent_id` provided), `agent_file` (optional, file path — mutually exclusive with `prompt`), `agent_id` (optional — if present, treat as resume), `role` (optional — selects a role preset), `cwd` (optional).
 - **FR-16.5**: If both `agent_file` and `prompt` are provided, proxy MUST return an error (mutually exclusive).
 - **FR-16.6**: If `agent_file` is provided, proxy MUST verify the file exists and is readable before forwarding. Return a clear error if not found.
 
 ### FR-17: Thread Lifecycle and State Machine
 
-> **Design Decision**: Each thread has a well-defined lifecycle with explicit states. The proxy enforces state transitions and exposes a `codex_close` tool for explicit shutdown.
+> **Design Decision**: Each thread has a well-defined lifecycle with explicit states. The proxy enforces state transitions and exposes a `agent_close` tool for explicit shutdown.
 
 **States:**
 
 ```
 [new] ──codex──► busy ──turn ends──► idle ──codex-reply/mail──► busy ──► idle ──► ...
                                       │                                    │
-                                      ├── codex_close ──► closed           ├── codex_close ──► closed
+                                      ├── agent_close ──► closed           ├── agent_close ──► closed
                                       │                     │              │
-                                      │                     ├── resume (codex w/ thread_id) ──► busy
-                                      │                     └── new agent same identity (codex w/o thread_id) ──► busy (new threadId)
+                                      │                     ├── resume (codex w/ agent_id) ──► busy
+                                      │                     └── new agent same identity (codex w/o agent_id) ──► busy (new threadId)
                                       │
                                       └── mail arrives ──► busy (auto-injection)
 ```
@@ -207,22 +219,22 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
   - `→ busy`: First `codex` call forwarded to child (thread created)
   - `busy → idle`: Child returns response (turn complete). Proxy checks for mail (FR-8.1).
   - `idle → busy`: New `codex-reply` from Claude, mail auto-injection, or explicit resume
-  - `idle → closed`: Explicit `codex_close` call, or proxy shutdown
-  - `busy → closed`: Explicit `codex_close` call (cancels in-progress turn with timeout)
-- **FR-17.3**: Proxy MUST expose `codex_close` as an MCP tool. Parameters: `codex_id` or `identity` (one required). Behavior: if thread is `busy`, request graceful shutdown (summary prompt with 10s timeout), then close. If thread is `idle`, close immediately. Releases identity for reuse. Equivalent to ending a teammate session.
-- **FR-17.4**: `codex_close` on a `busy` thread SHOULD attempt to get a summary before closing (same as graceful shutdown in FR-7). If timeout, close without summary and persist registry with status "interrupted".
-- **FR-17.5**: Thread state MUST be tracked in the registry and reported by `codex_threads` and `codex_status` tools.
+  - `idle → closed`: Explicit `agent_close` call, or proxy shutdown
+  - `busy → closed`: Explicit `agent_close` call (cancels in-progress turn with timeout)
+- **FR-17.3**: Proxy MUST expose `agent_close` as an MCP tool. Parameters: `agent_id` or `identity` (one required). Behavior: if thread is `busy`, request graceful shutdown (summary prompt with 10s timeout), then close. If thread is `idle`, close immediately. Releases identity for reuse. Equivalent to ending a teammate session.
+- **FR-17.4**: `agent_close` on a `busy` thread SHOULD attempt to get a summary before closing (same as graceful shutdown in FR-7). If timeout, close without summary and persist registry with status "interrupted".
+- **FR-17.5**: Thread state MUST be tracked in the registry and reported by `agent_sessions` and `agent_status` tools.
 - **FR-17.6**: Auto mail injection (FR-8.1/8.2) MUST only trigger when thread is `idle`. If thread is `busy`, mail waits until the turn completes.
 
 **Resume and replacement after close:**
 
-- **FR-17.7**: A `closed` session MAY be resumed by calling `codex` with `codex_id`. This restores the session's identity binding, cwd, and context from the registry (same as FR-16.3). The session transitions back to `busy`.
-- **FR-17.8**: After a thread is `closed`, Claude MAY start a **new** thread with the same identity by calling `codex` without `thread_id`. This creates a fresh threadId with clean context, binding the same identity. The old thread remains in the registry as `closed` for history/audit.
-- **FR-17.9**: `codex_close` MUST be idempotent — closing an already-closed thread is a no-op (returns success).
+- **FR-17.7**: A `closed` session MAY be resumed by calling `codex` with `agent_id`. This restores the session's identity binding, cwd, and context from the registry (same as FR-16.3). The session transitions back to `busy`.
+- **FR-17.8**: After a thread is `closed`, Claude MAY start a **new** thread with the same identity by calling `codex` without `agent_id`. This creates a fresh threadId with clean context, binding the same identity. The old thread remains in the registry as `closed` for history/audit.
+- **FR-17.9**: `agent_close` MUST be idempotent — closing an already-closed thread is a no-op (returns success).
 
 **Close/cancel/queue precedence:**
 
-- **FR-17.10**: `codex_close` takes precedence over all other operations. When close is requested:
+- **FR-17.10**: `agent_close` takes precedence over all other operations. When close is requested:
   1. If thread is `idle`: discard any queued auto-mail, close immediately.
   2. If thread is `busy`: cancel the in-flight turn (with summary timeout per FR-17.4), discard queued requests, then close.
   3. Any queued Claude requests for the closed thread MUST return an error indicating the thread was closed.
@@ -298,17 +310,17 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 | A.1 | **Crate scaffold + config** — workspace integration, CLI skeleton (`serve`, `config`, `threads`), config resolution from `.atm.toml` via `atm-core`, default identity + role preset resolution | atm-core config |
 | A.2 | **MCP stdio proxy** — spawn `codex mcp-server` child, JSON-RPC pass-through (content-length framing, partial reads), `tools/list` interception to add synthetic tools, child health monitoring | A.1 |
 | A.3 | **Context injection + ATM tools** — per-thread identity binding on `codex` calls, inject `developer-instructions` (with per-call context refresh), implement `atm_send`/`atm_read`/`atm_broadcast`/`atm_pending_count` via atm-core with thread-bound identity routing, mail envelope sanitization, at-least-once read semantics, auto mail injection (post-turn + idle polling) | A.2 |
-| A.4 | **Session registry** — persist codex_id→identity mapping on `codex`/`codex-reply` response (codex_id maps to Codex threadId internally), single registry file with atomic writes, `codex_threads`/`codex_status`/`codex_close` MCP tools, per-session cwd tracking, `max_concurrent_threads` enforcement, lifecycle state machine | A.3 |
+| A.4 | **Session registry** — persist agent_id→identity mapping on `codex`/`codex-reply` response (agent_id maps to Codex threadId internally), single registry file with atomic writes, `agent_sessions`/`agent_status`/`agent_close` MCP tools, per-session cwd tracking, `max_concurrent_threads` enforcement, lifecycle state machine | A.3 |
 | A.5 | **Shutdown + resume** — graceful shutdown with bounded summary requests (10s timeout), emergency snapshot on timeout, `--resume` flag with summary prepend, fallback for missing summaries, audit log (append-only JSONL) | A.4 |
 
 **MVP exit criteria:**
-- [ ] `codex-mcp serve` starts proxy, forwards all MCP traffic correctly
+- [ ] `atm-agent-mcp serve` starts proxy, forwards all MCP traffic correctly
 - [ ] Per-thread identity binding with uniqueness enforcement
 - [ ] `developer-instructions` injected with session context on every `codex` call
 - [ ] `atm_send`/`atm_read`/`atm_broadcast`/`atm_pending_count` work as MCP tools
 - [ ] Thread registry persists across restarts with atomic writes
 - [ ] Multiple concurrent threads with different identities work correctly
-- [ ] `codex_threads`/`codex_status` return accurate session info
+- [ ] `agent_sessions`/`agent_status` return accurate session info
 - [ ] Graceful shutdown writes summary, `--resume` restores context
 - [ ] Audit log captures all tool calls with correlation IDs
 - [ ] Child process crash detected and reported
@@ -320,7 +332,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 | Sprint | Deliverable | Dependencies |
 |--------|-------------|--------------|
-| B.1 | **Role presets** — `[plugins.codex-mcp.roles.*]` config, per-thread role selection via `codex` call parameter, role-specific model/sandbox/policy overrides, per-thread role tracking in registry | Phase A |
+| B.1 | **Role presets** — `[plugins.atm-agent-mcp.roles.*]` config, per-thread role selection via `codex` call parameter, role-specific model/sandbox/policy overrides, per-thread role tracking in registry | Phase A |
 | B.2 | **Advanced mail orchestration** — MCP notification on new mail arrival (if client supports), mail priority/urgency hints, per-thread auto-mail enable/disable, mail delivery metrics and diagnostics | B.1 |
 
 ### Phase C: Production Hardening (2 sprints)
@@ -328,23 +340,23 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 | Sprint | Deliverable | Dependencies |
 |--------|-------------|--------------|
 | C.1 | **Conformance testing** — MCP protocol conformance test suite (initialize, capabilities, notifications, cancellation, streaming), proxy latency benchmarks, registry stress tests | Phase B |
-| C.2 | **Cross-platform + packaging** — Windows support (if feasible), `codex-mcp` added to release workflow, Homebrew formula update, documentation | C.1 |
+| C.2 | **Cross-platform + packaging** — Windows support (if feasible), `atm-agent-mcp` added to release workflow, Homebrew formula update, documentation | C.1 |
 
 ---
 
 ## 9. Acceptance Test Checklist
 
 ### Proxy Core
-- [ ] Start `codex-mcp serve`, verify `codex mcp-server` child spawns
-- [ ] Send `codex` tool call through proxy, verify response includes `codex_id`
-- [ ] Send `codex-reply` with `codex_id`, verify conversation continues
+- [ ] Start `atm-agent-mcp serve`, verify `codex mcp-server` child spawns
+- [ ] Send `codex` tool call through proxy, verify response includes `agent_id`
+- [ ] Send `codex-reply` with `agent_id`, verify conversation continues
 - [ ] Kill child process, verify next request returns error with exit code
 - [ ] Send request exceeding timeout, verify timeout error returned
 
 ### Identity (Per-Thread)
 - [ ] Start thread with explicit identity "arch-ctm", verify identity used in injected context and ATM tools
 - [ ] Start second thread with identity "dev-1", verify both threads active with separate identities
-- [ ] Attempt to start third thread with identity "arch-ctm" (duplicate), verify error returned with conflicting `codex_id`
+- [ ] Attempt to start third thread with identity "arch-ctm" (duplicate), verify error returned with conflicting `agent_id`
 - [ ] Close first thread, start new thread with "arch-ctm", verify identity reuse succeeds
 - [ ] Start thread without explicit identity, verify proxy default identity used
 - [ ] Verify `codex-reply` on thread automatically resolves correct bound identity
@@ -372,19 +384,19 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 - [ ] Restart proxy, verify registry loaded, stale threads marked, and threads listed
 - [ ] Start 3 threads with different identities, verify registry contains all 3 with correct bindings
 - [ ] Exceed `max_concurrent_threads`, verify error returned
-- [ ] Call `codex_threads`, verify accurate listing with per-thread identity
-- [ ] Call `codex_status`, verify health info with identity→thread mapping
+- [ ] Call `agent_sessions`, verify accurate listing with per-thread identity
+- [ ] Call `agent_status`, verify health info with identity→thread mapping
 
 ### Thread Lifecycle
 - [ ] Start thread → verify state is `busy` during turn, transitions to `idle` when response received
 - [ ] Send `codex-reply` to idle thread → verify transitions to `busy`, back to `idle` on response
-- [ ] Call `codex_close` on idle thread → verify immediate close, identity released, state `closed`
-- [ ] Call `codex_close` on busy thread → verify summary attempted (10s timeout), then closed
-- [ ] Call `codex_close` on already-closed thread → verify idempotent success
-- [ ] Verify `codex_threads` reports correct state for each thread
+- [ ] Call `agent_close` on idle thread → verify immediate close, identity released, state `closed`
+- [ ] Call `agent_close` on busy thread → verify summary attempted (10s timeout), then closed
+- [ ] Call `agent_close` on already-closed thread → verify idempotent success
+- [ ] Verify `agent_sessions` reports correct state for each thread
 - [ ] Mail arrives while thread busy → verify mail waits, auto-injected only after turn completes (idle)
-- [ ] Close session, then resume with `codex` + `codex_id` → verify context restored, identity rebound, busy→idle
-- [ ] Close session, then start NEW session with same identity (no `codex_id`) → verify new codex_id, clean context, identity rebound
+- [ ] Close session, then resume with `codex` + `agent_id` → verify context restored, identity rebound, busy→idle
+- [ ] Close session, then start NEW session with same identity (no `agent_id`) → verify new agent_id, clean context, identity rebound
 
 ### Shutdown + Resume
 - [ ] SIGTERM proxy, verify summary requested (within 10s), registry persisted
@@ -403,9 +415,9 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 - [ ] Start thread with `agent_file` pointing to nonexistent file, verify clear error returned
 - [ ] Start thread with inline `prompt`, verify text forwarded to Codex
 - [ ] Start thread with both `agent_file` and `prompt`, verify mutual-exclusion error
-- [ ] Resume session with `codex_id` + continuation prompt, verify identity/cwd restored from registry
-- [ ] Resume session with `codex_id` that has saved summary, verify summary prepended
-- [ ] Resume session with `codex_id` that has no summary (crash), verify graceful fallback
+- [ ] Resume session with `agent_id` + continuation prompt, verify identity/cwd restored from registry
+- [ ] Resume session with `agent_id` that has saved summary, verify summary prepended
+- [ ] Resume session with `agent_id` that has no summary (crash), verify graceful fallback
 
 ---
 
@@ -417,6 +429,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 | 2026-02-18 | team-lead | Single-proxy-multi-session architecture: per-thread identity, no collision handling, simplified registry |
 | 2026-02-18 | team-lead | FR-16: Session initialization modes (agent file, inline prompt, thread resume) |
 | 2026-02-18 | team-lead | FR-8 rewrite: auto mail-as-turns (proxy→Codex), deterministic 1:1 identity routing, idle delivery |
-| 2026-02-18 | team-lead | FR-17: Thread lifecycle state machine (created→busy→idle→closed), codex_close tool |
+| 2026-02-18 | team-lead | FR-17: Thread lifecycle state machine (created→busy→idle→closed), agent_close tool |
 | 2026-02-18 | team-lead + arch-ctm | Address 3 blockers: turn serialization (FR-8.9-8.11), delivery ack (FR-8.12-8.13), close/cancel precedence (FR-17.10-17.11). Fix FR-4.5, FR-9.3 per nits. |
-| 2026-02-18 | team-lead | Rename MCP tool parameter from thread_id to codex_id to avoid collision with Claude Code agentId namespace |
+| 2026-02-18 | team-lead | Rename MCP tool parameter from thread_id to agent_id to avoid collision with Claude Code agentId namespace |
+| 2026-02-18 | arch-ctm | Rename design to atm-agent-mcp, clarify one-to-many lifecycle, adopt team-scoped storage paths, set model-default policy to upstream latest, and align MCP session APIs on `agent_id`/`agent_sessions`. |

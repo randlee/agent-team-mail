@@ -1,4 +1,4 @@
-# sc-codex-mcp Design
+# sc-atm-agent-mcp Design
 
 Codex running as a Claude subagent via MCP, with access to native multi-agent tools and the `atm` CLI for cross-system communication with Claude agent teams.
 
@@ -8,7 +8,7 @@ Codex running as a Claude subagent via MCP, with access to native multi-agent to
 
 Combine the base Codex prompt with the multi-agent addendum:
 
-**Base**: `prompts/gpt-5.2-codex_prompt.md` (or `gpt_5_2_prompt.md` for GPT-5.2 without Codex branding)
+**Base**: latest bundled Codex base prompt
 **Addendum**: `prompts/templates/collab/experimental_prompt.md`
 
 When using the MCP `codex` tool, pass via `developer-instructions` to augment without replacing the base prompt:
@@ -32,7 +32,7 @@ Or use `base-instructions` to supply the full combined prompt:
   "name": "codex",
   "arguments": {
     "prompt": "...",
-    "base-instructions": "<gpt-5.2-codex_prompt.md>\n\n<experimental_prompt.md>"
+    "base-instructions": "<codex_base_prompt>\n\n<experimental_prompt.md>"
   }
 }
 ```
@@ -107,10 +107,10 @@ Or via environment variables: `ATM_TEAM`, `ATM_IDENTITY`.
 atm send orchestrator@my-team "Task complete: refactored auth module. PR ready for review."
 ```
 
-**Request clarification from a human:**
+**Request clarification from a teammate:**
 ```bash
-atm send human@my-team "Ambiguous requirement in issue #42 — should the token TTL be per-user or global?"
-atm read human   # poll for reply
+atm send team-lead@my-team "Ambiguous requirement in issue #42 — should the token TTL be per-user or global?"
+atm read team-lead   # poll for reply
 ```
 
 **Notify a CI agent:**
@@ -131,8 +131,9 @@ atm members my-team
 ```
 Claude (orchestrator)
   │
-  ├─► codex MCP tool (via codex mcp-server)
-  │     └─► Codex agent (GPT-5.2 + multi-agent prompt)
+  ├─► atm-agent-mcp (MCP proxy)
+  │     └─► codex mcp-server (single child process)
+  │           └─► 0..N sessions (`agent_id` -> `threadId`)
   │           ├─► spawn_agent(worker) ──► worker subagent
   │           ├─► spawn_agent(explorer) ► explorer subagent
   │           └─► atm send/read ─────────► Claude agent teams
@@ -153,7 +154,7 @@ claude mcp add codex -s user \
 
 Auth via `codex login` — no `OPENAI_API_KEY` env var needed if already authenticated.
 
-See `codex-mcp.md` for full MCP tool reference (`codex` + `codex-reply`).
+See `codex-mcp.md` for Codex MCP tool reference (`codex` + `codex-reply`).
 
 ---
 

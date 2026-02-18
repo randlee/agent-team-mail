@@ -1,8 +1,8 @@
-# `codex-mcp` Crate Design
+# `atm-agent-mcp` Crate Design
 
-A new crate in the `agent-team-mail` workspace: `crates/codex-mcp`.
+A new crate in the `agent-team-mail` workspace: `crates/atm-agent-mcp`.
 
-A thin MCP proxy that wraps `codex mcp-server`, automatically injecting identity, team, repo context and system prompts from `.atm.toml`, managing named agent sessions, and delivering incoming `atm` mail as new Codex turns.
+A thin MCP proxy that wraps `codex mcp-server`, injects ATM identity/team/repo context, provides native ATM MCP tools, and manages 0..N Codex sessions through one proxy process.
 
 ---
 
@@ -14,74 +14,78 @@ agent-team-mail/
 │   ├── atm-core/       # existing — config, IO, schema
 │   ├── atm/            # existing — CLI
 │   ├── atm-daemon/     # existing — daemon
-│   └── codex-mcp/      # NEW — MCP proxy binary
+│   └── atm-agent-mcp/      # NEW — MCP proxy binary
 ```
 
-Binary name: `codex-mcp`
+Binary name: `atm-agent-mcp`
 
 Dependencies: `atm-core`, `tokio`, `serde_json`, `rmcp` (or raw stdio MCP), `signal-hook`
 
 ---
 
-## Session Identity Model
+## One-To-Many Session Model
 
-Each running `codex-mcp` instance is a **named agent** with a unique identity within a team. Multiple instances can run simultaneously against the same repo, each with a distinct name.
+`atm-agent-mcp` is a single proxy that manages one Codex child process and many logical agent sessions.
 
 ```
-Team: my-team
-├── codex-architect   (codex-mcp serve --identity codex-architect)
-├── codex-worker-1    (codex-mcp serve --identity codex-worker-1)
-└── codex-worker-2    (codex-mcp serve --identity codex-worker-2)
+Claude MCP client
+  -> atm-agent-mcp (single process)
+       -> codex mcp-server (single child process)
+       -> 0..N active sessions (agent_id -> codex threadId)
 ```
 
-Identity is resolved in priority order:
-1. `--identity` CLI flag
-2. `CODEX_MCP_IDENTITY` env var
-3. `identity` in `[plugins.codex-mcp]` in `.atm.toml`
-4. `identity` in `[core]` in `.atm.toml`
-5. Default: `"codex"`
+Each active session binds 1:1 to an ATM identity while active.
+The MCP-facing session key is `agent_id` (backend-agnostic). Internally, Codex uses `threadId`.
 
-If the resolved identity is already active in the team registry, `codex-mcp` appends a suffix (`codex-2`, `codex-3`) to avoid collision, and logs the resolved name.
+Lifecycle summary:
+1. Proxy starts and loads config/registry.
+2. First `codex` request lazily starts child process if needed.
+3. New sessions receive `agent_id` and identity binding.
+4. Sessions move through `busy`/`idle`/`closed`.
+5. Shutdown persists registry + summaries, then stops child process.
 
 ---
 
 ## Session Context
 
-On startup, the proxy collects and stores session context that is injected into every Codex turn and persisted with the thread registry:
+The proxy refreshes runtime context per turn and injects it into Codex requests. Session metadata is also persisted in the registry:
 
 | Field | Source | Description |
 |---|---|---|
 | `identity` | config resolution | Agent's name on the team |
 | `team` | `[core].default_team` | Team name |
-| `repo_root` | git rev-parse --show-toplevel | Absolute path to git root |
-| `repo_name` | git remote name or directory name | Human-readable repo identifier |
+| `repo_root` | git rev-parse --show-toplevel | Absolute path to git root, or `null` when outside git |
+| `repo_name` | git remote name or directory name | Human-readable repo identifier, or `null` when outside git |
 | `cwd` | process working directory | Launch directory (may differ from repo root) |
 | `branch` | git rev-parse --abbrev-ref HEAD | Current branch at launch time |
 
-If not in a git repo, `repo_root` and `repo_name` fall back to `cwd` and directory name respectively.
+`cwd` remains independent. It MUST NOT be reused as a fake repository identifier.
 
-This context is injected into `developer-instructions` on every `codex` call, and stored in the thread registry entry so it can be displayed in `codex-mcp threads` and used when resuming.
+This context is injected on `codex` and `codex-reply` turns and stored in registry entries for `atm-agent-mcp sessions` and resume flows.
 
 ---
 
 ## Configuration
 
-Codex-specific config lives in `.atm.toml` under `[plugins.codex-mcp]`:
+Agent-proxy config lives in `.atm.toml` under `[plugins.atm-agent-mcp]`:
 
 ```toml
 [core]
 default_team = "my-team"
 identity = "codex"              # default identity if --identity not passed
 
-[plugins.codex-mcp]
+[plugins.atm-agent-mcp]
 # Path to codex binary (default: resolved from PATH)
 codex_bin = "codex"
 
-# Agent identity — overrides [core].identity for codex-mcp sessions
+# Agent identity — overrides [core].identity for atm-agent-mcp sessions
 identity = "codex-architect"
 
-# Model override (default: codex CLI default)
-model = "o3"
+# Model override (optional). If omitted, no model is passed and Codex uses its latest default.
+model = ""
+
+# Optional fast profile model (for --fast)
+fast_model = "gpt-5.3-codex-spark"
 
 # Reasoning effort (default: none)
 reasoning_effort = "high"
@@ -92,7 +96,7 @@ sandbox = "workspace-write"
 # Approval policy (default: "on-failure")
 approval_policy = "on-failure"
 
-# Prompt files to inject (default: bundled gpt-5.2-codex + experimental)
+# Prompt files to inject (defaults are bundled prompts)
 base_prompt_file = ""          # empty = use bundled
 extra_instructions_file = ""   # empty = use bundled experimental_prompt.md
 
@@ -106,22 +110,22 @@ idle_timeout_ms = 300000
 persist_threads = true
 
 # Named role presets (see Roles section below)
-[plugins.codex-mcp.roles.architect]
+[plugins.atm-agent-mcp.roles.architect]
 model = "o3"
 reasoning_effort = "high"
 sandbox = "read-only"
 
-[plugins.codex-mcp.roles.worker]
-model = "gpt-5.2-codex"
+[plugins.atm-agent-mcp.roles.worker]
+model = "gpt-5.3-codex"
 sandbox = "workspace-write"
 approval_policy = "never"
 ```
 
 Config resolution follows the same priority chain as `atm`:
-1. CLI flags (`--identity`, `--role`, `--model`, `--sandbox`, `--approval-policy`)
+1. CLI flags (`--identity`, `--role`, `--model`, `--fast`, `--subagents`, `--readonly|--explore`, `--sandbox`, `--approval-policy`)
 2. Environment variables (`CODEX_MCP_IDENTITY`, `CODEX_MCP_MODEL`, `CODEX_MCP_SANDBOX`, etc.)
-3. `[plugins.codex-mcp]` in repo-local `.atm.toml`
-4. `[plugins.codex-mcp]` in `~/.config/atm/config.toml`
+3. `[plugins.atm-agent-mcp]` in repo-local `.atm.toml`
+4. `[plugins.atm-agent-mcp]` in `~/.config/atm/config.toml`
 5. Defaults
 
 ---
@@ -132,28 +136,28 @@ Config resolution follows the same priority chain as `atm`:
 claude (MCP client)
     │  stdio
     ▼
-codex-mcp (proxy)
+atm-agent-mcp (proxy)
     │
     ├── on startup:
     │     resolve_config()          ← atm-core: reads .atm.toml, env, defaults
-    │     resolve_identity()        ← identity + collision suffix if needed
-    │     collect_session_context() ← repo_root, repo_name, branch, cwd
-    │     load_prompts()            ← bundled gpt-5.2-codex + experimental
-    │     load_thread_registry()    ← restore persisted thread IDs from disk
-    │     register_with_team()      ← write agent entry to ~/.claude/teams/<team>/
-    │     spawn codex mcp-server    ← child process, stdio piped
+    │     detect_team_context()     ← team + launch cwd/repo facts
+    │     load_prompts()            ← bundled prompts + optional extras
+    │     load_session_registry()   ← restore persisted sessions from disk
+    │
+    ├── on first codex request:
+    │     spawn codex mcp-server    ← lazy child process start
     │
     ├── MCP request intercept:
     │     tools/list      → pass through + add atm_send/atm_read/atm_broadcast
-    │     codex           → inject developer-instructions, set cwd, then forward
-    │     codex-reply     → forward, track threadId→identity mapping
+    │     codex           → resolve/assign agent_id + identity, inject context, forward
+    │     codex-reply     → resolve agent_id->threadId, refresh context, forward
     │     atm_send        → handled locally via atm-core (no shell needed)
     │     atm_read        → handled locally via atm-core
     │     atm_broadcast   → handled locally via atm-core
     │     *               → pass through
     │
     ├── on codex/codex-reply response:
-    │     extract threadId          ← add to registry with identity + session context
+    │     extract threadId          ← update agent_id->threadId mapping + session metadata
     │     persist registry to disk
     │
     ├── idle detection:
@@ -176,14 +180,16 @@ codex-mcp (proxy)
 
 ## Thread Registry
 
-Active threads are tracked in memory and persisted to `~/.config/atm/codex-sessions/registry.json`:
+Active sessions are tracked in memory and persisted to `~/.config/atm/agent-sessions/<team>/registry.json`:
 
 ```json
 {
   "version": 1,
   "sessions": [
     {
-      "thread_id": "abc123",
+      "agent_id": "codex:thread_abc123",
+      "backend": "codex",
+      "backend_id": "abc123",
       "identity": "codex-architect",
       "team": "my-team",
       "repo_root": "/Users/rand/projects/myapp",
@@ -199,7 +205,8 @@ Active threads are tracked in memory and persisted to `~/.config/atm/codex-sessi
 }
 ```
 
-Multiple sessions from different `codex-mcp` instances (different identities) all write to the same registry file using `atm-core` atomic IO. Each instance only manages its own sessions at shutdown, but can read the full registry for display.
+One proxy instance is the only writer for its team-scoped registry file. Writes use `atm-core` atomic I/O.
+Audit logs are written alongside it at `~/.config/atm/agent-sessions/<team>/audit.jsonl`.
 
 **Shutdown behavior:**
 - Graceful (SIGTERM): request summary from each own thread, write summary files, deregister, exit
@@ -209,7 +216,7 @@ Multiple sessions from different `codex-mcp` instances (different identities) al
 
 ## Prompt Injection
 
-On every `codex` tool call, `codex-mcp` sets `cwd` to `repo_root` and injects into `developer-instructions`:
+On `codex` and `codex-reply`, `atm-agent-mcp` injects context into `developer-instructions`:
 
 ```
 <session-context>
@@ -219,21 +226,17 @@ Repo:      {repo_name} ({repo_root})
 Branch:    {branch}
 </session-context>
 
-<team-communication>
-You can communicate with your team using the atm MCP tools available in this session:
-  atm_send(to: "<agent>@{team}", message: "...")   # send to a team member
-  atm_read()                                        # read your inbox
-  atm_broadcast(message: "...")                     # send to all team members
-Use these instead of shell `atm` commands — they are faster and auditable.
-To discover teammates: atm_read() on startup, or check your team in context.
-</team-communication>
+<orchestrator-communication>
+ATM MCP tools (`atm_send`, `atm_read`, `atm_broadcast`) are available to the MCP client/orchestrator.
+They are auditable alternatives to shelling out to `atm`.
+</orchestrator-communication>
 
 <multi-agent>
 [contents of experimental_prompt.md]
 </multi-agent>
 ```
 
-The full `base-instructions` is the bundled `gpt-5.2-codex_prompt.md` + the above, unless the caller has already provided `base-instructions` (caller-supplied base is respected, only `developer-instructions` is injected).
+The full `base-instructions` uses bundled prompts unless the caller supplies `base-instructions`; proxy context is still appended via `developer-instructions`.
 
 ---
 
@@ -244,7 +247,7 @@ The proxy exposes `atm_send`, `atm_read`, and `atm_broadcast` as first-class MCP
 ### `atm_send`
 ```json
 {
-  "to": "human@my-team",
+  "to": "team-lead@atm-dev",
   "message": "PR is ready for review.",
   "summary": "PR ready notification"
 }
@@ -275,25 +278,25 @@ Benefits over shell `atm` commands: no approval policy friction, visible in MCP 
 When Codex becomes idle (a turn completes, no new call arrives within `mail_poll_interval_ms`):
 
 1. Read inbox for this identity via `atm-core`
-2. If unread messages exist, format a digest and inject as `codex-reply` on the active thread:
+2. If unread messages exist, format a digest and inject as `codex-reply` on the active session:
    ```
    [Incoming mail]
-   From: human@my-team — "Can you add rate limiting to the auth endpoint?"
+   From: team-lead@atm-dev — "Can you add rate limiting to the auth endpoint?"
    From: ci-agent@my-team — "Tests failing on feature/auth-refresh: timeout in test_token_expiry"
    ```
-3. Mark messages as read
-4. If no active thread — start a new `codex` session with the digest as the initial prompt
+3. Mark messages as read only after successful handoff to Codex
+4. If no active session is bound to the identity — keep mail unread for later delivery
 5. Resume polling after response completes
 
-**Mail routing with multiple threads:**
-- Mail addressed to this identity is delivered to the thread whose `tag` or `branch` matches content heuristics, or most-recently-active if ambiguous
-- Mail with explicit `[thread:<id>]` prefix in subject routes directly to that thread (convention for agent-to-agent)
+**Mail routing with multiple sessions:**
+- Routing is deterministic: identity -> active session mapping.
+- No heuristic routing by tag/branch.
 
 ---
 
 ## Session Summary and Resume
 
-On graceful shutdown, `codex-mcp` requests a compacted summary from each active thread:
+On graceful shutdown, `atm-agent-mcp` requests a compacted summary from each active session:
 
 ```
 Session ending. Write a concise summary of:
@@ -303,19 +306,19 @@ Session ending. Write a concise summary of:
 - Next steps if resumed
 ```
 
-Written to: `~/.config/atm/codex-sessions/<thread-id>/summary.md`
+Written to: `~/.config/atm/agent-sessions/<team>/<identity>/<backend-id>/summary.md`
 
 ### Resuming with Context
 
 ```bash
 # Resume most recent session for this identity
-codex-mcp serve --resume-compacted
+atm-agent-mcp serve --resume
 
 # Resume a specific thread by ID
-codex-mcp serve --resume-compacted <thread-id>
+atm-agent-mcp serve --resume <agent-id>
 
 # Resume by identity name (picks most recent session for that identity)
-codex-mcp serve --resume-compacted codex-architect
+atm-agent-mcp serve --resume codex-architect
 ```
 
 The summary is prepended to `developer-instructions` on the first turn of the new session:
@@ -326,7 +329,7 @@ The summary is prepended to `developer-instructions` on the first turn of the ne
 [End of previous session]
 ```
 
-Summary files are kept until `codex-mcp threads --prune` or overwritten at next shutdown.
+Summary files are kept until `atm-agent-mcp sessions --prune` or overwritten at next shutdown.
 
 ---
 
@@ -334,24 +337,26 @@ Summary files are kept until `codex-mcp threads --prune` or overwritten at next 
 
 ```bash
 # Start the MCP server
-codex-mcp serve
-codex-mcp serve --identity codex-worker-1
-codex-mcp serve --role worker
-codex-mcp serve --resume-compacted
+atm-agent-mcp serve
+atm-agent-mcp serve --identity codex-worker-1
+atm-agent-mcp serve --role worker
+atm-agent-mcp serve --resume
+atm-agent-mcp serve --fast
+atm-agent-mcp serve --readonly
 
 # Show resolved config and session context
-codex-mcp config
+atm-agent-mcp config
 
 # List all sessions in registry
-codex-mcp threads
-codex-mcp threads --repo myapp       # filter by repo
-codex-mcp threads --identity codex-architect
+atm-agent-mcp sessions
+atm-agent-mcp sessions --repo myapp       # filter by repo
+atm-agent-mcp sessions --identity codex-architect
 
 # Prune stale sessions and summaries
-codex-mcp threads --prune
+atm-agent-mcp sessions --prune
 
 # Show summary for a session
-codex-mcp summary <thread-id>
+atm-agent-mcp summary <agent-id>
 ```
 
 ### Claude MCP registration
@@ -359,7 +364,7 @@ codex-mcp summary <thread-id>
 ```bash
 claude mcp add codex -s user \
   -e PATH="/your/node/bin:/usr/local/bin:/usr/bin:/bin" \
-  -- codex-mcp serve
+  -- atm-agent-mcp serve
 ```
 
 Or with identity baked in (for named agent slots):
@@ -367,7 +372,7 @@ Or with identity baked in (for named agent slots):
 ```bash
 claude mcp add codex-architect -s user \
   -e PATH="..." \
-  -- codex-mcp serve --identity codex-architect --role architect
+  -- atm-agent-mcp serve --identity codex-architect --role architect
 ```
 
 ---
@@ -384,15 +389,15 @@ claude mcp add codex-architect -s user \
 
 | Path | Purpose |
 |---|---|
-| `crates/codex-mcp/src/main.rs` | CLI entry point, argument parsing |
-| `crates/codex-mcp/src/proxy.rs` | stdio MCP proxy loop |
-| `crates/codex-mcp/src/config.rs` | Plugin config resolution via `atm-core` |
-| `crates/codex-mcp/src/identity.rs` | Identity resolution and collision handling |
-| `crates/codex-mcp/src/context.rs` | Session context collection (repo, branch, cwd) |
-| `crates/codex-mcp/src/prompt.rs` | Bundled prompt loading and injection |
-| `crates/codex-mcp/src/registry.rs` | Thread registry with atomic IO via `atm-core` |
-| `crates/codex-mcp/src/mail.rs` | Idle detection, inbox polling, mail routing |
-| `crates/codex-mcp/src/atm_tools.rs` | `atm_send` / `atm_read` / `atm_broadcast` MCP tools |
-| `crates/codex-mcp/src/summary.rs` | Shutdown summary request and file write/read |
-| `crates/codex-mcp/prompts/base.md` | Bundled `gpt-5.2-codex_prompt.md` |
-| `crates/codex-mcp/prompts/multi-agent.md` | Bundled `experimental_prompt.md` |
+| `crates/atm-agent-mcp/src/main.rs` | CLI entry point, argument parsing |
+| `crates/atm-agent-mcp/src/proxy.rs` | stdio MCP proxy loop |
+| `crates/atm-agent-mcp/src/config.rs` | Plugin config resolution via `atm-core` |
+| `crates/atm-agent-mcp/src/identity.rs` | Session identity binding and `agent_id` mapping |
+| `crates/atm-agent-mcp/src/context.rs` | Per-turn context refresh (repo, branch, cwd) |
+| `crates/atm-agent-mcp/src/prompt.rs` | Bundled prompt loading and injection |
+| `crates/atm-agent-mcp/src/registry.rs` | Session registry with atomic IO via `atm-core` |
+| `crates/atm-agent-mcp/src/mail.rs` | Idle detection, inbox polling, mail routing |
+| `crates/atm-agent-mcp/src/atm_tools.rs` | `atm_send` / `atm_read` / `atm_broadcast` MCP tools |
+| `crates/atm-agent-mcp/src/summary.rs` | Shutdown summary request and file write/read |
+| `crates/atm-agent-mcp/prompts/base.md` | Bundled Codex base prompt |
+| `crates/atm-agent-mcp/prompts/multi-agent.md` | Bundled `experimental_prompt.md` |
