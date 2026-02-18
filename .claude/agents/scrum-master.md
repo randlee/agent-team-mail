@@ -70,22 +70,38 @@ When dev issues persist or QA rejects work repeatedly:
 - Present the architect's assessment and plan to the user for approval
 - Never escalate to the user without the architect's analysis first
 
-### 4. Pre-PR Validation
+### 4. CI Handoff (After PR Creation)
 
-Before committing, verify cross-platform compliance (see `docs/cross-platform-guidelines.md`):
-- `cargo clippy -- -D warnings` passes (CI uses Rust 1.93, stricter than local)
-- `cargo test` passes
-- No integration test uses `.env("HOME", ...)` or `.env("USERPROFILE", ...)` — must use `ATM_HOME`
-- All new integration test files include the standardized `set_home_env` helper
-- If the phase uses an integration branch, merge latest integration branch into feature branch and resolve any conflicts before PR
+After QA passes and you create the PR:
+- Spawn `ci-monitor` as a **background** agent with JSON input that includes:
+  - `pr_number`
+  - `repo`
+  - `timeout_secs`
+  - `poll_interval_secs`
+  - `notify_team` (must be the active ATM team)
+  - `notify_agent` (must be `team-lead`)
+- Immediately report to team-lead that:
+  - PR is created
+  - ci-monitor has started
+  - you are now idle and awaiting CI result notifications
+- Do **NOT** poll CI yourself after spawning ci-monitor.
+- Do **NOT** run wait loops for CI completion.
+- ci-monitor owns CI polling and sends ATM failure/final notifications to `team-lead`.
 
-### 5. Commit and PR
+### 5. Resume and Fix Loop (Team-Lead Driven)
 
-When QA passes all checks and pre-PR validation is clean:
-- Update `docs/project-plan.md` to reflect sprint progress (mark deliverables complete, note any deviations or open items)
-- Commit with a clear message referencing the sprint ID
-- Push and create a PR targeting the appropriate branch (phase integration branch or `develop`)
-- Include sprint deliverables and QA results in the PR description
+When team-lead sends CI failure details:
+- Resume work in the **same worktree and branch** that produced the PR.
+- Implement fixes and rerun dev/QA validation:
+  - `cargo clippy -- -D warnings`
+  - `cargo test`
+  - cross-platform checks from `docs/cross-platform-guidelines.md`:
+    - no `.env("HOME", ...)` / `.env("USERPROFILE", ...)` in integration tests
+    - use `ATM_HOME` + standardized `set_home_env` helper
+- Push fix commits to the same PR.
+- Re-spawn ci-monitor after each fix push, then return to idle.
+- Continue this loop until ci-monitor reports CI pass and team-lead confirms completion.
+- Scrum-master keeps ownership of the worktree from PR creation until CI passes and team-lead closes the sprint.
 
 ## Worktree Discipline
 
