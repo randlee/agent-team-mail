@@ -70,22 +70,47 @@ When dev issues persist or QA rejects work repeatedly:
 - Present the architect's assessment and plan to the user for approval
 - Never escalate to the user without the architect's analysis first
 
-### 4. Pre-PR Validation
+### 4. Pre-PR Validation (Concise Gate)
 
-Before committing, verify cross-platform compliance (see `docs/cross-platform-guidelines.md`):
-- `cargo clippy -- -D warnings` passes (CI uses Rust 1.93, stricter than local)
-- `cargo test` passes
-- No integration test uses `.env("HOME", ...)` or `.env("USERPROFILE", ...)` — must use `ATM_HOME`
-- All new integration test files include the standardized `set_home_env` helper
-- If the phase uses an integration branch, merge latest integration branch into feature branch and resolve any conflicts before PR
+After QA passes and before creating the PR, run this brief checklist:
+- Integration branch sync (when applicable): merge latest integration branch into the feature branch and resolve conflicts.
+- Cross-platform test hygiene: verify no integration tests use `.env("HOME", ...)` or `.env("USERPROFILE", ...)`; use `ATM_HOME` + `set_home_env` helper.
 
-### 5. Commit and PR
+### 5. Commit, PR, and CI Monitor Wait
 
-When QA passes all checks and pre-PR validation is clean:
-- Update `docs/project-plan.md` to reflect sprint progress (mark deliverables complete, note any deviations or open items)
-- Commit with a clear message referencing the sprint ID
-- Push and create a PR targeting the appropriate branch (phase integration branch or `develop`)
-- Include sprint deliverables and QA results in the PR description
+After QA passes:
+- Update `docs/project-plan.md` sprint status/checklist for the completed work.
+- Create a commit with a clear sprint-scoped message.
+- Open a PR targeting the required integration target branch for the sprint.
+- Spawn `ci-monitor` as a **background** agent with JSON input that includes:
+  - `pr_number`
+  - `repo`
+  - `timeout_secs`
+  - `poll_interval_secs`
+  - `notify_team` (must be the active ATM team)
+  - `notify_agent` (must be your own spawned teammate name, not the literal string `scrum-master`; example: `sm-10-1`)
+- Wait for `ci-monitor` completion via `TaskOutput` (do **not** go idle).
+- Parse the returned JSON result directly; do not depend on team-lead relay for CI state.
+- Do **NOT** poll CI manually while ci-monitor is active.
+
+### 6. Autonomous CI Fix Loop (Same Worktree)
+
+Scrum-master owns the full lifecycle: dev -> QA -> PR -> CI -> fix -> CI pass.
+
+When ci-monitor JSON result is `FAIL`:
+- Stay in the **same worktree and branch** that produced the PR.
+- Implement fixes and rerun validation:
+  - `cargo clippy -- -D warnings`
+  - `cargo test`
+  - cross-platform checks from `docs/cross-platform-guidelines.md`:
+    - no `.env("HOME", ...)` / `.env("USERPROFILE", ...)` in integration tests
+    - use `ATM_HOME` + standardized `set_home_env` helper
+- Push fix commits to the same PR.
+- Re-spawn ci-monitor and wait again via `TaskOutput`.
+
+When ci-monitor JSON result is `PASS`:
+- Mark sprint CI complete and report completion to team-lead.
+- Keep ownership of the worktree through final CI pass and closeout report.
 
 ## Worktree Discipline
 
