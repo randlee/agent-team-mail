@@ -244,7 +244,9 @@ The full `base-instructions` uses bundled prompts unless the caller supplies `ba
 
 ## ATM as MCP Tools
 
-The proxy exposes `atm_send`, `atm_read`, and `atm_broadcast` as first-class MCP tools, implemented directly via `atm-core` — no shell execution required:
+The proxy exposes `atm_send`, `atm_read`, `atm_broadcast`, and `atm_pending_count` as first-class MCP tools, implemented directly via `atm-core` — no shell execution required. Parameters mirror the CLI where applicable (minus flags like `--json`, `--stdin`, `--file` that don't apply to structured MCP calls).
+
+**Identity**: Sender identity is always the session's bound identity (FR-2). No `--from` override — anti-spoofing by design.
 
 ### `atm_send`
 ```json
@@ -254,24 +256,67 @@ The proxy exposes `atm_send`, `atm_read`, and `atm_broadcast` as first-class MCP
   "summary": "PR ready notification"
 }
 ```
+- `to` (required): Agent name or `agent@team` for cross-team messaging
+- `message` (required): Message text
+- `summary` (optional): Explicit summary (auto-generated if omitted)
 
 ### `atm_read`
 ```json
 {
-  "mark_read": true
+  "all": false,
+  "mark_read": true,
+  "limit": 20,
+  "since": "2026-02-18T10:00:00Z",
+  "from": "team-lead"
 }
 ```
-Returns array of messages with `from`, `content`, `received_at`.
+- `all` (optional, default false): Include already-read messages
+- `mark_read` (optional, default true): Mark returned messages as read
+- `limit` (optional): Max messages to return
+- `since` (optional): ISO 8601 timestamp filter
+- `from` (optional): Filter by sender name
+
+Returns array of messages with `from`, `content`, `received_at`, `message_id`.
 
 ### `atm_broadcast`
 ```json
 {
   "message": "Pausing work — need input on auth approach.",
-  "summary": "Requesting team input"
+  "summary": "Requesting team input",
+  "team": "atm-dev"
 }
 ```
+- `message` (required): Message text
+- `summary` (optional): Explicit summary (auto-generated if omitted)
+- `team` (optional): Override target team (default: session's configured team)
+
+### `atm_pending_count`
+```json
+{}
+```
+Returns unread message count without marking anything read. Lightweight check for mail polling.
 
 Benefits over shell `atm` commands: no approval policy friction, visible in MCP tool call logs, auditable by the orchestrator.
+
+---
+
+## Multi-Instance and Subagent Visibility
+
+**Multiple proxy instances in the same repo:**
+
+When two Claude teammates each start their own `atm-agent-mcp` process in the same working directory, each instance:
+- MUST have a distinct `--identity` (e.g., `codex-dev-1`, `codex-dev-2`)
+- Shares the same `~/.claude/teams/` inbox files (shared message history — this is correct and preferred)
+- Maintains its own session registry (independent thread tracking)
+- Reads/writes the same team config (both are visible team members)
+
+**Codex subagent visibility:**
+
+Codex subagents spawned via `spawn_agent` within a session are **invisible to the team**. The proxy's bound identity is the only team-visible identity. Subagents:
+- Do NOT get their own ATM identity or inbox
+- Do NOT appear in team member lists
+- Communicate only within their parent Codex session
+- Are analogous to Claude Code's background sub-agents — internal implementation detail of the session
 
 ---
 

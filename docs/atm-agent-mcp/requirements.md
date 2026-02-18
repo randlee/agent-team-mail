@@ -79,12 +79,25 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ### FR-4: ATM Communication Tools
 
-- **FR-4.1**: Proxy MUST expose `atm_send`, `atm_read`, and `atm_broadcast` as MCP tools in the `tools/list` response.
-- **FR-4.2**: `atm_send` MUST accept `to` (agent or agent@team format), `message`, and optional `summary`. The proxy parses `@` notation into separate recipient/team fields.
-- **FR-4.3**: `atm_read` MUST return unread messages for this identity, with option to mark as read. Returns array of `{from, message, timestamp, message_id}`.
-- **FR-4.4**: `atm_broadcast` MUST send to all team members via `atm-core`.
+> **Design Decision**: MCP tool parameters mirror CLI options where applicable. Flags like `--json`, `--stdin`, `--file` are omitted (MCP is already structured). Sender identity is always the session's bound identity — no `--from` override (anti-spoofing by design).
+
+- **FR-4.1**: Proxy MUST expose `atm_send`, `atm_read`, `atm_broadcast`, and `atm_pending_count` as MCP tools in the `tools/list` response.
+- **FR-4.2**: `atm_send` parameters: `to` (required, agent or `agent@team` for cross-team), `message` (required), `summary` (optional, auto-generated if omitted). The proxy parses `@` notation into separate recipient/team fields.
+- **FR-4.3**: `atm_read` parameters: `all` (optional, default false — include read messages), `mark_read` (optional, default true), `limit` (optional — max messages to return), `since` (optional — ISO 8601 timestamp filter), `from` (optional — filter by sender name). Returns array of `{from, message, timestamp, message_id}`.
+- **FR-4.4**: `atm_broadcast` parameters: `message` (required), `summary` (optional), `team` (optional — override target team for cross-team broadcasts). MUST send to all team members via `atm-core`.
 - **FR-4.5**: All ATM tools MUST use the calling thread's bound identity as sender — no impersonation. ATM tools called outside a thread context (e.g., from Claude directly via MCP) MUST require an explicit `identity` parameter; if omitted, the call MUST be rejected with an error.
 - **FR-4.6**: All ATM tool calls MUST be logged to an audit trail (see FR-9).
+- **FR-4.7**: `atm_pending_count` takes no required parameters. Returns unread message count without marking anything read. Intended for lightweight mail polling.
+
+### FR-20: Multi-Instance and Subagent Visibility
+
+> **Design Decision**: Multiple proxy instances may run in the same repo (e.g., two Claude teammates each with their own `atm-agent-mcp`). Codex subagents are invisible to the team — only the proxy's bound identity is a team member.
+
+- **FR-20.1**: Each proxy instance MUST have a distinct identity. Two instances with the same identity in the same team MUST be rejected (identity conflict per FR-2).
+- **FR-20.2**: Multiple proxy instances in the same repo MUST share the same `~/.claude/teams/` inbox files. Shared message history is expected and correct — each instance reads/writes the same team directory.
+- **FR-20.3**: Each proxy instance maintains its own independent session registry. Thread-to-identity mappings are per-instance, not shared.
+- **FR-20.4**: Codex subagents spawned via `spawn_agent` within a session MUST NOT receive their own ATM identity, inbox, or team membership. They are invisible to the team — analogous to Claude Code's background sub-agents.
+- **FR-20.5**: The proxy's bound identity is the sole team-visible identity for all communication originating from that session, including any tool calls made by Codex subagents.
 
 ### FR-5: Thread Registry and Persistence
 
@@ -458,12 +471,25 @@ Notes:
 
 ### ATM Tools
 - [ ] Call `atm_send` via MCP, verify message appears in recipient's ATM inbox
+- [ ] Call `atm_send` with `agent@other-team` cross-team target, verify delivery to other team's inbox
 - [ ] Call `atm_read`, verify unread messages returned with envelope metadata
-- [ ] Call `atm_read`, verify messages only marked read after successful response
+- [ ] Call `atm_read` with `mark_read: false`, verify messages remain unread
+- [ ] Call `atm_read` with `limit: 5`, verify at most 5 messages returned
+- [ ] Call `atm_read` with `since` timestamp, verify only newer messages returned
+- [ ] Call `atm_read` with `from` filter, verify only messages from that sender returned
+- [ ] Call `atm_read` with `all: true`, verify already-read messages included
 - [ ] Call `atm_broadcast`, verify all team members receive message
+- [ ] Call `atm_broadcast` with `team` override, verify sent to specified team
 - [ ] Call `atm_pending_count`, verify correct count without marking read
 - [ ] Verify `atm_send` uses thread's bound identity (no spoofing possible)
 - [ ] Send message > max_message_length, verify truncation
+
+### Multi-Instance and Subagent Visibility
+- [ ] Start two proxy instances with different identities in same repo, verify both register as team members
+- [ ] Start two proxy instances with same identity, verify second is rejected (identity conflict)
+- [ ] Two proxy instances read same inbox, verify both see shared message history
+- [ ] Codex subagent calls `atm_send` → verify message sent under parent session's identity, not subagent's
+- [ ] Verify Codex subagents do NOT appear in `atm members` output
 
 ### Automatic Mail Injection
 - [ ] Codex turn ends, unread mail exists for thread identity → verify proxy auto-issues `codex-reply` with mail
@@ -544,6 +570,7 @@ Notes:
 | 2026-02-18 | arch-ctm | Rename design to atm-agent-mcp, clarify one-to-many lifecycle, adopt team-scoped storage paths, set model-default policy to upstream latest, and align MCP session APIs on `agent_id`/`agent_sessions`. |
 | 2026-02-18 | team-lead | Split A.3/A.4 into 8 focused sprints, add NFR-6 error response format with error codes, add test strategy, add Codex MCP protocol reference appendix. |
 | 2026-02-18 | team-lead + arch-ctm | FR-18 (approval/elicitation bridging), FR-19 (event forwarding), fix FR-1.2 framing to protocol-compliant (not newline-only), confirm error codes -32001..-32009 as authoritative. |
+| 2026-02-18 | team-lead | FR-4 expanded: MCP tool params aligned with CLI (limit, since, from, all, team override). FR-4.7 atm_pending_count. FR-20: multi-instance identity isolation and Codex subagent invisibility. |
 
 ---
 
