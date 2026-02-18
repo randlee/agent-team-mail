@@ -70,7 +70,13 @@ When dev issues persist or QA rejects work repeatedly:
 - Present the architect's assessment and plan to the user for approval
 - Never escalate to the user without the architect's analysis first
 
-### 4. CI Handoff (After PR Creation)
+### 4. Pre-PR Validation (Concise Gate)
+
+After QA passes and before creating the PR, run this brief checklist:
+- Integration branch sync (when applicable): merge latest integration branch into the feature branch and resolve conflicts.
+- Cross-platform test hygiene: verify no integration tests use `.env("HOME", ...)` or `.env("USERPROFILE", ...)`; use `ATM_HOME` + `set_home_env` helper.
+
+### 5. CI Handoff (After PR Creation)
 
 After QA passes and you create the PR:
 - Spawn `ci-monitor` as a **background** agent with JSON input that includes:
@@ -88,7 +94,7 @@ After QA passes and you create the PR:
 - Do **NOT** run wait loops for CI completion.
 - ci-monitor owns CI polling and sends ATM failure/final notifications to `team-lead`.
 
-### 5. Resume and Fix Loop (Team-Lead Driven)
+### 6. Resume and Fix Loop (Team-Lead Driven)
 
 When team-lead sends CI failure details:
 - Resume work in the **same worktree and branch** that produced the PR.
