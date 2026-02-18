@@ -1,5 +1,7 @@
 # `atm-agent-mcp` Crate Design
 
+> **Implementation blueprint** — internal crate architecture for sprint developers. See `sc-codex-mcp-design.md` for the Synaptic Canvas plugin spec and end-user integration guide.
+
 A new crate in the `agent-team-mail` workspace: `crates/atm-agent-mcp`.
 
 A thin MCP proxy that wraps `codex mcp-server`, injects ATM identity/team/repo context, provides native ATM MCP tools, and manages 0..N Codex sessions through one proxy process.

@@ -1,5 +1,7 @@
 # sc-atm-agent-mcp Design
 
+> **Synaptic Canvas plugin spec** — end-user integration guide for running Codex as a Claude subagent via `atm-agent-mcp`. See `codex-mcp-crate-design.md` for the internal implementation blueprint.
+
 Codex running as a Claude subagent via MCP, with access to native multi-agent tools and the `atm` CLI for cross-system communication with Claude agent teams.
 
 ---
