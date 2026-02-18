@@ -92,7 +92,7 @@ After each scrum-master reports completion:
 
 ### 4. Post-Sprint: Arch-CTM Critical Design Review
 
-**After EVERY sprint PR passes CI** (before or after merge), request arch-ctm review:
+**After EVERY sprint PR is merged to `integrate/phase-{N}`**, request arch-ctm review:
 
 1. Send arch-ctm the diff via ATM CLI:
    ```
@@ -101,17 +101,19 @@ After each scrum-master reports completion:
 2. Wait for arch-ctm reply (use delay agent, nudge via tmux if no reply in 2 min)
 3. Track arch-ctm findings:
    - **No issues**: Continue to next sprint
-   - **Issues found**: Log findings. After all sprints complete, create a **separate fix worktree** (`feature/{P}-fixes-arch-review`) with a dedicated scrum-master sprint to address all accumulated arch-ctm findings
-4. Do NOT block sprint progress for arch-ctm review unless findings are critical/blocking
+   - **Issues found**: Create/update a **parallel arch-ctm fix track** in a separate worktree (`feature/{P}-fixes-arch-review`) to address findings while later sprint waves continue
+4. arch-ctm is authorized to implement fixes directly in the fix worktree for review findings
+5. Every arch-ctm fix PR MUST be validated by QA agents (`rust-qa-agent` and `atm-qa-agent`) before merge
+6. Do NOT block ongoing sprint execution unless arch-ctm marks findings as critical/blocking
 
 ### 5. Arch-CTM Fix Sprint (if needed)
 
 If arch-ctm found issues across sprints:
 1. Create a new worktree branched from `integrate/phase-{N}` (after all sprint PRs merged)
-2. Spawn a fresh scrum-master with all accumulated arch-ctm findings as the sprint prompt
-3. Follow normal dev-QA-CI loop
-4. Merge fix PR to integration branch
-5. Request arch-ctm re-review of fixes
+2. arch-ctm may execute fixes directly OR team-lead may delegate to a fresh scrum-master
+3. Regardless of who implements fixes, run QA validation (`rust-qa-agent` + `atm-qa-agent`) before merge
+4. Follow normal CI loop and merge fix PR to integration branch
+5. Request arch-ctm re-review of fixes if delegated implementation was used
 
 ### 6. Wave Transitions (for parallel sprints)
 
@@ -173,6 +175,8 @@ Create one task per sprint at phase start:
 - Do NOT use `rust-developer` as scrum-master subagent_type — use `scrum-master`
 - Do NOT tell scrum-masters to "do the work yourself" — they are coordinators
 - Do NOT do dev or QA work as team-lead — delegate to scrum-masters
+- Do NOT skip post-merge arch-ctm sprint review — every merged sprint requires it
+- Do NOT merge arch-ctm fix PRs without QA validation from both QA agents
 - Do NOT merge without QA pass + CI green
 - Do NOT delete the team between sprints or phases
 - Do NOT clean up worktrees without user approval
