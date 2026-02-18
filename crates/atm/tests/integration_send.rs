@@ -132,6 +132,42 @@ fn test_send_cross_team_addressing() {
 }
 
 #[test]
+fn test_send_alias_with_team_suffix_resolves_end_to_end() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+
+    // Configure alias in global ATM config under ATM_HOME so send command
+    // resolves arch-atm -> team-lead while preserving explicit @team suffix.
+    let global_cfg_dir = temp_dir.path().join(".config/atm");
+    fs::create_dir_all(&global_cfg_dir).unwrap();
+    fs::write(
+        global_cfg_dir.join("config.toml"),
+        "[core]\ndefault_team = \"test-team\"\nidentity = \"human\"\n\n[aliases]\narch-atm = \"team-lead\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("send")
+        .arg("arch-atm@test-team")
+        .arg("Alias routed message")
+        .assert()
+        .success();
+
+    // Full send path assertion: parse_address + alias resolution + team lookup + inbox write.
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/team-lead.json");
+    assert!(inbox_path.exists());
+
+    let inbox_content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&inbox_content).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["text"], "Alias routed message");
+}
+
+#[test]
 fn test_send_with_team_flag() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "override-team");
