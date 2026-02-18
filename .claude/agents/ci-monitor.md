@@ -19,7 +19,7 @@ Provide input as a fenced JSON object:
   "timeout_secs": 900,
   "poll_interval_secs": 20,
   "notify_team": "atm-dev",
-  "notify_agent": "team-lead"
+  "notify_agent": "scrum-master"
 }
 ```
 
@@ -57,15 +57,20 @@ Track `run_id` for the active CI run.
 - If a newer run appears for the same PR head SHA, reset prior in-memory failure state.
 - Re-evaluate and re-notify for the new run (do not suppress based on prior run).
 
-### 4. Immediate Failure Notification via ATM
+### 4. Immediate Failure Notification via ATM (Direct + Broadcast)
 
 When any check first fails in a run (for example clippy fails fast), notify immediately via ATM without waiting for all jobs to complete.
 
-Use a JSON payload string in the message body:
+Send two ATM notifications for the first failure observed in a run:
+- Direct message to `notify_agent`
+- Team broadcast to `notify_team`
+
+Use JSON payload strings in message bodies:
 
 ```json
 {
-  "command": "atm send <notify_agent> --team <notify_team> '<json_message>'"
+  "direct_command": "atm send <notify_agent> --team <notify_team> '<json_message>'",
+  "broadcast_command": "atm broadcast --team <notify_team> '<json_message>'"
 }
 ```
 
@@ -141,9 +146,10 @@ Include absolute paths in report and ATM notifications so other agents do not ne
 }
 ```
 
-### 7. Final ATM Notification (JSON)
+### 7. Final ATM Notification (JSON, Direct + Broadcast)
 
-After all checks are terminal (or timeout), send final status via ATM:
+After all checks are terminal (or timeout), send final status via ATM direct message to `notify_agent`.
+If final status is `PASS`, also broadcast to the whole team for visibility.
 
 ```json
 {
@@ -158,6 +164,25 @@ After all checks are terminal (or timeout), send final status via ATM:
     "failed_checks": [],
     "report_path": "/abs/path/to/.temp/ci-monitor/.../report.json",
     "dedupe_key": "randlee/agent-team-mail:95:1234567890:ci_final",
+    "timestamp": "2026-02-18T21:05:00Z"
+  }
+}
+```
+
+Final PASS broadcast template:
+
+```json
+{
+  "command": "atm broadcast --team <notify_team> '<json_message>'",
+  "json_message": {
+    "type": "ci_final_broadcast",
+    "schema_version": "ci_monitor_report_v1",
+    "repo": "<repo>",
+    "pr_number": 95,
+    "run_id": 1234567890,
+    "status": "PASS",
+    "report_path": "/abs/path/to/.temp/ci-monitor/.../report.json",
+    "dedupe_key": "randlee/agent-team-mail:95:1234567890:ci_final_broadcast_pass",
     "timestamp": "2026-02-18T21:05:00Z"
   }
 }
@@ -178,6 +203,8 @@ After all checks are terminal (or timeout), send final status via ATM:
 - You MAY write under `.temp/ci-monitor/...` for reports and artifacts.
 - Do NOT push commits or create branches
 - Do NOT trigger CI runs — read-only operations only
-- Send ATM notifications to `notify_agent`/`notify_team` using JSON payloads.
+- Send ATM notifications using JSON payloads:
+  - direct `atm send` to `notify_agent`
+  - team `atm broadcast` on initial failure and final PASS
 - Return final status and exit; do not loop indefinitely beyond timeout.
 - If `gh run view --log-failed` produces very large output, truncate to the first 100 lines of each job's failure section and note the truncation
