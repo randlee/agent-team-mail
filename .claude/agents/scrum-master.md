@@ -88,7 +88,7 @@ After QA passes:
   - `timeout_secs`
   - `poll_interval_secs`
   - `notify_team` (must be the active ATM team)
-  - `notify_agent` (must be your own team-member identity, `scrum-master`)
+  - `notify_agent` (must be your own spawned teammate name, not the literal string `scrum-master`; example: `sm-10-1`)
 - Wait for `ci-monitor` completion via `TaskOutput` (do **not** go idle).
 - Parse the returned JSON result directly; do not depend on team-lead relay for CI state.
 - Do **NOT** poll CI manually while ci-monitor is active.

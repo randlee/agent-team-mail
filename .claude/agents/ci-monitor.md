@@ -19,7 +19,7 @@ Provide input as a fenced JSON object:
   "timeout_secs": 900,
   "poll_interval_secs": 20,
   "notify_team": "atm-dev",
-  "notify_agent": "scrum-master"
+  "notify_agent": "sm-sprint-10"
 }
 ```
 
