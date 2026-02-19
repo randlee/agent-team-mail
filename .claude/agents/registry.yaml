@@ -20,6 +20,9 @@ agents:
   atm-qa-agent:
     version: 1.0.0
     path: .claude/agents/atm-qa-agent.md
+  atm-publisher:
+    version: 1.0.0
+    path: .claude/agents/atm-publisher.md
 
 skills:
   rust-development:

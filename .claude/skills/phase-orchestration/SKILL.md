@@ -131,8 +131,8 @@ After all sprints (including fix sprint if needed) merge to `integrate/phase-{N}
 2. Wait for CI green
 3. Merge after user approval
 4. **Minor version bump** on `develop` (separate release prep commit)
-5. Deploy the `publisher` teammate to orchestrate package publishing
-6. Publisher validates publish results and release artifacts before proceeding
+5. Deploy the `atm-publisher` teammate (named teammate) to orchestrate package publishing
+6. `atm-publisher` creates `release/vX.Y.Z` from `develop`, performs the minor version bump, runs validation, and publishes from the release branch
 7. Create PR: `develop → main` for release branch-forwarding
 8. Wait for CI green on `main` PR and merge after user approval
 9. Shutdown all remaining scrum-master panes
@@ -183,7 +183,7 @@ Create one task per sprint at phase start:
 - Do NOT skip post-merge arch-ctm sprint review — every merged sprint requires it
 - Do NOT merge arch-ctm fix PRs without QA validation from both QA agents
 - Do NOT merge without QA pass + CI green
-- Do NOT publish packages directly as team-lead — delegate publishing orchestration to `publisher`
+- Do NOT publish packages directly as team-lead — delegate publishing orchestration to `atm-publisher`
 - Do NOT delete the team between sprints or phases
 - Do NOT clean up worktrees without user approval
 - Do NOT reuse scrum-masters across sprints — each sprint gets a fresh instance
