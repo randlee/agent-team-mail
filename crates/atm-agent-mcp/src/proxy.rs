@@ -14,7 +14,9 @@
 //! - Registers sessions in an in-memory [`SessionRegistry`] with identity
 //!   binding and cross-process lock files (Sprint A.3)
 //!
-//! ATM tool execution and mail injection are deferred to Sprint A.4+.
+//! ATM communication tools are implemented in Sprint A.4. Session lifecycle
+//! state machine and elicitation bridging added in Sprint A.6. Auto mail
+//! injection (FR-8) is deferred to Sprint A.7.
 
 use std::collections::HashMap;
 use std::process::ExitStatus;
@@ -29,10 +31,11 @@ use tokio::time::{Duration, timeout};
 
 use crate::config::AgentMcpConfig;
 use crate::context::detect_context;
+use crate::elicitation::ElicitationRegistry;
 use crate::framing::{UpstreamReader, write_newline_delimited};
 use crate::inject::{build_session_context, inject_developer_instructions};
 use crate::lock::{acquire_lock, check_lock, release_lock};
-use crate::session::{RegistryError, SessionRegistry};
+use crate::session::{RegistryError, SessionRegistry, ThreadState};
 use crate::tools::synthetic_tools;
 
 /// Channel buffer capacity for upstream message delivery.
@@ -62,6 +65,15 @@ pub const ERR_IDENTITY_CONFLICT: i64 = -32001;
 /// JSON-RPC error code: session not found for requested `agent_id`.
 pub const ERR_SESSION_NOT_FOUND: i64 = -32002;
 
+/// JSON-RPC error code: target session is already closed.
+///
+/// Used when an operation is attempted on a session whose thread state is
+/// [`crate::session::ThreadState::Closed`].  Note that [`crate::atm_tools::handle_agent_close`]
+/// treats a repeated close as a success (idempotent, FR-17.9) rather than
+/// returning this error.  This constant is available for other operations that
+/// must reject closed sessions.
+pub const ERR_SESSION_CLOSED: i64 = -32003;
+
 /// JSON-RPC error code: maximum concurrent session limit reached.
 pub const ERR_MAX_SESSIONS_EXCEEDED: i64 = -32004;
 
@@ -86,6 +98,10 @@ pub struct ProxyServer {
     pub dropped_events: Arc<AtomicU64>,
     /// In-memory session registry shared with per-request tasks.
     registry: Arc<Mutex<SessionRegistry>>,
+    /// Registry of pending elicitation/create requests bridged upstream (FR-18).
+    elicitation_registry: Arc<Mutex<ElicitationRegistry>>,
+    /// Counter for generating unique upstream elicitation request IDs.
+    elicitation_counter: Arc<AtomicU64>,
     /// ATM team name used for session registration and lock files.
     pub team: String,
     /// Maps Codex `threadId` → `agent_id` for event attribution.
@@ -191,11 +207,17 @@ impl ProxyServer {
         let registry = SessionRegistry::new(max);
         let registry = Self::load_stale_from_disk(registry, &team_str);
         let (started_at, started_epoch_secs) = proxy_start_time();
+        // Elicitation default timeout: 30 seconds (FR-18).
+        const ELICITATION_TIMEOUT_SECS: u64 = 30;
         Self {
             config,
             child: None,
             dropped_events: Arc::new(AtomicU64::new(0)),
             registry: Arc::new(Mutex::new(registry)),
+            elicitation_registry: Arc::new(Mutex::new(ElicitationRegistry::new(
+                ELICITATION_TIMEOUT_SECS,
+            ))),
+            elicitation_counter: Arc::new(AtomicU64::new(1)),
             team: team_str,
             thread_to_agent: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             started_at,
@@ -304,6 +326,23 @@ impl ProxyServer {
         // Bounded to prevent unbounded memory growth under backpressure.
         let (upstream_tx, mut upstream_rx) = mpsc::channel::<Value>(UPSTREAM_CHANNEL_CAPACITY);
 
+        // Spawn a background task that periodically expires timed-out elicitations
+        // (FR-18, every 5 seconds).
+        {
+            let elicitation_registry_bg = Arc::clone(&self.elicitation_registry);
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(tokio::time::Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    let expired = elicitation_registry_bg.lock().await.expire_timeouts();
+                    for key in &expired {
+                        tracing::warn!("elicitation timed out: upstream_request_id={key}");
+                    }
+                }
+            });
+        }
+
         loop {
             tokio::select! {
                 // Read from upstream stdin
@@ -348,8 +387,43 @@ impl ProxyServer {
                                 .await;
                         }
                         None => {
-                            // Response from upstream (e.g. elicitation response)
-                            if let Some(ref handle) = self.child {
+                            // Response from upstream — may be an elicitation response.
+                            // Check the elicitation registry first; if it matches,
+                            // forward the response downstream to the child.
+                            // Otherwise forward as-is to the child.
+                            if let Some(resp_id) = msg.get("id") {
+                                let maybe_downstream_resp = self
+                                    .elicitation_registry
+                                    .lock()
+                                    .await
+                                    .resolve_for_downstream(resp_id, msg.clone());
+                                if let Some(downstream_resp) = maybe_downstream_resp {
+                                    tracing::debug!("elicitation response resolved for id={resp_id}");
+                                    if let Some(ref handle) = self.child {
+                                        let mut stdin = handle.stdin.lock().await;
+                                        let serialized = serde_json::to_string(&downstream_resp)
+                                            .unwrap_or_default();
+                                        if let Err(e) =
+                                            write_newline_delimited(&mut *stdin, &serialized).await
+                                        {
+                                            tracing::warn!(
+                                                "failed to write elicitation response to child: {e}"
+                                            );
+                                        }
+                                    }
+                                } else if let Some(ref handle) = self.child {
+                                    // Not an elicitation response — forward to child.
+                                    let mut stdin = handle.stdin.lock().await;
+                                    let serialized =
+                                        serde_json::to_string(&msg).unwrap_or_default();
+                                    if let Err(e) =
+                                        write_newline_delimited(&mut *stdin, &serialized).await
+                                    {
+                                        tracing::warn!("failed to write response to child: {e}");
+                                    }
+                                }
+                            } else if let Some(ref handle) = self.child {
+                                // No id field — forward to child as-is.
                                 let mut stdin = handle.stdin.lock().await;
                                 let serialized = serde_json::to_string(&msg).unwrap_or_default();
                                 if let Err(e) =
@@ -371,7 +445,16 @@ impl ProxyServer {
                     }
                 } => {
                     if let Some(msg) = msg {
-                        route_child_message(msg, &pending, &upstream_tx, &dropped, &thread_to_agent).await;
+                        route_child_message(
+                            msg,
+                            &pending,
+                            &upstream_tx,
+                            &dropped,
+                            &thread_to_agent,
+                            &self.elicitation_registry,
+                            &self.elicitation_counter,
+                        )
+                        .await;
                     }
                 }
 
@@ -716,18 +799,20 @@ impl ProxyServer {
         // prepare_* methods take &mut self, so they must be called before we
         // take any reference to self.child.
         // effective_tool_name may have been rewritten to "codex-reply" for resume flows.
-        let (msg_to_forward, expected_agent_id) = if effective_tool_name == "codex" {
+        let (msg_to_forward, expected_agent_id, state_agent_id) = if effective_tool_name == "codex" {
             match self.prepare_codex_message(&id, msg, upstream_tx).await {
                 PrepareResult::Error => return, // error already sent
                 PrepareResult::Ok {
                     modified,
                     expected_agent_id,
-                } => (modified, expected_agent_id),
+                } => (modified, expected_agent_id.clone(), expected_agent_id),
             }
         } else if effective_tool_name == "codex-reply" {
-            (self.prepare_codex_reply_message(msg).await, None)
+            let modified = self.prepare_codex_reply_message(msg).await;
+            let reply_agent_id = self.resolve_codex_reply_agent_id(&modified).await;
+            (modified, None, reply_agent_id)
         } else {
-            (msg, None)
+            (msg, None, None)
         };
 
         // Now borrow the handle for I/O (after all &mut self calls are done)
@@ -770,6 +855,14 @@ impl ProxyServer {
             }
         }
 
+        // Mark the session as Busy while the codex/codex-reply turn is in progress.
+        if let Some(ref agent_id_for_state) = state_agent_id {
+            self.registry
+                .lock()
+                .await
+                .set_thread_state(agent_id_for_state, ThreadState::Busy);
+        }
+
         let timeout_secs = self.config.request_timeout_secs;
         let upstream_tx_clone = upstream_tx.clone();
         let req_id = id;
@@ -779,6 +872,9 @@ impl ProxyServer {
         let pending_for_thread_map = Arc::clone(pending);
         let registry_for_thread_map = Arc::clone(&self.registry);
         let team_for_thread_map = self.team.clone();
+        // Clone state_agent_id for thread state tracking in the spawned task.
+        let state_agent_id_for_task = state_agent_id.clone();
+        let effective_tool_name_for_task = effective_tool_name.clone();
 
         tokio::spawn(async move {
             match timeout(Duration::from_secs(timeout_secs), rx).await {
@@ -792,10 +888,12 @@ impl ProxyServer {
                             .await
                             .take_codex_create(&req_id)
                         {
-                            registry_for_thread_map
-                                .lock()
-                                .await
-                                .set_thread_id(&agent_id, thread_id.to_string());
+                            {
+                                let mut reg = registry_for_thread_map.lock().await;
+                                reg.set_thread_id(&agent_id, thread_id.to_string());
+                                // Turn complete → thread is now idle (FR-17).
+                                reg.set_thread_state(&agent_id, ThreadState::Idle);
+                            }
                             thread_to_agent_task
                                 .lock()
                                 .await
@@ -812,7 +910,28 @@ impl ProxyServer {
                             {
                                 tracing::warn!("failed to persist registry after set_thread_id: {e}");
                             }
+                        } else if effective_tool_name_for_task == "codex-reply" {
+                            // codex-reply response — set the originating agent's thread to Idle.
+                            // We resolve the agent_id via the threadId that just arrived.
+                            let agent_id_opt = thread_to_agent_task
+                                .lock()
+                                .await
+                                .get(thread_id)
+                                .cloned();
+                            if let Some(aid) = agent_id_opt {
+                                registry_for_thread_map
+                                    .lock()
+                                    .await
+                                    .set_thread_state(&aid, ThreadState::Idle);
+                            }
                         }
+                    } else if let Some(ref aid) = state_agent_id_for_task {
+                        // Response without threadId (e.g. error) — still mark Idle
+                        // so the session does not remain stuck in Busy state.
+                        registry_for_thread_map
+                            .lock()
+                            .await
+                            .set_thread_state(aid, ThreadState::Idle);
                     }
                     let _ = upstream_tx_clone.send(resp).await;
                 }
@@ -1132,12 +1251,45 @@ impl ProxyServer {
         modified_msg
     }
 
+    /// Resolve the owning `agent_id` for a prepared `codex-reply` message.
+    ///
+    /// Preference:
+    /// 1. `params.arguments.agent_id`
+    /// 2. `params.arguments.threadId` via `thread_to_agent`
+    /// 3. Registry scan by `thread_id`
+    async fn resolve_codex_reply_agent_id(&self, msg: &Value) -> Option<String> {
+        if let Some(agent_id) = msg
+            .pointer("/params/arguments/agent_id")
+            .and_then(|v| v.as_str())
+        {
+            let reg = self.registry.lock().await;
+            if reg.get(agent_id).is_some() {
+                return Some(agent_id.to_string());
+            }
+        }
+
+        let thread_id = msg
+            .pointer("/params/arguments/threadId")
+            .and_then(|v| v.as_str())?;
+
+        if let Some(agent_id) = self.thread_to_agent.lock().await.get(thread_id).cloned() {
+            return Some(agent_id);
+        }
+
+        let reg = self.registry.lock().await;
+        reg.list_all()
+            .iter()
+            .find(|entry| entry.thread_id.as_deref() == Some(thread_id))
+            .map(|entry| entry.agent_id.clone())
+    }
+
     /// Handle a synthetic tool call (ATM tools, session management).
     ///
     /// ATM communication tools (`atm_send`, `atm_read`, `atm_broadcast`,
     /// `atm_pending_count`) are fully implemented in Sprint A.4.
     /// Session management tools (`agent_sessions`, `agent_status`) are
-    /// implemented in Sprint A.5. `agent_close` remains a stub.
+    /// implemented in Sprint A.5. `agent_close` is fully implemented in
+    /// Sprint A.6.
     async fn resolve_identity_from_thread(&self, thread_id: &str) -> Option<String> {
         // Prefer the fast thread->agent map, then fall back to registry scan.
         if let Some(agent_id) = self.thread_to_agent.lock().await.get(thread_id).cloned() {
@@ -1245,11 +1397,27 @@ impl ProxyServer {
                 .await
             }
             "agent_close" => {
-                // Stub: agent_close implementation deferred
-                atm_tools::make_mcp_error_result(
+                let resp = atm_tools::handle_agent_close(
                     id,
-                    "Tool 'agent_close' is not yet implemented",
+                    args,
+                    Arc::clone(&self.registry),
+                    Arc::clone(&self.elicitation_registry),
                 )
+                .await;
+                let is_success = resp.get("error").is_none()
+                    && resp
+                        .pointer("/result/isError")
+                        .and_then(|v| v.as_bool())
+                        != Some(true);
+                if is_success {
+                    let sessions_path = crate::lock::sessions_dir()
+                        .join(&self.team)
+                        .join("registry.json");
+                    if let Err(e) = Self::persist_registry(&self.registry, &sessions_path).await {
+                        tracing::warn!("failed to persist registry after agent_close: {e:#}");
+                    }
+                }
+                resp
             }
             _ => atm_tools::make_mcp_error_result(
                 id,
@@ -1479,12 +1647,18 @@ async fn forward_event(
 ///
 /// This is a free function rather than a method to avoid borrow conflicts with
 /// the `ProxyServer`'s mutable child handle.
+///
+/// Handles `elicitation/create` requests by bridging them upstream with a new
+/// proxy-assigned request ID, registering correlation in [`ElicitationRegistry`]
+/// (FR-18).
 async fn route_child_message(
     msg: Value,
     pending: &Arc<Mutex<PendingRequests>>,
     upstream_tx: &mpsc::Sender<Value>,
     dropped: &Arc<AtomicU64>,
     thread_to_agent: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    elicitation_registry: &Arc<Mutex<ElicitationRegistry>>,
+    elicitation_counter: &Arc<AtomicU64>,
 ) {
     let method = msg.get("method").and_then(|v| v.as_str());
 
@@ -1492,6 +1666,64 @@ async fn route_child_message(
         let mut event = msg;
         forward_event(&mut event, pending, thread_to_agent, upstream_tx, dropped).await;
         return;
+    }
+
+    // Elicitation/create — bridge upstream (FR-18).
+    if method == Some("elicitation/create") {
+        if let Some(downstream_id) = msg.get("id").cloned() {
+            let upstream_id_num = elicitation_counter.fetch_add(1, Ordering::Relaxed);
+            let upstream_request_id = Value::Number(upstream_id_num.into());
+
+            // Resolve the agent_id for this elicitation using thread_to_agent map
+            let agent_id = {
+                let thread_id_opt = msg
+                    .pointer("/params/threadId")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                if let Some(tid) = thread_id_opt {
+                    thread_to_agent
+                        .lock()
+                        .await
+                        .get(&tid)
+                        .cloned()
+                        .unwrap_or_else(|| "proxy:unknown".to_string())
+                } else {
+                    "proxy:unknown".to_string()
+                }
+            };
+
+            // Keep a per-request channel in the registry so close/timeout paths
+            // can reject pending elicitations.
+            let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<Value>();
+
+            // Register in the elicitation registry
+            elicitation_registry.lock().await.register(
+                agent_id.clone(),
+                downstream_id.clone(),
+                upstream_request_id.clone(),
+                response_tx,
+            );
+
+            // Build the upstream request: copy the original params and inject agent_id,
+            // then replace the id with the upstream_request_id.
+            let mut upstream_msg = msg.clone();
+            if let Some(id_field) = upstream_msg.get_mut("id") {
+                *id_field = upstream_request_id.clone();
+            }
+            if let Some(params) = upstream_msg.get_mut("params") {
+                if let Some(obj) = params.as_object_mut() {
+                    obj.insert(
+                        "agent_id".to_string(),
+                        Value::String(agent_id.clone()),
+                    );
+                }
+            }
+
+            // Forward to upstream
+            let _ = upstream_tx.send(upstream_msg).await;
+
+            return;
+        }
     }
 
     // Response — route to pending request

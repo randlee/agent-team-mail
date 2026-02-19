@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Status of a single agent session.
+/// Status of a single agent session (process-level lifecycle).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionStatus {
@@ -32,6 +32,29 @@ pub enum SessionStatus {
     Stale,
     /// Session has been explicitly closed.
     Closed,
+}
+
+/// Per-turn thread lifecycle state (FR-17).
+///
+/// Tracks whether a Codex thread is currently processing a turn (`Busy`),
+/// waiting for the next command (`Idle`), or has been permanently closed
+/// (`Closed`).  This is orthogonal to [`SessionStatus`], which tracks the
+/// process-level session lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadState {
+    /// A Codex turn is in progress.
+    Busy,
+    /// Turn complete, waiting for the next command.
+    Idle,
+    /// Thread removed from service — identity released.
+    Closed,
+}
+
+/// Default [`ThreadState`] used by serde when the field is absent in older
+/// snapshots.
+fn default_thread_state() -> ThreadState {
+    ThreadState::Busy
 }
 
 /// A single registered agent session.
@@ -59,6 +82,13 @@ pub struct SessionEntry {
     pub last_active: String,
     /// Current lifecycle status.
     pub status: SessionStatus,
+    /// Per-turn thread lifecycle state (FR-17).
+    ///
+    /// Defaults to [`ThreadState::Busy`] for new registrations (FR-17.2).
+    /// Uses a serde default so that older registry snapshots without this
+    /// field can be loaded without error.
+    #[serde(default = "default_thread_state")]
+    pub thread_state: ThreadState,
     /// Optional organizational label for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
@@ -216,6 +246,9 @@ impl SessionRegistry {
             started_at: now.clone(),
             last_active: now,
             status: SessionStatus::Active,
+            // New sessions start Busy (FR-17.2): the first codex call that
+            // triggers registration is already in progress.
+            thread_state: ThreadState::Busy,
             tag: None,
             agent_source: None,
         };
@@ -272,12 +305,14 @@ impl SessionRegistry {
     }
 
     /// Close a session, setting its status to [`SessionStatus::Closed`] and
-    /// releasing its identity for reuse.
+    /// its thread state to [`ThreadState::Closed`], releasing its identity for
+    /// reuse.
     ///
     /// Does nothing if the `agent_id` is not found.
     pub fn close(&mut self, agent_id: &str) {
         if let Some(entry) = self.sessions.get_mut(agent_id) {
             entry.status = SessionStatus::Closed;
+            entry.thread_state = ThreadState::Closed;
             self.identity_map.remove(&entry.identity.clone());
         }
     }
@@ -310,6 +345,8 @@ impl SessionRegistry {
         self.identity_map.remove(&entry.identity.clone());
         entry.identity = new_identity.clone();
         entry.status = SessionStatus::Active;
+        // Resuming starts a new turn, so thread is busy again (FR-17).
+        entry.thread_state = ThreadState::Busy;
         entry.last_active = now_iso8601();
         self.identity_map.insert(new_identity, agent_id.to_string());
         self.sessions.get(agent_id)
@@ -335,6 +372,22 @@ impl SessionRegistry {
         if let Some(entry) = self.sessions.get_mut(agent_id) {
             entry.cwd = cwd;
         }
+    }
+
+    /// Set the per-turn [`ThreadState`] for a session (FR-17).
+    ///
+    /// Does nothing if the `agent_id` is not found.
+    pub fn set_thread_state(&mut self, agent_id: &str, state: ThreadState) {
+        if let Some(entry) = self.sessions.get_mut(agent_id) {
+            entry.thread_state = state;
+        }
+    }
+
+    /// Return the current [`ThreadState`] for a session.
+    ///
+    /// Returns `None` if the `agent_id` is not found.
+    pub fn get_thread_state(&self, agent_id: &str) -> Option<ThreadState> {
+        self.sessions.get(agent_id).map(|e| e.thread_state.clone())
     }
 
     /// Return the `agent_id` currently bound to `identity` (active sessions only).
@@ -661,6 +714,7 @@ mod tests {
             started_at: "2026-01-01T00:00:00Z".to_string(),
             last_active: "2026-01-01T00:00:00Z".to_string(),
             status: SessionStatus::Stale,
+            thread_state: ThreadState::Idle,
             tag: None,
             agent_source: None,
         };
@@ -749,6 +803,7 @@ mod tests {
             started_at: "2026-01-01T00:00:00Z".to_string(),
             last_active: "2026-01-01T00:00:00Z".to_string(),
             status: SessionStatus::Active,
+            thread_state: ThreadState::Busy,
             tag: None,
             agent_source: None,
         };
@@ -778,6 +833,7 @@ mod tests {
             started_at: "2026-01-01T00:00:00Z".to_string(),
             last_active: "2026-01-01T00:00:00Z".to_string(),
             status: SessionStatus::Stale,
+            thread_state: ThreadState::Idle,
             tag: None,
             agent_source: None,
         };
@@ -793,6 +849,7 @@ mod tests {
             started_at: "2026-01-01T00:00:00Z".to_string(),
             last_active: "2026-01-01T00:00:00Z".to_string(),
             status: SessionStatus::Closed,
+            thread_state: ThreadState::Closed,
             tag: None,
             agent_source: None,
         };
@@ -825,6 +882,112 @@ mod tests {
         let loaded = r2.get(&e.agent_id).unwrap();
         assert_eq!(loaded.status, SessionStatus::Stale);
         assert_eq!(loaded.thread_id, Some("thread-rt-1".to_string()));
+    }
+
+    // ─── ThreadState / set_thread_state / get_thread_state ──────────────────
+
+    #[test]
+    fn new_session_has_busy_thread_state() {
+        let mut r = make_registry(10);
+        let entry = reg_entry(&mut r, "arch-ctm").unwrap();
+        assert_eq!(
+            r.get(&entry.agent_id).unwrap().thread_state,
+            ThreadState::Busy,
+            "newly registered sessions must start Busy (FR-17.2)"
+        );
+    }
+
+    #[test]
+    fn set_thread_state_updates_entry() {
+        let mut r = make_registry(10);
+        let entry = reg_entry(&mut r, "arch-ctm").unwrap();
+        r.set_thread_state(&entry.agent_id, ThreadState::Idle);
+        assert_eq!(
+            r.get_thread_state(&entry.agent_id),
+            Some(ThreadState::Idle)
+        );
+    }
+
+    #[test]
+    fn set_thread_state_nonexistent_is_noop() {
+        let mut r = make_registry(10);
+        // Should not panic
+        r.set_thread_state("codex:no-such-agent", ThreadState::Idle);
+    }
+
+    #[test]
+    fn get_thread_state_unknown_agent_returns_none() {
+        let r = make_registry(10);
+        assert!(r.get_thread_state("codex:ghost").is_none());
+    }
+
+    #[test]
+    fn close_sets_thread_state_to_closed() {
+        let mut r = make_registry(10);
+        let entry = reg_entry(&mut r, "arch-ctm").unwrap();
+        r.set_thread_state(&entry.agent_id, ThreadState::Idle);
+        r.close(&entry.agent_id);
+        assert_eq!(
+            r.get_thread_state(&entry.agent_id),
+            Some(ThreadState::Closed),
+            "close() must set thread_state to Closed"
+        );
+    }
+
+    #[test]
+    fn resume_stale_sets_thread_state_to_busy() {
+        let mut r = make_registry(10);
+        let entry = reg_entry(&mut r, "agent-a").unwrap();
+        let id = entry.agent_id.clone();
+        // Make idle, then stale
+        r.set_thread_state(&id, ThreadState::Idle);
+        r.mark_all_stale();
+        // Resume — should go back to Busy
+        let resumed = r.resume_stale(&id, "agent-a".to_string()).unwrap();
+        assert_eq!(
+            resumed.thread_state,
+            ThreadState::Busy,
+            "resume_stale() must set thread_state to Busy"
+        );
+    }
+
+    #[test]
+    fn thread_state_serialization_round_trip() {
+        // Verify that ThreadState serializes to lowercase strings matching serde attr
+        let busy_json = serde_json::to_string(&ThreadState::Busy).unwrap();
+        assert_eq!(busy_json, "\"busy\"");
+        let idle_json = serde_json::to_string(&ThreadState::Idle).unwrap();
+        assert_eq!(idle_json, "\"idle\"");
+        let closed_json = serde_json::to_string(&ThreadState::Closed).unwrap();
+        assert_eq!(closed_json, "\"closed\"");
+
+        // Round-trip
+        let state: ThreadState = serde_json::from_str("\"idle\"").unwrap();
+        assert_eq!(state, ThreadState::Idle);
+    }
+
+    #[test]
+    fn session_entry_thread_state_defaults_to_busy_when_deserializing_old_format() {
+        // Simulate an older registry snapshot JSON without thread_state field
+        let json = r#"{
+            "agent_id": "codex:old-session",
+            "identity": "legacy",
+            "team": "atm-dev",
+            "thread_id": null,
+            "cwd": "/tmp",
+            "repo_root": null,
+            "repo_name": null,
+            "branch": null,
+            "started_at": "2026-01-01T00:00:00Z",
+            "last_active": "2026-01-01T00:00:00Z",
+            "status": "active"
+        }"#;
+        let entry: SessionEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            entry.thread_state,
+            ThreadState::Busy,
+            "missing thread_state field must default to Busy via serde default"
+        );
     }
 
     // ─── epoch_secs_to_iso8601 ───────────────────────────────────────────────
