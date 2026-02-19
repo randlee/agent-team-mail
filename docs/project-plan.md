@@ -1784,7 +1784,37 @@ Parallel execution plan:
 
 ---
 
-## 12. Future Plugins
+## 12. Phase A: atm-agent-mcp (MCP Stdio Proxy for Codex)
+
+**Goal**: New `atm-agent-mcp` crate — an MCP stdio proxy that sits between Claude and a Codex
+`mcp-server` child process, injecting ATM messaging tools and forwarding `codex/event`
+notifications. Enables Claude to orchestrate Codex agents over the MCP protocol.
+
+**Integration branch**: `integrate/phase-A`
+
+### Phase A Sprint Summary
+
+| Sprint | Name | Status |
+|--------|------|--------|
+| A.1 | Crate scaffold + config | ✅ COMPLETE |
+| A.2 | MCP stdio proxy core | IN PROGRESS |
+| A.3 | Identity binding + session registry | PENDING |
+| A.4 | ATM tool execution (send/read/broadcast) | PENDING |
+| A.5 | Session lifecycle management | PENDING |
+| A.6 | Integration tests + hardening | PENDING |
+| A.7 | CLI polish + docs | PENDING |
+| A.8 | ARCH-CTM review + fixes | PENDING |
+
+### Phase A Design References
+
+- Requirements: `docs/atm-agent-mcp/`
+- Design: `docs/phase-10-codex-orchestration.md`
+- Spike reference: `spike/codex-mcp-pattern-copy`
+- New crate: `crates/atm-agent-mcp`
+
+---
+
+## 13. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
 
@@ -1796,7 +1826,7 @@ Additional plugins planned (each is a self-contained sprint series):
 
 ---
 
-## 13. Sprint Summary
+## 14. Sprint Summary
 
 | Phase | Sprint | Name | Status | PR |
 |-------|--------|------|--------|-----|
@@ -1864,7 +1894,7 @@ Additional plugins planned (each is a self-contained sprint series):
 
 ---
 
-## 12. Scrum Master Agent Prompt
+## 15. Scrum Master Agent Prompt
 
 The following prompt is used when spawning the scrum master agent for a sprint:
 

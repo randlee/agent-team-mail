@@ -1,16 +1,53 @@
-//! `serve` subcommand — MCP proxy server (stub).
+//! `serve` subcommand — start the MCP proxy server.
 //!
-//! Full implementation is planned for Sprint A.2+. This stub exists so the
-//! CLI structure and binary are buildable before the MCP protocol is wired up.
+//! Reads MCP JSON-RPC messages from stdin, proxies to a lazily spawned `codex
+//! mcp-server` child process, and writes responses to stdout. See [`crate::proxy`]
+//! for the core proxy logic and [`crate::framing`] for framing details.
 
 use crate::cli::ServeArgs;
+use crate::config::resolve_config;
+use crate::proxy::ProxyServer;
 
 /// Run the `serve` subcommand.
 ///
+/// Resolves configuration, applies CLI overrides, then enters the proxy loop
+/// which reads from stdin and writes to stdout until EOF.
+///
 /// # Errors
 ///
-/// Currently infallible. Returns `Ok(())` after printing a stub message.
-pub async fn run(_args: ServeArgs) -> anyhow::Result<()> {
-    println!("atm-agent-mcp serve: MCP proxy server not yet implemented (Sprint A.2+)");
-    Ok(())
+/// Returns an error if configuration resolution fails or the proxy loop
+/// encounters an unrecoverable I/O error.
+pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
+    // Resolve configuration from file/env/defaults
+    let resolved = resolve_config(None)?;
+    let mut config = resolved.agent_mcp;
+
+    // Apply CLI argument overrides
+    if let Some(ref identity) = args.identity {
+        config.identity = Some(identity.clone());
+    }
+    if let Some(ref model) = args.model {
+        config.model = Some(model.clone());
+    }
+    if args.fast {
+        if let Some(ref fast_model) = config.fast_model.clone() {
+            config.model = Some(fast_model.clone());
+        }
+    }
+    if let Some(ref sandbox) = args.sandbox {
+        config.sandbox = sandbox.clone();
+    }
+    if let Some(ref policy) = args.approval_policy {
+        config.approval_policy = policy.clone();
+    }
+    if let Some(timeout_secs) = args.timeout {
+        config.request_timeout_secs = timeout_secs;
+    }
+
+    // Set up upstream I/O (stdin for reading, stdout for writing)
+    let upstream_in = tokio::io::stdin();
+    let upstream_out = tokio::io::stdout();
+
+    let mut proxy = ProxyServer::new(config);
+    proxy.run(upstream_in, upstream_out).await
 }
