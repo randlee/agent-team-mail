@@ -18,8 +18,8 @@
 
 use std::collections::HashMap;
 use std::process::ExitStatus;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -58,6 +58,9 @@ pub const ERR_INTERNAL: i64 = -32603;
 /// JSON-RPC error code: identity already bound to an active session in another
 /// process.
 pub const ERR_IDENTITY_CONFLICT: i64 = -32001;
+
+/// JSON-RPC error code: session not found for requested `agent_id`.
+pub const ERR_SESSION_NOT_FOUND: i64 = -32002;
 
 /// JSON-RPC error code: maximum concurrent session limit reached.
 pub const ERR_MAX_SESSIONS_EXCEEDED: i64 = -32004;
@@ -117,6 +120,8 @@ struct PendingRequests {
     map: HashMap<Value, oneshot::Sender<Value>>,
     /// Request IDs that correspond to `tools/list` requests and need interception.
     tools_list_ids: std::collections::HashSet<Value>,
+    /// Request IDs for new `codex` session creation mapped to the preallocated agent_id.
+    codex_create_ids: HashMap<Value, String>,
 }
 
 impl PendingRequests {
@@ -124,6 +129,7 @@ impl PendingRequests {
         Self {
             map: HashMap::new(),
             tools_list_ids: std::collections::HashSet::new(),
+            codex_create_ids: HashMap::new(),
         }
     }
 
@@ -142,6 +148,18 @@ impl PendingRequests {
     fn complete(&mut self, id: &Value) -> Option<oneshot::Sender<Value>> {
         self.tools_list_ids.remove(id);
         self.map.remove(id)
+    }
+
+    fn mark_codex_create(&mut self, id: Value, agent_id: String) {
+        self.codex_create_ids.insert(id, agent_id);
+    }
+
+    fn take_codex_create(&mut self, id: &Value) -> Option<String> {
+        self.codex_create_ids.remove(id)
+    }
+
+    fn peek_codex_create(&self, id: &Value) -> Option<String> {
+        self.codex_create_ids.get(id).cloned()
     }
 }
 
@@ -185,7 +203,7 @@ impl ProxyServer {
     /// prior active sessions as stale on proxy startup.
     fn load_stale_from_disk(mut registry: SessionRegistry, team: &str) -> SessionRegistry {
         use crate::lock::sessions_dir;
-        use crate::session::{SessionStatus};
+        use crate::session::SessionStatus;
 
         let registry_path = sessions_dir().join(team).join("registry.json");
         let Ok(contents) = std::fs::read_to_string(&registry_path) else {
@@ -199,10 +217,7 @@ impl ProxyServer {
         };
 
         for session in sessions {
-            let status_str = session
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let status_str = session.get("status").and_then(|v| v.as_str()).unwrap_or("");
             if status_str != "active" {
                 continue;
             }
@@ -276,11 +291,7 @@ impl ProxyServer {
     ///
     /// Returns an error on unrecoverable I/O failures. Transient errors (child crash,
     /// timeout) are reported as JSON-RPC error responses to the upstream client.
-    pub async fn run<R, W>(
-        &mut self,
-        upstream_in: R,
-        mut upstream_out: W,
-    ) -> anyhow::Result<()>
+    pub async fn run<R, W>(&mut self, upstream_in: R, mut upstream_out: W) -> anyhow::Result<()>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
@@ -310,6 +321,14 @@ impl ProxyServer {
                         Ok(v) => v,
                         Err(e) => {
                             tracing::warn!("failed to parse upstream JSON: {e}");
+                            let _ = upstream_tx
+                                .send(make_error_response(
+                                    Value::Null,
+                                    -32700,
+                                    "Parse error",
+                                    json!({"error_source": "proxy"}),
+                                ))
+                                .await;
                             continue;
                         }
                     };
@@ -499,7 +518,7 @@ impl ProxyServer {
                     let _ = upstream_tx
                         .send(make_error_response(
                             id,
-                            ERR_IDENTITY_CONFLICT,
+                            ERR_SESSION_NOT_FOUND,
                             "session not found for agent_id",
                             json!({"error_source": "proxy", "agent_id": resume_agent_id}),
                         ))
@@ -576,59 +595,57 @@ impl ProxyServer {
                 // Skip if child is already running: the lock/registry entry from the
                 // live session is intentional and should not be treated as a conflict.
                 if self.child.is_none() {
-                let explicit_identity = params
-                    .get("identity")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let identity = explicit_identity
-                    .or_else(|| self.config.identity.clone())
-                    .unwrap_or_else(|| "codex".to_string());
+                    let explicit_identity = params
+                        .get("identity")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let identity = explicit_identity
+                        .or_else(|| self.config.identity.clone())
+                        .unwrap_or_else(|| "codex".to_string());
 
-                // Cross-process lock check (FR-20.1)
-                if let Some((pid, conflicting_agent_id)) =
-                    check_lock(&self.team, &identity).await
-                {
-                    let _ = upstream_tx
-                        .send(make_error_response(
-                            id,
-                            ERR_IDENTITY_CONFLICT,
-                            &format!(
-                                "identity '{identity}' already locked by PID {pid} \
+                    // Cross-process lock check (FR-20.1)
+                    if let Some((pid, conflicting_agent_id)) =
+                        check_lock(&self.team, &identity).await
+                    {
+                        let _ = upstream_tx
+                            .send(make_error_response(
+                                id,
+                                ERR_IDENTITY_CONFLICT,
+                                &format!(
+                                    "identity '{identity}' already locked by PID {pid} \
                                  (agent_id: {conflicting_agent_id})"
-                            ),
-                            json!({
-                                "error_source": "proxy",
-                                "identity": identity,
-                                "conflicting_agent_id": conflicting_agent_id,
-                                "pid": pid,
-                            }),
-                        ))
-                        .await;
-                    return;
-                }
+                                ),
+                                json!({
+                                    "error_source": "proxy",
+                                    "identity": identity,
+                                    "conflicting_agent_id": conflicting_agent_id,
+                                    "pid": pid,
+                                }),
+                            ))
+                            .await;
+                        return;
+                    }
 
-                // In-memory registry conflict check
-                let conflict_agent_id = {
-                    let reg = self.registry.lock().await;
-                    reg.find_by_identity(&identity).map(|s| s.to_string())
-                };
-                if let Some(conflicting_agent_id) = conflict_agent_id {
-                    let _ = upstream_tx
-                        .send(make_error_response(
-                            id,
-                            ERR_IDENTITY_CONFLICT,
-                            &format!(
-                                "identity '{identity}' already bound to active session"
-                            ),
-                            json!({
-                                "error_source": "proxy",
-                                "identity": identity,
-                                "conflicting_agent_id": conflicting_agent_id,
-                            }),
-                        ))
-                        .await;
-                    return;
-                }
+                    // In-memory registry conflict check
+                    let conflict_agent_id = {
+                        let reg = self.registry.lock().await;
+                        reg.find_by_identity(&identity).map(|s| s.to_string())
+                    };
+                    if let Some(conflicting_agent_id) = conflict_agent_id {
+                        let _ = upstream_tx
+                            .send(make_error_response(
+                                id,
+                                ERR_IDENTITY_CONFLICT,
+                                &format!("identity '{identity}' already bound to active session"),
+                                json!({
+                                    "error_source": "proxy",
+                                    "identity": identity,
+                                    "conflicting_agent_id": conflicting_agent_id,
+                                }),
+                            ))
+                            .await;
+                        return;
+                    }
                 } // end if self.child.is_none() (pre-flight check)
             }
         }
@@ -684,18 +701,18 @@ impl ProxyServer {
         // prepare_* methods take &mut self, so they must be called before we
         // take any reference to self.child.
         // effective_tool_name may have been rewritten to "codex-reply" for resume flows.
-        let msg_to_forward = if effective_tool_name == "codex" {
-            match self
-                .prepare_codex_message(&id, msg, upstream_tx)
-                .await
-            {
+        let (msg_to_forward, expected_agent_id) = if effective_tool_name == "codex" {
+            match self.prepare_codex_message(&id, msg, upstream_tx).await {
                 PrepareResult::Error => return, // error already sent
-                PrepareResult::Ok(modified) => modified,
+                PrepareResult::Ok {
+                    modified,
+                    expected_agent_id,
+                } => (modified, expected_agent_id),
             }
         } else if effective_tool_name == "codex-reply" {
-            self.prepare_codex_reply_message(msg).await
+            (self.prepare_codex_reply_message(msg).await, None)
         } else {
-            msg
+            (msg, None)
         };
 
         // Now borrow the handle for I/O (after all &mut self calls are done)
@@ -730,51 +747,43 @@ impl ProxyServer {
 
         // Register pending request with timeout
         let (tx, rx) = oneshot::channel();
-        pending.lock().await.insert(id.clone(), tx);
+        {
+            let mut p = pending.lock().await;
+            p.insert(id.clone(), tx);
+            if let Some(aid) = expected_agent_id.clone() {
+                p.mark_codex_create(id.clone(), aid);
+            }
+        }
 
         let timeout_secs = self.config.request_timeout_secs;
         let upstream_tx_clone = upstream_tx.clone();
         let req_id = id;
         let child_stdin = Arc::clone(&handle.stdin);
 
-        // For codex (new session) calls, capture threadId from the response
-        let registry_clone = if effective_tool_name == "codex" {
-            Some(Arc::clone(&self.registry))
-        } else {
-            None
-        };
         let thread_to_agent_task = Arc::clone(&self.thread_to_agent);
+        let pending_for_thread_map = Arc::clone(pending);
+        let registry_for_thread_map = Arc::clone(&self.registry);
 
         tokio::spawn(async move {
             match timeout(Duration::from_secs(timeout_secs), rx).await {
                 Ok(Ok(resp)) => {
-                    // If this was a codex call, try to extract threadId and
-                    // update both the registry and the thread→agent map so
-                    // forward_event can attribute events to the correct session.
-                    if let Some(reg) = registry_clone {
-                        if let Some(thread_id) = resp
-                            .pointer("/result/structuredContent/threadId")
-                            .and_then(|v| v.as_str())
+                    if let Some(thread_id) = resp
+                        .pointer("/result/structuredContent/threadId")
+                        .and_then(|v| v.as_str())
+                    {
+                        if let Some(agent_id) = pending_for_thread_map
+                            .lock()
+                            .await
+                            .take_codex_create(&req_id)
                         {
-                            // Find the first unthreaded active session and update it.
-                            // (Sprint A.5 will correlate by request ID more precisely)
-                            let mut r = reg.lock().await;
-                            let first_unthreaded = r
-                                .list_all()
-                                .iter()
-                                .find(|e| {
-                                    e.status == crate::session::SessionStatus::Active
-                                        && e.thread_id.is_none()
-                                })
-                                .map(|e| e.agent_id.clone());
-                            if let Some(ref aid) = first_unthreaded {
-                                r.set_thread_id(aid, thread_id.to_string());
-                                // Mirror into thread_to_agent map for event attribution
-                                thread_to_agent_task
-                                    .lock()
-                                    .await
-                                    .insert(thread_id.to_string(), aid.clone());
-                            }
+                            registry_for_thread_map
+                                .lock()
+                                .await
+                                .set_thread_id(&agent_id, thread_id.to_string());
+                            thread_to_agent_task
+                                .lock()
+                                .await
+                                .insert(thread_id.to_string(), agent_id);
                         }
                     }
                     let _ = upstream_tx_clone.send(resp).await;
@@ -782,9 +791,17 @@ impl ProxyServer {
                 Ok(Err(_)) => {
                     // Sender dropped (child died)
                     tracing::debug!("pending request canceled (child died)");
+                    let _ = pending_for_thread_map
+                        .lock()
+                        .await
+                        .take_codex_create(&req_id);
                 }
                 Err(_elapsed) => {
                     tracing::warn!("request timed out after {timeout_secs}s");
+                    let _ = pending_for_thread_map
+                        .lock()
+                        .await
+                        .take_codex_create(&req_id);
                     let cancel = json!({
                         "jsonrpc": "2.0",
                         "method": "notifications/cancelled",
@@ -830,10 +847,7 @@ impl ProxyServer {
             .get("identity")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let caller_cwd = params
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let caller_cwd = params.get("cwd").and_then(|v| v.as_str()).map(String::from);
 
         // Resolve identity: explicit → config.identity → "codex"
         let identity = explicit_identity
@@ -952,7 +966,10 @@ impl ProxyServer {
             }
         }
 
-        PrepareResult::Ok(modified_msg)
+        PrepareResult::Ok {
+            modified: modified_msg,
+            expected_agent_id: Some(entry.agent_id),
+        }
     }
 
     /// Prepare a `codex-reply` message: refresh git context and inject
@@ -966,20 +983,45 @@ impl ProxyServer {
             .cloned()
             .unwrap_or_else(|| json!({}));
 
-        let agent_id_param = params.get("agent_id").and_then(|v| v.as_str()).map(String::from);
+        let agent_id_param = params
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let thread_id_param = params
+            .get("threadId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let explicit_cwd = params.get("cwd").and_then(|v| v.as_str()).map(String::from);
 
-        // Look up session for cwd and identity
-        let (identity_opt, stored_cwd) = {
+        // Look up session for cwd/identity. Prefer agent_id, then threadId.
+        let (resolved_agent_id, identity_opt, stored_cwd) = {
             let reg = self.registry.lock().await;
             if let Some(ref aid) = agent_id_param {
                 if let Some(entry) = reg.get(aid) {
-                    (Some(entry.identity.clone()), entry.cwd.clone())
+                    (
+                        Some(aid.clone()),
+                        Some(entry.identity.clone()),
+                        entry.cwd.clone(),
+                    )
                 } else {
-                    (None, ".".to_string())
+                    (None, None, ".".to_string())
+                }
+            } else if let Some(ref tid) = thread_id_param {
+                if let Some(entry) = reg
+                    .list_all()
+                    .iter()
+                    .find(|e| e.thread_id.as_deref() == Some(tid.as_str()))
+                {
+                    (
+                        Some(entry.agent_id.clone()),
+                        Some(entry.identity.clone()),
+                        entry.cwd.clone(),
+                    )
+                } else {
+                    (None, None, ".".to_string())
                 }
             } else {
-                (None, ".".to_string())
+                (None, None, ".".to_string())
             }
         };
 
@@ -990,7 +1032,7 @@ impl ProxyServer {
         let ctx = detect_context(effective_cwd).await;
 
         // Update session with fresh context (and explicit cwd if supplied)
-        if let Some(ref aid) = agent_id_param {
+        if let Some(ref aid) = resolved_agent_id {
             let mut reg = self.registry.lock().await;
             if let Some(ref new_cwd) = explicit_cwd {
                 reg.set_cwd(aid, new_cwd.clone());
@@ -1001,6 +1043,14 @@ impl ProxyServer {
                 ctx.repo_name.clone(),
                 ctx.branch.clone(),
             );
+        }
+
+        // Keep event attribution accurate during codex-reply-only flows.
+        if let (Some(aid), Some(tid)) = (&resolved_agent_id, &thread_id_param) {
+            self.thread_to_agent
+                .lock()
+                .await
+                .insert(tid.clone(), aid.clone());
         }
 
         let identity_str = identity_opt
@@ -1140,7 +1190,14 @@ impl ProxyServer {
                 if method == Some("codex/event") {
                     // Add agent_id to event params and forward upstream
                     let mut event = msg;
-                    forward_event(&mut event, &thread_to_agent_clone, &upstream_tx_clone, &dropped_clone).await;
+                    forward_event(
+                        &mut event,
+                        &pending_clone,
+                        &thread_to_agent_clone,
+                        &upstream_tx_clone,
+                        &dropped_clone,
+                    )
+                    .await;
                     continue;
                 }
 
@@ -1178,21 +1235,38 @@ impl ProxyServer {
         let pending_crash = Arc::clone(pending);
         let process_clone = Arc::clone(&process);
         tokio::spawn(async move {
-            let child_opt = process_clone.lock().await.take();
-            if let Some(mut child) = child_opt {
-                match child.wait().await {
-                    Ok(s) => {
-                        tracing::info!("child process exited: {s}");
-                        *exit_clone.lock().await = Some(s);
-                    }
-                    Err(e) => {
-                        tracing::error!("error waiting for child: {e}");
+            loop {
+                let mut done = false;
+                {
+                    let mut child_guard = process_clone.lock().await;
+                    match child_guard.as_mut() {
+                        Some(child) => match child.try_wait() {
+                            Ok(Some(s)) => {
+                                tracing::info!("child process exited: {s}");
+                                *exit_clone.lock().await = Some(s);
+                                *child_guard = None;
+                                done = true;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::error!("error waiting for child: {e}");
+                                done = true;
+                            }
+                        },
+                        None => {
+                            done = true;
+                        }
                     }
                 }
+                if done {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
             // Cancel all pending requests
             let mut guard = pending_crash.lock().await;
             guard.map.clear();
+            guard.codex_create_ids.clear();
         });
 
         self.child = Some(ChildHandle {
@@ -1209,7 +1283,10 @@ impl ProxyServer {
 /// Outcome of [`ProxyServer::prepare_codex_message`].
 enum PrepareResult {
     /// Validation succeeded; the modified message is ready to send.
-    Ok(Value),
+    Ok {
+        modified: Value,
+        expected_agent_id: Option<String>,
+    },
     /// Validation failed; an error response has already been sent upstream.
     Error,
 }
@@ -1223,6 +1300,7 @@ enum PrepareResult {
 /// and the `dropped_events` counter is incremented.
 async fn forward_event(
     event: &mut Value,
+    pending: &Arc<Mutex<PendingRequests>>,
     thread_to_agent: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
     upstream_tx: &mpsc::Sender<Value>,
     dropped_events: &Arc<AtomicU64>,
@@ -1230,14 +1308,26 @@ async fn forward_event(
     // Resolve agent_id from the event's threadId if available
     let agent_id = {
         let thread_id_opt = event
-            .pointer("/params/threadId")
+            .pointer("/params/_meta/threadId")
             .and_then(|v| v.as_str())
+            .or_else(|| event.pointer("/params/threadId").and_then(|v| v.as_str()))
             .map(String::from);
         if let Some(tid) = thread_id_opt {
             let map = thread_to_agent.lock().await;
-            map.get(&tid).cloned().unwrap_or_else(|| "proxy:unknown".to_string())
+            map.get(&tid)
+                .cloned()
+                .unwrap_or_else(|| "proxy:unknown".to_string())
         } else {
-            "proxy:unknown".to_string()
+            let req_id_opt = event.pointer("/params/_meta/requestId");
+            if let Some(req_id) = req_id_opt {
+                pending
+                    .lock()
+                    .await
+                    .peek_codex_create(req_id)
+                    .unwrap_or_else(|| "proxy:unknown".to_string())
+            } else {
+                "proxy:unknown".to_string()
+            }
         }
     };
 
@@ -1269,7 +1359,7 @@ async fn route_child_message(
 
     if method == Some("codex/event") {
         let mut event = msg;
-        forward_event(&mut event, thread_to_agent, upstream_tx, dropped).await;
+        forward_event(&mut event, pending, thread_to_agent, upstream_tx, dropped).await;
         return;
     }
 
@@ -1305,9 +1395,10 @@ pub fn intercept_tools_list(response: &mut Value) {
     {
         // Replace the child's codex tool entry with the extended proxy schema (FR-16.4)
         let extended_codex = crate::tools::codex_tool_schema();
-        if let Some(codex_entry) = tools_array.iter_mut().find(|t| {
-            t.get("name").and_then(|n| n.as_str()) == Some("codex")
-        }) {
+        if let Some(codex_entry) = tools_array
+            .iter_mut()
+            .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("codex"))
+        {
             *codex_entry = extended_codex;
         }
 
@@ -1430,6 +1521,7 @@ mod tests {
     async fn test_forward_event_injects_agent_id_unknown_when_no_thread_id() {
         let (tx, mut rx) = mpsc::channel::<Value>(8);
         let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let mut event = json!({
@@ -1438,7 +1530,7 @@ mod tests {
             "params": {"type": "task_started"}
         });
         // No threadId in the event → falls back to "proxy:unknown"
-        forward_event(&mut event, &thread_to_agent, &tx, &dropped).await;
+        forward_event(&mut event, &pending, &thread_to_agent, &tx, &dropped).await;
         let received = rx.try_recv().expect("event should be forwarded");
         assert_eq!(received["params"]["agent_id"], "proxy:unknown");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
@@ -1448,6 +1540,7 @@ mod tests {
     async fn test_forward_event_resolves_agent_id_from_thread_id() {
         let (tx, mut rx) = mpsc::channel::<Value>(8);
         let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let mut map = HashMap::new();
         map.insert("thread-123".to_string(), "codex:abc-agent".to_string());
         let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
@@ -1457,7 +1550,7 @@ mod tests {
             "method": "codex/event",
             "params": {"type": "task_started", "threadId": "thread-123"}
         });
-        forward_event(&mut event, &thread_to_agent, &tx, &dropped).await;
+        forward_event(&mut event, &pending, &thread_to_agent, &tx, &dropped).await;
         let received = rx.try_recv().expect("event should be forwarded");
         assert_eq!(received["params"]["agent_id"], "codex:abc-agent");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
@@ -1467,6 +1560,7 @@ mod tests {
     async fn test_forward_event_drops_on_full_channel() {
         let (tx, _rx) = mpsc::channel::<Value>(1);
         let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
@@ -1479,7 +1573,7 @@ mod tests {
             "method": "codex/event",
             "params": {"type": "task_started"}
         });
-        forward_event(&mut event, &thread_to_agent, &tx, &dropped).await;
+        forward_event(&mut event, &pending, &thread_to_agent, &tx, &dropped).await;
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 
@@ -1499,6 +1593,7 @@ mod tests {
     #[test]
     fn test_error_code_constants() {
         assert_eq!(ERR_IDENTITY_CONFLICT, -32001);
+        assert_eq!(ERR_SESSION_NOT_FOUND, -32002);
         assert_eq!(ERR_MAX_SESSIONS_EXCEEDED, -32004);
         assert_eq!(ERR_CHILD_DEAD, -32005);
         assert_eq!(ERR_TIMEOUT, -32006);
@@ -1545,7 +1640,9 @@ mod tests {
             }
         });
 
-        proxy.handle_tools_call(msg, &pending, &upstream_tx, &dropped).await;
+        proxy
+            .handle_tools_call(msg, &pending, &upstream_tx, &dropped)
+            .await;
         let resp = upstream_rx.try_recv().expect("should get error response");
         unsafe { std::env::remove_var("ATM_HOME") };
 
@@ -1579,7 +1676,9 @@ mod tests {
             }
         });
 
-        proxy.handle_tools_call(msg, &pending, &upstream_tx, &dropped).await;
+        proxy
+            .handle_tools_call(msg, &pending, &upstream_tx, &dropped)
+            .await;
         let resp = upstream_rx.try_recv().expect("should get error response");
         unsafe { std::env::remove_var("ATM_HOME") };
 
@@ -1699,14 +1798,16 @@ mod tests {
             }
         });
 
-        proxy.handle_tools_call(msg, &pending, &upstream_tx, &dropped).await;
+        proxy
+            .handle_tools_call(msg, &pending, &upstream_tx, &dropped)
+            .await;
         let resp = upstream_rx.try_recv().expect("should get error response");
         unsafe { std::env::remove_var("ATM_HOME") };
 
         assert_eq!(
             resp.pointer("/error/code").and_then(|v| v.as_i64()),
-            Some(ERR_IDENTITY_CONFLICT),
-            "unknown agent_id should return ERR_IDENTITY_CONFLICT"
+            Some(ERR_SESSION_NOT_FOUND),
+            "unknown agent_id should return ERR_SESSION_NOT_FOUND"
         );
         let msg_str = resp
             .pointer("/error/message")
@@ -1756,7 +1857,9 @@ mod tests {
             }
         });
 
-        proxy.handle_tools_call(msg, &pending, &upstream_tx, &dropped).await;
+        proxy
+            .handle_tools_call(msg, &pending, &upstream_tx, &dropped)
+            .await;
         let resp = upstream_rx.try_recv().expect("should get error response");
 
         assert_eq!(
@@ -1816,18 +1919,21 @@ mod tests {
             "params.name must be rewritten to codex-reply so child treats this as a resume"
         );
         assert_eq!(
-            msg.pointer("/params/arguments/threadId").and_then(|v| v.as_str()),
+            msg.pointer("/params/arguments/threadId")
+                .and_then(|v| v.as_str()),
             Some(known_thread_id),
             "threadId must be injected into params.arguments for Codex to resume the conversation"
         );
         // Existing fields must be preserved
         assert_eq!(
-            msg.pointer("/params/arguments/agent_id").and_then(|v| v.as_str()),
+            msg.pointer("/params/arguments/agent_id")
+                .and_then(|v| v.as_str()),
             Some("some-agent-id-abc"),
             "agent_id must remain in arguments after rewrite"
         );
         assert_eq!(
-            msg.pointer("/params/arguments/prompt").and_then(|v| v.as_str()),
+            msg.pointer("/params/arguments/prompt")
+                .and_then(|v| v.as_str()),
             Some("continue the work"),
             "prompt must remain in arguments after rewrite"
         );
@@ -1853,9 +1959,10 @@ mod tests {
         assert_eq!(tools.len(), 9);
 
         // The codex entry should now have the extended schema with identity property
-        let codex_tool = tools.iter().find(|t| {
-            t.get("name").and_then(|n| n.as_str()) == Some("codex")
-        }).expect("codex tool must be present");
+        let codex_tool = tools
+            .iter()
+            .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("codex"))
+            .expect("codex tool must be present");
         let has_identity = codex_tool
             .pointer("/inputSchema/properties/identity")
             .is_some();
@@ -1912,7 +2019,9 @@ mod tests {
             }
         });
 
-        proxy.handle_tools_call(msg, &pending, &upstream_tx, &dropped).await;
+        proxy
+            .handle_tools_call(msg, &pending, &upstream_tx, &dropped)
+            .await;
         unsafe { std::env::remove_var("ATM_HOME") };
 
         let resp = upstream_rx.try_recv().expect("should get error response");

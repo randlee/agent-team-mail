@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
-**Version**: 0.2
-**Date**: 2026-02-13
-**Status**: Phase 6 Complete — Phase 7 Next
+**Version**: 0.3
+**Date**: 2026-02-19
+**Status**: Phase A (atm-agent-mcp) IN PROGRESS — 3/8 sprints merged
 
 ---
 
@@ -1786,29 +1786,54 @@ Parallel execution plan:
 
 ## 12. Phase A: atm-agent-mcp (MCP Stdio Proxy for Codex)
 
-**Goal**: New `atm-agent-mcp` crate — an MCP stdio proxy that sits between Claude and a Codex
-`mcp-server` child process, injecting ATM messaging tools and forwarding `codex/event`
-notifications. Enables Claude to orchestrate Codex agents over the MCP protocol.
+**Status**: IN PROGRESS (3/8 sprints merged)
+**Goal**: New `atm-agent-mcp` crate — a thin MCP proxy that wraps a single `codex mcp-server` child
+process, managing multiple concurrent Codex sessions with per-session identity, team context,
+ATM communication tools, and lifecycle management. Enables Claude to orchestrate Codex agents
+over the MCP protocol with native ATM messaging integration.
 
 **Integration branch**: `integrate/phase-A`
+**Crate**: `crates/atm-agent-mcp` (binary: `atm-agent-mcp`)
+**Requirements**: `docs/atm-agent-mcp/requirements.md` (20 FRs, 6 NFRs, 70+ acceptance tests)
+**Design**: `docs/atm-agent-mcp/codex-mcp-crate-design.md`
 
 ### Phase A Sprint Summary
 
-| Sprint | Name | Status |
-|--------|------|--------|
-| A.1 | Crate scaffold + config | ✅ COMPLETE |
-| A.2 | MCP stdio proxy core | IN PROGRESS |
-| A.3 | Identity binding + session registry | PENDING |
-| A.4 | ATM tool execution (send/read/broadcast) | PENDING |
-| A.5 | Session lifecycle management | PENDING |
-| A.6 | Integration tests + hardening | PENDING |
-| A.7 | CLI polish + docs | PENDING |
-| A.8 | ARCH-CTM review + fixes | PENDING |
+Sprints are sequential (each depends on the previous). Scope aligned with `requirements.md` Section 8.
+
+| Sprint | Name | FR Coverage | Status | PR |
+|--------|------|-------------|--------|-----|
+| A.1 | Crate scaffold + config | FR-12, FR-13 | ✅ MERGED | [#100](https://github.com/randlee/agent-team-mail/pull/100) |
+| A.2 | MCP stdio proxy core | FR-1, FR-11, FR-14, FR-15, FR-19 | ✅ MERGED | [#101](https://github.com/randlee/agent-team-mail/pull/101) |
+| A.3 | Identity binding + context injection | FR-2, FR-3, FR-16, FR-20.1 | ✅ MERGED | [#102](https://github.com/randlee/agent-team-mail/pull/102) |
+| A.4 | ATM communication tools | FR-4, FR-20.4–20.5 | PENDING | — |
+| A.5 | Session registry + persistence | FR-5, FR-10, FR-20.2–20.3 | PENDING | — |
+| A.6 | Lifecycle state machine + agent_close + approval bridging | FR-17, FR-18 | PENDING | — |
+| A.7 | Auto mail injection + turn serialization | FR-8 | PENDING | — |
+| A.8 | Shutdown + resume + audit | FR-6, FR-7, FR-9 | PENDING | — |
+
+### Phase A Sprint Details
+
+**A.1 — Crate scaffold + config** (PR #100): New workspace crate with CLI skeleton (`serve`, `config`, `sessions`, `summary`), `AgentMcpConfig` struct with full config resolution chain (CLI → env → .atm.toml → defaults), role preset support, env var mapping (`ATM_AGENT_MCP_*`), high-level CLI flags (`--fast`, `--subagents`, `--readonly`/`--explore`).
+
+**A.2 — MCP stdio proxy core** (PR #101): Lazy child process spawn, JSON-RPC pass-through with dual framing (Content-Length + newline-delimited), `tools/list` interception to inject synthetic ATM tool definitions, child crash detection with exit code reporting, configurable request timeout (default 300s), `codex/event` notification forwarding with `agent_id` metadata, mock `echo-mcp-server` test fixture.
+
+**A.3 — Identity binding + context injection** (PR #102): Per-session identity assignment (`codex` calls), identity→agent_id namespace management, cross-process identity lock files with PID liveness detection, `developer-instructions` injection with per-turn context refresh (repo_root, repo_name, branch, cwd), session initialization modes (agent_file, inline prompt, resume), error codes -32001/-32004/-32007/-32008. 1049 workspace tests.
+
+**A.4 — ATM communication tools**: Implement `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` as MCP tools via atm-core. Thread-bound identity enforcement (anti-spoofing). Mail envelope wrapping for injection (FR-8.4–8.5). `max_messages` and `max_message_length` truncation.
+
+**A.5 — Session registry + persistence**: In-memory registry with atomic disk persistence at `~/.config/atm/agent-sessions/<team>/registry.json`. agent_id→backend_id mapping, per-session cwd tracking, stale-session detection on startup, `max_concurrent_threads` enforcement, per-instance independent registry. `agent_sessions` and `agent_status` MCP tools.
+
+**A.6 — Lifecycle state machine + agent_close + approval bridging**: Thread states (busy/idle/closed), `agent_close` MCP tool with summary timeout, resume after close, identity replacement after close, idempotent close, close/cancel/queue precedence. `elicitation/create` request bridging with correlation and timeout.
+
+**A.7 — Auto mail injection + turn serialization**: Post-turn mail check, idle mail polling (configurable interval), deterministic identity routing, single-flight rule per thread, FIFO queue with priority dispatch (close > cancel > Claude > auto-mail), delivery ack boundary, configurable `auto_mail` toggle.
+
+**A.8 — Shutdown + resume + audit**: Graceful shutdown with bounded summary requests per thread, emergency snapshot on timeout, `--resume` flag with summary prepend, fallback for missing summaries, audit log as append-only JSONL, parent disconnect (stdio EOF) as SIGTERM equivalent.
 
 ### Phase A Design References
 
-- Requirements: `docs/atm-agent-mcp/`
-- Design: `docs/phase-10-codex-orchestration.md`
+- Requirements: [`docs/atm-agent-mcp/requirements.md`](./docs/atm-agent-mcp/requirements.md)
+- Design: [`docs/atm-agent-mcp/codex-mcp-crate-design.md`](./docs/atm-agent-mcp/codex-mcp-crate-design.md)
 - Spike reference: `spike/codex-mcp-pattern-copy`
 - New crate: `crates/atm-agent-mcp`
 
@@ -1867,9 +1892,21 @@ Additional plugins planned (each is a self-contained sprint series):
 | **8** | 8.5.1 | Phase 8 Arch Review Fixes | ✅ | [#60](https://github.com/randlee/agent-team-mail/pull/60) |
 | **8** | 8.6 | Bridge Hardening + Blocking Read | ✅ | [#61](https://github.com/randlee/agent-team-mail/pull/61) |
 
-**Completed**: 43 sprints + 1 design reconciliation across 9 phases (CI green)
-**Current version**: v0.9.0
-**Next**: Future plugins (Phase 10+)
+| **10** | 10.1 | Agent State Machine | ✅ | [#85](https://github.com/randlee/agent-team-mail/pull/85) |
+| **10** | 10.2 | Nudge Engine | ✅ | [#86](https://github.com/randlee/agent-team-mail/pull/86) |
+| **10** | 10.3 | Unix Socket IPC | ✅ | [#87](https://github.com/randlee/agent-team-mail/pull/87) |
+| **10** | 10.4 | Pub/Sub Events | ✅ | [#88](https://github.com/randlee/agent-team-mail/pull/88) |
+| **10** | 10.5 | Output Tailing | ✅ | [#89](https://github.com/randlee/agent-team-mail/pull/89) |
+| **10** | 10.6 | Agent Launcher | ✅ | [#90](https://github.com/randlee/agent-team-mail/pull/90) |
+| **10** | 10.7 | Identity Aliases + Integration | ✅ | [#91](https://github.com/randlee/agent-team-mail/pull/91) |
+| **10** | 10.8 | CI Monitor Agent | ✅ | [#92](https://github.com/randlee/agent-team-mail/pull/92) |
+| **A** | A.1 | Crate scaffold + config | ✅ | [#100](https://github.com/randlee/agent-team-mail/pull/100) |
+| **A** | A.2 | MCP stdio proxy core | ✅ | [#101](https://github.com/randlee/agent-team-mail/pull/101) |
+| **A** | A.3 | Identity binding + context injection | ✅ | [#102](https://github.com/randlee/agent-team-mail/pull/102) |
+
+**Completed**: 54 sprints across 11 phases (CI green)
+**Current version**: v0.10.0
+**Next**: Phase A sprints A.4–A.8, then integrate/phase-A → develop
 
 **Sprint PRs (Phase 9)**:
 | Sprint | PR | Description |
@@ -1891,6 +1928,8 @@ Additional plugins planned (each is a self-contained sprint series):
 | Phase 7 | [#50](https://github.com/randlee/agent-team-mail/pull/50), [#51](https://github.com/randlee/agent-team-mail/pull/51) | ✅ Merged |
 | Phase 9 | [#75](https://github.com/randlee/agent-team-mail/pull/75) | ✅ Merged |
 | Phase 8 | [#59](https://github.com/randlee/agent-team-mail/pull/59) | ✅ Merged |
+| Phase 10 | [#93](https://github.com/randlee/agent-team-mail/pull/93) | ✅ Merged |
+| Phase A | TBD | IN PROGRESS |
 
 ---
 
@@ -1952,6 +1991,6 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 
 ---
 
-**Document Version**: 0.2
-**Last Updated**: 2026-02-13
+**Document Version**: 0.3
+**Last Updated**: 2026-02-19
 **Maintained By**: Claude (ARCH-ATM)
