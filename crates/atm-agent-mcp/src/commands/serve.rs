@@ -48,6 +48,8 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     let upstream_in = tokio::io::stdin();
     let upstream_out = tokio::io::stdout();
 
-    let mut proxy = ProxyServer::new(config);
+    // Use the ATM core team name for session registration and lock files.
+    let team = resolved.core.default_team.clone();
+    let mut proxy = ProxyServer::new_with_team(config, team);
     proxy.run(upstream_in, upstream_out).await
 }

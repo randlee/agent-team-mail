@@ -4,13 +4,62 @@
 //! making ATM messaging and session management tools available to Claude alongside
 //! the native `codex` and `codex-reply` tools.
 //!
-//! Tool implementations are stubbed for Sprint A.2 (schemas only). Actual execution
+//! Tool implementations are stubbed for Sprint A.2/A.3 (schemas only). Actual execution
 //! logic will be added in Sprint A.4+.
+//!
+//! # Codex tool schema
+//!
+//! The `codex` and `codex-reply` tools are native Codex tools provided by the child
+//! process. The proxy intercepts their `tools/call` invocations to add identity
+//! binding and context injection (Sprint A.3). [`codex_tool_schema`] documents the
+//! extended parameter set accepted by the proxy layer (FR-16.4).
 
 use serde_json::{Value, json};
 
 /// Number of synthetic tools that the proxy appends to `tools/list` responses.
 pub const SYNTHETIC_TOOL_COUNT: usize = 7;
+
+/// Extended `codex` tool parameter schema accepted by the proxy layer (FR-16.4).
+///
+/// This schema documents the additional parameters the proxy intercepts and
+/// processes before forwarding to the Codex child. It is not appended to
+/// `tools/list` (the child owns the `codex` tool definition) but is exported
+/// for documentation and testing purposes.
+pub fn codex_tool_schema() -> Value {
+    json!({
+        "name": "codex",
+        "description": "Start a new Codex agent session with optional identity and context binding",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Inline prompt for the session (mutually exclusive with agent_file)"
+                },
+                "agent_file": {
+                    "type": "string",
+                    "description": "Path to an agent file whose contents become the session prompt (mutually exclusive with prompt)"
+                },
+                "identity": {
+                    "type": "string",
+                    "description": "Explicit ATM identity for this session. Overrides config.identity. Defaults to 'codex'."
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Resume an existing session (maps to codex-reply)"
+                },
+                "role": {
+                    "type": "string",
+                    "description": "Role preset name defined in [plugins.atm-agent-mcp.roles.<name>]"
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory for this session (used for git context detection)"
+                }
+            }
+        }
+    })
+}
 
 /// Return all synthetic tool definitions as JSON values.
 ///

@@ -192,6 +192,8 @@ dependencies = [
  "agent-team-mail-core",
  "anyhow",
  "clap",
+ "dirs",
+ "libc",
  "serde",
  "serde_json",
  "serial_test",
