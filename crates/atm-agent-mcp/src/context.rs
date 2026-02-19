@@ -107,10 +107,36 @@ async fn git_toplevel(cwd: &str) -> Option<String> {
     if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
-/// Run `git rev-parse --abbrev-ref HEAD` in `cwd`.
+/// Run `git branch --show-current` in `cwd`, falling back to
+/// `git rev-parse --abbrev-ref HEAD` when the first command returns an empty
+/// string (detached HEAD state on GitHub Actions and similar CI environments).
 ///
-/// Returns `None` on any failure.
+/// Returns `None` on any failure.  In detached HEAD mode the fallback returns
+/// the literal string `"HEAD"`, which is wrapped in `Some("HEAD")` so callers
+/// can tell "inside a git repo but detached" from "not a git repo at all".
 async fn git_branch(cwd: &str) -> Option<String> {
+    // Primary: git branch --show-current (empty in detached HEAD)
+    let show_current = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(cwd)
+        .output()
+        .await
+        .ok();
+
+    if let Some(out) = show_current {
+        if out.status.success()
+            && let Ok(s) = String::from_utf8(out.stdout)
+        {
+            let trimmed = s.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+
+    // Fallback: git rev-parse --abbrev-ref HEAD
+    // Returns "HEAD" in detached mode — keep it as Some("HEAD") so the caller
+    // can distinguish "inside repo, detached" from "not a repo at all".
     let output = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(cwd)
@@ -124,11 +150,7 @@ async fn git_branch(cwd: &str) -> Option<String> {
 
     let s = String::from_utf8(output.stdout).ok()?;
     let trimmed = s.trim().to_string();
-    if trimmed.is_empty() || trimmed == "HEAD" {
-        None
-    } else {
-        Some(trimmed)
-    }
+    if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
 /// Derive a human-readable repository name.

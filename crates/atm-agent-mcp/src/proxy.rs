@@ -562,6 +562,66 @@ impl ProxyServer {
                         return;
                     }
                 }
+
+                // Pre-flight identity conflict check — runs before spawn_child so
+                // unit tests can validate conflict detection without a live child.
+                // Skip if child is already running: the lock/registry entry from the
+                // live session is intentional and should not be treated as a conflict.
+                if self.child.is_none() {
+                let explicit_identity = params
+                    .get("identity")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let identity = explicit_identity
+                    .or_else(|| self.config.identity.clone())
+                    .unwrap_or_else(|| "codex".to_string());
+
+                // Cross-process lock check (FR-20.1)
+                if let Some((pid, conflicting_agent_id)) =
+                    check_lock(&self.team, &identity).await
+                {
+                    let _ = upstream_tx
+                        .send(make_error_response(
+                            id,
+                            ERR_IDENTITY_CONFLICT,
+                            &format!(
+                                "identity '{identity}' already locked by PID {pid} \
+                                 (agent_id: {conflicting_agent_id})"
+                            ),
+                            json!({
+                                "error_source": "proxy",
+                                "identity": identity,
+                                "conflicting_agent_id": conflicting_agent_id,
+                                "pid": pid,
+                            }),
+                        ))
+                        .await;
+                    return;
+                }
+
+                // In-memory registry conflict check
+                let conflict_agent_id = {
+                    let reg = self.registry.lock().await;
+                    reg.find_by_identity(&identity).map(|s| s.to_string())
+                };
+                if let Some(conflicting_agent_id) = conflict_agent_id {
+                    let _ = upstream_tx
+                        .send(make_error_response(
+                            id,
+                            ERR_IDENTITY_CONFLICT,
+                            &format!(
+                                "identity '{identity}' already bound to active session"
+                            ),
+                            json!({
+                                "error_source": "proxy",
+                                "identity": identity,
+                                "conflicting_agent_id": conflicting_agent_id,
+                            }),
+                        ))
+                        .await;
+                    return;
+                }
+                } // end if self.child.is_none() (pre-flight check)
             }
         }
 
