@@ -1809,7 +1809,7 @@ Sprints are sequential (each depends on the previous). Scope aligned with `requi
 | A.4 | ATM communication tools | FR-4, FR-20.4–20.5 | PENDING | — |
 | A.5 | Session registry + persistence | FR-5, FR-10, FR-20.2–20.3 | PENDING | — |
 | A.6 | Lifecycle state machine + agent_close + approval bridging | FR-17, FR-18 | PENDING | — |
-| A.7 | Auto mail injection + turn serialization | FR-8 | PENDING | — |
+| A.7 | Auto mail injection + turn serialization | FR-8 | ✅ PR OPEN | — |
 | A.8 | Shutdown + resume + audit | FR-6, FR-7, FR-9 | PENDING | — |
 
 ### Phase A Sprint Details

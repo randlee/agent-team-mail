@@ -42,6 +42,12 @@ pub enum ThreadCommand {
         request_id: serde_json::Value,
         /// The tool arguments forwarded to the child.
         args: serde_json::Value,
+        /// Channel to deliver the child's response back to the upstream caller.
+        ///
+        /// When a `ClaudeReply` is dispatched from the queue, the dispatcher
+        /// registers this sender in the pending map so the child's response
+        /// completes the original upstream request.
+        respond_tx: oneshot::Sender<serde_json::Value>,
     },
     /// Auto-mail injection turn (lowest priority, FR-17.11).
     AutoMailInject {
@@ -84,8 +90,9 @@ impl std::fmt::Debug for ThreadCommand {
 /// use tokio::sync::oneshot;
 ///
 /// let mut q = ThreadCommandQueue::new("codex:test-agent".to_string());
-/// // Push a Claude reply
-/// assert!(q.push_claude_reply(serde_json::json!(1), serde_json::json!({})).is_ok());
+/// // Push a Claude reply with a respond_tx for upstream delivery
+/// let (tx, _rx) = oneshot::channel();
+/// assert!(q.push_claude_reply(serde_json::json!(1), serde_json::json!({}), tx).is_ok());
 /// // Pop it back
 /// assert!(q.pop_next().is_some());
 /// ```
@@ -121,18 +128,24 @@ impl ThreadCommandQueue {
 
     /// Enqueue a Claude-initiated reply turn.
     ///
+    /// The `respond_tx` oneshot is stored with the command so that when the
+    /// dispatcher pops this entry, it can register the sender in the pending
+    /// map and the child's eventual response will complete the original
+    /// upstream request.
+    ///
     /// Returns `Err(QueueClosedError)` when a close has already been requested (FR-17.9).
     /// The caller should return `ERR_SESSION_CLOSED` to upstream when this fails.
     pub fn push_claude_reply(
         &mut self,
         request_id: serde_json::Value,
         args: serde_json::Value,
+        respond_tx: oneshot::Sender<serde_json::Value>,
     ) -> Result<(), QueueClosedError> {
         if self.close_requested {
             return Err(QueueClosedError);
         }
         self.queue
-            .push_back(ThreadCommand::ClaudeReply { request_id, args });
+            .push_back(ThreadCommand::ClaudeReply { request_id, args, respond_tx });
         Ok(())
     }
 
@@ -217,7 +230,8 @@ mod tests {
         let (tx, _rx) = oneshot::channel::<CloseResult>();
         q.push_close(tx);
 
-        let result = q.push_claude_reply(serde_json::json!(1), serde_json::json!({}));
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let result = q.push_claude_reply(serde_json::json!(1), serde_json::json!({}), reply_tx);
         assert!(result.is_err(), "ClaudeReply must be rejected when close is pending");
     }
 
@@ -238,7 +252,8 @@ mod tests {
     #[test]
     fn auto_mail_rejected_when_claude_reply_queued() {
         let mut q = make_queue();
-        q.push_claude_reply(serde_json::json!(1), serde_json::json!({}))
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        q.push_claude_reply(serde_json::json!(1), serde_json::json!({}), reply_tx)
             .unwrap();
 
         let queued = q.push_auto_mail("inject me".to_string());
@@ -251,7 +266,8 @@ mod tests {
     fn close_jumps_to_front_of_non_empty_queue() {
         let mut q = make_queue();
         // Push a ClaudeReply first
-        q.push_claude_reply(serde_json::json!(42), serde_json::json!({"prompt": "hello"}))
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        q.push_claude_reply(serde_json::json!(42), serde_json::json!({"prompt": "hello"}), reply_tx)
             .unwrap();
 
         // Now push close — it should jump ahead
@@ -286,12 +302,13 @@ mod tests {
     #[test]
     fn push_and_pop_claude_reply_round_trip() {
         let mut q = make_queue();
-        q.push_claude_reply(serde_json::json!(99), serde_json::json!({"x": 1}))
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        q.push_claude_reply(serde_json::json!(99), serde_json::json!({"x": 1}), reply_tx)
             .unwrap();
 
         let cmd = q.pop_next().unwrap();
         match cmd {
-            ThreadCommand::ClaudeReply { request_id, args } => {
+            ThreadCommand::ClaudeReply { request_id, args, .. } => {
                 assert_eq!(request_id, serde_json::json!(99));
                 assert_eq!(args["x"], 1);
             }

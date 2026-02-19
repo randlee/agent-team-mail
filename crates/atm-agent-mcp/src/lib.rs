@@ -14,6 +14,7 @@ pub mod framing;
 pub mod inject;
 pub mod lifecycle;
 pub mod lock;
+pub mod mail_inject;
 pub mod proxy;
 pub mod session;
 pub mod tools;

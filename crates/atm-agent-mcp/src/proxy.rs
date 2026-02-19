@@ -16,7 +16,8 @@
 //!
 //! ATM communication tools are implemented in Sprint A.4. Session lifecycle
 //! state machine and elicitation bridging added in Sprint A.6. Auto mail
-//! injection (FR-8) is deferred to Sprint A.7.
+//! injection (FR-8) implemented in Sprint A.7: post-turn mail check,
+//! idle mail polling, delivery ack boundary, single-flight enforcement.
 
 use std::collections::HashMap;
 use std::process::ExitStatus;
@@ -34,8 +35,10 @@ use crate::context::detect_context;
 use crate::elicitation::ElicitationRegistry;
 use crate::framing::{UpstreamReader, write_newline_delimited};
 use crate::inject::{build_session_context, inject_developer_instructions};
+use crate::lifecycle::{ThreadCommand, ThreadCommandQueue};
 use crate::lock::{acquire_lock, check_lock, release_lock};
-use crate::session::{RegistryError, SessionRegistry, ThreadState};
+use crate::mail_inject::{MailPoller, fetch_unread_mail, format_mail_turn_content, mark_messages_read};
+use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
 
 /// Channel buffer capacity for upstream message delivery.
@@ -110,6 +113,20 @@ pub struct ProxyServer {
     started_at: String,
     /// Unix epoch seconds when this proxy process started (for uptime calc).
     started_epoch_secs: u64,
+    /// Per-agent command queues for serialising turn dispatch (FR-8, FR-17).
+    ///
+    /// Keyed by `agent_id`; created when a new `codex` session is registered.
+    queues: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<ThreadCommandQueue>>>>>,
+    /// Mail polling configuration derived from [`AgentMcpConfig`] (FR-8.2).
+    mail_poller: MailPoller,
+    /// Monotonically increasing counter for auto-generated request IDs.
+    request_counter: Arc<AtomicU64>,
+    /// Shared reference to the child stdin writer.
+    ///
+    /// Populated when the child is lazily spawned.  The idle mail poller task
+    /// uses this to write codex-reply messages to the child without going
+    /// through the proxy's main select loop.
+    shared_child_stdin: Arc<Mutex<Option<Arc<Mutex<ChildStdin>>>>>,
 }
 
 /// Handle to the spawned Codex child process.
@@ -142,6 +159,12 @@ struct PendingRequests {
     tools_list_ids: std::collections::HashSet<Value>,
     /// Request IDs for new `codex` session creation mapped to the preallocated agent_id.
     codex_create_ids: HashMap<Value, String>,
+    /// Request IDs for proxy-initiated auto-mail turns mapped to the `agent_id`.
+    ///
+    /// When the child responds to an auto-mail codex-reply, the proxy uses this
+    /// map to resolve the agent_id, transition the thread Busy -> Idle, and
+    /// trigger the next post-turn mail check (FR-8.1 chaining).
+    auto_mail_pending: HashMap<Value, String>,
 }
 
 impl PendingRequests {
@@ -150,6 +173,7 @@ impl PendingRequests {
             map: HashMap::new(),
             tools_list_ids: std::collections::HashSet::new(),
             codex_create_ids: HashMap::new(),
+            auto_mail_pending: HashMap::new(),
         }
     }
 
@@ -181,6 +205,16 @@ impl PendingRequests {
     fn peek_codex_create(&self, id: &Value) -> Option<String> {
         self.codex_create_ids.get(id).cloned()
     }
+
+    /// Register an auto-mail turn's request ID with its owning agent_id.
+    fn mark_auto_mail(&mut self, id: Value, agent_id: String) {
+        self.auto_mail_pending.insert(id, agent_id);
+    }
+
+    /// Take the agent_id for a completed auto-mail turn, removing it from the map.
+    fn take_auto_mail(&mut self, id: &Value) -> Option<String> {
+        self.auto_mail_pending.remove(id)
+    }
 }
 
 impl ProxyServer {
@@ -209,6 +243,7 @@ impl ProxyServer {
         let (started_at, started_epoch_secs) = proxy_start_time();
         // Elicitation default timeout: 30 seconds (FR-18).
         const ELICITATION_TIMEOUT_SECS: u64 = 30;
+        let mail_poller = MailPoller::new(&config);
         Self {
             config,
             child: None,
@@ -222,6 +257,10 @@ impl ProxyServer {
             thread_to_agent: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             started_at,
             started_epoch_secs,
+            queues: Arc::new(Mutex::new(HashMap::new())),
+            mail_poller,
+            request_counter: Arc::new(AtomicU64::new(1)),
+            shared_child_stdin: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -341,6 +380,79 @@ impl ProxyServer {
                     }
                 }
             });
+        }
+
+        // Spawn the idle mail poller (FR-8.2): checks all idle sessions for unread
+        // mail at the configured interval and injects auto-mail turns via the
+        // shared child stdin reference.  The JoinHandle is stored so we can
+        // abort it cleanly on shutdown.
+        let mut mail_poller_handle: Option<tokio::task::JoinHandle<()>> = None;
+        if self.mail_poller.is_enabled() {
+            let poll_interval = self.mail_poller.poll_interval;
+            let max_messages = self.mail_poller.max_messages;
+            let max_message_length = self.mail_poller.max_message_length;
+            let registry_bg = Arc::clone(&self.registry);
+            let queues_bg = Arc::clone(&self.queues);
+            let team_bg = self.team.clone();
+            let request_counter_bg = Arc::clone(&self.request_counter);
+            let per_thread_overrides = self.config.per_thread_auto_mail.clone();
+            let shared_stdin_bg = Arc::clone(&self.shared_child_stdin);
+            let pending_bg = Arc::clone(&pending);
+
+            mail_poller_handle = Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(poll_interval);
+                loop {
+                    interval.tick().await;
+
+                    // Collect idle active sessions
+                    let idle_sessions: Vec<(String, String, Option<String>)> = {
+                        let reg = registry_bg.lock().await;
+                        reg.list_all()
+                            .iter()
+                            .filter(|e| {
+                                e.status == SessionStatus::Active
+                                    && e.thread_state == ThreadState::Idle
+                            })
+                            .map(|e| (e.agent_id.clone(), e.identity.clone(), e.thread_id.clone()))
+                            .collect()
+                    };
+
+                    for (agent_id, identity, thread_id_opt) in idle_sessions {
+                        // Per-thread override takes precedence over global setting (FR-8.8)
+                        let enabled = per_thread_overrides
+                            .get(&agent_id)
+                            .copied()
+                            .unwrap_or(true);
+                        if !enabled {
+                            continue;
+                        }
+
+                        let Some(ref thread_id) = thread_id_opt else {
+                            continue;
+                        };
+
+                        // Fix 5: Delegate directly to dispatch_auto_mail_if_available
+                        // which handles priority checking (ClaudeReply > AutoMailInject),
+                        // single-flight guard, write, pending registration, and mark-read.
+                        // This avoids the previous push_auto_mail + inline dispatch
+                        // inconsistency where a queue entry was never popped.
+                        dispatch_auto_mail_if_available(
+                            &agent_id,
+                            &identity,
+                            thread_id,
+                            &team_bg,
+                            max_messages,
+                            max_message_length,
+                            &registry_bg,
+                            &queues_bg,
+                            &shared_stdin_bg,
+                            &pending_bg,
+                            &request_counter_bg,
+                        )
+                        .await;
+                    }
+                }
+            }));
         }
 
         loop {
@@ -463,6 +575,11 @@ impl ProxyServer {
                     }
                 }
             }
+        }
+
+        // Shutdown: abort the idle mail poller task to prevent leaked background work.
+        if let Some(handle) = mail_poller_handle.take() {
+            handle.abort();
         }
 
         // Shutdown: release all session locks before terminating
@@ -812,12 +929,115 @@ impl ProxyServer {
             return;
         };
 
+        // Resolve the agent_id for thread state tracking.  For `codex` calls the
+        // agent_id is known from session registration; for `codex-reply` calls we
+        // resolve it via the threadId.
+        let resolved_agent_id_for_state: Option<String> =
+            if effective_tool_name == "codex" || effective_tool_name == "codex-reply" {
+                if let Some(ref aid) = expected_agent_id {
+                    Some(aid.clone())
+                } else {
+                    // codex-reply without expected_agent_id: resolve via threadId
+                    let thread_id_from_msg = msg_to_forward
+                        .pointer("/params/arguments/threadId")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    if let Some(tid) = thread_id_from_msg {
+                        self.thread_to_agent.lock().await.get(&tid).cloned()
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        // Fix 4: If this is a codex-reply and the thread is currently Busy
+        // (e.g. an auto-mail turn is in-flight), queue the command instead of
+        // writing directly to child stdin.  The dispatcher
+        // (dispatch_auto_mail_if_available) will pop and dispatch it when the
+        // thread becomes Idle, preserving the priority order (FR-17.11).
+        if effective_tool_name == "codex-reply" {
+            if let Some(ref agent_id) = resolved_agent_id_for_state {
+                let is_busy = {
+                    let reg = self.registry.lock().await;
+                    reg.get(agent_id)
+                        .map(|e| e.thread_state == ThreadState::Busy)
+                        .unwrap_or(false)
+                };
+                if is_busy {
+                    let args = msg_to_forward
+                        .pointer("/params/arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    let (tx, rx) = oneshot::channel();
+                    let queued = {
+                        let queues_guard = self.queues.lock().await;
+                        if let Some(q_arc) = queues_guard.get(agent_id.as_str()) {
+                            let mut q = q_arc.lock().await;
+                            q.push_claude_reply(id.clone(), args, tx).is_ok()
+                        } else {
+                            false
+                        }
+                    };
+                    if queued {
+                        tracing::info!(
+                            agent_id = %agent_id,
+                            "codex-reply queued (thread is Busy); will dispatch when Idle"
+                        );
+                        // Spawn a task that waits for the queued reply to be dispatched
+                        // and sends the response upstream.
+                        let upstream_tx_clone = upstream_tx.clone();
+                        let timeout_secs = self.config.request_timeout_secs;
+                        tokio::spawn(async move {
+                            match timeout(Duration::from_secs(timeout_secs), rx).await {
+                                Ok(Ok(resp)) => {
+                                    let _ = upstream_tx_clone.send(resp).await;
+                                }
+                                Ok(Err(_)) => {
+                                    tracing::debug!("queued ClaudeReply dropped (child died)");
+                                }
+                                Err(_elapsed) => {
+                                    tracing::warn!("queued ClaudeReply timed out after {timeout_secs}s");
+                                    let err = make_error_response(
+                                        id,
+                                        ERR_TIMEOUT,
+                                        &format!("Queued codex-reply timed out after {timeout_secs}s"),
+                                        json!({"error_source": "proxy"}),
+                                    );
+                                    let _ = upstream_tx_clone.send(err).await;
+                                }
+                            }
+                        });
+                        return;
+                    }
+                    // If queuing failed (queue closed), fall through to direct dispatch.
+                }
+            }
+        }
+
+        // Set thread state Busy BEFORE writing to child stdin to close the
+        // TOCTOU window where auto-mail could inject concurrently.
+        if let Some(ref agent_id_for_state) = resolved_agent_id_for_state {
+            self.registry
+                .lock()
+                .await
+                .set_thread_state(agent_id_for_state, ThreadState::Busy);
+        }
+
         // Forward to child
         let serialized = serde_json::to_string(&msg_to_forward).unwrap_or_default();
         {
             let mut stdin = handle.stdin.lock().await;
             if let Err(e) = write_newline_delimited(&mut *stdin, &serialized).await {
                 tracing::error!("failed to write to child: {e}");
+                // Revert Busy → Idle on write failure.
+                if let Some(ref agent_id_for_state) = resolved_agent_id_for_state {
+                    self.registry
+                        .lock()
+                        .await
+                        .set_thread_state(agent_id_for_state, ThreadState::Idle);
+                }
                 let err = make_error_response(
                     id,
                     ERR_CHILD_DEAD,
@@ -839,16 +1059,6 @@ impl ProxyServer {
             }
         }
 
-        // Mark the session as Busy while the codex/codex-reply turn is in progress.
-        if effective_tool_name == "codex" || effective_tool_name == "codex-reply" {
-            if let Some(ref agent_id_for_state) = expected_agent_id {
-                self.registry
-                    .lock()
-                    .await
-                    .set_thread_state(agent_id_for_state, ThreadState::Busy);
-            }
-        }
-
         let timeout_secs = self.config.request_timeout_secs;
         let upstream_tx_clone = upstream_tx.clone();
         let req_id = id;
@@ -861,10 +1071,24 @@ impl ProxyServer {
         // Clone expected_agent_id for thread state tracking in the spawned task.
         let expected_agent_id_for_task = expected_agent_id.clone();
         let effective_tool_name_for_task = effective_tool_name.clone();
+        // Mail injection context for post-turn check (FR-8.1).
+        let queues_for_task = Arc::clone(&self.queues);
+        let mail_enabled_for_task = self.mail_poller.is_enabled();
+        let mail_max_messages = self.mail_poller.max_messages;
+        let mail_max_length = self.mail_poller.max_message_length;
+        let request_counter_for_task = Arc::clone(&self.request_counter);
+        let per_thread_overrides_for_task = self.config.per_thread_auto_mail.clone();
+        let shared_stdin_for_task = Arc::clone(&self.shared_child_stdin);
 
         tokio::spawn(async move {
             match timeout(Duration::from_secs(timeout_secs), rx).await {
                 Ok(Ok(resp)) => {
+                    // Track the agent_id that just completed its turn so we can
+                    // run the post-turn mail check (FR-8.1) after forwarding the response.
+                    let mut completed_agent_id: Option<String> = None;
+                    let mut completed_identity: Option<String> = None;
+                    let mut completed_thread_id: Option<String> = None;
+
                     if let Some(thread_id) = resp
                         .pointer("/result/structuredContent/threadId")
                         .and_then(|v| v.as_str())
@@ -879,11 +1103,17 @@ impl ProxyServer {
                                 reg.set_thread_id(&agent_id, thread_id.to_string());
                                 // Turn complete → thread is now idle (FR-17).
                                 reg.set_thread_state(&agent_id, ThreadState::Idle);
+                                // Capture for post-turn mail check.
+                                if let Some(entry) = reg.get(&agent_id) {
+                                    completed_identity = Some(entry.identity.clone());
+                                }
                             }
                             thread_to_agent_task
                                 .lock()
                                 .await
-                                .insert(thread_id.to_string(), agent_id);
+                                .insert(thread_id.to_string(), agent_id.clone());
+                            completed_agent_id = Some(agent_id.clone());
+                            completed_thread_id = Some(thread_id.to_string());
                             // Persist updated registry (thread_id now set)
                             let sessions_path = crate::lock::sessions_dir()
                                 .join(&team_for_thread_map)
@@ -905,21 +1135,65 @@ impl ProxyServer {
                                 .get(thread_id)
                                 .cloned();
                             if let Some(aid) = agent_id_opt {
-                                registry_for_thread_map
-                                    .lock()
-                                    .await
-                                    .set_thread_state(&aid, ThreadState::Idle);
+                                {
+                                    let mut reg = registry_for_thread_map.lock().await;
+                                    reg.set_thread_state(&aid, ThreadState::Idle);
+                                    if let Some(entry) = reg.get(&aid) {
+                                        completed_identity = Some(entry.identity.clone());
+                                    }
+                                }
+                                completed_agent_id = Some(aid);
+                                completed_thread_id = Some(thread_id.to_string());
                             }
                         }
                     } else if let Some(ref aid) = expected_agent_id_for_task {
                         // Response without threadId (e.g. error) — still mark Idle
                         // so the session does not remain stuck in Busy state.
-                        registry_for_thread_map
-                            .lock()
-                            .await
-                            .set_thread_state(aid, ThreadState::Idle);
+                        {
+                            let mut reg = registry_for_thread_map.lock().await;
+                            reg.set_thread_state(aid, ThreadState::Idle);
+                            if let Some(entry) = reg.get(aid) {
+                                completed_identity = Some(entry.identity.clone());
+                                completed_thread_id = entry.thread_id.clone();
+                            }
+                        }
+                        completed_agent_id = Some(aid.clone());
                     }
                     let _ = upstream_tx_clone.send(resp).await;
+
+                    // Post-turn mail check (FR-8.1): after a turn completes,
+                    // delegate to the unified dispatch function which handles
+                    // priority checking, single-flight guard, write, pending map
+                    // registration, and mark-read.
+                    if mail_enabled_for_task {
+                        if let (Some(agent_id), Some(identity), Some(thread_id)) = (
+                            &completed_agent_id,
+                            &completed_identity,
+                            &completed_thread_id,
+                        ) {
+                            let per_thread_enabled = per_thread_overrides_for_task
+                                .get(agent_id.as_str())
+                                .copied()
+                                .unwrap_or(true);
+
+                            if per_thread_enabled {
+                                dispatch_auto_mail_if_available(
+                                    agent_id,
+                                    identity,
+                                    thread_id,
+                                    &team_for_thread_map,
+                                    mail_max_messages,
+                                    mail_max_length,
+                                    &registry_for_thread_map,
+                                    &queues_for_task,
+                                    &shared_stdin_for_task,
+                                    &pending_for_thread_map,
+                                    &request_counter_for_task,
+                                )
+                                .await;
+                            }
+                        }
+                    }
                 }
                 Ok(Err(_)) => {
                     // Sender dropped (child died)
@@ -1084,6 +1358,17 @@ impl ProxyServer {
                 .lock()
                 .await
                 .set_agent_source(&entry.agent_id, path.clone());
+        }
+
+        // Create a command queue for this agent session (FR-8.11).
+        {
+            let mut queues = self.queues.lock().await;
+            queues.insert(
+                entry.agent_id.clone(),
+                Arc::new(tokio::sync::Mutex::new(ThreadCommandQueue::new(
+                    entry.agent_id.clone(),
+                ))),
+            );
         }
 
         // Persist registry after successful registration (FR-5.5)
@@ -1374,6 +1659,15 @@ impl ProxyServer {
         let upstream_tx_clone = upstream_tx.clone();
         let dropped_clone = Arc::clone(dropped);
         let thread_to_agent_clone = Arc::clone(&self.thread_to_agent);
+        let registry_for_reader = Arc::clone(&self.registry);
+        let shared_stdin_for_reader = Arc::clone(&self.shared_child_stdin);
+        let queues_for_reader = Arc::clone(&self.queues);
+        let request_counter_for_reader = Arc::clone(&self.request_counter);
+        let team_for_reader = self.team.clone();
+        let mail_enabled_for_reader = self.mail_poller.is_enabled();
+        let mail_max_messages_reader = self.mail_poller.max_messages;
+        let mail_max_length_reader = self.mail_poller.max_message_length;
+        let per_thread_overrides_reader = self.config.per_thread_auto_mail.clone();
         tokio::spawn(async move {
             let reader = tokio::io::BufReader::new(stdout);
             let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
@@ -1412,6 +1706,61 @@ impl ProxyServer {
                 if method.is_none() {
                     if let Some(resp_id) = msg.get("id") {
                         let mut pending_guard = pending_clone.lock().await;
+
+                        // Defect 2 fix: check for auto-mail response before
+                        // completing the regular pending entry.
+                        if let Some(auto_agent_id) =
+                            pending_guard.take_auto_mail(resp_id)
+                        {
+                            // Auto-mail response: transition Busy -> Idle, then
+                            // chain the post-turn mail check (FR-8.1).
+                            let _ = pending_guard.complete(resp_id);
+                            drop(pending_guard);
+
+                            let (completed_identity, completed_thread_id) = {
+                                let mut reg = registry_for_reader.lock().await;
+                                reg.set_thread_state(&auto_agent_id, ThreadState::Idle);
+                                let entry = reg.get(&auto_agent_id);
+                                let ident = entry.map(|e| e.identity.clone());
+                                let tid = entry.and_then(|e| e.thread_id.clone());
+                                (ident, tid)
+                            };
+
+                            tracing::debug!(
+                                agent_id = %auto_agent_id,
+                                "auto-mail response received, thread Busy -> Idle"
+                            );
+
+                            // Chain post-turn mail check (FR-8.1).
+                            if mail_enabled_for_reader {
+                                if let (Some(identity), Some(thread_id)) =
+                                    (&completed_identity, &completed_thread_id)
+                                {
+                                    let per_thread_ok = per_thread_overrides_reader
+                                        .get(auto_agent_id.as_str())
+                                        .copied()
+                                        .unwrap_or(true);
+                                    if per_thread_ok {
+                                        dispatch_auto_mail_if_available(
+                                            &auto_agent_id,
+                                            identity,
+                                            thread_id,
+                                            &team_for_reader,
+                                            mail_max_messages_reader,
+                                            mail_max_length_reader,
+                                            &registry_for_reader,
+                                            &queues_for_reader,
+                                            &shared_stdin_for_reader,
+                                            &pending_clone,
+                                            &request_counter_for_reader,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
                         let is_tl = pending_guard.is_tools_list(resp_id);
                         if let Some(tx) = pending_guard.complete(resp_id) {
                             let mut resp = msg;
@@ -1474,7 +1823,11 @@ impl ProxyServer {
             let mut guard = pending_crash.lock().await;
             guard.map.clear();
             guard.codex_create_ids.clear();
+            guard.auto_mail_pending.clear();
         });
+
+        // Populate the shared child stdin reference for the idle poller.
+        *self.shared_child_stdin.lock().await = Some(Arc::clone(&shared_stdin));
 
         self.child = Some(ChildHandle {
             stdin: shared_stdin,
@@ -1548,6 +1901,173 @@ async fn forward_event(
         Err(_) => {
             dropped_events.fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+/// Dispatch an auto-mail codex-reply to the child if unread mail is available.
+///
+/// This is the shared logic used by both the post-turn path (in the response
+/// handler spawned task) and the auto-mail response chaining path (in the child
+/// stdout reader).  It fetches unread mail, builds and writes the codex-reply
+/// message to the child, registers the request-id in the pending map, and marks
+/// messages read only after successful dispatch (FR-8.12).
+///
+/// Also satisfies Defect 3: after a turn completes (Busy -> Idle), this
+/// function first checks the command queue for a pending `ClaudeReply`.  If one
+/// exists it is dispatched instead of auto-mail, preserving the priority order
+/// (FR-17.11: Close > ClaudeReply > AutoMailInject).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+async fn dispatch_auto_mail_if_available(
+    agent_id: &str,
+    identity: &str,
+    thread_id: &str,
+    team: &str,
+    max_messages: usize,
+    max_message_length: usize,
+    registry: &Arc<Mutex<SessionRegistry>>,
+    queues: &Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<ThreadCommandQueue>>>>>,
+    shared_stdin: &Arc<Mutex<Option<Arc<Mutex<ChildStdin>>>>>,
+    pending: &Arc<Mutex<PendingRequests>>,
+    request_counter: &Arc<AtomicU64>,
+) {
+    // Defect 3 partial fix: check the command queue first.  If a ClaudeReply
+    // was queued while the thread was Busy, dispatch it instead.
+    {
+        let queues_guard = queues.lock().await;
+        if let Some(q_arc) = queues_guard.get(agent_id) {
+            let mut q = q_arc.lock().await;
+            if let Some(cmd) = q.pop_next() {
+                match cmd {
+                    ThreadCommand::ClaudeReply { request_id, args, respond_tx } => {
+                        tracing::info!(
+                            agent_id = %agent_id,
+                            "dispatching queued ClaudeReply (Fix 3/4)"
+                        );
+                        // Write the queued ClaudeReply to child stdin.
+                        let msg = json!({
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "codex-reply",
+                                "arguments": args,
+                            }
+                        });
+                        if let Ok(serialized) = serde_json::to_string(&msg) {
+                            let child_stdin_opt = shared_stdin.lock().await.clone();
+                            if let Some(child_stdin) = child_stdin_opt {
+                                registry
+                                    .lock()
+                                    .await
+                                    .set_thread_state(agent_id, ThreadState::Busy);
+                                let mut stdin = child_stdin.lock().await;
+                                if write_newline_delimited(&mut *stdin, &serialized)
+                                    .await
+                                    .is_ok()
+                                {
+                                    // Fix 3b: register (request_id, respond_tx) in the
+                                    // pending map so route_child_message completes the
+                                    // oneshot and unblocks the upstream caller.
+                                    let mut p = pending.lock().await;
+                                    p.insert(request_id, respond_tx);
+                                } else {
+                                    registry
+                                        .lock()
+                                        .await
+                                        .set_thread_state(agent_id, ThreadState::Idle);
+                                    tracing::warn!("failed to write queued ClaudeReply to child stdin");
+                                }
+                            }
+                        }
+                        return; // ClaudeReply dispatched; do not inject auto-mail.
+                    }
+                    other => {
+                        // Non-ClaudeReply (e.g. AutoMailInject from queue) — we'll
+                        // handle auto-mail via the fetch_unread_mail path below.
+                        // Close commands are handled elsewhere.
+                        drop(other);
+                    }
+                }
+            }
+        }
+    }
+
+    // Single-flight guard: only inject if still Idle (FR-8.9).
+    let still_idle = {
+        let reg = registry.lock().await;
+        reg.get(agent_id)
+            .map(|e| {
+                e.status == SessionStatus::Active && e.thread_state == ThreadState::Idle
+            })
+            .unwrap_or(false)
+    };
+    if !still_idle {
+        return;
+    }
+
+    let envelopes = fetch_unread_mail(identity, team, max_messages, max_message_length);
+    if envelopes.is_empty() {
+        return;
+    }
+
+    let child_stdin_opt = shared_stdin.lock().await.clone();
+    let Some(child_stdin) = child_stdin_opt else {
+        return;
+    };
+
+    let content = format_mail_turn_content(&envelopes);
+    let auto_req_id = request_counter.fetch_add(1, Ordering::Relaxed);
+    let auto_req_id_val = serde_json::Value::Number(auto_req_id.into());
+    let auto_msg = json!({
+        "jsonrpc": "2.0",
+        "id": auto_req_id_val,
+        "method": "tools/call",
+        "params": {
+            "name": "codex-reply",
+            "arguments": {
+                "prompt": content,
+                "threadId": thread_id,
+            }
+        }
+    });
+    let Ok(serialized) = serde_json::to_string(&auto_msg) else {
+        return;
+    };
+
+    // Mark Busy before write.
+    registry
+        .lock()
+        .await
+        .set_thread_state(agent_id, ThreadState::Busy);
+    let write_ok = {
+        let mut stdin = child_stdin.lock().await;
+        write_newline_delimited(&mut *stdin, &serialized)
+            .await
+            .is_ok()
+    };
+    if write_ok {
+        // Register in pending map for Busy -> Idle transition on response.
+        let (tx, _rx) = oneshot::channel();
+        {
+            let mut p = pending.lock().await;
+            p.insert(auto_req_id_val.clone(), tx);
+            p.mark_auto_mail(auto_req_id_val, agent_id.to_string());
+        }
+        // FR-8.12: mark read only after successful dispatch.
+        let ids: Vec<String> = envelopes.iter().map(|e| e.message_id.clone()).collect();
+        mark_messages_read(identity, team, &ids);
+        tracing::info!(
+            agent_id = %agent_id,
+            req_id = auto_req_id,
+            message_count = envelopes.len(),
+            "chained auto-mail codex-reply dispatched (FR-8.1)"
+        );
+    } else {
+        registry
+            .lock()
+            .await
+            .set_thread_state(agent_id, ThreadState::Idle);
+        tracing::warn!("chained auto-mail: failed to write codex-reply to child stdin");
     }
 }
 
