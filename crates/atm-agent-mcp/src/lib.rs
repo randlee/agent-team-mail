@@ -7,6 +7,10 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod context;
 pub mod framing;
+pub mod inject;
+pub mod lock;
 pub mod proxy;
+pub mod session;
 pub mod tools;
