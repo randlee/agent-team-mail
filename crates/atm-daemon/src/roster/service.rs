@@ -289,7 +289,9 @@ where
     F: FnOnce(&mut TeamConfig) -> Result<bool, RosterError>,
 {
     let lock_path = config_path.with_extension("lock");
-    let _lock = agent_team_mail_core::io::lock::acquire_lock(&lock_path, 5)
+    // Use 10 retries (max ~51s backoff) to handle slow I/O on Windows CI and
+    // high-concurrency scenarios where multiple threads compete for the same lock.
+    let _lock = agent_team_mail_core::io::lock::acquire_lock(&lock_path, 10)
         .map_err(|e| RosterError::Io(format!("lock failed: {e}")))?;
 
     // Read current config
