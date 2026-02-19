@@ -304,7 +304,8 @@ mod tests {
 
         let entries = read_audit_lines(&log.path);
         let summary = entries[0]["prompt_summary"].as_str().unwrap();
-        assert_eq!(summary.len(), 200);
+        // PROMPT_SUMMARY_MAX is a character count; use chars().count() not byte len.
+        assert_eq!(summary.chars().count(), 200);
     }
 
     #[tokio::test]

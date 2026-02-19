@@ -1906,10 +1906,18 @@ Session ending. Write a concise summary of:\n\
                 let message_summary = args
                     .get("message")
                     .and_then(|v| v.as_str());
+                // Resolve agent_id from the thread→agent map when a threadId is present.
+                // ATM tools called directly by the user-facing Claude session (no threadId)
+                // have no associated Codex agent_id, so None is the correct value there.
+                let agent_id_opt: Option<String> = if let Some(tid) = thread_id {
+                    self.thread_to_agent.lock().await.get(tid).cloned()
+                } else {
+                    None
+                };
                 self.audit_log
                     .log_atm_call(
                         tool_name,
-                        None, // agent_id not tracked for ATM tools at proxy level
+                        agent_id_opt.as_deref(),
                         Some(&identity),
                         recipient,
                         message_summary,
