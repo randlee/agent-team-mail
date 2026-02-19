@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use agent_team_mail_core::InboxMessage;
 use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::io::inbox_update;
 use serde::{Deserialize, Serialize};
 
 use crate::config::AgentMcpConfig;
@@ -133,13 +134,7 @@ pub fn build_mail_envelopes(
         .filter(|m| !m.read && m.message_id.is_some())
         .take(max_messages)
         .map(|m| {
-            let text = if m.text.len() <= max_message_length {
-                m.text.clone()
-            } else {
-                let mut t = m.text[..max_message_length].to_string();
-                t.push_str(TRUNCATION_SUFFIX);
-                t
-            };
+            let text = truncate_utf8_chars(&m.text, max_message_length, TRUNCATION_SUFFIX);
             MailEnvelope {
                 sender: m.from.clone(),
                 timestamp: m.timestamp.clone(),
@@ -148,6 +143,17 @@ pub fn build_mail_envelopes(
             }
         })
         .collect()
+}
+
+fn truncate_utf8_chars(text: &str, max_chars: usize, suffix: &str) -> String {
+    match text.char_indices().nth(max_chars).map(|(idx, _)| idx) {
+        Some(cutoff) => {
+            let mut out = text[..cutoff].to_string();
+            out.push_str(suffix);
+            out
+        }
+        None => text.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -302,63 +308,17 @@ pub fn mark_messages_read(identity: &str, team: &str, message_ids: &[String]) {
         return;
     }
 
-    let content = match std::fs::read(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "mark_messages_read: cannot read inbox for '{}': {e}",
-                identity
-            );
-            return;
-        }
-    };
-
-    let mut messages: Vec<InboxMessage> = match serde_json::from_slice(&content) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(
-                "mark_messages_read: failed to parse inbox for '{}': {e}",
-                identity
-            );
-            return;
-        }
-    };
-
     let ids_set: HashSet<&str> = message_ids.iter().map(|s| s.as_str()).collect();
-    for msg in messages.iter_mut() {
-        if let Some(ref mid) = msg.message_id {
-            if ids_set.contains(mid.as_str()) {
-                msg.read = true;
+    if let Err(e) = inbox_update(&path, team, identity, |messages| {
+        for msg in messages.iter_mut() {
+            if let Some(ref mid) = msg.message_id {
+                if ids_set.contains(mid.as_str()) {
+                    msg.read = true;
+                }
             }
         }
-    }
-
-    let updated = match serde_json::to_vec_pretty(&messages) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(
-                "mark_messages_read: failed to serialize inbox for '{}': {e}",
-                identity
-            );
-            return;
-        }
-    };
-
-    // Atomic write: write to a temporary file then rename, preventing torn
-    // writes under concurrent access (matches atm-core Section 3.2 strategy).
-    let tmp_path = path.with_extension("tmp");
-    if let Err(e) = std::fs::write(&tmp_path, &updated) {
-        tracing::warn!(
-            "mark_messages_read: failed to write temp inbox for '{}': {e}",
-            identity
-        );
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &path) {
-        tracing::warn!(
-            "mark_messages_read: failed to rename temp inbox for '{}': {e}",
-            identity
-        );
+    }) {
+        tracing::warn!("mark_messages_read: failed atomic update for '{}': {e}", identity);
     }
 }
 
@@ -509,6 +469,15 @@ mod tests {
         let envelopes = build_mail_envelopes(&messages, 10, 50);
         assert_eq!(envelopes[0].text, text);
         assert!(!envelopes[0].text.contains("truncated"));
+    }
+
+    #[test]
+    fn build_envelopes_truncation_is_utf8_safe() {
+        let text = "é".repeat(20);
+        let messages = vec![make_msg("a", &text, false, Some("id-1"))];
+        let envelopes = build_mail_envelopes(&messages, 10, 5);
+        assert_eq!(envelopes.len(), 1);
+        assert!(envelopes[0].text.ends_with(" [...truncated]"));
     }
 
     // -----------------------------------------------------------------------

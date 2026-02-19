@@ -570,18 +570,25 @@ impl ProxyServer {
                             // forward the response downstream to the child.
                             // Otherwise forward as-is to the child.
                             if let Some(resp_id) = msg.get("id") {
-                                let resolved = self
+                                let maybe_downstream_resp = self
                                     .elicitation_registry
                                     .lock()
                                     .await
-                                    .resolve(resp_id, msg.clone());
-                                if resolved {
-                                    // The ElicitationRegistry already sent the response
-                                    // via the oneshot channel; the downstream handler will
-                                    // write it to the child.  Nothing more to do here.
-                                    tracing::debug!(
-                                        "elicitation response resolved for id={resp_id}"
-                                    );
+                                    .resolve_for_downstream(resp_id, msg.clone());
+                                if let Some(downstream_resp) = maybe_downstream_resp {
+                                    tracing::debug!("elicitation response resolved for id={resp_id}");
+                                    if let Some(ref handle) = self.child {
+                                        let mut stdin = handle.stdin.lock().await;
+                                        let serialized = serde_json::to_string(&downstream_resp)
+                                            .unwrap_or_default();
+                                        if let Err(e) =
+                                            write_newline_delimited(&mut *stdin, &serialized).await
+                                        {
+                                            tracing::warn!(
+                                                "failed to write elicitation response to child: {e}"
+                                            );
+                                        }
+                                    }
                                 } else if let Some(ref handle) = self.child {
                                     // Not an elicitation response — forward to child.
                                     let mut stdin = handle.stdin.lock().await;
@@ -1147,18 +1154,20 @@ Session ending. Write a concise summary of:\n\
         // prepare_* methods take &mut self, so they must be called before we
         // take any reference to self.child.
         // effective_tool_name may have been rewritten to "codex-reply" for resume flows.
-        let (msg_to_forward, expected_agent_id) = if effective_tool_name == "codex" {
+        let (msg_to_forward, expected_agent_id, state_agent_id) = if effective_tool_name == "codex" {
             match self.prepare_codex_message(&id, msg, upstream_tx).await {
                 PrepareResult::Error => return, // error already sent
                 PrepareResult::Ok {
                     modified,
                     expected_agent_id,
-                } => (modified, expected_agent_id),
+                } => (modified, expected_agent_id.clone(), expected_agent_id),
             }
         } else if effective_tool_name == "codex-reply" {
-            (self.prepare_codex_reply_message(msg).await, None)
+            let modified = self.prepare_codex_reply_message(msg).await;
+            let reply_agent_id = self.resolve_codex_reply_agent_id(&modified).await;
+            (modified, None, reply_agent_id)
         } else {
-            (msg, None)
+            (msg, None, None)
         };
 
         // Now borrow the handle for I/O (after all &mut self calls are done)
@@ -1188,7 +1197,16 @@ Session ending. Write a concise summary of:\n\
                         .and_then(|v| v.as_str())
                         .map(String::from);
                     if let Some(tid) = thread_id_from_msg {
-                        self.thread_to_agent.lock().await.get(&tid).cloned()
+                        if let Some(agent_id) = self.thread_to_agent.lock().await.get(&tid).cloned()
+                        {
+                            Some(agent_id)
+                        } else {
+                            let reg = self.registry.lock().await;
+                            reg.list_all()
+                                .iter()
+                                .find(|e| e.thread_id.as_deref() == Some(tid.as_str()))
+                                .map(|e| e.agent_id.clone())
+                        }
                     } else {
                         None
                     }
@@ -1304,6 +1322,14 @@ Session ending. Write a concise summary of:\n\
             }
         }
 
+        // Mark the session as Busy while the codex/codex-reply turn is in progress.
+        if let Some(ref agent_id_for_state) = state_agent_id {
+            self.registry
+                .lock()
+                .await
+                .set_thread_state(agent_id_for_state, ThreadState::Busy);
+        }
+
         let timeout_secs = self.config.request_timeout_secs;
         let upstream_tx_clone = upstream_tx.clone();
         let req_id = id;
@@ -1313,8 +1339,8 @@ Session ending. Write a concise summary of:\n\
         let pending_for_thread_map = Arc::clone(pending);
         let registry_for_thread_map = Arc::clone(&self.registry);
         let team_for_thread_map = self.team.clone();
-        // Clone expected_agent_id for thread state tracking in the spawned task.
-        let expected_agent_id_for_task = expected_agent_id.clone();
+        // Clone state_agent_id for thread state tracking in the spawned task.
+        let state_agent_id_for_task = state_agent_id.clone();
         let effective_tool_name_for_task = effective_tool_name.clone();
         // Mail injection context for post-turn check (FR-8.1).
         let queues_for_task = Arc::clone(&self.queues);
@@ -1391,7 +1417,7 @@ Session ending. Write a concise summary of:\n\
                                 completed_thread_id = Some(thread_id.to_string());
                             }
                         }
-                    } else if let Some(ref aid) = expected_agent_id_for_task {
+                    } else if let Some(ref aid) = state_agent_id_for_task {
                         // Response without threadId (e.g. error) — still mark Idle
                         // so the session does not remain stuck in Busy state.
                         {
@@ -1836,12 +1862,45 @@ Session ending. Write a concise summary of:\n\
         modified_msg
     }
 
+    /// Resolve the owning `agent_id` for a prepared `codex-reply` message.
+    ///
+    /// Preference:
+    /// 1. `params.arguments.agent_id`
+    /// 2. `params.arguments.threadId` via `thread_to_agent`
+    /// 3. Registry scan by `thread_id`
+    async fn resolve_codex_reply_agent_id(&self, msg: &Value) -> Option<String> {
+        if let Some(agent_id) = msg
+            .pointer("/params/arguments/agent_id")
+            .and_then(|v| v.as_str())
+        {
+            let reg = self.registry.lock().await;
+            if reg.get(agent_id).is_some() {
+                return Some(agent_id.to_string());
+            }
+        }
+
+        let thread_id = msg
+            .pointer("/params/arguments/threadId")
+            .and_then(|v| v.as_str())?;
+
+        if let Some(agent_id) = self.thread_to_agent.lock().await.get(thread_id).cloned() {
+            return Some(agent_id);
+        }
+
+        let reg = self.registry.lock().await;
+        reg.list_all()
+            .iter()
+            .find(|entry| entry.thread_id.as_deref() == Some(thread_id))
+            .map(|entry| entry.agent_id.clone())
+    }
+
     /// Handle a synthetic tool call (ATM tools, session management).
     ///
     /// ATM communication tools (`atm_send`, `atm_read`, `atm_broadcast`,
     /// `atm_pending_count`) are fully implemented in Sprint A.4.
-    /// Session management tools (`agent_sessions`, `agent_status`, `agent_close`)
-    /// remain stubs until Sprint A.6.
+    /// Session management tools (`agent_sessions`, `agent_status`) are
+    /// implemented in Sprint A.5. `agent_close` is fully implemented in
+    /// Sprint A.6.
     async fn resolve_identity_from_thread(&self, thread_id: &str) -> Option<String> {
         // Prefer the fast thread->agent map, then fall back to registry scan.
         if let Some(agent_id) = self.thread_to_agent.lock().await.get(thread_id).cloned() {
@@ -1976,13 +2035,27 @@ Session ending. Write a concise summary of:\n\
                 .await
             }
             "agent_close" => {
-                atm_tools::handle_agent_close(
+                let resp = atm_tools::handle_agent_close(
                     id,
                     args,
                     Arc::clone(&self.registry),
                     Arc::clone(&self.elicitation_registry),
                 )
-                .await
+                .await;
+                let is_success = resp.get("error").is_none()
+                    && resp
+                        .pointer("/result/isError")
+                        .and_then(|v| v.as_bool())
+                        != Some(true);
+                if is_success {
+                    let sessions_path = crate::lock::sessions_dir()
+                        .join(&self.team)
+                        .join("registry.json");
+                    if let Err(e) = Self::persist_registry(&self.registry, &sessions_path).await {
+                        tracing::warn!("failed to persist registry after agent_close: {e:#}");
+                    }
+                }
+                resp
             }
             _ => atm_tools::make_mcp_error_result(
                 id,
@@ -2492,8 +2565,9 @@ async fn route_child_message(
                 }
             };
 
-            // Build a oneshot channel for delivering the upstream response back
-            let (response_tx, mut response_rx) = tokio::sync::oneshot::channel::<Value>();
+            // Keep a per-request channel in the registry so close/timeout paths
+            // can reject pending elicitations.
+            let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<Value>();
 
             // Register in the elicitation registry
             elicitation_registry.lock().await.register(
@@ -2520,27 +2594,6 @@ async fn route_child_message(
 
             // Forward to upstream
             let _ = upstream_tx.send(upstream_msg).await;
-
-            // Spawn a task that waits for the upstream response and writes it
-            // back to the child with the original downstream_request_id.
-            // Note: the actual write to child stdin requires access to the child
-            // handle which is not available here as a free function.  For Sprint A.6
-            // we log the correlation; the actual downstream write is handled via the
-            // elicitation registry's resolve path in the run loop.
-            let upstream_tx_clone = upstream_tx.clone();
-            tokio::spawn(async move {
-                // Wait for the response (or drop on registry cancel/timeout).
-                if let Ok(mut response) = response_rx.try_recv() {
-                    // Restore the downstream_request_id so the child can correlate.
-                    if let Some(id_field) = response.get_mut("id") {
-                        *id_field = downstream_id;
-                    }
-                    // Forward back upstream where the run loop will write to child.
-                    // (This path is for synchronous resolution only; async resolution
-                    // happens via the run loop's upstream response handler.)
-                    let _ = upstream_tx_clone.send(response).await;
-                }
-            });
 
             return;
         }
