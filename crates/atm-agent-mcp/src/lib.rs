@@ -4,6 +4,7 @@
 //! types for the `atm-agent-mcp` binary. Exposed as a library for integration
 //! testing and potential reuse.
 
+pub mod atm_tools;
 pub mod cli;
 pub mod commands;
 pub mod config;
