@@ -2,7 +2,7 @@
 
 **Version**: 0.3
 **Date**: 2026-02-19
-**Status**: Phase A (atm-agent-mcp) IN PROGRESS — 3/8 sprints merged
+**Status**: Phase A (atm-agent-mcp) IN PROGRESS — 7/8 sprints merged, A.8 PR pending
 
 ---
 
@@ -1786,7 +1786,7 @@ Parallel execution plan:
 
 ## 12. Phase A: atm-agent-mcp (MCP Stdio Proxy for Codex)
 
-**Status**: IN PROGRESS (3/8 sprints merged)
+**Status**: IN PROGRESS (7/8 sprints merged, A.8 PR pending)
 **Goal**: New `atm-agent-mcp` crate — a thin MCP proxy that wraps a single `codex mcp-server` child
 process, managing multiple concurrent Codex sessions with per-session identity, team context,
 ATM communication tools, and lifecycle management. Enables Claude to orchestrate Codex agents
@@ -1810,7 +1810,7 @@ Sprints are sequential (each depends on the previous). Scope aligned with `requi
 | A.5 | Session registry + persistence | FR-5, FR-10, FR-20.2–20.3 | PENDING | — |
 | A.6 | Lifecycle state machine + agent_close + approval bridging | FR-17, FR-18 | PENDING | — |
 | A.7 | Auto mail injection + turn serialization | FR-8 | PENDING | — |
-| A.8 | Shutdown + resume + audit | FR-6, FR-7, FR-9 | PENDING | — |
+| A.8 | Shutdown + resume + audit | FR-6, FR-7, FR-9 | 🔄 PR OPEN | pending |
 
 ### Phase A Sprint Details
 
