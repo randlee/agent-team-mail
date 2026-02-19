@@ -41,6 +41,7 @@ use std::sync::{Mutex, OnceLock};
 use agent_team_mail_core::home::get_home_dir;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 /// In-process set of `"<team>/<identity>"` strings for actively-held locks.
 ///
@@ -105,10 +106,7 @@ pub async fn acquire_lock(team: &str, identity: &str, agent_id: &str) -> anyhow:
     {
         let guard = in_process_locks().lock().unwrap();
         if guard.contains(&key) {
-            anyhow::bail!(
-                "identity '{}' is already locked by this process",
-                identity
-            );
+            anyhow::bail!("identity '{}' is already locked by this process", identity);
         }
     }
 
@@ -117,31 +115,52 @@ pub async fn acquire_lock(team: &str, identity: &str, agent_id: &str) -> anyhow:
         fs::create_dir_all(parent).await?;
     }
 
-    // Check for existing live lock from another process
-    if let Some((pid, existing_id)) = check_lock(team, identity).await {
-        anyhow::bail!(
-            "identity '{}' already locked by PID {} (agent_id: {})",
-            identity,
-            pid,
-            existing_id
-        );
-    }
-
     let payload = LockPayload {
         pid: std::process::id(),
         agent_id: agent_id.to_string(),
     };
     let json = serde_json::to_string(&payload)?;
 
-    // Write atomically via a temp file in the same directory
-    let tmp_path = path.with_extension("lock.tmp");
-    fs::write(&tmp_path, &json).await?;
-    fs::rename(&tmp_path, &path).await?;
+    // Attempt exclusive create. If the file already exists, reconcile stale-vs-live
+    // lock state and retry once after cleaning up stale data.
+    for _ in 0..2 {
+        match fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .await
+        {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(json.as_bytes()).await {
+                    let _ = fs::remove_file(&path).await;
+                    return Err(e.into());
+                }
+                if let Err(e) = file.flush().await {
+                    let _ = fs::remove_file(&path).await;
+                    return Err(e.into());
+                }
+                // Register in the in-process lock set only after durable write.
+                in_process_locks().lock().unwrap().insert(key);
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Some((pid, existing_id)) = check_lock(team, identity).await {
+                    anyhow::bail!(
+                        "identity '{}' already locked by PID {} (agent_id: {})",
+                        identity,
+                        pid,
+                        existing_id
+                    );
+                }
+                // check_lock() may treat malformed files as stale but cannot remove them.
+                // Clean up and retry once.
+                let _ = fs::remove_file(&path).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 
-    // Register in the in-process lock set
-    in_process_locks().lock().unwrap().insert(key);
-
-    Ok(())
+    anyhow::bail!("failed to acquire lock for identity '{}'", identity)
 }
 
 /// Remove the lock file for `identity` in `team`.
