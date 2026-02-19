@@ -30,6 +30,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 
+use crate::audit::AuditLog;
 use crate::config::AgentMcpConfig;
 use crate::context::detect_context;
 use crate::elicitation::ElicitationRegistry;
@@ -127,6 +128,25 @@ pub struct ProxyServer {
     /// uses this to write codex-reply messages to the child without going
     /// through the proxy's main select loop.
     shared_child_stdin: Arc<Mutex<Option<Arc<Mutex<ChildStdin>>>>>,
+    /// Append-only audit log for ATM tool calls and Codex forwards (FR-9).
+    audit_log: AuditLog,
+    /// Resume context loaded at startup via `--resume` (FR-6).
+    /// Consumed on the first `codex` or `codex-reply` developer-instructions
+    /// injection and set to `None` thereafter.
+    resume_context: Option<ResumeContext>,
+}
+
+/// Context from a previous session to prepend on resume (FR-6).
+#[derive(Debug, Clone)]
+pub struct ResumeContext {
+    /// Original agent_id (for display/logging).
+    pub agent_id: String,
+    /// ATM identity of the resumed session.
+    pub identity: String,
+    /// Codex threadId (backend_id) of the resumed session.
+    pub backend_id: String,
+    /// Session summary text, or `None` if no summary was saved (crash/SIGKILL).
+    pub summary: Option<String>,
 }
 
 /// Handle to the spawned Codex child process.
@@ -244,6 +264,7 @@ impl ProxyServer {
         // Elicitation default timeout: 30 seconds (FR-18).
         const ELICITATION_TIMEOUT_SECS: u64 = 30;
         let mail_poller = MailPoller::new(&config);
+        let audit_log = AuditLog::new(&team_str);
         Self {
             config,
             child: None,
@@ -261,7 +282,23 @@ impl ProxyServer {
             mail_poller,
             request_counter: Arc::new(AtomicU64::new(1)),
             shared_child_stdin: Arc::new(Mutex::new(None)),
+            audit_log,
+            resume_context: None,
         }
+    }
+
+    /// Create a proxy server with resume context (FR-6).
+    ///
+    /// If `resume` is `Some`, the summary (if available) is prepended to
+    /// `developer-instructions` on the first `codex` or `codex-reply` turn.
+    pub fn new_with_resume(
+        config: AgentMcpConfig,
+        team: impl Into<String>,
+        resume: Option<ResumeContext>,
+    ) -> Self {
+        let mut proxy = Self::new_with_team(config, team);
+        proxy.resume_context = resume;
+        proxy
     }
 
     /// Persist the current registry snapshot to disk atomically (FR-5.5).
@@ -455,8 +492,37 @@ impl ProxyServer {
             }));
         }
 
+        // Cross-platform shutdown signal handler (FR-7.1, FR-7.4).
+        #[cfg(unix)]
+        let shutdown_signal = async {
+            let mut sigterm = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate(),
+            )
+            .expect("failed to install SIGTERM handler");
+            let mut sigint = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::interrupt(),
+            )
+            .expect("failed to install SIGINT handler");
+            tokio::select! {
+                _ = sigterm.recv() => { tracing::info!("received SIGTERM"); }
+                _ = sigint.recv() => { tracing::info!("received SIGINT"); }
+            }
+        };
+        #[cfg(not(unix))]
+        let shutdown_signal = async {
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("received Ctrl-C");
+        };
+        tokio::pin!(shutdown_signal);
+
         loop {
             tokio::select! {
+                // Shutdown signal received (FR-7.1)
+                _ = &mut shutdown_signal => {
+                    tracing::info!("shutdown signal received, initiating graceful shutdown");
+                    break;
+                }
+
                 // Read from upstream stdin
                 result = reader.next_message() => {
                     let raw = match result? {
@@ -589,6 +655,9 @@ impl ProxyServer {
             handle.abort();
         }
 
+        // Graceful shutdown: request summary from each active thread (FR-7.1).
+        self.collect_shutdown_summaries().await;
+
         // Shutdown: release all session locks before terminating
         {
             let team = self.team.clone();
@@ -622,6 +691,175 @@ impl ProxyServer {
         }
 
         Ok(())
+    }
+
+    /// Request a compacted summary from each active Codex thread during
+    /// graceful shutdown (FR-7.1, FR-7.2).
+    ///
+    /// For each active session with a known `thread_id`:
+    /// 1. Sends a `codex-reply` to the child with a summary prompt.
+    /// 2. Waits up to 10 seconds for the response.
+    /// 3. Writes the summary to disk via [`crate::summary::write_summary`].
+    /// 4. If the timeout expires, writes the session as interrupted (no summary).
+    ///
+    /// Sessions without a `thread_id` (still in initial codex call) are skipped.
+    async fn collect_shutdown_summaries(&mut self) {
+        const SUMMARY_TIMEOUT_SECS: u64 = 10;
+        const SUMMARY_PROMPT: &str = "\
+Session ending. Write a concise summary of:\n\
+- What you were working on\n\
+- Current state \u{2014} what is done, what is not\n\
+- Any open questions or blockers\n\
+- Next steps if resumed";
+
+        // Collect active sessions that have a thread_id.
+        let sessions: Vec<(String, String, String)> = {
+            let reg = self.registry.lock().await;
+            reg.list_all()
+                .iter()
+                .filter(|e| e.status == SessionStatus::Active && e.thread_id.is_some())
+                .map(|e| {
+                    (
+                        e.agent_id.clone(),
+                        e.identity.clone(),
+                        e.thread_id.clone().unwrap(),
+                    )
+                })
+                .collect()
+        };
+
+        if sessions.is_empty() {
+            tracing::info!("no active sessions with thread_id; skipping shutdown summaries");
+            return;
+        }
+
+        if self.child.is_none() {
+            tracing::info!("child not running; skipping shutdown summaries");
+            return;
+        }
+
+        // Clone the stdin Arc so we can write to it without holding an immutable
+        // borrow on `self.child` across the loop body — we need `&mut self.child`
+        // later to receive from `response_rx`.
+        let stdin_arc = self.child.as_ref().unwrap().stdin.clone();
+
+        for (i, (agent_id, identity, thread_id)) in sessions.iter().enumerate() {
+            let request_id = format!("shutdown-summary-{i}");
+
+            // Build a codex-reply request with the summary prompt.
+            let request = json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {
+                    "name": "codex-reply",
+                    "arguments": {
+                        "threadId": thread_id,
+                        "prompt": SUMMARY_PROMPT,
+                    }
+                }
+            });
+
+            let serialized = serde_json::to_string(&request).unwrap_or_default();
+            {
+                let mut stdin = stdin_arc.lock().await;
+                if let Err(e) = write_newline_delimited(&mut *stdin, &serialized).await {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        "failed to send summary request to child: {e}"
+                    );
+                    continue;
+                }
+            }
+
+            // Wait for the matching response on the child's response channel
+            // (10s timeout). Other messages are discarded during shutdown.
+            let deadline = tokio::time::Instant::now()
+                + tokio::time::Duration::from_secs(SUMMARY_TIMEOUT_SECS);
+            let mut summary_text: Option<String> = None;
+
+            if let Some(ch) = self.child.as_mut() {
+                loop {
+                    let remaining =
+                        deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            "shutdown summary timed out after {SUMMARY_TIMEOUT_SECS}s"
+                        );
+                        break;
+                    }
+                    match timeout(remaining, ch.response_rx.recv()).await {
+                        Ok(Some(msg)) => {
+                            if msg.get("id").and_then(|v| v.as_str()) == Some(&request_id) {
+                                summary_text = msg
+                                    .pointer("/result/content")
+                                    .and_then(|v| v.as_array())
+                                    .and_then(|arr| {
+                                        arr.iter()
+                                            .find(|item| {
+                                                item.get("type").and_then(|t| t.as_str())
+                                                    == Some("text")
+                                            })
+                                            .and_then(|item| {
+                                                item.get("text").and_then(|t| t.as_str())
+                                            })
+                                    })
+                                    .or_else(|| {
+                                        msg.pointer("/result/structuredContent/text")
+                                            .and_then(|v| v.as_str())
+                                    })
+                                    .map(String::from);
+                                break;
+                            }
+                            // Not our response — discard during shutdown.
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                "child response channel closed during shutdown summary"
+                            );
+                            break;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                "shutdown summary timed out after {SUMMARY_TIMEOUT_SECS}s"
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Write summary to disk (or interrupted marker if none received).
+            let team = self.team.clone();
+            if let Some(ref text) = summary_text {
+                if let Err(e) =
+                    crate::summary::write_summary(&team, identity, thread_id, text).await
+                {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        "failed to write shutdown summary: {e}"
+                    );
+                } else {
+                    tracing::info!(
+                        agent_id = %agent_id,
+                        identity = %identity,
+                        "shutdown summary written"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "no summary received; session marked as interrupted"
+                );
+                let interrupted_msg = "[Session interrupted — no summary available]";
+                let _ =
+                    crate::summary::write_summary(&team, identity, thread_id, interrupted_msg)
+                        .await;
+            }
+        }
     }
 
     /// Forward a non-tools/call request or notification to the child.
@@ -1425,6 +1663,29 @@ impl ProxyServer {
         if let Some(args) = modified_msg.pointer_mut("/params/arguments") {
             inject_developer_instructions(args, &context_str);
 
+            // FR-6: Prepend resume context on first turn if available.
+            if let Some(resume_ctx) = self.resume_context.take() {
+                if let Some(ref summary) = resume_ctx.summary {
+                    let resume_block = crate::summary::format_resume_context(
+                        &resume_ctx.identity,
+                        ctx.repo_name.as_deref(),
+                        ctx.branch.as_deref(),
+                        summary,
+                    );
+                    inject_developer_instructions(args, &resume_block);
+                    tracing::info!(
+                        agent_id = %resume_ctx.agent_id,
+                        "resume context prepended to developer-instructions"
+                    );
+                } else {
+                    tracing::warn!(
+                        agent_id = %resume_ctx.agent_id,
+                        identity = %resume_ctx.identity,
+                        "no summary available for resume; continuing without context"
+                    );
+                }
+            }
+
             // FR-16.1: if agent_file provided, read its contents as the prompt
             if let Some(ref path) = agent_file_path {
                 match tokio::fs::read_to_string(path).await {
@@ -1437,6 +1698,15 @@ impl ProxyServer {
                 }
             }
         }
+
+        // FR-9.2: Audit the codex forward.
+        let prompt_for_audit = modified_msg
+            .pointer("/params/arguments/prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        self.audit_log
+            .log_codex_forward("codex", Some(&entry.agent_id), Some(&identity), prompt_for_audit)
+            .await;
 
         PrepareResult::Ok {
             modified: modified_msg,
@@ -1550,7 +1820,44 @@ impl ProxyServer {
         let mut modified_msg = msg;
         if let Some(args) = modified_msg.pointer_mut("/params/arguments") {
             inject_developer_instructions(args, &context_str);
+
+            // FR-6: Prepend resume context on first codex-reply if not yet consumed.
+            if let Some(resume_ctx) = self.resume_context.take() {
+                if let Some(ref summary) = resume_ctx.summary {
+                    let resume_block = crate::summary::format_resume_context(
+                        &resume_ctx.identity,
+                        ctx.repo_name.as_deref(),
+                        ctx.branch.as_deref(),
+                        summary,
+                    );
+                    inject_developer_instructions(args, &resume_block);
+                    tracing::info!(
+                        agent_id = %resume_ctx.agent_id,
+                        "resume context prepended to developer-instructions (codex-reply)"
+                    );
+                } else {
+                    tracing::warn!(
+                        agent_id = %resume_ctx.agent_id,
+                        identity = %resume_ctx.identity,
+                        "no summary available for resume; continuing without context"
+                    );
+                }
+            }
         }
+
+        // FR-9.2: Audit the codex-reply forward.
+        let prompt_for_audit = modified_msg
+            .pointer("/params/arguments/prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        self.audit_log
+            .log_codex_forward(
+                "codex-reply",
+                resolved_agent_id.as_deref(),
+                Some(&identity_str),
+                prompt_for_audit,
+            )
+            .await;
 
         modified_msg
     }
@@ -1649,6 +1956,33 @@ impl ProxyServer {
                     team = %team,
                     "ATM tool call"
                 );
+
+                // FR-9.1: Audit ATM tool call.
+                let recipient = match tool_name {
+                    "atm_send" => args.get("to").and_then(|v| v.as_str()),
+                    _ => None,
+                };
+                let message_summary = args
+                    .get("message")
+                    .and_then(|v| v.as_str());
+                // Resolve agent_id from the thread→agent map when a threadId is present.
+                // ATM tools called directly by the user-facing Claude session (no threadId)
+                // have no associated Codex agent_id, so None is the correct value there.
+                let agent_id_opt: Option<String> = if let Some(tid) = thread_id {
+                    self.thread_to_agent.lock().await.get(tid).cloned()
+                } else {
+                    None
+                };
+                self.audit_log
+                    .log_atm_call(
+                        tool_name,
+                        agent_id_opt.as_deref(),
+                        Some(&identity),
+                        recipient,
+                        message_summary,
+                    )
+                    .await;
+
                 match tool_name {
                     "atm_send" => atm_tools::handle_atm_send(id, args, &identity, team),
                     "atm_read" => atm_tools::handle_atm_read(id, args, &identity, team),
