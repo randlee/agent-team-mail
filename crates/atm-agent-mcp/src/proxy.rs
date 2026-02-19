@@ -504,18 +504,25 @@ impl ProxyServer {
                             // forward the response downstream to the child.
                             // Otherwise forward as-is to the child.
                             if let Some(resp_id) = msg.get("id") {
-                                let resolved = self
+                                let maybe_downstream_resp = self
                                     .elicitation_registry
                                     .lock()
                                     .await
-                                    .resolve(resp_id, msg.clone());
-                                if resolved {
-                                    // The ElicitationRegistry already sent the response
-                                    // via the oneshot channel; the downstream handler will
-                                    // write it to the child.  Nothing more to do here.
-                                    tracing::debug!(
-                                        "elicitation response resolved for id={resp_id}"
-                                    );
+                                    .resolve_for_downstream(resp_id, msg.clone());
+                                if let Some(downstream_resp) = maybe_downstream_resp {
+                                    tracing::debug!("elicitation response resolved for id={resp_id}");
+                                    if let Some(ref handle) = self.child {
+                                        let mut stdin = handle.stdin.lock().await;
+                                        let serialized = serde_json::to_string(&downstream_resp)
+                                            .unwrap_or_default();
+                                        if let Err(e) =
+                                            write_newline_delimited(&mut *stdin, &serialized).await
+                                        {
+                                            tracing::warn!(
+                                                "failed to write elicitation response to child: {e}"
+                                            );
+                                        }
+                                    }
                                 } else if let Some(ref handle) = self.child {
                                     // Not an elicitation response — forward to child.
                                     let mut stdin = handle.stdin.lock().await;
@@ -950,7 +957,16 @@ impl ProxyServer {
                         .and_then(|v| v.as_str())
                         .map(String::from);
                     if let Some(tid) = thread_id_from_msg {
-                        self.thread_to_agent.lock().await.get(&tid).cloned()
+                        if let Some(agent_id) = self.thread_to_agent.lock().await.get(&tid).cloned()
+                        {
+                            Some(agent_id)
+                        } else {
+                            let reg = self.registry.lock().await;
+                            reg.list_all()
+                                .iter()
+                                .find(|e| e.thread_id.as_deref() == Some(tid.as_str()))
+                                .map(|e| e.agent_id.clone())
+                        }
                     } else {
                         None
                     }
@@ -2159,8 +2175,9 @@ async fn route_child_message(
                 }
             };
 
-            // Build a oneshot channel for delivering the upstream response back
-            let (response_tx, mut response_rx) = tokio::sync::oneshot::channel::<Value>();
+            // Keep a per-request channel in the registry so close/timeout paths
+            // can reject pending elicitations.
+            let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<Value>();
 
             // Register in the elicitation registry
             elicitation_registry.lock().await.register(
@@ -2187,27 +2204,6 @@ async fn route_child_message(
 
             // Forward to upstream
             let _ = upstream_tx.send(upstream_msg).await;
-
-            // Spawn a task that waits for the upstream response and writes it
-            // back to the child with the original downstream_request_id.
-            // Note: the actual write to child stdin requires access to the child
-            // handle which is not available here as a free function.  For Sprint A.6
-            // we log the correlation; the actual downstream write is handled via the
-            // elicitation registry's resolve path in the run loop.
-            let upstream_tx_clone = upstream_tx.clone();
-            tokio::spawn(async move {
-                // Wait for the response (or drop on registry cancel/timeout).
-                if let Ok(mut response) = response_rx.try_recv() {
-                    // Restore the downstream_request_id so the child can correlate.
-                    if let Some(id_field) = response.get_mut("id") {
-                        *id_field = downstream_id;
-                    }
-                    // Forward back upstream where the run loop will write to child.
-                    // (This path is for synchronous resolution only; async resolution
-                    // happens via the run loop's upstream response handler.)
-                    let _ = upstream_tx_clone.send(response).await;
-                }
-            });
 
             return;
         }

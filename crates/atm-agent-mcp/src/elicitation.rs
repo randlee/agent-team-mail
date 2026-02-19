@@ -118,6 +118,27 @@ impl ElicitationRegistry {
         }
     }
 
+    /// Resolve a pending elicitation and rewrite `response.id` back to the
+    /// original downstream request ID for delivery to the child process.
+    ///
+    /// Returns `Some(rewritten_response)` when a pending elicitation was
+    /// found, otherwise `None`.
+    pub fn resolve_for_downstream(
+        &mut self,
+        upstream_request_id: &serde_json::Value,
+        mut response: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let key = upstream_request_id.to_string();
+        let entry = self.pending.remove(&key)?;
+
+        if let Some(id_field) = response.get_mut("id") {
+            *id_field = entry.downstream_request_id.clone();
+        }
+
+        let _ = entry.response_tx.send(response.clone());
+        Some(response)
+    }
+
     /// Cancel all pending elicitations for the given agent, sending `rejection_result`
     /// to each waiting channel.
     ///
