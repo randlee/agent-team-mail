@@ -105,8 +105,7 @@ extra_instructions_file = ""   # empty = use bundled experimental_prompt.md
 # Incoming mail polling interval when idle, in milliseconds (default: 5000)
 mail_poll_interval_ms = 5000
 
-# How long to wait with no new mail before stopping idle polling (default: 300000 = 5min)
-idle_timeout_ms = 300000
+# Idle polling runs while the MCP connection is open; no timeout needed.
 
 # Persist active thread IDs to disk for resume across restarts (default: true)
 persist_threads = true
@@ -167,7 +166,7 @@ atm-agent-mcp (proxy)
     │     every poll_interval_ms: atm-core inbox read for this identity
     │     if messages → format digest, inject as codex-reply on active session
     │     if no active session for identity → keep mail unread
-    │     if idle_timeout_ms expires with no mail → stop polling
+    │     polling runs while MCP connection is open (no idle timeout)
     │     mail arriving during active turn → queue, deliver after turn completes
     │
     └── on shutdown (SIGTERM/SIGINT/parent disconnect):
@@ -200,7 +199,7 @@ Active sessions are tracked in memory and persisted to `~/.config/atm/agent-sess
       "cwd": "/Users/rand/projects/myapp/src",
       "started_at": "2026-02-17T10:00:00Z",
       "last_active": "2026-02-17T10:45:00Z",
-      "status": "active",
+      "status": "idle",
       "tag": "feature/auth-refresh"
     }
   ]
@@ -253,12 +252,14 @@ The proxy exposes `atm_send`, `atm_read`, `atm_broadcast`, and `atm_pending_coun
 {
   "to": "team-lead@atm-dev",
   "message": "PR is ready for review.",
-  "summary": "PR ready notification"
+  "summary": "PR ready notification",
+  "identity": "codex-architect"
 }
 ```
 - `to` (required): Agent name or `agent@team` for cross-team messaging
 - `message` (required): Message text
 - `summary` (optional): Explicit summary (auto-generated if omitted)
+- `identity` (optional): Explicit sender identity. Required when called outside a thread context; ignored inside a thread (uses bound identity per FR-4.5)
 
 ### `atm_read`
 ```json
@@ -267,7 +268,8 @@ The proxy exposes `atm_send`, `atm_read`, `atm_broadcast`, and `atm_pending_coun
   "mark_read": true,
   "limit": 20,
   "since": "2026-02-18T10:00:00Z",
-  "from": "team-lead"
+  "from": "team-lead",
+  "identity": "codex-architect"
 }
 ```
 - `all` (optional, default false): Include already-read messages
@@ -275,25 +277,32 @@ The proxy exposes `atm_send`, `atm_read`, `atm_broadcast`, and `atm_pending_coun
 - `limit` (optional): Max messages to return
 - `since` (optional): ISO 8601 timestamp filter
 - `from` (optional): Filter by sender name
+- `identity` (optional): Explicit identity for inbox lookup. Required when called outside a thread context; ignored inside a thread (uses bound identity per FR-4.5)
 
-Returns array of messages with `from`, `content`, `received_at`, `message_id`.
+Returns array of messages with `from`, `text`, `timestamp`, `message_id` (matching `InboxMessage` schema from `docs/requirements.md` Section 3.1).
 
 ### `atm_broadcast`
 ```json
 {
-  "message": "Pausing work — need input on auth approach.",
+  "message": "Pausing work -- need input on auth approach.",
   "summary": "Requesting team input",
-  "team": "atm-dev"
+  "team": "atm-dev",
+  "identity": "codex-architect"
 }
 ```
 - `message` (required): Message text
 - `summary` (optional): Explicit summary (auto-generated if omitted)
 - `team` (optional): Override target team (default: session's configured team)
+- `identity` (optional): Explicit sender identity. Required when called outside a thread context; ignored inside a thread (uses bound identity per FR-4.5)
 
 ### `atm_pending_count`
 ```json
-{}
+{
+  "identity": "codex-architect"
+}
 ```
+- `identity` (optional): Explicit identity for inbox count. Required when called outside a thread context; ignored inside a thread (uses bound identity per FR-4.5)
+
 Returns unread message count without marking anything read. Lightweight check for mail polling.
 
 Benefits over shell `atm` commands: no approval policy friction, visible in MCP tool call logs, auditable by the orchestrator.
