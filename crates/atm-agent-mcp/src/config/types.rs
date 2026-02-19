@@ -6,6 +6,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ---------------------------------------------------------------------------
+// Default value functions for new mail-injection config fields (FR-8)
+// ---------------------------------------------------------------------------
+
+fn default_max_mail_messages() -> usize {
+    10
+}
+
+fn default_max_mail_message_length() -> usize {
+    4096
+}
+
 /// Per-role model/sandbox/approval_policy overrides.
 ///
 /// Role presets are defined under `[plugins.atm-agent-mcp.roles.<name>]` in `.atm.toml`
@@ -91,6 +103,22 @@ pub struct AgentMcpConfig {
     #[serde(default = "default_auto_mail")]
     pub auto_mail: bool,
 
+    /// Maximum number of messages to inject per auto-mail turn (FR-8.5, default: `10`).
+    #[serde(default = "default_max_mail_messages")]
+    pub max_mail_messages: usize,
+
+    /// Maximum message body length in characters before truncation (FR-8.5, default: `4096`).
+    #[serde(default = "default_max_mail_message_length")]
+    pub max_mail_message_length: usize,
+
+    /// Per-thread auto-mail overrides.
+    ///
+    /// Map of `agent_id` → `bool` enabling or disabling auto-mail injection for
+    /// a specific thread (FR-8.8).  When absent, the global [`Self::auto_mail`]
+    /// setting applies.
+    #[serde(default)]
+    pub per_thread_auto_mail: HashMap<String, bool>,
+
     /// Optional base prompt file path
     #[serde(default)]
     pub base_prompt_file: Option<String>,
@@ -151,6 +179,9 @@ impl Default for AgentMcpConfig {
             max_concurrent_threads: default_max_concurrent_threads(),
             persist_threads: default_persist_threads(),
             auto_mail: default_auto_mail(),
+            max_mail_messages: default_max_mail_messages(),
+            max_mail_message_length: default_max_mail_message_length(),
+            per_thread_auto_mail: HashMap::new(),
             base_prompt_file: None,
             extra_instructions_file: None,
             roles: HashMap::new(),

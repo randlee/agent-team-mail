@@ -30,6 +30,10 @@ fn test_config(timeout_secs: u64) -> atm_agent_mcp::proxy::ProxyServer {
     let config = AgentMcpConfig {
         codex_bin: echo_mcp_server_path().to_string_lossy().to_string(),
         request_timeout_secs: timeout_secs,
+        // Disable auto-mail in integration tests to prevent the idle poller
+        // from interfering with test timing (it reads ATM inboxes and spawns
+        // background tasks that outlive the proxy run loop).
+        auto_mail: false,
         ..Default::default()
     };
     // Use a unique team per test invocation so lock files don't collide across
