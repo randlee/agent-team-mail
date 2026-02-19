@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve(args) => commands::serve::run(args).await,
+        Commands::Serve(args) => commands::serve::run(&cli.config, args).await,
         Commands::Config(args) => commands::config_cmd::run(&cli.config, args).await,
         Commands::Sessions(args) => commands::sessions::run(args).await,
         Commands::Summary(args) => commands::summary::run(args).await,

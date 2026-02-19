@@ -7,6 +7,7 @@
 use crate::cli::ServeArgs;
 use crate::config::resolve_config;
 use crate::proxy::ProxyServer;
+use std::path::PathBuf;
 
 /// Run the `serve` subcommand.
 ///
@@ -17,9 +18,9 @@ use crate::proxy::ProxyServer;
 ///
 /// Returns an error if configuration resolution fails or the proxy loop
 /// encounters an unrecoverable I/O error.
-pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
+pub async fn run(config_path: &Option<PathBuf>, args: ServeArgs) -> anyhow::Result<()> {
     // Resolve configuration from file/env/defaults
-    let resolved = resolve_config(None)?;
+    let resolved = resolve_config(config_path.as_deref())?;
     let mut config = resolved.agent_mcp;
 
     // Apply CLI argument overrides
