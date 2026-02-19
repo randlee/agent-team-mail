@@ -83,9 +83,9 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 - **FR-4.1**: Proxy MUST expose `atm_send`, `atm_read`, `atm_broadcast`, and `atm_pending_count` as MCP tools in the `tools/list` response.
 - **FR-4.2**: `atm_send` parameters: `to` (required, agent or `agent@team` for cross-team), `message` (required), `summary` (optional, auto-generated if omitted). The proxy parses `@` notation into separate recipient/team fields.
-- **FR-4.3**: `atm_read` parameters: `all` (optional, default false — include read messages), `mark_read` (optional, default true), `limit` (optional — max messages to return), `since` (optional — ISO 8601 timestamp filter), `from` (optional — filter by sender name). Returns array of `{from, message, timestamp, message_id}`.
+- **FR-4.3**: `atm_read` parameters: `all` (optional, default false — include read messages), `mark_read` (optional, default true), `limit` (optional — max messages to return), `since` (optional — ISO 8601 timestamp filter), `from` (optional — filter by sender name). Returns array of `{from, text, timestamp, message_id}` (field names match `InboxMessage` schema in `docs/requirements.md` Section 3.1).
 - **FR-4.4**: `atm_broadcast` parameters: `message` (required), `summary` (optional), `team` (optional — override target team for cross-team broadcasts). MUST send to all team members via `atm-core`.
-- **FR-4.5**: All ATM tools MUST use the calling thread's bound identity as sender — no impersonation. ATM tools called outside a thread context (e.g., from Claude directly via MCP) MUST require an explicit `identity` parameter; if omitted, the call MUST be rejected with an error.
+- **FR-4.5**: All ATM tools MUST use the calling thread's bound identity as sender — no impersonation. ATM tools called outside a thread context (e.g., from Claude directly via MCP) MUST require an explicit `identity` parameter (optional string on all 4 tool schemas); if omitted and no thread context exists, the call MUST be rejected with `IDENTITY_REQUIRED` (-32009).
 - **FR-4.6**: All ATM tool calls MUST be logged to an audit trail (see FR-9).
 - **FR-4.7**: `atm_pending_count` takes no required parameters. Returns unread message count without marking anything read. Intended for lightweight mail polling.
 
@@ -146,7 +146,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 **Delivery acknowledgment:**
 
 - **FR-8.12**: "Successfully sent" (FR-8.6) means: the `codex-reply` JSON-RPC request has been written to the child's stdin AND the proxy has recorded the request-id in its in-memory turn tracker. Messages are marked read only after both conditions are met.
-- **FR-8.13**: On proxy crash between send and mark-read, messages remain unread (at-least-once). On restart, proxy MUST detect unacked mail (still marked unread) and re-deliver on next idle cycle. Duplicate delivery is acceptable; Codex agents MUST tolerate replayed mail (message_id enables dedup at the agent level).
+- **FR-8.13**: On restart, proxy MUST deliver ALL unread messages for its bound identities on the next idle cycle. This is a deliberate deliver-all policy — the proxy cannot distinguish crash-unacked messages from newly arrived messages (both are `read: false`). Duplicate delivery is expected and acceptable; Codex agents MUST tolerate replayed mail (`message_id` in the envelope enables dedup at the agent level).
 
 **Pull model (supplementary):**
 
@@ -161,7 +161,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ### FR-10: Proxy Management MCP Tools
 
-- **FR-10.1**: Proxy MUST expose `agent_sessions` tool — returns active and resumable sessions with fields: `agent_id`, `backend`, `backend_id` (Codex threadId), `team`, `identity`, `agent_name` (if prompt file used), `agent_source` (prompt file path if applicable), `status`, `last_active_at`, `tag` (if set), and `resumable`.
+- **FR-10.1**: Proxy MUST expose `agent_sessions` tool — returns active and resumable sessions with fields: `agent_id`, `backend`, `backend_id` (Codex threadId), `team`, `identity`, `agent_name` (if prompt file used), `agent_source` (prompt file path if applicable), `status`, `last_active`, `tag` (if set), and `resumable`.
 - **FR-10.2**: Proxy MUST expose `agent_status` tool — returns proxy health (child process alive, team, uptime, active thread count, identity→thread mapping, aggregate pending mail count).
 
 ### FR-11: Codex Process Health
@@ -177,6 +177,18 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 - **FR-12.3**: Config resolution: CLI flags → env vars → repo-local `.atm.toml` → global `~/.config/atm/config.toml` → defaults.
 - **FR-12.4**: If model is not explicitly set by CLI/env/config, proxy MUST forward no model override so Codex uses its current default (latest upstream model).
 - **FR-12.5**: Proxy SHOULD support `fast_model` config for quick profile selection (for example via `--fast`) without changing explicit `model` pins.
+- **FR-12.6**: Environment variables for all plugin config fields follow the pattern `ATM_AGENT_MCP_<FIELD>`:
+
+  | Config Key | Env Var | CLI Flag |
+  |------------|---------|----------|
+  | `identity` | `ATM_AGENT_MCP_IDENTITY` | `--identity` |
+  | `model` | `ATM_AGENT_MCP_MODEL` | `--model` |
+  | `sandbox` | `ATM_AGENT_MCP_SANDBOX` | `--sandbox` |
+  | `approval_policy` | `ATM_AGENT_MCP_APPROVAL_POLICY` | `--approval-policy` |
+  | `reasoning_effort` | `ATM_AGENT_MCP_REASONING_EFFORT` | (via `--config`) |
+  | `codex_bin` | `ATM_AGENT_MCP_CODEX_BIN` | (none) |
+  | `mail_poll_interval_ms` | `ATM_AGENT_MCP_MAIL_POLL_INTERVAL_MS` | (none) |
+  | `fast_model` | `ATM_AGENT_MCP_FAST_MODEL` | `--fast` (selects fast_model) |
 
 ### FR-13: CLI Interface
 
@@ -292,7 +304,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ### NFR-4: Compatibility
 - MUST work with Codex CLI v0.103+ MCP server protocol.
-- MUST work on macOS and Linux. Windows support is stretch goal.
+- MUST work on macOS, Linux, and Windows. Codex CLI supports Windows; `atm-agent-mcp` MUST compile and pass tests on all three platforms. CI MUST include Windows in the test matrix.
 - MUST integrate with existing `atm-core` config and IO primitives.
 
 ### NFR-5: Observability
@@ -412,8 +424,10 @@ Notes:
 - [ ] Codex subagents invisible to team (no ATM identity, messages sent under parent identity)
 - [ ] `codex/event` notifications forwarded to upstream with agent_id metadata
 - [ ] `elicitation/create` bridged bidirectionally with request correlation and timeout
-- [ ] All tests pass on macOS + Linux
+- [ ] All tests pass on macOS, Linux, and Windows
 - [ ] `cargo clippy -- -D warnings` clean
+- [ ] Minimum 120 tests across unit + integration
+- [ ] Test coverage >= 80% on proxy logic (config, identity, registry, mail, state machine)
 
 ### Phase B: Role Presets + Advanced Orchestration (2 sprints)
 
@@ -427,7 +441,7 @@ Notes:
 | Sprint | Deliverable | Dependencies |
 |--------|-------------|--------------|
 | C.1 | **Conformance testing** — MCP protocol conformance test suite (initialize, capabilities, notifications, cancellation, streaming), proxy latency benchmarks, registry stress tests | Phase B |
-| C.2 | **Cross-platform + packaging** — Windows support (if feasible), `atm-agent-mcp` added to release workflow, Homebrew formula update, documentation | C.1 |
+| C.2 | **Packaging + polish** — `atm-agent-mcp` added to release workflow, Homebrew formula update, documentation | C.1 |
 
 ### Test Strategy
 
@@ -450,7 +464,7 @@ Notes:
 | Mail injection | Mock inbox + mock child | Same |
 | Shutdown/resume | Mock child + SIGTERM | Same |
 
-**Cross-platform**: All tests must pass on macOS + Linux. Use `ATM_HOME` for test isolation (existing pattern). Windows is stretch goal (Phase C).
+**Cross-platform**: All tests must pass on macOS, Linux, and Windows. Use `ATM_HOME` for test isolation (existing pattern). Follow `docs/cross-platform-guidelines.md` for path handling.
 
 ---
 

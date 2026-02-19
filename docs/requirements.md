@@ -848,6 +848,8 @@ interoperability between `atm` teams and agents using the MCP agent mail protoco
 
 **Status**: Planned — research and design TBD.
 
+> **Note**: This plugin (Section 6.6) is an `atm-daemon` plugin for interoperability with the external [mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail) project. It is unrelated to `atm-agent-mcp` (the Codex MCP proxy crate defined in `docs/atm-agent-mcp/`). Despite both having "MCP" in their names, they serve different purposes: this plugin bridges a third-party messaging protocol, while `atm-agent-mcp` wraps Codex sessions with ATM identity and communication.
+
 ---
 
 ## 7. Cross-Team Messaging
