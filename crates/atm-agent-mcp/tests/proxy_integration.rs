@@ -814,7 +814,13 @@ async fn test_content_length_upstream_framing() {
 
     let resp = read_response(&mut reader).await.expect("response to CL-framed request");
     assert_eq!(resp["id"], 1);
-    assert_eq!(resp["result"]["isError"], true);
+    // agent_status is fully implemented in Sprint A.5; it returns a successful result.
+    assert!(resp.get("error").is_none(), "should not be a protocol error; got: {resp}");
+    assert_ne!(
+        resp["result"]["isError"],
+        json!(true),
+        "agent_status should return a success result; got: {resp}"
+    );
 
     drop(writer);
     let _ = handle.await;

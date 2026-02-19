@@ -324,10 +324,14 @@ async fn integration_atm_pending_count_no_inbox() {
     assert_eq!(v["unread"], json!(0), "nonexistent inbox should have 0 unread");
 }
 
-/// `agent_sessions` returns stub error (Sprint A.6).
+/// `agent_sessions` returns a valid list of sessions (Sprint A.5 fully implemented).
+///
+/// On a fresh registry the list is empty, but the response must be a
+/// successful `tools/call` result (not an error) whose text is a valid
+/// JSON array.
 #[tokio::test]
 #[serial]
-async fn integration_agent_sessions_is_stub() {
+async fn integration_agent_sessions_returns_list() {
     let dir = TempDir::new().unwrap();
     unsafe { std::env::set_var("ATM_HOME", dir.path()) };
 
@@ -346,13 +350,62 @@ async fn integration_agent_sessions_is_stub() {
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    // Should return isError: true with "not yet implemented" message
-    assert_eq!(resp["result"]["isError"], json!(true), "stub should set isError; got: {resp}");
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
-    assert!(
-        text.contains("not yet implemented"),
-        "stub message should mention not yet implemented; got: {text}"
+    assert!(resp.get("error").is_none(), "should not be a protocol error; got: {resp}");
+    assert_ne!(
+        resp["result"]["isError"],
+        json!(true),
+        "agent_sessions should not set isError; got: {resp}"
     );
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("MISSING");
+    let parsed: Value =
+        serde_json::from_str(text).expect("agent_sessions text must be valid JSON");
+    assert!(
+        parsed.is_array(),
+        "agent_sessions result must be a JSON array; got: {text}"
+    );
+}
+
+/// `agent_status` returns a valid status object (Sprint A.5 fully implemented).
+///
+/// The proxy exposes runtime metadata: whether a child process is alive,
+/// the team name, startup timestamp, uptime, active thread count, and the
+/// identity→threadId map for active sessions.
+#[tokio::test]
+#[serial]
+async fn integration_agent_status_returns_object() {
+    let dir = TempDir::new().unwrap();
+    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+
+    let mut proxy = make_proxy(Some("team-lead"), "myteam");
+
+    let msg = json!({
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_status",
+            "arguments": {}
+        }
+    });
+
+    let resp = roundtrip_tools_call(&mut proxy, msg).await;
+    unsafe { std::env::remove_var("ATM_HOME") };
+
+    assert!(resp.get("error").is_none(), "should not be a protocol error; got: {resp}");
+    assert_ne!(
+        resp["result"]["isError"],
+        json!(true),
+        "agent_status should not set isError; got: {resp}"
+    );
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("MISSING");
+    let parsed: Value =
+        serde_json::from_str(text).expect("agent_status text must be valid JSON");
+    assert!(parsed.is_object(), "agent_status result must be a JSON object; got: {text}");
+    assert!(parsed.get("child_alive").is_some(), "status must include 'child_alive'");
+    assert!(parsed.get("team").is_some(), "status must include 'team'");
+    assert!(parsed.get("uptime_secs").is_some(), "status must include 'uptime_secs'");
+    assert!(parsed.get("active_thread_count").is_some(), "status must include 'active_thread_count'");
+    assert!(parsed.get("identity_map").is_some(), "status must include 'identity_map'");
 }
 
 /// `atm_read` without identity returns ERR_IDENTITY_REQUIRED.
