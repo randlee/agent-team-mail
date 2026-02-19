@@ -132,6 +132,7 @@ After all sprints (including fix sprint if needed) merge to `integrate/phase-{N}
 3. Merge after user approval
 4. **Minor version bump** on `develop` (separate release prep commit)
 5. Deploy the `atm-publisher` teammate (named teammate) to orchestrate package publishing
+   - Purpose: run publishing in parallel while team-lead plans the next phase, so release execution does not stall phase planning
 6. `atm-publisher` follows `docs/publishing-procedures.md` (source of truth) for release branch creation, minor bump, validation, publishing, and PRs
 7. Create PR: `develop → main` for release branch-forwarding
 8. Wait for CI green on `main` PR and merge after user approval
