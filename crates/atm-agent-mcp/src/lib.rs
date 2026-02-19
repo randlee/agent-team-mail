@@ -5,6 +5,7 @@
 //! testing and potential reuse.
 
 pub mod atm_tools;
+pub mod audit;
 pub mod cli;
 pub mod commands;
 pub mod config;
@@ -17,4 +18,5 @@ pub mod lock;
 pub mod mail_inject;
 pub mod proxy;
 pub mod session;
+pub mod summary;
 pub mod tools;
