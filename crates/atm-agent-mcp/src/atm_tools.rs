@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use agent_team_mail_core::InboxMessage;
 use agent_team_mail_core::home::get_home_dir;
-use agent_team_mail_core::io::inbox_append;
+use agent_team_mail_core::io::{inbox_append, inbox_update};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -73,34 +73,57 @@ pub fn resolve_identity(args: &Value, config_identity: Option<&str>) -> Option<S
 
 /// Truncate `text` to [`MAX_MESSAGE_LEN`] and append [`TRUNCATION_SUFFIX`] when truncated.
 fn maybe_truncate(text: &str) -> String {
-    if text.len() <= MAX_MESSAGE_LEN {
-        text.to_string()
-    } else {
-        let mut truncated = text[..MAX_MESSAGE_LEN].to_string();
-        truncated.push_str(TRUNCATION_SUFFIX);
-        truncated
+    match char_boundary_at_limit(text, MAX_MESSAGE_LEN) {
+        Some(cutoff) => {
+            let mut truncated = text[..cutoff].to_string();
+            truncated.push_str(TRUNCATION_SUFFIX);
+            truncated
+        }
+        None => text.to_string(),
     }
 }
 
 /// Auto-generate a summary from the first 60 characters of a message.
 fn auto_summary(message: &str) -> String {
     let trimmed = message.trim();
-    if trimmed.len() <= 60 {
-        trimmed.to_string()
-    } else {
-        format!("{}...", &trimmed[..60])
+    match char_boundary_at_limit(trimmed, 60) {
+        Some(cutoff) => {
+            let mut summary = trimmed[..cutoff].to_string();
+            summary.push_str("...");
+            summary
+        }
+        None => trimmed.to_string(),
     }
+}
+
+/// Return the byte index of the first character past `max_chars`.
+///
+/// Returns `None` when `text` has `max_chars` or fewer characters.
+fn char_boundary_at_limit(text: &str, max_chars: usize) -> Option<usize> {
+    text.char_indices().nth(max_chars).map(|(idx, _)| idx)
 }
 
 /// Parse the `to` field into `(agent, team)`.
 ///
 /// `"arch-ctm@atm-dev"` → `("arch-ctm", "atm-dev")`
 /// `"arch-ctm"` → `("arch-ctm", default_team)`
-fn parse_to(to: &str, default_team: &str) -> (String, String) {
+fn parse_to(to: &str, default_team: &str) -> Result<(String, String), String> {
     if let Some((agent, team)) = to.split_once('@') {
-        (agent.to_string(), team.to_string())
+        let agent = agent.trim();
+        let team = team.trim();
+        if agent.is_empty() {
+            return Err("atm_send: invalid 'to' parameter: empty agent name".to_string());
+        }
+        if team.is_empty() {
+            return Err("atm_send: invalid 'to' parameter: empty team name".to_string());
+        }
+        Ok((agent.to_string(), team.to_string()))
     } else {
-        (to.to_string(), default_team.to_string())
+        let agent = to.trim();
+        if agent.is_empty() {
+            return Err("atm_send: invalid 'to' parameter: empty agent name".to_string());
+        }
+        Ok((agent.to_string(), default_team.to_string()))
     }
 }
 
@@ -225,7 +248,10 @@ pub fn handle_atm_send(id: &Value, args: &Value, identity: &str, team: &str) -> 
         None => return make_mcp_error_result(id, "atm_send: 'message' parameter is required"),
     };
 
-    let (agent, effective_team) = parse_to(to, team);
+    let (agent, effective_team) = match parse_to(to, team) {
+        Ok(parsed) => parsed,
+        Err(e) => return make_mcp_error_result(id, &e),
+    };
     let message_text = maybe_truncate(raw_message);
     let summary = args
         .get("summary")
@@ -237,7 +263,7 @@ pub fn handle_atm_send(id: &Value, args: &Value, identity: &str, team: &str) -> 
     let home = match get_home_dir() {
         Ok(h) => h,
         Err(e) => {
-            return make_mcp_error_result(id, &format!("atm_send: cannot resolve home dir: {e}"))
+            return make_mcp_error_result(id, &format!("atm_send: cannot resolve home dir: {e}"));
         }
     };
 
@@ -280,7 +306,7 @@ pub fn handle_atm_read(id: &Value, args: &Value, identity: &str, team: &str) -> 
     let home = match get_home_dir() {
         Ok(h) => h,
         Err(e) => {
-            return make_mcp_error_result(id, &format!("atm_read: cannot resolve home dir: {e}"))
+            return make_mcp_error_result(id, &format!("atm_read: cannot resolve home dir: {e}"));
         }
     };
 
@@ -294,22 +320,17 @@ pub fn handle_atm_read(id: &Value, args: &Value, identity: &str, team: &str) -> 
     // Read current messages
     let content = match std::fs::read(&path) {
         Ok(c) => c,
-        Err(e) => {
-            return make_mcp_error_result(id, &format!("atm_read: cannot read inbox: {e}"))
-        }
+        Err(e) => return make_mcp_error_result(id, &format!("atm_read: cannot read inbox: {e}")),
     };
-    let mut messages: Vec<InboxMessage> = match serde_json::from_slice(&content) {
+    let messages: Vec<InboxMessage> = match serde_json::from_slice(&content) {
         Ok(m) => m,
         Err(e) => {
-            return make_mcp_error_result(id, &format!("atm_read: failed to parse inbox: {e}"))
+            return make_mcp_error_result(id, &format!("atm_read: failed to parse inbox: {e}"));
         }
     };
 
     // Parse optional params
-    let include_all = args
-        .get("all")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let include_all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
     let mark_read = args
         .get("mark_read")
         .and_then(|v| v.as_bool())
@@ -387,32 +408,21 @@ pub fn handle_atm_read(id: &Value, args: &Value, identity: &str, team: &str) -> 
             .map(|m| (m.from.clone(), m.timestamp.clone()))
             .collect();
 
-        for msg in messages.iter_mut() {
-            let should_mark = if let Some(ref mid) = msg.message_id {
-                ids_set.contains(mid)
-            } else {
-                id_less_keys
-                    .iter()
-                    .any(|(f, t)| f == &msg.from && t == &msg.timestamp)
-            };
-            if should_mark {
-                msg.read = true;
+        if let Err(e) = inbox_update(&path, team, identity, |latest_messages| {
+            for msg in latest_messages.iter_mut() {
+                let should_mark = if let Some(ref mid) = msg.message_id {
+                    ids_set.contains(mid)
+                } else {
+                    id_less_keys
+                        .iter()
+                        .any(|(f, t)| f == &msg.from && t == &msg.timestamp)
+                };
+                if should_mark {
+                    msg.read = true;
+                }
             }
-        }
-
-        // Write back with marked messages
-        let updated_content = match serde_json::to_vec_pretty(&messages) {
-            Ok(c) => c,
-            Err(e) => {
-                // Return the output even if we failed to persist mark-read
-                tracing::warn!("atm_read: failed to serialize updated inbox: {e}");
-                let text = serde_json::to_string_pretty(&output).unwrap_or_default();
-                return make_mcp_success(id, text);
-            }
-        };
-
-        if let Err(e) = std::fs::write(&path, &updated_content) {
-            tracing::warn!("atm_read: failed to persist mark-read: {e}");
+        }) {
+            tracing::warn!("atm_read: failed to persist mark-read via atomic update: {e}");
         }
     }
 
@@ -438,9 +448,7 @@ pub fn handle_atm_read(id: &Value, args: &Value, identity: &str, team: &str) -> 
 pub fn handle_atm_broadcast(id: &Value, args: &Value, identity: &str, team: &str) -> Value {
     let raw_message = match args.get("message").and_then(|v| v.as_str()) {
         Some(s) => s,
-        None => {
-            return make_mcp_error_result(id, "atm_broadcast: 'message' parameter is required")
-        }
+        None => return make_mcp_error_result(id, "atm_broadcast: 'message' parameter is required"),
     };
 
     let effective_team = args
@@ -461,7 +469,7 @@ pub fn handle_atm_broadcast(id: &Value, args: &Value, identity: &str, team: &str
             return make_mcp_error_result(
                 id,
                 &format!("atm_broadcast: cannot resolve home dir: {e}"),
-            )
+            );
         }
     };
 
@@ -482,7 +490,7 @@ pub fn handle_atm_broadcast(id: &Value, args: &Value, identity: &str, team: &str
                      Ensure the team '{effective_team}' exists.",
                     config_path.display()
                 ),
-            )
+            );
         }
     };
 
@@ -493,7 +501,7 @@ pub fn handle_atm_broadcast(id: &Value, args: &Value, identity: &str, team: &str
                 return make_mcp_error_result(
                     id,
                     &format!("atm_broadcast: failed to parse team config: {e}"),
-                )
+                );
             }
         };
 
@@ -543,7 +551,7 @@ pub fn handle_atm_pending_count(id: &Value, _args: &Value, identity: &str, team:
             return make_mcp_error_result(
                 id,
                 &format!("atm_pending_count: cannot resolve home dir: {e}"),
-            )
+            );
         }
     };
 
@@ -556,10 +564,7 @@ pub fn handle_atm_pending_count(id: &Value, _args: &Value, identity: &str, team:
     let content = match std::fs::read(&path) {
         Ok(c) => c,
         Err(e) => {
-            return make_mcp_error_result(
-                id,
-                &format!("atm_pending_count: cannot read inbox: {e}"),
-            )
+            return make_mcp_error_result(id, &format!("atm_pending_count: cannot read inbox: {e}"));
         }
     };
 
@@ -569,7 +574,7 @@ pub fn handle_atm_pending_count(id: &Value, _args: &Value, identity: &str, team:
             return make_mcp_error_result(
                 id,
                 &format!("atm_pending_count: failed to parse inbox: {e}"),
-            )
+            );
         }
     };
 
@@ -896,10 +901,7 @@ mod tests {
 
     /// Write a minimal team config with the given member names.
     fn write_team_config(home: &std::path::Path, team: &str, member_names: &[&str]) {
-        let team_dir = home
-            .join(".claude")
-            .join("teams")
-            .join(team);
+        let team_dir = home.join(".claude").join("teams").join(team);
         fs::create_dir_all(&team_dir).unwrap();
 
         let members: Vec<serde_json::Value> = member_names
@@ -940,11 +942,7 @@ mod tests {
             .join("inboxes");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{agent}.json"));
-        fs::write(
-            &path,
-            serde_json::to_string_pretty(messages).unwrap(),
-        )
-        .unwrap();
+        fs::write(&path, serde_json::to_string_pretty(messages).unwrap()).unwrap();
     }
 
     /// Build a minimal test InboxMessage.
@@ -1010,16 +1008,22 @@ mod tests {
 
     #[test]
     fn test_atm_send_to_parsing_simple() {
-        let (agent, team) = parse_to("arch-ctm", "default-team");
+        let (agent, team) = parse_to("arch-ctm", "default-team").expect("valid to");
         assert_eq!(agent, "arch-ctm");
         assert_eq!(team, "default-team");
     }
 
     #[test]
     fn test_atm_send_to_parsing_at_notation() {
-        let (agent, team) = parse_to("arch-ctm@atm-dev", "default-team");
+        let (agent, team) = parse_to("arch-ctm@atm-dev", "default-team").expect("valid to");
         assert_eq!(agent, "arch-ctm");
         assert_eq!(team, "atm-dev");
+    }
+
+    #[test]
+    fn test_atm_send_to_parsing_rejects_empty_agent() {
+        let err = parse_to("@atm-dev", "default-team").expect_err("must reject empty agent");
+        assert!(err.contains("empty agent name"));
     }
 
     // -----------------------------------------------------------------------
@@ -1050,6 +1054,13 @@ mod tests {
         assert!(!result.contains("truncated"));
     }
 
+    #[test]
+    fn test_message_truncation_is_utf8_safe() {
+        let unicode = "é".repeat(MAX_MESSAGE_LEN + 1);
+        let result = maybe_truncate(&unicode);
+        assert!(result.ends_with(TRUNCATION_SUFFIX));
+    }
+
     // -----------------------------------------------------------------------
     // Auto-summary tests
     // -----------------------------------------------------------------------
@@ -1070,6 +1081,13 @@ mod tests {
         assert!(!summary.ends_with("..."));
     }
 
+    #[test]
+    fn test_auto_summary_is_utf8_safe() {
+        let msg = "é".repeat(100);
+        let summary = auto_summary(&msg);
+        assert!(summary.ends_with("..."));
+    }
+
     // -----------------------------------------------------------------------
     // atm_send tests
     // -----------------------------------------------------------------------
@@ -1086,7 +1104,10 @@ mod tests {
 
         unset_atm_home();
 
-        assert!(resp.get("error").is_none(), "should not be an error response");
+        assert!(
+            resp.get("error").is_none(),
+            "should not be an error response"
+        );
         assert_eq!(resp["result"]["isError"], Value::Null);
 
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
@@ -1151,6 +1172,16 @@ mod tests {
         let args = json!({"to": "agent"});
         let resp = handle_atm_send(&id, &args, "sender", "team");
         assert_eq!(resp["result"]["isError"], json!(true));
+    }
+
+    #[test]
+    fn test_atm_send_rejects_empty_agent_in_to() {
+        let id = json!(6);
+        let args = json!({"to": "@atm-dev", "message": "hello"});
+        let resp = handle_atm_send(&id, &args, "sender", "team");
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("empty agent name"));
     }
 
     // -----------------------------------------------------------------------
@@ -1258,7 +1289,10 @@ mod tests {
         let msgs = read_inbox(dir.path(), "team", "agent");
         unset_atm_home();
 
-        assert!(msgs.iter().all(|m| m.read), "all messages should be marked read");
+        assert!(
+            msgs.iter().all(|m| m.read),
+            "all messages should be marked read"
+        );
     }
 
     #[test]
@@ -1268,7 +1302,14 @@ mod tests {
         set_atm_home(&dir);
 
         let messages: Vec<InboxMessage> = (0..15)
-            .map(|i| make_msg("sender", &format!("msg{i}"), false, Some(&format!("id-{i}"))))
+            .map(|i| {
+                make_msg(
+                    "sender",
+                    &format!("msg{i}"),
+                    false,
+                    Some(&format!("id-{i}")),
+                )
+            })
             .collect();
         seed_inbox(dir.path(), "team", "agent", &messages);
 
@@ -1290,7 +1331,14 @@ mod tests {
         set_atm_home(&dir);
 
         let messages: Vec<InboxMessage> = (0..20)
-            .map(|i| make_msg("sender", &format!("msg{i}"), false, Some(&format!("id-{i}"))))
+            .map(|i| {
+                make_msg(
+                    "sender",
+                    &format!("msg{i}"),
+                    false,
+                    Some(&format!("id-{i}")),
+                )
+            })
             .collect();
         seed_inbox(dir.path(), "team", "agent", &messages);
 
@@ -1368,7 +1416,12 @@ mod tests {
             message_id: Some("id-future".to_string()),
             unknown_fields: HashMap::new(),
         };
-        seed_inbox(dir.path(), "team", "agent", &[old_msg, middle_msg, future_msg]);
+        seed_inbox(
+            dir.path(),
+            "team",
+            "agent",
+            &[old_msg, middle_msg, future_msg],
+        );
 
         let id = json!(16);
         // since = "2026-02-01T00:00:00Z" — should include middle and future, exclude old
@@ -1377,12 +1430,23 @@ mod tests {
 
         unset_atm_home();
 
-        assert!(resp.get("error").is_none(), "should not be protocol error; got: {resp}");
-        assert_ne!(resp["result"]["isError"], json!(true), "should not be isError; got: {resp}");
+        assert!(
+            resp.get("error").is_none(),
+            "should not be protocol error; got: {resp}"
+        );
+        assert_ne!(
+            resp["result"]["isError"],
+            json!(true),
+            "should not be isError; got: {resp}"
+        );
 
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         let msgs: Vec<Value> = serde_json::from_str(text).unwrap();
-        assert_eq!(msgs.len(), 2, "should return only messages at or after the since timestamp");
+        assert_eq!(
+            msgs.len(),
+            2,
+            "should return only messages at or after the since timestamp"
+        );
         assert!(
             msgs.iter().any(|m| m["text"] == "middle message"),
             "middle message should be included"
@@ -1501,7 +1565,10 @@ mod tests {
         assert_ne!(resp["result"]["isError"], json!(true));
 
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("2 members"), "should send to 2 members (excluding self)");
+        assert!(
+            text.contains("2 members"),
+            "should send to 2 members (excluding self)"
+        );
     }
 
     #[test]
@@ -1510,11 +1577,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         set_atm_home(&dir);
 
-        write_team_config(
-            dir.path(),
-            "team",
-            &["sender", "recip-a", "recip-b"],
-        );
+        write_team_config(dir.path(), "team", &["sender", "recip-a", "recip-b"]);
 
         let id = json!(31);
         let args = json!({"message": "skips-me"});
@@ -2028,10 +2091,7 @@ mod tests {
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], 42);
         assert_eq!(resp["result"]["isError"], json!(true));
-        assert_eq!(
-            resp["result"]["content"][0]["text"],
-            "something went wrong"
-        );
+        assert_eq!(resp["result"]["content"][0]["text"], "something went wrong");
         // Must not be a JSON-RPC error response
         assert!(resp.get("error").is_none());
     }
