@@ -487,7 +487,14 @@ impl ProxyServer {
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let resp = self.handle_synthetic_tool(&id, &tool_name, &args);
+            let thread_id = msg
+                .pointer("/params/_meta/threadId")
+                .and_then(|v| v.as_str())
+                .or_else(|| args.get("threadId").and_then(|v| v.as_str()))
+                .map(ToString::to_string);
+            let resp = self
+                .handle_synthetic_tool(&id, &tool_name, &args, thread_id.as_deref())
+                .await;
             let _ = upstream_tx.send(resp).await;
             return;
         }
@@ -1080,13 +1087,45 @@ impl ProxyServer {
     /// `atm_pending_count`) are fully implemented in Sprint A.4.
     /// Session management tools (`agent_sessions`, `agent_status`, `agent_close`)
     /// remain stubs until Sprint A.6.
-    fn handle_synthetic_tool(&self, id: &Value, tool_name: &str, args: &Value) -> Value {
+    async fn resolve_identity_from_thread(&self, thread_id: &str) -> Option<String> {
+        // Prefer the fast thread->agent map, then fall back to registry scan.
+        if let Some(agent_id) = self.thread_to_agent.lock().await.get(thread_id).cloned() {
+            let reg = self.registry.lock().await;
+            if let Some(entry) = reg.get(&agent_id)
+                && entry.status == crate::session::SessionStatus::Active
+            {
+                return Some(entry.identity.clone());
+            }
+        }
+
+        let reg = self.registry.lock().await;
+        reg.list_all()
+            .into_iter()
+            .find(|entry| {
+                entry.status == crate::session::SessionStatus::Active
+                    && entry.thread_id.as_deref() == Some(thread_id)
+            })
+            .map(|entry| entry.identity.clone())
+    }
+
+    async fn handle_synthetic_tool(
+        &self,
+        id: &Value,
+        tool_name: &str,
+        args: &Value,
+        thread_id: Option<&str>,
+    ) -> Value {
         use crate::atm_tools;
 
         match tool_name {
             "atm_send" | "atm_read" | "atm_broadcast" | "atm_pending_count" => {
-                let identity_opt =
-                    atm_tools::resolve_identity(args, self.config.identity.as_deref());
+                let thread_identity = if let Some(tid) = thread_id {
+                    self.resolve_identity_from_thread(tid).await
+                } else {
+                    None
+                };
+                let identity_opt = thread_identity
+                    .or_else(|| atm_tools::resolve_identity(args, self.config.identity.as_deref()));
                 let Some(identity) = identity_opt else {
                     return make_error_response(
                         id.clone(),
@@ -1710,6 +1749,86 @@ mod tests {
             )
             .unwrap();
         assert_eq!(entry.identity, "explicit-identity");
+    }
+
+    /// FR-4.5: in-thread ATM tools must use the thread-bound identity,
+    /// not an arbitrary args.identity override.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn synthetic_tool_prefers_thread_bound_identity_over_args_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let atm_home = dir.path().to_string_lossy().to_string();
+        // SAFETY: isolated tmp dir, no parallelism risk in serial test
+        unsafe { std::env::set_var("ATM_HOME", &atm_home) };
+
+        let config = crate::config::AgentMcpConfig {
+            identity: Some("config-identity".to_string()),
+            ..Default::default()
+        };
+        let mut proxy = ProxyServer::new(config);
+
+        let agent_id = {
+            let mut reg = proxy.registry.lock().await;
+            let entry = reg
+                .register(
+                    "bound-identity".to_string(),
+                    "default".to_string(),
+                    ".".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            reg.set_thread_id(&entry.agent_id, "thread-abc".to_string());
+            entry.agent_id
+        };
+        proxy
+            .thread_to_agent
+            .lock()
+            .await
+            .insert("thread-abc".to_string(), agent_id);
+
+        let (upstream_tx, mut upstream_rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 77,
+            "method": "tools/call",
+            "params": {
+                "name": "atm_send",
+                "_meta": {"threadId": "thread-abc"},
+                "arguments": {
+                    "to": "receiver",
+                    "message": "hello from test",
+                    "identity": "spoofed-identity"
+                }
+            }
+        });
+
+        proxy
+            .handle_tools_call(msg, &pending, &upstream_tx, &dropped)
+            .await;
+        let _resp = upstream_rx
+            .try_recv()
+            .expect("should get synthetic tool response");
+
+        let inbox_path = dir
+            .path()
+            .join(".claude")
+            .join("teams")
+            .join("default")
+            .join("inboxes")
+            .join("receiver.json");
+        let inbox_content = std::fs::read_to_string(&inbox_path).unwrap();
+        let messages: Vec<agent_team_mail_core::InboxMessage> =
+            serde_json::from_str(&inbox_content).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "bound-identity");
+
+        // SAFETY: restoring process env after isolated test
+        unsafe { std::env::remove_var("ATM_HOME") };
     }
 
     /// FR-3.2: Persisted active sessions loaded on startup are marked stale.
