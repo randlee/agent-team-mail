@@ -70,6 +70,10 @@ pub const ERR_INVALID_SESSION_PARAMS: i64 = -32007;
 /// (FR-16.6).
 pub const ERR_AGENT_FILE_NOT_FOUND: i64 = -32008;
 
+/// JSON-RPC error code: identity is required to execute an ATM tool but
+/// was not provided via the `identity` argument or proxy config (FR-8.x).
+pub const ERR_IDENTITY_REQUIRED: i64 = -32009;
+
 /// Manages the MCP proxy lifecycle: upstream I/O, child process, and message routing.
 #[derive(Debug)]
 pub struct ProxyServer {
@@ -460,7 +464,11 @@ impl ProxyServer {
 
         // Synthetic ATM tool calls — no child needed
         if is_synthetic_tool(&tool_name) {
-            let resp = self.handle_synthetic_tool(&id, &tool_name);
+            let args = msg
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let resp = self.handle_synthetic_tool(&id, &tool_name, &args);
             let _ = upstream_tx.send(resp).await;
             return;
         }
@@ -1018,19 +1026,55 @@ impl ProxyServer {
 
     /// Handle a synthetic tool call (ATM tools, session management).
     ///
-    /// For Sprint A.2/A.3 these return stub "not implemented" errors.
-    fn handle_synthetic_tool(&self, id: &Value, tool_name: &str) -> Value {
-        json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": format!("Tool '{tool_name}' is not yet implemented (Sprint A.4+)")
-                }],
-                "isError": true
+    /// ATM communication tools (`atm_send`, `atm_read`, `atm_broadcast`,
+    /// `atm_pending_count`) are fully implemented in Sprint A.4.
+    /// Session management tools (`agent_sessions`, `agent_status`, `agent_close`)
+    /// remain stubs until Sprint A.6.
+    fn handle_synthetic_tool(&self, id: &Value, tool_name: &str, args: &Value) -> Value {
+        use crate::atm_tools;
+
+        match tool_name {
+            "atm_send" | "atm_read" | "atm_broadcast" | "atm_pending_count" => {
+                let identity_opt =
+                    atm_tools::resolve_identity(args, self.config.identity.as_deref());
+                let Some(identity) = identity_opt else {
+                    return make_error_response(
+                        id.clone(),
+                        ERR_IDENTITY_REQUIRED,
+                        "identity required for ATM tools: provide 'identity' parameter or \
+                         configure proxy identity",
+                        json!({"error_source": "proxy", "tool": tool_name}),
+                    );
+                };
+                let team = &self.team;
+                tracing::info!(
+                    tool = tool_name,
+                    identity = %identity,
+                    team = %team,
+                    "ATM tool call"
+                );
+                match tool_name {
+                    "atm_send" => atm_tools::handle_atm_send(id, args, &identity, team),
+                    "atm_read" => atm_tools::handle_atm_read(id, args, &identity, team),
+                    "atm_broadcast" => atm_tools::handle_atm_broadcast(id, args, &identity, team),
+                    "atm_pending_count" => {
+                        atm_tools::handle_atm_pending_count(id, args, &identity, team)
+                    }
+                    _ => unreachable!(),
+                }
             }
-        })
+            "agent_sessions" | "agent_status" | "agent_close" => {
+                // Sprint A.6 stubs
+                atm_tools::make_mcp_error_result(
+                    id,
+                    &format!("Tool '{tool_name}' is not yet implemented (Sprint A.6+)"),
+                )
+            }
+            _ => atm_tools::make_mcp_error_result(
+                id,
+                &format!("Unknown synthetic tool: {tool_name}"),
+            ),
+        }
     }
 
     /// Spawn the Codex child process.

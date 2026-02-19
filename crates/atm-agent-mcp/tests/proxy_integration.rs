@@ -753,13 +753,19 @@ async fn test_codex_reply_passes_through() {
     let _ = handle.await;
 }
 
-// ─── Synthetic tool stubs ───────────────────────────────────────────────
+// ─── Synthetic ATM tool dispatch ─────────────────────────────────────────
 
+/// ATM tools require an identity.  When no identity is configured on the proxy
+/// and none is provided in arguments, the proxy must return ERR_IDENTITY_REQUIRED
+/// (-32009) as a JSON-RPC error (not an `isError` result).
+///
+/// This test replaced the Sprint A.2/A.3 stub test which expected `isError:true`
+/// with "not yet implemented" — ATM tools are real as of Sprint A.4.
 #[tokio::test]
 async fn test_synthetic_tool_returns_not_implemented() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
-    // atm_send should work without child spawned (it's synthetic)
+    // atm_send requires identity; default proxy config has none → ERR_IDENTITY_REQUIRED
     let req = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -773,9 +779,16 @@ async fn test_synthetic_tool_returns_not_implemented() {
 
     let resp = read_response(&mut reader).await.expect("synthetic tool response");
     assert_eq!(resp["id"], 1);
-    assert_eq!(resp["result"]["isError"], true);
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("not yet implemented"));
+    // Must be a JSON-RPC error (not a result)
+    let code = resp
+        .pointer("/error/code")
+        .and_then(|v| v.as_i64())
+        .expect("error code must be present");
+    assert_eq!(
+        code,
+        atm_agent_mcp::proxy::ERR_IDENTITY_REQUIRED,
+        "atm_send without identity should return ERR_IDENTITY_REQUIRED (-32009)"
+    );
 
     drop(writer);
     let _ = handle.await;
