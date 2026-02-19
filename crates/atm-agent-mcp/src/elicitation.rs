@@ -135,6 +135,8 @@ impl ElicitationRegistry {
             *id_field = entry.downstream_request_id.clone();
         }
 
+        // Keep existing semantics for callers relying on resolve() side effects.
+        // Ignore send failures if no receiver is waiting.
         let _ = entry.response_tx.send(response.clone());
         Some(response)
     }
