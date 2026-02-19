@@ -2,7 +2,7 @@
 
 **Version**: 0.2
 **Date**: 2026-02-13
-**Status**: Phase 6 Complete — Phase 7 Next
+**Status**: Phase 9 Complete — Phase A Planning/Execution Next
 
 ---
 
@@ -267,6 +267,10 @@ Phase 5: First Plugin (Issues) ✅
 Phase 6: Additional Plugins
   └─ CI Monitor (GitHub built-in + Azure external), Bridge
   └─ Sprint planning below
+
+Phase A: ATM Agent MCP (Standalone Proxy)
+  └─ `atm-agent-mcp` crate (Codex MCP proxy + ATM MCP tools)
+  └─ 8 MVP sprints (A.1–A.8), integrates after Phase 9 baseline
 ```
 
 ---
@@ -1784,7 +1788,33 @@ Parallel execution plan:
 
 ---
 
-## 12. Future Plugins
+## 12. Phase A: ATM Agent MCP (Planned)
+
+**Goal**: Deliver a standalone MCP proxy crate (`atm-agent-mcp`) that wraps Codex MCP, provides native ATM MCP tools, and manages agent session lifecycle.
+
+**Branch prefix**: `feature/pa-*`  
+**Integration branch**: `integrate/phase-a` (off `develop`)  
+**Depends on**: Phase 9 completion (`v0.9.x` baseline)  
+**Sequencing in phase chain**: `... -> Phase 9 -> Phase A -> future Phase B+ expansions`
+
+### Phase A Sprint Sequence
+
+| Sprint | Scope |
+|--------|-------|
+| A.1 | Crate bootstrap + CLI/config skeleton |
+| A.2 | MCP stdio proxy + downstream Codex child lifecycle |
+| A.3 | Identity binding + context injection |
+| A.4 | ATM MCP tools (`atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count`) |
+| A.5 | Session registry + persistence |
+| A.6 | Mail delivery loops + injection semantics |
+| A.7 | API stabilization (`agent_id`, error model, docs sync) |
+| A.8 | Validation/QA hardening + exit gate |
+
+**Source of truth**: `docs/atm-agent-mcp/requirements.md` owns detailed FR/NFR requirements for Phase A.
+
+---
+
+## 13. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
 
@@ -1796,7 +1826,7 @@ Additional plugins planned (each is a self-contained sprint series):
 
 ---
 
-## 13. Sprint Summary
+## 14. Sprint Summary
 
 | Phase | Sprint | Name | Status | PR |
 |-------|--------|------|--------|-----|
@@ -1864,7 +1894,7 @@ Additional plugins planned (each is a self-contained sprint series):
 
 ---
 
-## 12. Scrum Master Agent Prompt
+## 15. Scrum Master Agent Prompt
 
 The following prompt is used when spawning the scrum master agent for a sprint:
 

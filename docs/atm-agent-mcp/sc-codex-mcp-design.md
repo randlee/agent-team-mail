@@ -1,6 +1,8 @@
 # sc-atm-agent-mcp Design
 
 > **Synaptic Canvas plugin spec** — end-user integration guide for running Codex as a Claude subagent via `atm-agent-mcp`. See `codex-mcp-crate-design.md` for the internal implementation blueprint.
+>
+> **Status**: Subordinate integration guide. Normative requirements live in `docs/atm-agent-mcp/requirements.md`.
 
 Codex running as a Claude subagent via MCP, with access to native multi-agent tools and the `atm` CLI for cross-system communication with Claude agent teams.
 
@@ -149,12 +151,12 @@ Claude (orchestrator)
 ## MCP Server Setup
 
 ```bash
-claude mcp add codex -s user \
+claude mcp add atm-agent-mcp -s user \
   -e PATH="/your/node/bin:/usr/local/bin:/usr/bin:/bin" \
-  -- codex mcp-server
+  -- atm-agent-mcp serve
 ```
 
-Auth via `codex login` — no `OPENAI_API_KEY` env var needed if already authenticated.
+`atm-agent-mcp` manages the downstream `codex mcp-server` child process internally. Auth still uses `codex login` — no `OPENAI_API_KEY` env var needed if already authenticated.
 
 See `codex-mcp.md` for Codex MCP tool reference (`codex` + `codex-reply`).
 

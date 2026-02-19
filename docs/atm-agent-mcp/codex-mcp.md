@@ -20,7 +20,7 @@ claude mcp add codex -s user \
 
 Auth is handled via `codex login` (stored in `~/.codex/`). No `OPENAI_API_KEY` env var needed if already authenticated through your account.
 
-Server info: `codex-mcp-server` v0.103.0, protocol version `2024-11-05`.
+Server info: `codex-mcp-server` v0.103.0, protocol version `2025-03-26`.
 
 ---
 

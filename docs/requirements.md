@@ -10,6 +10,8 @@
 
 `atm` is a Rust workspace that provides mail-like messaging for Claude agent teams. It consists of a CLI for interactive use, a shared library for safe file I/O against the `~/.claude/teams/` file structure, and (post-MVP) an always-on daemon that hosts plugins for CI monitoring, cross-machine bridging, issue tracking, and human chat interfaces.
 
+Phase A extends this with a standalone MCP proxy crate (`atm-agent-mcp`) for Claude/Codex session orchestration and ATM-native MCP tools.
+
 ### Goals
 
 - Thin, well-tested CLI over the existing agent-team file-based API
@@ -48,6 +50,13 @@ agent-team-mail/
 │   │   └── src/
 │   │       ├── main.rs
 │   │       └── commands/       # send, read, broadcast, inbox, teams, etc.
+│   ├── atm-agent-mcp/          # standalone MCP proxy binary (Phase A)
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── main.rs
+│   │       ├── mcp/            # upstream MCP transport + tool surface
+│   │       ├── codex/          # downstream codex child process bridge
+│   │       └── registry/       # agent session persistence + lifecycle
 │   └── atm-daemon/             # daemon binary (post-MVP)
 │       ├── Cargo.toml
 │       └── src/
@@ -92,6 +101,7 @@ agent-team-mail/
 |-------|------|--------|
 | `atm-core` | Schema types, file I/O, config, context | No (sync I/O with atomic ops) |
 | `atm` | CLI binary, command dispatch, output formatting | No (calls atm-core sync functions) |
+| `atm-agent-mcp` | Standalone MCP proxy for Codex sessions + ATM MCP tools (Phase A) | Yes (tokio, stdio proxying, process management) |
 | `atm-daemon` | Plugin host, inbox watchers, event loop | Yes (tokio, async plugin trait) |
 
 ### 2.3 File-Based API
@@ -815,6 +825,22 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 - Designed to avoid stdin injection into the user's active terminal
 - Backend-agnostic adapter interface (Codex implementation first, others later)
 
+**Architecture boundary note (normative)**:
+- This is a **daemon plugin path** for daemon-managed async workers.
+- `atm-agent-mcp` is a **separate standalone binary**, not a daemon plugin.
+- Phase 7 `TmuxWorkerAdapter` remains valid for daemon workflows; Phase A `atm-agent-mcp` addresses Claude MCP proxy integration.
+- Shared concerns (identity, locks, registry) must use explicit namespace separation to avoid cross-component collisions.
+
+### 6.8 ATM Agent MCP (Standalone Proxy, Phase A)
+
+**Purpose**: Provide MCP-native Codex session orchestration and ATM communication tools without requiring daemon plugin hosting.
+
+**Design decision**:
+- Implemented as a standalone process (`atm-agent-mcp serve`).
+- Not loaded via daemon `Plugin` trait.
+- Integrates with `atm-core` and team inbox files directly.
+- Coexists with daemon plugin architecture; does not replace Phase 7 worker adapter responsibilities.
+
 ### 6.4 Human Chat Interface Plugin
 
 **Purpose**: Connect human users via chat applications.
@@ -940,6 +966,7 @@ The core has no awareness of whether a team member is local or remote.
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
 | Language | Rust (Edition 2024) | Type safety, performance, existing agent infrastructure |
+| MCP proxy runtime | `tokio` + async process I/O (Phase A `atm-agent-mcp`) | Upstream/downstream stdio bridging, child lifecycle |
 | CLI framework | `clap` (derive) | Standard Rust CLI framework |
 | Async runtime | `tokio` (daemon only) | Plugin async trait, inbox watchers |
 | Serialization | `serde` + `serde_json` | JSON file I/O with `#[serde(flatten)]` for round-trip |

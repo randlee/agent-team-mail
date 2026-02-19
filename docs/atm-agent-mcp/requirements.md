@@ -52,7 +52,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 ### FR-1: MCP Proxy Pass-Through
 
 - **FR-1.1**: Proxy MUST forward all standard MCP requests/responses between Claude and `codex mcp-server` without modification, except for intercepted tool calls listed below.
-- **FR-1.2**: Proxy MUST implement protocol-compliant JSON-RPC transport handling, including Content-Length framed messages where applicable. Newline-delimited JSON MAY be supported as a compatibility mode for the downstream child process, but the normative framing behavior MUST follow the MCP stdio transport specification. Proxy MUST handle both framing styles on the upstream (Claude) side.
+- **FR-1.2**: Proxy transport framing is directional: **downstream (proxy↔Codex child) MUST use newline-delimited JSON**, matching Codex MCP server behavior (Appendix A.3). **Upstream (Claude↔proxy) MUST accept both Content-Length framed JSON-RPC and newline-delimited JSON** for compatibility across MCP clients.
 - **FR-1.3**: Proxy MUST handle `codex mcp-server` process lifecycle (lazy spawn on first Codex request, terminate on shutdown, detect crashes).
 
 ### FR-2: Per-Thread Identity and Context Injection
@@ -70,7 +70,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ### FR-3: Identity Namespace Management
 
-> **Design Decision**: The proxy owns the identity namespace for all threads it manages. Since there is one proxy instance per MCP connection, identity uniqueness is guaranteed in-process — no PID files, liveness checks, or collision suffixes needed.
+> **Design Decision**: Identity uniqueness is enforced at two levels: in-process map for per-instance thread routing (this section), and cross-process lock/claim checks for multi-instance safety (FR-20.1).
 
 - **FR-3.1**: Proxy MUST maintain an in-memory map of identity→agent_id. A `codex` call requesting an identity already bound to an active session MUST be rejected with an error indicating the conflict.
 - **FR-3.2**: On startup, proxy MUST load the persisted registry and mark all previously-active threads as "stale" (since the previous proxy process is gone). Stale threads may be resumed via `--resume` or their identities reused by new threads.
@@ -103,7 +103,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 - **FR-5.1**: Proxy MUST track all active sessions in an in-memory registry, persisted to disk on every session creation/update.
 - **FR-5.2**: Registry entries MUST include: agent_id, backend_id (Codex threadId), identity, team, repo_root, repo_name, branch, cwd, started_at, last_active, status, tag (optional, for organizational labeling).
-- **FR-5.3**: Registry MUST use a single file at `~/.config/atm/agent-sessions/<team>/registry.json` since the proxy is the sole writer for that team namespace. Atomic writes (via `atm-core`) prevent corruption on crash, but no file locking or CAS is needed.
+- **FR-5.3**: Registry MUST use a per-instance file at `~/.config/atm/agent-sessions/<team>/<identity>/registry.json`. Atomic writes (via `atm-core`) are required. Cross-process identity collisions are prevented by FR-20.1 lock/claim checks.
 - **FR-5.4**: On `codex`/`codex-reply` response, proxy MUST extract the Codex `threadId`, assign an `agent_id`, and register the mapping.
 - **FR-5.5**: Registry MUST be persisted atomically on every state change (thread create, update, close) to survive proxy crashes.
 
