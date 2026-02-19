@@ -1,16 +1,21 @@
 //! ATM synthetic tool handlers for the MCP proxy.
 //!
-//! This module implements the four ATM communication tools exposed by the proxy:
+//! This module implements the ATM communication tools and session management
+//! tools exposed by the proxy:
 //!
 //! - [`handle_atm_send`] — send a message to a specific agent's inbox
 //! - [`handle_atm_read`] — read messages from the caller's inbox
 //! - [`handle_atm_broadcast`] — send a message to all team members
 //! - [`handle_atm_pending_count`] — count unread messages without marking them read
+//! - [`handle_agent_sessions`] — list all sessions with their status (FR-10.1)
+//! - [`handle_agent_status`] — summarise proxy status (FR-10.2)
 //!
-//! All handlers operate synchronously using `std::fs` (not tokio), since they are
-//! called from the synchronous `handle_synthetic_tool` dispatch path.  Each function
-//! constructs a valid MCP result response (JSON-RPC 2.0) on success or uses
-//! `isError: true` in the result content on failure.
+//! The ATM communication handlers operate synchronously using `std::fs`.
+//! The session management handlers are `async` because they must acquire the
+//! `Arc<Mutex<SessionRegistry>>` lock.
+//!
+//! Each function constructs a valid MCP result response (JSON-RPC 2.0) on
+//! success or uses `isError: true` in the result content on failure.
 //!
 //! # Identity Resolution
 //!
@@ -21,11 +26,15 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use agent_team_mail_core::InboxMessage;
 use agent_team_mail_core::home::get_home_dir;
 use agent_team_mail_core::io::inbox_append;
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
+
+use crate::session::{SessionRegistry, SessionStatus};
 
 /// Maximum allowed message length in characters (FR-8.4).
 const MAX_MESSAGE_LEN: usize = 4096;
@@ -566,6 +575,137 @@ pub fn handle_atm_pending_count(id: &Value, _args: &Value, identity: &str, team:
 
     let unread = messages.iter().filter(|m| !m.read).count();
     make_mcp_success(id, format!(r#"{{"unread":{unread}}}"#))
+}
+
+// ---------------------------------------------------------------------------
+// Session management tool handlers (FR-10.1, FR-10.2)
+// ---------------------------------------------------------------------------
+
+/// Handle an `agent_sessions` tool call (FR-10.1).
+///
+/// Returns a JSON array of all sessions currently tracked by the registry,
+/// regardless of status. Each element includes `agent_id`, `backend`,
+/// `backend_id` (Codex threadId), `team`, `identity`, `agent_name`,
+/// `agent_source`, `tag`, `status`, `last_active`, and `resumable`.
+///
+/// A session is `resumable` when it is [`SessionStatus::Stale`] **and** has a
+/// non-`None` `thread_id`, meaning the prior Codex thread may still be alive.
+///
+/// The `agent_name` field is derived from the file stem of `agent_source` when
+/// present, falling back to `identity`.
+///
+/// # Returns
+///
+/// MCP result whose text is a pretty-printed JSON array of session objects.
+pub async fn handle_agent_sessions(
+    id: &Value,
+    registry: Arc<Mutex<SessionRegistry>>,
+) -> Value {
+    let guard = registry.lock().await;
+    let sessions: Vec<Value> = guard.list_all().iter().map(|e| {
+        let status_str = match e.status {
+            SessionStatus::Active => "active",
+            SessionStatus::Stale => "stale",
+            SessionStatus::Closed => "closed",
+        };
+        let resumable = e.status == SessionStatus::Stale && e.thread_id.is_some();
+        let agent_name = e.agent_source.as_deref()
+            .and_then(|p| std::path::Path::new(p).file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or(&e.identity)
+            .to_string();
+        json!({
+            "agent_id": e.agent_id,
+            "backend": "codex",
+            "backend_id": e.thread_id,
+            "team": e.team,
+            "identity": e.identity,
+            "agent_name": agent_name,
+            "agent_source": e.agent_source,
+            "tag": e.tag,
+            "status": status_str,
+            "last_active": e.last_active,
+            "resumable": resumable,
+        })
+    }).collect();
+
+    let text = serde_json::to_string_pretty(&sessions).unwrap_or_else(|_| "[]".to_string());
+    make_mcp_success(id, text)
+}
+
+/// Count the number of unread messages in an agent's inbox.
+///
+/// Returns `0` when the inbox file does not exist or cannot be parsed.
+/// This is used by [`handle_agent_status`] (and its callers) to compute the
+/// aggregate pending mail count across all active sessions.
+pub fn count_unread_for_identity(identity: &str, team: &str, home: &std::path::Path) -> u64 {
+    let path = inbox_path(home, team, identity);
+    if !path.exists() {
+        return 0;
+    }
+    let content = match std::fs::read(&path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    let messages: Vec<agent_team_mail_core::InboxMessage> =
+        match serde_json::from_slice(&content) {
+            Ok(m) => m,
+            Err(_) => return 0,
+        };
+    messages.iter().filter(|m| !m.read).count() as u64
+}
+
+/// Handle an `agent_status` tool call (FR-10.2).
+///
+/// Returns a JSON object summarising the proxy's runtime status: whether a
+/// Codex child process is alive, the ATM team name, startup timestamp, uptime
+/// in seconds, active thread count, aggregate unread mail count across all
+/// active sessions, and the current identity→threadId map for active sessions.
+///
+/// # Parameters
+///
+/// * `pending_mail_count` — pre-computed total unread message count across all
+///   active sessions; callers should compute this before acquiring the registry
+///   lock to keep this function pure relative to the registry state.
+///
+/// # Returns
+///
+/// MCP result whose text is a pretty-printed JSON status object.
+pub async fn handle_agent_status(
+    id: &Value,
+    registry: Arc<Mutex<SessionRegistry>>,
+    child_alive: bool,
+    team: &str,
+    started_at: &str,
+    uptime_secs: u64,
+    pending_mail_count: u64,
+) -> Value {
+    let guard = registry.lock().await;
+    let active_count = guard.active_count();
+    let identity_map: serde_json::Map<String, Value> = guard
+        .list_all()
+        .iter()
+        .filter(|e| e.status == SessionStatus::Active)
+        .map(|e| {
+            (
+                e.identity.clone(),
+                Value::String(e.thread_id.clone().unwrap_or_default()),
+            )
+        })
+        .collect();
+
+    let status = json!({
+        "child_alive": child_alive,
+        "team": team,
+        "started_at": started_at,
+        "uptime_secs": uptime_secs,
+        "active_thread_count": active_count,
+        "pending_mail_count": pending_mail_count,
+        "identity_map": identity_map,
+    });
+
+    let text = serde_json::to_string_pretty(&status).unwrap_or_default();
+    make_mcp_success(id, text)
 }
 
 // ---------------------------------------------------------------------------
@@ -1257,6 +1397,288 @@ mod tests {
         unset_atm_home();
 
         assert_eq!(resp["result"]["isError"], json!(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_agent_sessions tests
+    // -----------------------------------------------------------------------
+
+    fn make_test_registry(max: usize) -> Arc<Mutex<SessionRegistry>> {
+        Arc::new(Mutex::new(SessionRegistry::new(max)))
+    }
+
+    #[tokio::test]
+    async fn test_agent_sessions_empty_registry() {
+        let reg = make_test_registry(10);
+        let id = json!(100);
+        let resp = handle_agent_sessions(&id, reg).await;
+        assert!(resp.get("error").is_none());
+        assert_ne!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let sessions: Vec<Value> = serde_json::from_str(text).unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_agent_sessions_active_session_listed() {
+        let reg = make_test_registry(10);
+        {
+            let mut guard = reg.lock().await;
+            guard
+                .register(
+                    "arch-ctm".to_string(),
+                    "atm-dev".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        let id = json!(101);
+        let resp = handle_agent_sessions(&id, reg).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let sessions: Vec<Value> = serde_json::from_str(text).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["identity"], "arch-ctm");
+        assert_eq!(sessions[0]["status"], "active");
+        assert_eq!(sessions[0]["resumable"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn test_agent_sessions_stale_with_thread_id_is_resumable() {
+        let reg = make_test_registry(10);
+        let agent_id = {
+            let mut guard = reg.lock().await;
+            let e = guard
+                .register(
+                    "dev-agent".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            guard.set_thread_id(&e.agent_id, "thread-xyz".to_string());
+            guard.mark_all_stale();
+            e.agent_id.clone()
+        };
+        let id = json!(102);
+        let resp = handle_agent_sessions(&id, Arc::clone(&reg)).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let sessions: Vec<Value> = serde_json::from_str(text).unwrap();
+        let session = sessions
+            .iter()
+            .find(|s| s["agent_id"] == agent_id)
+            .unwrap();
+        assert_eq!(session["status"], "stale");
+        assert_eq!(session["resumable"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_agent_sessions_stale_without_thread_id_not_resumable() {
+        let reg = make_test_registry(10);
+        {
+            let mut guard = reg.lock().await;
+            guard
+                .register(
+                    "no-thread".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            guard.mark_all_stale();
+        }
+        let id = json!(103);
+        let resp = handle_agent_sessions(&id, reg).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let sessions: Vec<Value> = serde_json::from_str(text).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["resumable"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn test_agent_sessions_mixed_statuses() {
+        let reg = make_test_registry(10);
+        {
+            let mut guard = reg.lock().await;
+            let a = guard
+                .register(
+                    "active-agent".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let c = guard
+                .register(
+                    "closed-agent".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            guard.close(&c.agent_id);
+            guard
+                .register(
+                    "stale-agent".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let _ = a;
+        }
+        // Mark non-active sessions stale (mark_all_stale makes ALL stale)
+        // Instead close + keep one active, and use insert_stale for the third
+        let reg2 = make_test_registry(10);
+        {
+            let mut guard = reg2.lock().await;
+            guard
+                .register(
+                    "active-agent".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let closed = guard
+                .register(
+                    "closed-agent".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            guard.close(&closed.agent_id);
+        }
+        let id = json!(104);
+        let resp = handle_agent_sessions(&id, reg2).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let sessions: Vec<Value> = serde_json::from_str(text).unwrap();
+        assert_eq!(sessions.len(), 2);
+        let statuses: Vec<&str> = sessions
+            .iter()
+            .map(|s| s["status"].as_str().unwrap())
+            .collect();
+        assert!(statuses.contains(&"active"));
+        assert!(statuses.contains(&"closed"));
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_agent_status tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_agent_status_no_sessions() {
+        let reg = make_test_registry(10);
+        let id = json!(200);
+        let resp = handle_agent_status(
+            &id,
+            reg,
+            false,
+            "atm-dev",
+            "2026-02-18T00:00:00Z",
+            42,
+            0,
+        )
+        .await;
+        assert!(resp.get("error").is_none());
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let status: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(status["child_alive"], json!(false));
+        assert_eq!(status["team"], "atm-dev");
+        assert_eq!(status["started_at"], "2026-02-18T00:00:00Z");
+        assert_eq!(status["uptime_secs"], json!(42));
+        assert_eq!(status["active_thread_count"], json!(0));
+        assert_eq!(status["pending_mail_count"], json!(0));
+        assert!(status["identity_map"].as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_agent_status_with_active_session() {
+        let reg = make_test_registry(10);
+        let agent_id = {
+            let mut guard = reg.lock().await;
+            let e = guard
+                .register(
+                    "arch-ctm".to_string(),
+                    "atm-dev".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            guard.set_thread_id(&e.agent_id, "thread-abc".to_string());
+            e.agent_id.clone()
+        };
+        let id = json!(201);
+        let resp = handle_agent_status(
+            &id,
+            Arc::clone(&reg),
+            true,
+            "atm-dev",
+            "2026-02-18T12:00:00Z",
+            3600,
+            0,
+        )
+        .await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let status: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(status["child_alive"], json!(true));
+        assert_eq!(status["active_thread_count"], json!(1));
+        let map = status["identity_map"].as_object().unwrap();
+        assert_eq!(map.get("arch-ctm").and_then(|v| v.as_str()), Some("thread-abc"));
+        let _ = agent_id;
+    }
+
+    #[tokio::test]
+    async fn test_agent_status_stale_sessions_not_in_identity_map() {
+        let reg = make_test_registry(10);
+        {
+            let mut guard = reg.lock().await;
+            guard
+                .register(
+                    "stale-agent".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            guard.mark_all_stale();
+        }
+        let id = json!(202);
+        let resp = handle_agent_status(
+            &id,
+            reg,
+            false,
+            "team",
+            "2026-02-18T00:00:00Z",
+            0,
+            0,
+        )
+        .await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let status: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(status["active_thread_count"], json!(0));
+        assert!(status["identity_map"].as_object().unwrap().is_empty());
     }
 
     // -----------------------------------------------------------------------

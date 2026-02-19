@@ -90,6 +90,10 @@ pub struct ProxyServer {
     pub team: String,
     /// Maps Codex `threadId` → `agent_id` for event attribution.
     thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    /// UTC ISO 8601 timestamp of when this proxy process started.
+    started_at: String,
+    /// Unix epoch seconds when this proxy process started (for uptime calc).
+    started_epoch_secs: u64,
 }
 
 /// Handle to the spawned Codex child process.
@@ -186,6 +190,7 @@ impl ProxyServer {
         let team_str: String = team.into();
         let registry = SessionRegistry::new(max);
         let registry = Self::load_stale_from_disk(registry, &team_str);
+        let (started_at, started_epoch_secs) = proxy_start_time();
         Self {
             config,
             child: None,
@@ -193,94 +198,88 @@ impl ProxyServer {
             registry: Arc::new(Mutex::new(registry)),
             team: team_str,
             thread_to_agent: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            started_at,
+            started_epoch_secs,
         }
     }
 
-    /// Load a persisted registry file and mark any `"active"` sessions as stale.
+    /// Persist the current registry snapshot to disk atomically (FR-5.5).
+    ///
+    /// Writes a temporary file alongside the target path, then renames it to
+    /// the target, ensuring readers always see a complete file.  Parent
+    /// directories are created on demand.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when I/O fails (permissions, disk full, etc.).
+    async fn persist_registry(
+        registry: &Arc<Mutex<SessionRegistry>>,
+        sessions_path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        use crate::session::RegistrySnapshot;
+        use tokio::fs;
+        use tokio::io::AsyncWriteExt;
+
+        let snapshot: RegistrySnapshot = {
+            let guard = registry.lock().await;
+            guard.to_snapshot()
+        };
+        let json = serde_json::to_vec_pretty(&snapshot)?;
+
+        // Ensure parent directory exists.
+        if let Some(parent) = sessions_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        // Write to a temp file alongside the target, then rename for atomicity.
+        let tmp_path = sessions_path.with_extension("json.tmp");
+        {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .await?;
+            file.write_all(&json).await?;
+            file.flush().await?;
+        }
+        fs::rename(&tmp_path, sessions_path).await?;
+        Ok(())
+    }
+
+    /// Load a persisted registry file and mark any `Active` sessions as
+    /// [`crate::session::SessionStatus::Stale`].
     ///
     /// If the file does not exist or cannot be parsed, returns the registry
     /// unchanged (fresh start). This satisfies FR-3.2's requirement to mark
     /// prior active sessions as stale on proxy startup.
-    fn load_stale_from_disk(mut registry: SessionRegistry, team: &str) -> SessionRegistry {
+    fn load_stale_from_disk(registry: SessionRegistry, team: &str) -> SessionRegistry {
         use crate::lock::sessions_dir;
-        use crate::session::SessionStatus;
+        use crate::session::RegistrySnapshot;
 
         let registry_path = sessions_dir().join(team).join("registry.json");
-        let Ok(contents) = std::fs::read_to_string(&registry_path) else {
-            return registry;
+        let contents = match std::fs::read_to_string(&registry_path) {
+            Ok(c) => c,
+            Err(_) => return registry, // file absent — fresh start
         };
-        let Ok(root) = serde_json::from_str::<serde_json::Value>(&contents) else {
-            return registry;
-        };
-        let Some(sessions) = root.get("sessions").and_then(|v| v.as_array()) else {
-            return registry;
-        };
-
-        for session in sessions {
-            let status_str = session.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            if status_str != "active" {
-                continue;
+        let snapshot = match serde_json::from_str::<RegistrySnapshot>(&contents) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    path = %registry_path.display(),
+                    "failed to parse registry.json, starting fresh: {e}"
+                );
+                return registry;
             }
-            // Extract required fields; skip malformed entries
-            let Some(agent_id) = session.get("agent_id").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let identity = session
-                .get("identity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let team_val = session
-                .get("team")
-                .and_then(|v| v.as_str())
-                .unwrap_or(team)
-                .to_string();
-            let cwd = session
-                .get("cwd")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".")
-                .to_string();
-            let started_at = session
-                .get("started_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let last_active = session
-                .get("last_active")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let thread_id = session
-                .get("thread_id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
+        };
 
-            let entry = crate::session::SessionEntry {
-                agent_id: agent_id.to_string(),
-                identity,
-                team: team_val,
-                thread_id,
-                cwd,
-                repo_root: session
-                    .get("repo_root")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                repo_name: session
-                    .get("repo_name")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                branch: session
-                    .get("branch")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                started_at,
-                last_active,
-                status: SessionStatus::Stale,
-            };
-            registry.insert_stale(entry);
-        }
-
-        registry
+        let max = registry.max_concurrent();
+        let loaded = SessionRegistry::load_from_snapshot(snapshot, max);
+        tracing::info!(
+            count = loaded.list_all().len(),
+            "loaded persisted sessions from disk (all marked stale)"
+        );
+        loaded
     }
 
     /// Run the proxy loop, reading from `upstream_in` and writing to `upstream_out`.
@@ -401,6 +400,15 @@ impl ProxyServer {
             }
         }
 
+        // Shutdown: persist final registry state to disk (ATM-QA-A5-008).
+        // The lock from the block above is released before this call.
+        let sessions_path = crate::lock::sessions_dir()
+            .join(&self.team)
+            .join("registry.json");
+        if let Err(e) = Self::persist_registry(&self.registry, &sessions_path).await {
+            tracing::warn!("failed to persist registry at shutdown: {e:#}");
+        }
+
         // Shutdown: signal child and force-kill if it ignores stdin EOF
         if let Some(handle) = self.child.take() {
             // Drop stdin to signal EOF to child
@@ -487,7 +495,7 @@ impl ProxyServer {
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let resp = self.handle_synthetic_tool(&id, &tool_name, &args);
+            let resp = self.handle_synthetic_tool(&id, &tool_name, &args).await;
             let _ = upstream_tx.send(resp).await;
             return;
         }
@@ -763,6 +771,7 @@ impl ProxyServer {
         let thread_to_agent_task = Arc::clone(&self.thread_to_agent);
         let pending_for_thread_map = Arc::clone(pending);
         let registry_for_thread_map = Arc::clone(&self.registry);
+        let team_for_thread_map = self.team.clone();
 
         tokio::spawn(async move {
             match timeout(Duration::from_secs(timeout_secs), rx).await {
@@ -784,6 +793,18 @@ impl ProxyServer {
                                 .lock()
                                 .await
                                 .insert(thread_id.to_string(), agent_id);
+                            // Persist updated registry (thread_id now set)
+                            let sessions_path = crate::lock::sessions_dir()
+                                .join(&team_for_thread_map)
+                                .join("registry.json");
+                            if let Err(e) = ProxyServer::persist_registry(
+                                &registry_for_thread_map,
+                                &sessions_path,
+                            )
+                            .await
+                            {
+                                tracing::warn!("failed to persist registry after set_thread_id: {e}");
+                            }
                         }
                     }
                     let _ = upstream_tx_clone.send(resp).await;
@@ -927,6 +948,13 @@ impl ProxyServer {
         if let Err(e) = acquire_lock(&team, &identity, &entry.agent_id).await {
             // Roll back registry entry
             self.registry.lock().await.close(&entry.agent_id);
+            let sessions_path =
+                crate::lock::sessions_dir().join(&team).join("registry.json");
+            if let Err(pe) =
+                Self::persist_registry(&self.registry, &sessions_path).await
+            {
+                tracing::warn!("failed to persist registry after lock-rollback close: {pe}");
+            }
             let _ = upstream_tx
                 .send(make_error_response(
                     id.clone(),
@@ -936,6 +964,20 @@ impl ProxyServer {
                 ))
                 .await;
             return PrepareResult::Error;
+        }
+
+        // Record agent_source on the new entry if agent_file was provided (FR-16.1).
+        if let Some(ref path) = agent_file_path {
+            self.registry
+                .lock()
+                .await
+                .set_agent_source(&entry.agent_id, path.clone());
+        }
+
+        // Persist registry after successful registration (FR-5.5)
+        let sessions_path = crate::lock::sessions_dir().join(&team).join("registry.json");
+        if let Err(e) = Self::persist_registry(&self.registry, &sessions_path).await {
+            tracing::warn!("failed to persist registry after register: {e}");
         }
 
         // Build developer-instructions context string
@@ -1033,16 +1075,25 @@ impl ProxyServer {
 
         // Update session with fresh context (and explicit cwd if supplied)
         if let Some(ref aid) = resolved_agent_id {
-            let mut reg = self.registry.lock().await;
-            if let Some(ref new_cwd) = explicit_cwd {
-                reg.set_cwd(aid, new_cwd.clone());
+            {
+                let mut reg = self.registry.lock().await;
+                if let Some(ref new_cwd) = explicit_cwd {
+                    reg.set_cwd(aid, new_cwd.clone());
+                }
+                reg.touch(
+                    aid,
+                    ctx.repo_root.clone(),
+                    ctx.repo_name.clone(),
+                    ctx.branch.clone(),
+                );
             }
-            reg.touch(
-                aid,
-                ctx.repo_root.clone(),
-                ctx.repo_name.clone(),
-                ctx.branch.clone(),
-            );
+            // Persist updated registry after touch (lock released above).
+            let sessions_path = crate::lock::sessions_dir()
+                .join(&self.team)
+                .join("registry.json");
+            if let Err(e) = Self::persist_registry(&self.registry, &sessions_path).await {
+                tracing::warn!("failed to persist registry after touch: {e:#}");
+            }
         }
 
         // Keep event attribution accurate during codex-reply-only flows.
@@ -1078,9 +1129,9 @@ impl ProxyServer {
     ///
     /// ATM communication tools (`atm_send`, `atm_read`, `atm_broadcast`,
     /// `atm_pending_count`) are fully implemented in Sprint A.4.
-    /// Session management tools (`agent_sessions`, `agent_status`, `agent_close`)
-    /// remain stubs until Sprint A.6.
-    fn handle_synthetic_tool(&self, id: &Value, tool_name: &str, args: &Value) -> Value {
+    /// Session management tools (`agent_sessions`, `agent_status`) are
+    /// implemented in Sprint A.5. `agent_close` remains a stub.
+    async fn handle_synthetic_tool(&self, id: &Value, tool_name: &str, args: &Value) -> Value {
         use crate::atm_tools;
 
         match tool_name {
@@ -1113,11 +1164,52 @@ impl ProxyServer {
                     _ => unreachable!(),
                 }
             }
-            "agent_sessions" | "agent_status" | "agent_close" => {
-                // Sprint A.6 stubs
+            "agent_sessions" => {
+                atm_tools::handle_agent_sessions(id, Arc::clone(&self.registry)).await
+            }
+            "agent_status" => {
+                use agent_team_mail_core::home::get_home_dir;
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let now_secs = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let uptime_secs = now_secs.saturating_sub(self.started_epoch_secs);
+                let child_alive = self.child.is_some();
+                // Compute aggregate unread mail count across all active sessions.
+                let pending_mail_count: u64 = {
+                    let home_opt = get_home_dir().ok();
+                    let reg = self.registry.lock().await;
+                    reg.list_all()
+                        .iter()
+                        .filter(|e| e.status == crate::session::SessionStatus::Active)
+                        .map(|e| {
+                            home_opt.as_deref().map_or(0, |home| {
+                                atm_tools::count_unread_for_identity(
+                                    &e.identity,
+                                    &self.team,
+                                    home,
+                                )
+                            })
+                        })
+                        .sum()
+                };
+                atm_tools::handle_agent_status(
+                    id,
+                    Arc::clone(&self.registry),
+                    child_alive,
+                    &self.team,
+                    &self.started_at,
+                    uptime_secs,
+                    pending_mail_count,
+                )
+                .await
+            }
+            "agent_close" => {
+                // Stub: agent_close implementation deferred
                 atm_tools::make_mcp_error_result(
                     id,
-                    &format!("Tool '{tool_name}' is not yet implemented (Sprint A.6+)"),
+                    "Tool 'agent_close' is not yet implemented",
                 )
             }
             _ => atm_tools::make_mcp_error_result(
@@ -1421,6 +1513,37 @@ fn is_synthetic_tool(name: &str) -> bool {
             | "agent_status"
             | "agent_close"
     )
+}
+
+/// Return the proxy start time as `(iso8601_string, epoch_secs)`.
+fn proxy_start_time() -> (String, u64) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+    let (y, mo, d) = epoch_days_to_ymd(days);
+    let iso = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z");
+    (iso, secs)
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn epoch_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    days += 719468;
+    let era = days / 146097;
+    let doe = days % 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    (y, mo, d)
 }
 
 /// Construct a JSON-RPC error response.

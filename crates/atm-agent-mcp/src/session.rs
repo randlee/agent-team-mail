@@ -5,8 +5,11 @@
 //! (one active session per identity) and a configurable maximum concurrency
 //! limit.
 //!
-//! The registry is entirely in-memory for Sprint A.3. Persistence to disk is
-//! added in Sprint A.5.
+//! Persistence to disk is handled via [`RegistrySnapshot`]: callers call
+//! [`SessionRegistry::to_snapshot`] to obtain a serializable snapshot and
+//! write it themselves (Sprint A.5). On startup,
+//! [`SessionRegistry::load_from_snapshot`] restores entries and immediately
+//! marks them [`SessionStatus::Stale`] (FR-3.2).
 //!
 //! # Thread safety
 //!
@@ -21,6 +24,7 @@ use uuid::Uuid;
 
 /// Status of a single agent session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SessionStatus {
     /// Session is actively running in this proxy process.
     Active,
@@ -55,6 +59,12 @@ pub struct SessionEntry {
     pub last_active: String,
     /// Current lifecycle status.
     pub status: SessionStatus,
+    /// Optional organizational label for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// Path to the agent file used to create this session, if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_source: Option<String>,
 }
 
 /// Errors produced by [`SessionRegistry`] operations.
@@ -74,6 +84,38 @@ pub enum RegistryError {
         /// The configured maximum.
         max: usize,
     },
+}
+
+/// Serializable snapshot of all sessions, used for disk persistence (FR-5.3).
+///
+/// Obtain one by calling [`SessionRegistry::to_snapshot`]. Restore with
+/// [`SessionRegistry::load_from_snapshot`].
+///
+/// # Examples
+///
+/// ```
+/// use atm_agent_mcp::session::{SessionRegistry, RegistrySnapshot};
+///
+/// let registry = SessionRegistry::new(10);
+/// let snap = registry.to_snapshot();
+/// let json = serde_json::to_string(&snap).unwrap();
+/// let snap2: RegistrySnapshot = serde_json::from_str(&json).unwrap();
+/// assert_eq!(snap2.sessions.len(), 0);
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RegistrySnapshot {
+    /// Schema version for forward compatibility.
+    ///
+    /// Version 1 is the current and only defined version.
+    #[serde(default = "default_registry_version")]
+    pub version: u32,
+    /// All session entries captured at snapshot time.
+    pub sessions: Vec<SessionEntry>,
+}
+
+/// Return the current registry snapshot schema version.
+fn default_registry_version() -> u32 {
+    1
 }
 
 /// In-memory registry of all agent sessions.
@@ -113,6 +155,11 @@ impl SessionRegistry {
             identity_map: HashMap::new(),
             max_concurrent,
         }
+    }
+
+    /// The configured maximum number of concurrent active sessions.
+    pub fn max_concurrent(&self) -> usize {
+        self.max_concurrent
     }
 
     /// Number of sessions with [`SessionStatus::Active`] status.
@@ -169,6 +216,8 @@ impl SessionRegistry {
             started_at: now.clone(),
             last_active: now,
             status: SessionStatus::Active,
+            tag: None,
+            agent_source: None,
         };
 
         self.sessions.insert(agent_id.clone(), entry.clone());
@@ -188,6 +237,19 @@ impl SessionRegistry {
     pub fn set_thread_id(&mut self, agent_id: &str, thread_id: String) {
         if let Some(entry) = self.sessions.get_mut(agent_id) {
             entry.thread_id = Some(thread_id);
+        }
+    }
+
+    /// Set the agent source file path for a session.
+    ///
+    /// Records the path to the agent file (`agent_file` argument) that was
+    /// used to create this session, enabling callers to display a human-friendly
+    /// agent name derived from the file stem.
+    ///
+    /// Does nothing if the `agent_id` is not found.
+    pub fn set_agent_source(&mut self, agent_id: &str, source: String) {
+        if let Some(entry) = self.sessions.get_mut(agent_id) {
+            entry.agent_source = Some(source);
         }
     }
 
@@ -287,6 +349,58 @@ impl SessionRegistry {
     /// Order is unspecified.
     pub fn list_all(&self) -> Vec<&SessionEntry> {
         self.sessions.values().collect()
+    }
+
+    /// Export all sessions as a serializable snapshot.
+    ///
+    /// The caller is responsible for writing the snapshot to disk.
+    /// This method is pure and synchronous — it holds no locks and performs
+    /// no I/O.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atm_agent_mcp::session::SessionRegistry;
+    ///
+    /// let registry = SessionRegistry::new(10);
+    /// let snap = registry.to_snapshot();
+    /// assert!(snap.sessions.is_empty());
+    /// ```
+    pub fn to_snapshot(&self) -> RegistrySnapshot {
+        RegistrySnapshot {
+            version: 1,
+            sessions: self.sessions.values().cloned().collect(),
+        }
+    }
+
+    /// Restore a registry from a snapshot, marking all loaded sessions as
+    /// [`SessionStatus::Stale`] (FR-3.2).
+    ///
+    /// Any `Active` entries in the snapshot are treated as stale because the
+    /// proxy process that created them is no longer running. `Stale` and
+    /// `Closed` entries are preserved as-is.
+    ///
+    /// If the snapshot is empty the registry is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atm_agent_mcp::session::{SessionRegistry, RegistrySnapshot, SessionEntry, SessionStatus};
+    ///
+    /// let snap = RegistrySnapshot { version: 1, sessions: vec![] };
+    /// let registry = SessionRegistry::load_from_snapshot(snap, 10);
+    /// assert_eq!(registry.active_count(), 0);
+    /// ```
+    pub fn load_from_snapshot(snapshot: RegistrySnapshot, max_concurrent: usize) -> Self {
+        let mut registry = Self::new(max_concurrent);
+        for mut entry in snapshot.sessions {
+            if entry.status == SessionStatus::Active {
+                entry.status = SessionStatus::Stale;
+            }
+            // Stale and Closed sessions do not occupy identity map slots.
+            registry.sessions.insert(entry.agent_id.clone(), entry);
+        }
+        registry
     }
 }
 
@@ -547,6 +661,8 @@ mod tests {
             started_at: "2026-01-01T00:00:00Z".to_string(),
             last_active: "2026-01-01T00:00:00Z".to_string(),
             status: SessionStatus::Stale,
+            tag: None,
+            agent_source: None,
         };
         r.insert_stale(entry);
         // Session is stored
@@ -575,6 +691,140 @@ mod tests {
         let mut r = make_registry(10);
         // Should not panic
         r.set_cwd("codex:no-such-agent", "/tmp".to_string());
+    }
+
+    // ─── RegistrySnapshot / to_snapshot / load_from_snapshot ────────────────
+
+    #[test]
+    fn to_snapshot_empty_registry() {
+        let r = make_registry(10);
+        let snap = r.to_snapshot();
+        assert!(snap.sessions.is_empty());
+    }
+
+    #[test]
+    fn to_snapshot_includes_all_sessions() {
+        let mut r = make_registry(10);
+        reg_entry(&mut r, "agent-a").unwrap();
+        reg_entry(&mut r, "agent-b").unwrap();
+        let snap = r.to_snapshot();
+        assert_eq!(snap.sessions.len(), 2);
+        let identities: Vec<&str> = snap.sessions.iter().map(|e| e.identity.as_str()).collect();
+        assert!(identities.contains(&"agent-a"));
+        assert!(identities.contains(&"agent-b"));
+    }
+
+    #[test]
+    fn to_snapshot_includes_all_statuses() {
+        let mut r = make_registry(10);
+        let a = reg_entry(&mut r, "agent-a").unwrap();
+        reg_entry(&mut r, "agent-b").unwrap();
+        r.close(&a.agent_id);
+        reg_entry(&mut r, "agent-c").unwrap();
+        r.mark_all_stale();
+
+        let snap = r.to_snapshot();
+        assert_eq!(snap.sessions.len(), 3);
+    }
+
+    #[test]
+    fn load_from_snapshot_empty_gives_empty_registry() {
+        let snap = RegistrySnapshot { version: 1, sessions: vec![] };
+        let r = SessionRegistry::load_from_snapshot(snap, 10);
+        assert_eq!(r.active_count(), 0);
+        assert!(r.list_all().is_empty());
+    }
+
+    #[test]
+    fn load_from_snapshot_marks_active_as_stale() {
+        let entry = SessionEntry {
+            agent_id: "codex:snap-test-1".to_string(),
+            identity: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            thread_id: Some("thread-xyz".to_string()),
+            cwd: "/tmp".to_string(),
+            repo_root: None,
+            repo_name: None,
+            branch: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            last_active: "2026-01-01T00:00:00Z".to_string(),
+            status: SessionStatus::Active,
+            tag: None,
+            agent_source: None,
+        };
+        let snap = RegistrySnapshot {
+            version: 1,
+            sessions: vec![entry],
+        };
+        let r = SessionRegistry::load_from_snapshot(snap, 10);
+        assert_eq!(r.active_count(), 0, "active sessions become stale on load");
+        let found = r.get("codex:snap-test-1").expect("session must be present");
+        assert_eq!(found.status, SessionStatus::Stale);
+        // Identity map must NOT contain the stale session
+        assert!(r.find_by_identity("arch-ctm").is_none());
+    }
+
+    #[test]
+    fn load_from_snapshot_preserves_stale_and_closed() {
+        let stale = SessionEntry {
+            agent_id: "codex:stale-1".to_string(),
+            identity: "stale-agent".to_string(),
+            team: "atm-dev".to_string(),
+            thread_id: None,
+            cwd: "/tmp".to_string(),
+            repo_root: None,
+            repo_name: None,
+            branch: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            last_active: "2026-01-01T00:00:00Z".to_string(),
+            status: SessionStatus::Stale,
+            tag: None,
+            agent_source: None,
+        };
+        let closed = SessionEntry {
+            agent_id: "codex:closed-1".to_string(),
+            identity: "closed-agent".to_string(),
+            team: "atm-dev".to_string(),
+            thread_id: None,
+            cwd: "/tmp".to_string(),
+            repo_root: None,
+            repo_name: None,
+            branch: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            last_active: "2026-01-01T00:00:00Z".to_string(),
+            status: SessionStatus::Closed,
+            tag: None,
+            agent_source: None,
+        };
+        let snap = RegistrySnapshot {
+            version: 1,
+            sessions: vec![stale, closed],
+        };
+        let r = SessionRegistry::load_from_snapshot(snap, 10);
+        let s = r.get("codex:stale-1").unwrap();
+        assert_eq!(s.status, SessionStatus::Stale);
+        let c = r.get("codex:closed-1").unwrap();
+        assert_eq!(c.status, SessionStatus::Closed);
+    }
+
+    #[test]
+    fn round_trip_snapshot_serialize_deserialize() {
+        let mut r = make_registry(10);
+        let e = reg_entry(&mut r, "arch-ctm").unwrap();
+        r.set_thread_id(&e.agent_id, "thread-rt-1".to_string());
+        reg_entry(&mut r, "dev-agent").unwrap();
+
+        let snap = r.to_snapshot();
+        let json = serde_json::to_string(&snap).unwrap();
+        let snap2: RegistrySnapshot = serde_json::from_str(&json).unwrap();
+        let r2 = SessionRegistry::load_from_snapshot(snap2, 10);
+
+        assert_eq!(r2.list_all().len(), 2);
+        // All were Active, so all become Stale after load
+        assert_eq!(r2.active_count(), 0);
+        let loaded = r2.get(&e.agent_id).unwrap();
+        assert_eq!(loaded.status, SessionStatus::Stale);
+        assert_eq!(loaded.thread_id, Some("thread-rt-1".to_string()));
     }
 
     // ─── epoch_secs_to_iso8601 ───────────────────────────────────────────────
