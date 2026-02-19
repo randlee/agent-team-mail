@@ -34,7 +34,7 @@ use agent_team_mail_core::io::inbox_append;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::session::{SessionRegistry, SessionStatus};
+use crate::session::{SessionRegistry, SessionStatus, ThreadState};
 
 /// Maximum allowed message length in characters (FR-8.4).
 const MAX_MESSAGE_LEN: usize = 4096;
@@ -608,6 +608,11 @@ pub async fn handle_agent_sessions(
             SessionStatus::Stale => "stale",
             SessionStatus::Closed => "closed",
         };
+        let thread_state_str = match e.thread_state {
+            ThreadState::Busy => "busy",
+            ThreadState::Idle => "idle",
+            ThreadState::Closed => "closed",
+        };
         let resumable = e.status == SessionStatus::Stale && e.thread_id.is_some();
         let agent_name = e.agent_source.as_deref()
             .and_then(|p| std::path::Path::new(p).file_stem())
@@ -624,6 +629,7 @@ pub async fn handle_agent_sessions(
             "agent_source": e.agent_source,
             "tag": e.tag,
             "status": status_str,
+            "thread_state": thread_state_str,
             "last_active": e.last_active,
             "resumable": resumable,
         })
@@ -682,6 +688,20 @@ pub async fn handle_agent_status(
 ) -> Value {
     let guard = registry.lock().await;
     let active_count = guard.active_count();
+    let busy_count = guard
+        .list_all()
+        .iter()
+        .filter(|e| {
+            e.status == SessionStatus::Active && e.thread_state == ThreadState::Busy
+        })
+        .count();
+    let idle_count = guard
+        .list_all()
+        .iter()
+        .filter(|e| {
+            e.status == SessionStatus::Active && e.thread_state == ThreadState::Idle
+        })
+        .count();
     let identity_map: serde_json::Map<String, Value> = guard
         .list_all()
         .iter()
@@ -700,12 +720,143 @@ pub async fn handle_agent_status(
         "started_at": started_at,
         "uptime_secs": uptime_secs,
         "active_thread_count": active_count,
+        "busy_thread_count": busy_count,
+        "idle_thread_count": idle_count,
         "pending_mail_count": pending_mail_count,
         "identity_map": identity_map,
     });
 
     let text = serde_json::to_string_pretty(&status).unwrap_or_default();
     make_mcp_success(id, text)
+}
+
+/// Handle an `agent_close` tool call (FR-17).
+///
+/// Closes the specified agent session, releasing its identity lock.  The tool
+/// accepts either `agent_id` (direct lookup) or `identity` (looked up via the
+/// active identity map).
+///
+/// Close is **idempotent** (FR-17.9): closing an already-closed session returns
+/// a success response with `"status": "already_closed"`.
+///
+/// If the thread is `Busy` at close time the session is still closed immediately
+/// and `"status": "interrupted"` is returned.  Actual in-flight turn cancellation
+/// is deferred to Sprint A.7.
+///
+/// # Parameters (from `args`)
+///
+/// | Field       | Required | Description                                     |
+/// |-------------|----------|-------------------------------------------------|
+/// | `agent_id`  | one of   | Direct session identifier                        |
+/// | `identity`  | one of   | ATM identity (looks up via identity map)         |
+///
+/// # Returns
+///
+/// MCP result with a JSON object:
+/// ```json
+/// {"closed": true, "agent_id": "...", "status": "closed"|"interrupted"|"already_closed"}
+/// ```
+pub async fn handle_agent_close(
+    id: &Value,
+    args: &Value,
+    registry: Arc<Mutex<SessionRegistry>>,
+) -> Value {
+    use crate::proxy::{ERR_SESSION_NOT_FOUND};
+
+    // Resolve agent_id from args
+    let explicit_agent_id = args
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let explicit_identity = args
+        .get("identity")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    if explicit_agent_id.is_none() && explicit_identity.is_none() {
+        return make_mcp_error_result(
+            id,
+            "agent_close: one of 'agent_id' or 'identity' is required",
+        );
+    }
+
+    let mut guard = registry.lock().await;
+
+    // Resolve the final agent_id
+    let resolved_agent_id: String = if let Some(ref aid) = explicit_agent_id {
+        aid.clone()
+    } else if let Some(ref ident) = explicit_identity {
+        match guard.find_by_identity(ident) {
+            Some(aid) => aid.to_string(),
+            None => {
+                // Not in active identity map — check if any session has this identity
+                let found = guard
+                    .list_all()
+                    .iter()
+                    .find(|e| e.identity == *ident)
+                    .map(|e| e.agent_id.clone());
+                match found {
+                    Some(aid) => aid,
+                    None => {
+                        drop(guard);
+                        return crate::proxy::make_error_response(
+                            id.clone(),
+                            ERR_SESSION_NOT_FOUND,
+                            &format!("agent_close: no session found for identity '{ident}'"),
+                            json!({"error_source": "proxy", "identity": ident}),
+                        );
+                    }
+                }
+            }
+        }
+    } else {
+        unreachable!()
+    };
+
+    // Look up the session
+    let entry = match guard.get(&resolved_agent_id) {
+        Some(e) => e.clone(),
+        None => {
+            drop(guard);
+            return crate::proxy::make_error_response(
+                id.clone(),
+                ERR_SESSION_NOT_FOUND,
+                &format!("agent_close: session not found for agent_id '{resolved_agent_id}'"),
+                json!({"error_source": "proxy", "agent_id": resolved_agent_id}),
+            );
+        }
+    };
+
+    // Idempotent: already closed → success no-op (FR-17.9)
+    if entry.status == SessionStatus::Closed
+        || entry.thread_state == ThreadState::Closed
+    {
+        drop(guard);
+        let result = json!({
+            "closed": true,
+            "agent_id": resolved_agent_id,
+            "status": "already_closed"
+        });
+        return make_mcp_success(id, serde_json::to_string_pretty(&result).unwrap_or_default());
+    }
+
+    // Determine close status based on current thread state
+    let close_status = if entry.thread_state == ThreadState::Busy {
+        "interrupted"
+    } else {
+        "closed"
+    };
+
+    // Close the session (sets status + thread_state to Closed, releases identity)
+    guard.close(&resolved_agent_id);
+    drop(guard);
+
+    let result = json!({
+        "closed": true,
+        "agent_id": resolved_agent_id,
+        "status": close_status
+    });
+    make_mcp_success(id, serde_json::to_string_pretty(&result).unwrap_or_default())
 }
 
 // ---------------------------------------------------------------------------
