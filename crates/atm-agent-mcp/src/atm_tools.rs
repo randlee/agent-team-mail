@@ -1036,6 +1036,69 @@ mod tests {
         assert!(msgs.iter().all(|m| m["from"] == "alice"));
     }
 
+    #[test]
+    #[serial]
+    fn test_atm_read_since_filter() {
+        let dir = TempDir::new().unwrap();
+        set_atm_home(&dir);
+
+        // Seed 3 messages with distinct timestamps
+        let old_msg = InboxMessage {
+            from: "sender".to_string(),
+            text: "old message".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            read: false,
+            summary: None,
+            message_id: Some("id-old".to_string()),
+            unknown_fields: HashMap::new(),
+        };
+        let middle_msg = InboxMessage {
+            from: "sender".to_string(),
+            text: "middle message".to_string(),
+            timestamp: "2026-02-01T00:00:00Z".to_string(),
+            read: false,
+            summary: None,
+            message_id: Some("id-middle".to_string()),
+            unknown_fields: HashMap::new(),
+        };
+        let future_msg = InboxMessage {
+            from: "sender".to_string(),
+            text: "future message".to_string(),
+            timestamp: "2026-03-01T00:00:00Z".to_string(),
+            read: false,
+            summary: None,
+            message_id: Some("id-future".to_string()),
+            unknown_fields: HashMap::new(),
+        };
+        seed_inbox(dir.path(), "team", "agent", &[old_msg, middle_msg, future_msg]);
+
+        let id = json!(16);
+        // since = "2026-02-01T00:00:00Z" — should include middle and future, exclude old
+        let args = json!({"since": "2026-02-01T00:00:00Z", "mark_read": false, "limit": 10});
+        let resp = handle_atm_read(&id, &args, "agent", "team");
+
+        unset_atm_home();
+
+        assert!(resp.get("error").is_none(), "should not be protocol error; got: {resp}");
+        assert_ne!(resp["result"]["isError"], json!(true), "should not be isError; got: {resp}");
+
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let msgs: Vec<Value> = serde_json::from_str(text).unwrap();
+        assert_eq!(msgs.len(), 2, "should return only messages at or after the since timestamp");
+        assert!(
+            msgs.iter().any(|m| m["text"] == "middle message"),
+            "middle message should be included"
+        );
+        assert!(
+            msgs.iter().any(|m| m["text"] == "future message"),
+            "future message should be included"
+        );
+        assert!(
+            !msgs.iter().any(|m| m["text"] == "old message"),
+            "old message should be excluded"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // atm_pending_count tests
     // -----------------------------------------------------------------------

@@ -97,7 +97,7 @@ fn parse_first_content_length_response(data: &[u8]) -> Value {
     let len: usize = header
         .lines()
         .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
-        .and_then(|l| l.splitn(2, ':').nth(1))
+        .and_then(|l| l.split_once(':').map(|x| x.1))
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0);
     let body_end = body_start + len;

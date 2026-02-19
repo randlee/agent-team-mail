@@ -4,8 +4,8 @@
 //! making ATM messaging and session management tools available to Claude alongside
 //! the native `codex` and `codex-reply` tools.
 //!
-//! Tool implementations are stubbed for Sprint A.2/A.3 (schemas only). Actual execution
-//! logic will be added in Sprint A.4+.
+//! Tool schemas only. Actual execution logic lives in [`crate::atm_tools`] (Sprint A.4)
+//! and future sprints for session management tools.
 //!
 //! # Codex tool schema
 //!
