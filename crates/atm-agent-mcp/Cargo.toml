@@ -7,10 +7,15 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "MCP proxy for managing Codex agent sessions with ATM team integration"
+default-run = "atm-agent-mcp"
 
 [[bin]]
 name = "atm-agent-mcp"
 path = "src/main.rs"
+
+[[bin]]
+name = "echo-mcp-server"
+path = "tests/fixtures/echo_mcp_server.rs"
 
 [dependencies]
 agent-team-mail-core.workspace = true
@@ -22,7 +27,9 @@ toml.workspace = true
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
 serial_test = "3"
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -9,11 +9,8 @@
 
 use clap::Parser;
 
-mod cli;
-mod commands;
-mod config;
-
-use cli::{Cli, Commands};
+use atm_agent_mcp::cli::{Cli, Commands};
+use atm_agent_mcp::commands;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
