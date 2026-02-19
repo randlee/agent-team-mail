@@ -1319,7 +1319,13 @@ impl ProxyServer {
                 .await
             }
             "agent_close" => {
-                atm_tools::handle_agent_close(id, args, Arc::clone(&self.registry)).await
+                atm_tools::handle_agent_close(
+                    id,
+                    args,
+                    Arc::clone(&self.registry),
+                    Arc::clone(&self.elicitation_registry),
+                )
+                .await
             }
             _ => atm_tools::make_mcp_error_result(
                 id,

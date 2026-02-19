@@ -760,6 +760,7 @@ pub async fn handle_agent_close(
     id: &Value,
     args: &Value,
     registry: Arc<Mutex<SessionRegistry>>,
+    elicitation_registry: Arc<Mutex<crate::elicitation::ElicitationRegistry>>,
 ) -> Value {
     use crate::proxy::{ERR_SESSION_NOT_FOUND};
 
@@ -850,6 +851,12 @@ pub async fn handle_agent_close(
     // Close the session (sets status + thread_state to Closed, releases identity)
     guard.close(&resolved_agent_id);
     drop(guard);
+
+    // Cancel any pending elicitations for this agent (FR-18.5)
+    elicitation_registry.lock().await.cancel_for_agent(
+        &resolved_agent_id,
+        serde_json::json!({"error": {"code": -32003, "message": "session closed"}}),
+    );
 
     let result = json!({
         "closed": true,
@@ -1830,6 +1837,174 @@ mod tests {
         let status: Value = serde_json::from_str(text).unwrap();
         assert_eq!(status["active_thread_count"], json!(0));
         assert!(status["identity_map"].as_object().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_agent_close tests (FR-17, FR-18.5)
+    // -----------------------------------------------------------------------
+
+    fn make_test_elicitation_registry() -> Arc<Mutex<crate::elicitation::ElicitationRegistry>> {
+        Arc::new(Mutex::new(
+            crate::elicitation::ElicitationRegistry::new(30),
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_agent_close_by_agent_id_returns_closed() {
+        let reg = make_test_registry(10);
+        let agent_id = {
+            let mut guard = reg.lock().await;
+            let e = guard
+                .register(
+                    "close-me".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            // Transition to Idle so close_status is "closed", not "interrupted"
+            guard.set_thread_state(&e.agent_id, ThreadState::Idle);
+            e.agent_id.clone()
+        };
+        let elicit_reg = make_test_elicitation_registry();
+        let id = json!(300);
+        let args = json!({"agent_id": agent_id});
+        let resp = handle_agent_close(&id, &args, reg, elicit_reg).await;
+        assert!(resp.get("error").is_none());
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["closed"], json!(true));
+        assert_eq!(result["status"], "closed");
+        assert_eq!(result["agent_id"], agent_id);
+    }
+
+    #[tokio::test]
+    async fn test_agent_close_idempotent_already_closed() {
+        let reg = make_test_registry(10);
+        let elicit_reg = make_test_elicitation_registry();
+        let agent_id = {
+            let mut guard = reg.lock().await;
+            let e = guard
+                .register(
+                    "already-closed".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            guard.close(&e.agent_id);
+            e.agent_id.clone()
+        };
+        let id = json!(301);
+        let args = json!({"agent_id": agent_id});
+        // First close (already closed)
+        let resp = handle_agent_close(&id, &args, Arc::clone(&reg), Arc::clone(&elicit_reg)).await;
+        assert!(resp.get("error").is_none());
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["closed"], json!(true));
+        assert_eq!(result["status"], "already_closed");
+    }
+
+    #[tokio::test]
+    async fn test_agent_close_busy_session_returns_interrupted() {
+        let reg = make_test_registry(10);
+        let elicit_reg = make_test_elicitation_registry();
+        let agent_id = {
+            let mut guard = reg.lock().await;
+            // New sessions default to ThreadState::Busy (FR-17.2)
+            let e = guard
+                .register(
+                    "busy-agent".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            e.agent_id.clone()
+        };
+        let id = json!(302);
+        let args = json!({"agent_id": agent_id});
+        let resp = handle_agent_close(&id, &args, reg, elicit_reg).await;
+        assert!(resp.get("error").is_none());
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["closed"], json!(true));
+        assert_eq!(result["status"], "interrupted");
+    }
+
+    #[tokio::test]
+    async fn test_agent_close_unknown_agent_id_returns_err_session_not_found() {
+        let reg = make_test_registry(10);
+        let elicit_reg = make_test_elicitation_registry();
+        let id = json!(303);
+        let args = json!({"agent_id": "does-not-exist"});
+        let resp = handle_agent_close(&id, &args, reg, elicit_reg).await;
+        // Must be a JSON-RPC error (not an MCP isError result)
+        let err = &resp["error"];
+        assert_eq!(
+            err["code"],
+            json!(crate::proxy::ERR_SESSION_NOT_FOUND),
+            "expected ERR_SESSION_NOT_FOUND code"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_close_cancels_pending_elicitations() {
+        use tokio::sync::oneshot;
+
+        let reg = make_test_registry(10);
+        let agent_id = {
+            let mut guard = reg.lock().await;
+            let e = guard
+                .register(
+                    "elicit-agent".to_string(),
+                    "team".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            guard.set_thread_state(&e.agent_id, ThreadState::Idle);
+            e.agent_id.clone()
+        };
+
+        let elicit_reg = make_test_elicitation_registry();
+        // Register a pending elicitation for this agent
+        let (_tx, mut rx) = oneshot::channel::<serde_json::Value>();
+        {
+            let mut guard = elicit_reg.lock().await;
+            guard.register(
+                agent_id.clone(),
+                serde_json::json!(1),
+                serde_json::json!(999),
+                _tx,
+            );
+        }
+
+        let id = json!(304);
+        let args = json!({"agent_id": agent_id});
+        let _resp = handle_agent_close(&id, &args, reg, Arc::clone(&elicit_reg)).await;
+
+        // The receiver should have received the rejection payload sent by cancel_for_agent
+        let rejection = rx.try_recv();
+        assert!(
+            rejection.is_ok(),
+            "rejection should have been sent to the elicitation receiver"
+        );
+        let rejection_val = rejection.unwrap();
+        assert_eq!(rejection_val["error"]["code"], json!(-32003));
+        // The elicitation should no longer be pending — trying to resolve it returns false
+        let resolved_again =
+            elicit_reg.lock().await.resolve(&serde_json::json!(999), serde_json::json!({}));
+        assert!(!resolved_again, "elicitation should have been removed by cancel_for_agent");
     }
 
     // -----------------------------------------------------------------------
