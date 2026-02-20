@@ -1,0 +1,37 @@
+[package]
+name = "atm-agent-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "MCP proxy for managing Codex agent sessions with ATM team integration"
+default-run = "atm-agent-mcp"
+
+[[bin]]
+name = "atm-agent-mcp"
+path = "src/main.rs"
+
+[[bin]]
+name = "echo-mcp-server"
+path = "tests/fixtures/echo_mcp_server.rs"
+
+[dependencies]
+agent-team-mail-core.workspace = true
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml.workspace = true
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+serial_test = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
