@@ -1,3 +1,9 @@
 [core]
 default_team = "atm-dev"
 identity = "team-lead"
+
+[plugins.atm-agent-mcp]
+codex_bin = "codex"
+identity = "arch-ctm"
+sandbox = "workspace-write"
+approval_policy = "on-failure"

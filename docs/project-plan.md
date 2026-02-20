@@ -1839,7 +1839,160 @@ Sprints are sequential (each depends on the previous). Scope aligned with `requi
 
 ---
 
-## 13. Future Plugins
+## 13. Phase B: Team-Lead Session Management
+
+**Status**: PLANNED
+**Goal**: Make `atm teams resume` the canonical way for team-lead to re-establish team context after a session restart, `/compress`, or crash — with the daemon as the authority on who is legitimately team-lead.
+
+**Integration branch**: `integrate/phase-B`
+
+### Phase B Sprint Summary
+
+| Sprint | Name | Status | PR |
+|--------|------|--------|-----|
+| B.1 | Daemon session tracking + `atm teams resume` + `atm teams cleanup` | PLANNED | — |
+
+---
+
+### Sprint B.1 — Daemon Session Tracking + `atm teams resume` + `atm teams cleanup`
+
+**Branch**: `feature/pB-s1-teams-resume`
+**Crate(s)**: `crates/atm` (new subcommands), `crates/atm-daemon` (new tracking), `crates/atm-core` (schema)
+
+#### Problem
+
+When a Claude Code session restarts (new session, `/compress`, or crash), `leadSessionId` in `config.json` no longer matches the new `CLAUDE_SESSION_ID`. Claude Code then creates a **new team with a random name** instead of rejoining `atm-dev`. Since `.atm.toml` hardcodes `default_team=atm-dev`, non-Claude teammates (arch-ctm) become unreachable.
+
+**Current workaround**: Trigger a gated Task call → extract session ID from gate debug log → manually update `config.json` via Python. This is fragile and not documented as a user-facing workflow.
+
+#### Solution
+
+Two components working together:
+
+1. **Daemon session tracking** — daemon captures `CLAUDE_SESSION_ID` from `SessionStart` hook events and maintains a registry of `agent_name → {session_id, process_id, state}`. This makes the daemon the authoritative source on which session legitimately holds team-lead role.
+
+2. **`atm teams resume <team> [message]`** — new CLI subcommand that:
+   - Resolves caller identity (must be `team-lead` via `.atm.toml` / `ATM_IDENTITY`, else rejected)
+   - Checks daemon for registered team-lead session:
+     - **Same session ID** → no-op, just print TeamCreate reminder (handles `/compress` case)
+     - **Different session ID, old session dead** → update `leadSessionId`, notify members, print TeamCreate reminder
+     - **Different session ID, old session alive** → reject: `"team-lead is already active in session <id>. (see --help to override)"`
+     - **No team on disk** → `"No team 'atm-dev' found. Call TeamCreate(...) to create it."`
+   - `--force` → override even if old session appears alive (lost pane, unresponsive)
+   - `--force --kill` → SIGTERM old process first, then resume
+
+#### Output Format
+
+**No team on disk:**
+```
+No team 'atm-dev' found. Call TeamCreate(team_name="atm-dev") to create it.
+```
+
+**Team exists, resumed successfully:**
+```
+atm-dev resumed. leadSessionId updated. 3 members notified.
+
+To re-establish as team-lead, call:
+  TeamCreate(team_name="atm-dev", description="ATM Phase A development team - atm-agent-mcp MCP Proxy")
+```
+
+**Rejected (already active):**
+```
+Error: team-lead is already active in session abc12345... (see --help to override)
+```
+
+**Rejected (wrong identity):**
+```
+Error: caller identity is 'publisher'. Only team-lead may call atm teams resume.
+```
+
+#### Notification Message
+
+When `resume` notifies members:
+- If `[message]` arg provided: use that
+- Default: `"Team-lead has rejoined the session. Context may have been reset. Please provide a brief status update."`
+
+#### Daemon Changes (`crates/atm-daemon`)
+
+- `SessionStart` hook watcher: capture `session_id` + `process_id` per agent name
+- New in-memory registry: `HashMap<AgentName, SessionRecord { session_id, process_id, state }>`
+- New Unix socket query: `{"type": "session_query", "name": "team-lead"}` → `{session_id, process_id, alive}`
+- Liveness check: poll `process_id` to confirm alive (already done for `Killed` state detection)
+- Shutdown hook (new): mark session dead cleanly on `SessionEnd` / process exit
+
+#### `atm teams resume` Changes (`crates/atm`)
+
+- New subcommand under `atm teams` (consistent with `atm teams add-member`)
+- Queries daemon via Unix socket for session registry
+- Falls back gracefully if daemon not running (treat old session as dead, update + warn)
+- Atomic write to `config.json`: update `leadSessionId` + set `isActive=false` for all Claude members except team-lead
+- Sends notifications via existing `atm send` path
+
+#### `atm teams cleanup [team] [agent]`
+
+New subcommand for inbox and member housekeeping.
+
+**`atm teams cleanup atm-dev`** (full team cleanup):
+- For each member in `config.json`: check liveness via daemon
+- **Alive** → skip, no warning (healthy member)
+- **Dead** → remove from `config.json` members array + delete inbox file
+- Print summary: `"Removed 3 stale members: publisher, publisher-2, sm-a-8"`
+
+**`atm teams cleanup atm-dev <agent>`** (single agent):
+- **Alive** → skip with warning: `"<agent> is still active, skipping cleanup"`
+- **Dead** → remove from config + delete inbox
+- Use case: called by team-lead after a sprint scrum-master finishes
+
+**Design rationale**: No message preservation — inbox files are deleted unconditionally when agent is dead. Keeping large inboxes wastes context (50+ messages). If message history matters, read before cleaning.
+
+#### CLAUDE.md Startup Instruction
+
+Add to **Initialization Process** section:
+
+```
+1. Run: atm teams resume atm-dev
+   Follow the output to call TeamCreate.
+2. Run: atm teams cleanup atm-dev
+   Removes stale members and their inboxes.
+```
+
+#### Corner Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| `/compress` in same session | Same session ID → no-op |
+| Clean session restart | Old session dead → update + notify |
+| Claude crashes (no shutdown hook) | Daemon detects via PID poll → old session dead → update + notify |
+| Teammate accidentally calls resume | Identity check → rejected (not team-lead) |
+| Two arch-atm instances on same repo | Second call → rejected (old session still alive) |
+| Claude loses tmux pane | `--force` to override |
+| Stuck process | `--force --kill` to SIGTERM + override |
+
+#### Exit Criteria
+
+**`atm teams resume`:**
+- [ ] Outputs correct TeamCreate call on clean restart
+- [ ] Same session ID → no-op, no spurious member notifications
+- [ ] Non-team-lead caller rejected with clear error
+- [ ] Second concurrent team-lead rejected with clear error
+- [ ] `--force` overrides alive-session check
+- [ ] `--force --kill` terminates old process before resuming
+- [ ] Daemon not running → graceful fallback (assume dead, update + warn)
+
+**`atm teams cleanup`:**
+- [ ] Dead members removed from `config.json`, inbox deleted
+- [ ] Alive members skipped with warning
+- [ ] `cleanup atm-dev <agent>` targets single agent correctly
+- [ ] Summary output lists removed members
+
+**General:**
+- [ ] Daemon survives resume/cleanup calls without restart
+- [ ] All existing tests pass
+- [ ] New unit + integration tests for each corner case
+
+---
+
+## 14. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
 
@@ -1930,6 +2083,7 @@ Additional plugins planned (each is a self-contained sprint series):
 | Phase 8 | [#59](https://github.com/randlee/agent-team-mail/pull/59) | ✅ Merged |
 | Phase 10 | [#93](https://github.com/randlee/agent-team-mail/pull/93) | ✅ Merged |
 | Phase A | TBD | IN PROGRESS |
+| Phase B | TBD | PLANNED |
 
 ---
 
