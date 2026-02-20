@@ -64,6 +64,10 @@ pub struct AddMemberArgs {
     /// Mark agent as inactive
     #[arg(long)]
     inactive: bool,
+
+    /// tmux pane ID for message injection (e.g. "%235")
+    #[arg(long)]
+    pane_id: Option<String>,
 }
 
 /// Resume as team-lead for an existing team
@@ -209,12 +213,25 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
     let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
 
     let agent_id = format!("{}@{}", args.agent, args.team);
-    let existing = team_config
+    let existing_idx = team_config
         .members
         .iter()
-        .any(|m| m.agent_id == agent_id || m.name == args.agent);
-    if existing {
-        println!("Member '{}' already exists in team '{}'", args.agent, args.team);
+        .position(|m| m.agent_id == agent_id || m.name == args.agent);
+    if let Some(idx) = existing_idx {
+        // If --pane-id provided, update it on the existing member
+        if let Some(ref pane_id) = args.pane_id {
+            team_config.members[idx].tmux_pane_id = Some(pane_id.clone());
+            let serialized = serde_json::to_string_pretty(&team_config)?;
+            let tmp_path = config_path.with_extension("tmp");
+            let mut file = std::fs::File::create(&tmp_path)?;
+            file.write_all(serialized.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            atomic_swap(&config_path, &tmp_path)?;
+            println!("Updated tmuxPaneId for '{}' in team '{}' (paneId='{}')", args.agent, args.team, pane_id);
+        } else {
+            println!("Member '{}' already exists in team '{}'", args.agent, args.team);
+        }
         return Ok(());
     }
 
@@ -235,7 +252,7 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
         color: None,
         plan_mode_required: None,
         joined_at: now_ms,
-        tmux_pane_id: None,
+        tmux_pane_id: args.pane_id,
         cwd: cwd.to_string_lossy().to_string(),
         subscriptions: Vec::new(),
         backend_type: None,
