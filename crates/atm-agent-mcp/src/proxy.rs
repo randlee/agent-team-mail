@@ -29,6 +29,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
+use tracing::Instrument;
 
 use crate::audit::AuditLog;
 use crate::config::AgentMcpConfig;
@@ -553,76 +554,79 @@ impl ProxyServer {
                         || "none".to_string(),
                         |v| v.to_string(),
                     );
-                    let _req_span = tracing::debug_span!("mcp_request", request_id = %req_id).entered();
-
-                    match method.as_deref() {
-                        Some("tools/call") => {
-                            self.handle_tools_call(msg, &pending, &upstream_tx, &dropped)
-                                .await;
-                        }
-                        Some("initialize") => {
-                            self.handle_initialize(id, &upstream_tx).await;
-                        }
-                        Some("notifications/initialized") => {
-                            // No-op when child not yet spawned; forward if child is running.
-                            if self.child.is_some() {
-                                self.forward_to_child(msg, id, false, &pending, &upstream_tx)
+                    let request_span = tracing::debug_span!("mcp_request", request_id = %req_id);
+                    async {
+                        match method.as_deref() {
+                            Some("tools/call") => {
+                                self.handle_tools_call(msg, &pending, &upstream_tx, &dropped)
                                     .await;
                             }
-                        }
-                        Some(method_name) => {
-                            let is_tools_list = method_name == "tools/list";
-                            self.forward_to_child(msg, id, is_tools_list, &pending, &upstream_tx)
-                                .await;
-                        }
-                        None => {
-                            // Response from upstream — may be an elicitation response.
-                            // Check the elicitation registry first; if it matches,
-                            // forward the response downstream to the child.
-                            // Otherwise forward as-is to the child.
-                            if let Some(resp_id) = msg.get("id") {
-                                let maybe_downstream_resp = self
-                                    .elicitation_registry
-                                    .lock()
-                                    .await
-                                    .resolve_for_downstream(resp_id, msg.clone());
-                                if let Some(downstream_resp) = maybe_downstream_resp {
-                                    tracing::debug!("elicitation response resolved for id={resp_id}");
-                                    if let Some(ref handle) = self.child {
+                            Some("initialize") => {
+                                self.handle_initialize(id, &upstream_tx).await;
+                            }
+                            Some("notifications/initialized") => {
+                                // No-op when child not yet spawned; forward if child is running.
+                                if self.child.is_some() {
+                                    self.forward_to_child(msg, id, false, &pending, &upstream_tx)
+                                        .await;
+                                }
+                            }
+                            Some(method_name) => {
+                                let is_tools_list = method_name == "tools/list";
+                                self.forward_to_child(msg, id, is_tools_list, &pending, &upstream_tx)
+                                    .await;
+                            }
+                            None => {
+                                // Response from upstream — may be an elicitation response.
+                                // Check the elicitation registry first; if it matches,
+                                // forward the response downstream to the child.
+                                // Otherwise forward as-is to the child.
+                                if let Some(resp_id) = msg.get("id") {
+                                    let maybe_downstream_resp = self
+                                        .elicitation_registry
+                                        .lock()
+                                        .await
+                                        .resolve_for_downstream(resp_id, msg.clone());
+                                    if let Some(downstream_resp) = maybe_downstream_resp {
+                                        tracing::debug!("elicitation response resolved for id={resp_id}");
+                                        if let Some(ref handle) = self.child {
+                                            let mut stdin = handle.stdin.lock().await;
+                                            let serialized = serde_json::to_string(&downstream_resp)
+                                                .unwrap_or_default();
+                                            if let Err(e) =
+                                                write_newline_delimited(&mut *stdin, &serialized).await
+                                            {
+                                                tracing::warn!(
+                                                    "failed to write elicitation response to child: {e}"
+                                                );
+                                            }
+                                        }
+                                    } else if let Some(ref handle) = self.child {
+                                        // Not an elicitation response — forward to child.
                                         let mut stdin = handle.stdin.lock().await;
-                                        let serialized = serde_json::to_string(&downstream_resp)
-                                            .unwrap_or_default();
+                                        let serialized =
+                                            serde_json::to_string(&msg).unwrap_or_default();
                                         if let Err(e) =
                                             write_newline_delimited(&mut *stdin, &serialized).await
                                         {
-                                            tracing::warn!(
-                                                "failed to write elicitation response to child: {e}"
-                                            );
+                                            tracing::warn!("failed to write response to child: {e}");
                                         }
                                     }
                                 } else if let Some(ref handle) = self.child {
-                                    // Not an elicitation response — forward to child.
+                                    // No id field — forward to child as-is.
                                     let mut stdin = handle.stdin.lock().await;
-                                    let serialized =
-                                        serde_json::to_string(&msg).unwrap_or_default();
+                                    let serialized = serde_json::to_string(&msg).unwrap_or_default();
                                     if let Err(e) =
                                         write_newline_delimited(&mut *stdin, &serialized).await
                                     {
                                         tracing::warn!("failed to write response to child: {e}");
                                     }
                                 }
-                            } else if let Some(ref handle) = self.child {
-                                // No id field — forward to child as-is.
-                                let mut stdin = handle.stdin.lock().await;
-                                let serialized = serde_json::to_string(&msg).unwrap_or_default();
-                                if let Err(e) =
-                                    write_newline_delimited(&mut *stdin, &serialized).await
-                                {
-                                    tracing::warn!("failed to write response to child: {e}");
-                                }
                             }
                         }
                     }
+                    .instrument(request_span)
+                    .await;
                 }
 
                 // Read from child (server-initiated requests like elicitation)

@@ -163,7 +163,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
             }
             Err(e) => {
                 let path_display = path.display();
-                eprintln!("Warning: Failed to read config for {path_display}: {e}");
+                warn!("Failed to read config for {path_display}: {e}");
             }
         }
     }
