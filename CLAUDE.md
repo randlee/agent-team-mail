@@ -191,9 +191,9 @@ tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --te
 ---
 
 ## Initialization Process
-1. Run: `atm teams resume atm-dev`
+1. Run: `atm teams resume <team>` where `<team>` is the `default_team` value from `.atm.toml` (e.g. `atm teams resume $(grep default_team .atm.toml | cut -d'"' -f2)`).
    Follow the output to call TeamCreate if needed.
-2. Run: `atm teams cleanup atm-dev`
+2. Run: `atm teams cleanup <team>` (same team name as above).
    Removes stale members and their inboxes.
 3. Read project plan (`docs/project-plan.md`)
 4. Check current status (branches, PRs, worktrees)

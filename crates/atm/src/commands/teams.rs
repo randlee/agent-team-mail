@@ -96,6 +96,10 @@ pub struct CleanupArgs {
 
     /// Specific agent to clean up (if omitted, cleans all dead members)
     agent: Option<String>,
+
+    /// Remove members even when the daemon is unreachable (unsafe — use only when daemon is known to be stopped)
+    #[arg(long)]
+    force: bool,
 }
 
 /// Team summary information
@@ -284,11 +288,10 @@ fn resume(args: ResumeArgs) -> Result<()> {
     // Check team exists
     let config_path = team_dir.join("config.json");
     if !config_path.exists() {
-        println!(
+        return Err(anyhow::anyhow!(
             "No team '{}' found. Call TeamCreate(team_name=\"{}\") to create it.",
             args.team, args.team
-        );
-        return Ok(());
+        ));
     }
 
     // Resolve caller identity via full config pipeline (.atm.toml → env → flag)
@@ -298,18 +301,22 @@ fn resume(args: ResumeArgs) -> Result<()> {
 
     // Only team-lead may call resume
     if caller_identity != "team-lead" {
-        println!(
-            "Error: caller identity is '{}'. Only team-lead may call atm teams resume.",
+        return Err(anyhow::anyhow!(
+            "caller identity is '{}'. Only team-lead may call atm teams resume.",
             caller_identity
-        );
-        return Ok(());
+        ));
     }
 
     // Load team config
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
     let old_session_id = team_config.lead_session_id.clone();
 
-    // Check existing session liveness if there is one
+    // Check existing session liveness if there is one.
+    // NOTE: query_session uses a bare agent name ("team-lead") without team qualification.
+    // The daemon session registry is currently scoped by process/name only, not by team.
+    // If a user runs multiple teams that each have a "team-lead" member, liveness queries
+    // may collide across teams. This is an accepted limitation; team-scoped session queries
+    // require a daemon API change that is tracked separately.
     if !old_session_id.is_empty() {
         use agent_team_mail_core::daemon_client::query_session;
 
@@ -337,11 +344,10 @@ fn resume(args: ResumeArgs) -> Result<()> {
 
                 if info.alive && !args.force {
                     let short = &info.session_id[..8.min(info.session_id.len())];
-                    println!(
-                        "Error: team-lead is already active in session {}... (see --help to override)",
+                    return Err(anyhow::anyhow!(
+                        "team-lead is already active in session {}... (use --force to override)",
                         short
-                    );
-                    return Ok(());
+                    ));
                 }
 
                 if info.alive && args.kill {
@@ -467,8 +473,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
-        println!("No team '{}' found.", args.team);
-        return Ok(());
+        return Err(anyhow::anyhow!("No team '{}' found.", args.team));
     }
 
     let lock_path = config_path.with_extension("lock");
@@ -492,12 +497,52 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         team_config.members.clone()
     };
 
+    // Check daemon reachability once before iterating members.
+    // NOTE: query_session uses bare agent names without team qualification because
+    // the current daemon session registry is process/name scoped, not team scoped.
+    // If two teams have a member with the same name, liveness queries may collide.
+    // This is an accepted limitation; team-scoped queries require a daemon API change.
+    let daemon_running = agent_team_mail_core::daemon_client::daemon_is_running();
+    let mut skipped_names: Vec<String> = Vec::new();
+
     for member in &members_to_check {
-        // Query daemon for liveness
+        // Query daemon for liveness.
+        // Safety rule: only remove a member when the daemon *explicitly* confirms
+        // the session is gone.  If the daemon is unreachable we cannot determine
+        // liveness, so we skip the member unless --force is given.
         let is_dead = match agent_team_mail_core::daemon_client::query_session(&member.name) {
-            Ok(Some(ref info)) => !info.alive,
-            Ok(None) => true,   // Not found in registry — treat as dead
-            Err(_) => true,     // Daemon unreachable — treat as dead
+            Ok(Some(ref info)) => {
+                // Daemon responded with an explicit record — trust it.
+                !info.alive
+            }
+            Ok(None) if daemon_running => {
+                // Daemon is running but has no record for this member — session is gone.
+                true
+            }
+            Ok(None) => {
+                // Daemon is not running: we cannot confirm liveness.
+                // Skip unless --force.
+                if args.force {
+                    true
+                } else {
+                    eprintln!(
+                        "Warning: daemon unreachable, skipping {} — use --force to override",
+                        member.name
+                    );
+                    skipped_names.push(member.name.clone());
+                    continue;
+                }
+            }
+            Err(e) => {
+                // Unexpected I/O error after connection was established — cannot
+                // determine liveness; skip the member to avoid unsafe removal.
+                eprintln!(
+                    "Warning: daemon query error for {}, skipping: {e}",
+                    member.name
+                );
+                skipped_names.push(member.name.clone());
+                continue;
+            }
         };
 
         if is_dead {
@@ -526,12 +571,29 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         write_team_config(&config_path, &team_config)?;
     }
 
-    if removed_names.is_empty() {
+    if removed_names.is_empty() && skipped_names.is_empty() {
         println!("No stale members found.");
     } else {
-        let names = removed_names.join(", ");
-        let count = removed_names.len();
-        println!("Removed {count} stale member(s): {names}");
+        if !removed_names.is_empty() {
+            let names = removed_names.join(", ");
+            let count = removed_names.len();
+            println!("Removed {count} stale member(s): {names}");
+        }
+        if !skipped_names.is_empty() {
+            let names = skipped_names.join(", ");
+            let count = skipped_names.len();
+            println!("Skipped {count} member(s) (daemon unreachable): {names}");
+        }
+    }
+
+    // Return an error if any members were skipped due to an unreachable daemon,
+    // so the caller knows the cleanup was incomplete.
+    if !skipped_names.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Cleanup incomplete: {} member(s) skipped because daemon liveness could not be determined. \
+             Start the daemon or use --force to remove without confirmation.",
+            skipped_names.len()
+        ));
     }
 
     Ok(())
@@ -658,7 +720,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_resume_no_team_prints_helpful_message() {
+    fn test_resume_no_team_returns_err() {
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
 
@@ -678,9 +740,11 @@ mod tests {
             kill: false,
         };
 
-        // Should return Ok (not an error) even when team doesn't exist
+        // Should return Err with a helpful message so the CLI exits non-zero.
         let result = resume(args);
-        assert!(result.is_ok());
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("nonexistent-team"), "error should name the team: {msg}");
 
         // Restore env
         // SAFETY: test-only cleanup
@@ -720,7 +784,10 @@ mod tests {
         };
 
         let result = resume(args);
-        assert!(result.is_ok()); // returns Ok, not Err
+        // Wrong identity returns Err so the CLI exits non-zero.
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("arch-ctm"), "error should name the caller: {msg}");
 
         // Restore env
         // SAFETY: test-only cleanup
@@ -751,10 +818,12 @@ mod tests {
         let args = CleanupArgs {
             team: "nonexistent".to_string(),
             agent: None,
+            force: false,
         };
 
         let result = cleanup(args);
-        assert!(result.is_ok());
+        // No team found is now an Err so the CLI exits non-zero.
+        assert!(result.is_err());
 
         // SAFETY: test-only cleanup
         unsafe {
@@ -768,7 +837,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_cleanup_removes_member_with_no_daemon() {
-        // When daemon is not running, query_session returns Ok(None) → member treated as dead
+        // When daemon is not running and --force is set, members are removed without
+        // daemon confirmation.  Without --force, they would be skipped (see companion test).
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
@@ -786,6 +856,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: Some("publisher".to_string()),
+            force: true,
         };
 
         let result = cleanup(args);
@@ -944,8 +1015,8 @@ mod tests {
     #[serial]
     fn test_cleanup_removes_multiple_dead_members() {
         // When no specific agent is named, cleanup removes all dead members.
-        // With no daemon running, all members (including team-lead) are treated
-        // as dead since query_session returns Ok(None).
+        // With no daemon running and --force, all members (including team-lead)
+        // are removed without daemon confirmation.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team_multi_dead(&temp_dir, "atm-dev");
@@ -959,22 +1030,23 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: None, // full-team cleanup
+            force: true,
         };
 
         let result = cleanup(args);
-        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+        assert!(result.is_ok(), "cleanup with --force should succeed: {result:?}");
 
-        // Both agent inboxes should be removed (no daemon → all treated as dead)
+        // Both agent inboxes should be removed (--force, no daemon → all treated as dead)
         assert!(!team_dir.join("inboxes/agent-a.json").exists());
         assert!(!team_dir.join("inboxes/agent-b.json").exists());
 
-        // With no daemon all members are removed (including team-lead)
+        // With --force and no daemon all members are removed (including team-lead)
         let config_path = team_dir.join("config.json");
         let config: TeamConfig =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert!(
             config.members.is_empty(),
-            "all members removed when no daemon: {:?}",
+            "all members removed when --force and no daemon: {:?}",
             config.members.iter().map(|m| &m.name).collect::<Vec<_>>()
         );
 
@@ -992,8 +1064,8 @@ mod tests {
     fn test_cleanup_single_agent_mode_prints_alive_warning() {
         // In single-agent mode (`args.agent.is_some()`), an alive member
         // should produce a warning.  Since no daemon is running, query_session
-        // returns Ok(None) and the member is treated as dead — meaning cleanup
-        // always removes it in test context. This test verifies the code path
+        // returns Ok(None) and with --force the member is treated as dead —
+        // meaning cleanup removes it.  This test verifies the code path
         // compiles and runs without panicking.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
@@ -1008,10 +1080,11 @@ mod tests {
             std::env::set_var("ATM_HOME", &home_env);
         }
 
-        // Cleanup a specific agent — daemon is unreachable so treated as dead
+        // Cleanup a specific agent — daemon unreachable but --force removes anyway
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: Some("publisher".to_string()),
+            force: true,
         };
 
         let result = cleanup(args);
