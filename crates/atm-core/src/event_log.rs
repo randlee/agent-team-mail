@@ -48,9 +48,14 @@ pub struct EventLogConfig {
 
 impl EventLogConfig {
     pub fn from_env() -> Self {
-        let default_path = get_home_dir()
-            .map(|h| h.join(".config/atm/events.jsonl"))
-            .unwrap_or_else(|_| PathBuf::from("events.jsonl"));
+        let default_path = std::env::var("ATM_HOME")
+            .map(|atm_home| PathBuf::from(atm_home).join("events.jsonl"))
+            .unwrap_or_else(|_| {
+                dirs::config_dir()
+                    .map(|p| p.join("atm/events.jsonl"))
+                    .or_else(|| get_home_dir().ok().map(|h| h.join(".config/atm/events.jsonl")))
+                    .unwrap_or_else(|| PathBuf::from("events.jsonl"))
+            });
 
         let path = std::env::var("ATM_LOG_FILE")
             .or_else(|_| std::env::var("ATM_LOG_PATH"))
@@ -370,5 +375,18 @@ mod tests {
             action: "send",
             ..Default::default()
         });
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_uses_atm_home_events_file() {
+        let tmp = TempDir::new().unwrap();
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+            std::env::remove_var("ATM_LOG_PATH");
+            std::env::set_var("ATM_HOME", tmp.path());
+        }
+        let cfg = EventLogConfig::from_env();
+        assert_eq!(cfg.path, tmp.path().join("events.jsonl"));
     }
 }
