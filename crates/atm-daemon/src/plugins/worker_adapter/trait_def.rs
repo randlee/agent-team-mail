@@ -68,23 +68,55 @@ impl Clone for WorkerHandle {
 /// - Graceful shutdown
 #[async_trait::async_trait]
 pub trait WorkerAdapter: Send + Sync {
-    /// Spawn a new worker for the given agent
+    /// Spawn a new worker for the given agent.
     ///
     /// # Arguments
     ///
-    /// * `agent_id` - Full agent identifier (e.g., "arch-ctm@atm-planning")
-    /// * `command` - Startup command to run in the worker (e.g., "codex --yolo")
+    /// * `agent_id` - Full agent identifier (e.g., `"arch-ctm@atm-planning"`)
+    /// * `command` - Startup command to run in the worker (e.g., `"codex --yolo"`)
     ///
     /// # Returns
     ///
-    /// A WorkerHandle for the spawned worker
+    /// A [`WorkerHandle`] for the spawned worker.
     ///
     /// # Errors
     ///
-    /// Returns PluginError::Runtime if spawn fails
+    /// Returns [`PluginError::Runtime`] if spawn fails.
     async fn spawn(&mut self, agent_id: &str, command: &str) -> Result<WorkerHandle, PluginError>;
 
-    /// Send a message to a running worker
+    /// Spawn a new worker with additional environment variables set in the pane.
+    ///
+    /// The `env_vars` map is exported via shell `export` commands *before* the
+    /// main `command` is started. `ATM_IDENTITY` and `ATM_TEAM` should be
+    /// included here if you need the agent to know its identity/team.
+    ///
+    /// The default implementation calls [`Self::spawn`] and ignores `env_vars`.
+    /// Override this method if your backend supports environment injection.
+    ///
+    /// # Arguments
+    ///
+    /// * `agent_id` - Full agent identifier (e.g., `"arch-ctm"`)
+    /// * `command` - Startup command to run in the worker (e.g., `"codex --yolo"`)
+    /// * `env_vars` - Extra environment variables to export before the command
+    ///
+    /// # Returns
+    ///
+    /// A [`WorkerHandle`] for the spawned worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::Runtime`] if spawn fails.
+    async fn spawn_with_env(
+        &mut self,
+        agent_id: &str,
+        command: &str,
+        env_vars: &std::collections::HashMap<String, String>,
+    ) -> Result<WorkerHandle, PluginError> {
+        let _ = env_vars; // default: ignore env_vars
+        self.spawn(agent_id, command).await
+    }
+
+    /// Send a message to a running worker.
     ///
     /// # Arguments
     ///
@@ -93,18 +125,18 @@ pub trait WorkerAdapter: Send + Sync {
     ///
     /// # Returns
     ///
-    /// Ok(()) if message was delivered, Err otherwise
+    /// `Ok(())` if message was delivered, `Err` otherwise.
     ///
     /// # Errors
     ///
-    /// Returns PluginError::Runtime if delivery fails
+    /// Returns [`PluginError::Runtime`] if delivery fails.
     async fn send_message(
         &mut self,
         handle: &WorkerHandle,
         message: &str,
     ) -> Result<(), PluginError>;
 
-    /// Gracefully shut down a worker
+    /// Gracefully shut down a worker.
     ///
     /// # Arguments
     ///
@@ -112,11 +144,11 @@ pub trait WorkerAdapter: Send + Sync {
     ///
     /// # Returns
     ///
-    /// Ok(()) if shutdown succeeded, Err otherwise
+    /// `Ok(())` if shutdown succeeded, `Err` otherwise.
     ///
     /// # Errors
     ///
-    /// Returns PluginError::Runtime if shutdown fails
+    /// Returns [`PluginError::Runtime`] if shutdown fails.
     async fn shutdown(&mut self, handle: &WorkerHandle) -> Result<(), PluginError>;
 }
 

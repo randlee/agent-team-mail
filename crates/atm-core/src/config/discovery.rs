@@ -133,6 +133,11 @@ fn merge_config(base: &mut Config, file: Config) {
     // Merge retention config
     base.retention = file.retention;
 
+    // Merge aliases (later sources override earlier ones)
+    for (alias, identity) in file.aliases {
+        base.aliases.insert(alias, identity);
+    }
+
     // Merge plugin config sections
     for (name, table) in file.plugins {
         base.plugins.insert(name, table);
@@ -510,5 +515,39 @@ enabled = false
         let issues = config.plugin_config("issues").unwrap();
         assert_eq!(issues.get("enabled").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(issues.get("poll_interval").and_then(|v| v.as_integer()), Some(60));
+    }
+
+    #[test]
+    fn test_aliases_merge_via_resolve_with_repo_override() {
+        use tempfile::TempDir;
+
+        // Global config defines an alias value, repo config overrides it.
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let global_cfg_dir = home_dir.join(".config/atm");
+        std::fs::create_dir_all(&global_cfg_dir).unwrap();
+        std::fs::write(
+            global_cfg_dir.join("config.toml"),
+            "[aliases]\narch-atm = \"team-lead\"\nqa = \"qa-bot\"\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            "[aliases]\narch-atm = \"lead-override\"\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigOverrides::default();
+        let config = resolve_config(&overrides, &repo_dir, home_dir).unwrap();
+
+        assert_eq!(
+            config.aliases.get("arch-atm").map(String::as_str),
+            Some("lead-override")
+        );
+        assert_eq!(config.aliases.get("qa").map(String::as_str), Some("qa-bot"));
     }
 }

@@ -35,9 +35,12 @@ libloading = "0.8"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 globset = "0.4"
-
 # SSH/SFTP support (optional, behind feature flag)
 ssh2 = { version = "0.9", optional = true }
+
+# Unix process monitoring (kill -0 for PID existence checks)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 default = []

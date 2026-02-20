@@ -10,7 +10,14 @@ use tempfile::TempDir;
 /// platform-specific differences in how `dirs::home_dir()` resolves
 /// (HOME on Unix, Windows API on Windows).
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
-    cmd.env("ATM_HOME", temp_dir.path());
+    // Use a subdirectory as CWD to avoid:
+    // 1. .atm.toml config leak from the repo root
+    // 2. auto-identity CWD matching against team member CWD (temp_dir root)
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).ok();
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_IDENTITY")
+        .current_dir(&workdir);
 }
 
 /// Create a test team structure
@@ -122,6 +129,42 @@ fn test_send_cross_team_addressing() {
 
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["text"], "Cross-team message");
+}
+
+#[test]
+fn test_send_alias_with_team_suffix_resolves_end_to_end() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+
+    // Configure alias in global ATM config under ATM_HOME so send command
+    // resolves arch-atm -> team-lead while preserving explicit @team suffix.
+    let global_cfg_dir = temp_dir.path().join(".config/atm");
+    fs::create_dir_all(&global_cfg_dir).unwrap();
+    fs::write(
+        global_cfg_dir.join("config.toml"),
+        "[core]\ndefault_team = \"test-team\"\nidentity = \"human\"\n\n[aliases]\narch-atm = \"team-lead\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("send")
+        .arg("arch-atm@test-team")
+        .arg("Alias routed message")
+        .assert()
+        .success();
+
+    // Full send path assertion: parse_address + alias resolution + team lookup + inbox write.
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/team-lead.json");
+    assert!(inbox_path.exists());
+
+    let inbox_content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&inbox_content).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["text"], "Alias routed message");
 }
 
 #[test]

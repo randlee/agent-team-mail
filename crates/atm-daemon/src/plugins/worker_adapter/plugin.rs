@@ -1,21 +1,35 @@
 //! Worker Adapter plugin implementation
 
 use super::activity::ActivityTracker;
+use super::agent_state::{AgentState, AgentStateTracker};
 use super::capture::LogTailer;
 use super::codex_tmux::CodexTmuxBackend;
 use super::config::WorkersConfig;
+use super::hook_watcher::HookWatcher;
 use super::lifecycle::{self, LifecycleManager, WorkerState};
+use super::nudge::NudgeEngine;
+use super::pubsub::PubSub;
 use super::router::{ConcurrencyPolicy, MessageRouter};
 use super::trait_def::{WorkerAdapter, WorkerHandle};
+use crate::daemon::socket::{LaunchRequest};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
+use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use chrono::Utc;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tokio::time::{interval, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// Interval for PID-based process health polling (5 seconds per acceptance criteria).
+const PID_POLL_INTERVAL_SECS: u64 = 5;
+
+/// Interval for PubSub GC (60 seconds).
+const PUBSUB_GC_INTERVAL_SECS: u64 = 60;
 
 /// Worker Adapter plugin — manages async agent teammates in tmux panes
 pub struct WorkerAdapterPlugin {
@@ -33,29 +47,113 @@ pub struct WorkerAdapterPlugin {
     log_tailer: LogTailer,
     /// Lifecycle manager for worker health and restart
     lifecycle: LifecycleManager,
+    /// Turn-level agent state tracker (Launching/Busy/Idle/Killed)
+    agent_state: Arc<Mutex<AgentStateTracker>>,
+    /// Ephemeral pub/sub registry for agent state change notifications
+    pubsub: Arc<Mutex<PubSub>>,
+    /// Nudge engine — auto-nudges idle agents with unread messages
+    nudge_engine: NudgeEngine,
+    /// Snapshot of last-notified agent states for change detection
+    last_notified_states: HashMap<String, AgentState>,
     /// Cached context for runtime use
     ctx: Option<PluginContext>,
+    /// Receiver for launch requests from the socket server.
+    ///
+    /// Set via [`set_launch_receiver`] before `run()` is called.  When `None`,
+    /// remote launch requests are silently ignored.
+    launch_rx: Option<tokio::sync::mpsc::Receiver<LaunchRequest>>,
 }
 
 impl WorkerAdapterPlugin {
-    /// Create a new Worker Adapter plugin instance
+    /// Create a new Worker Adapter plugin instance with a fresh state store.
     pub fn new() -> Self {
+        Self::with_state_store(Arc::new(Mutex::new(AgentStateTracker::new())))
+    }
+
+    /// Create a new Worker Adapter plugin instance that shares the given state
+    /// store.
+    ///
+    /// Use this when the socket server or another component needs to read
+    /// live agent state from the same tracker that the plugin populates:
+    ///
+    /// ```rust,ignore
+    /// let store = new_state_store();
+    /// let plugin = WorkerAdapterPlugin::with_state_store(Arc::clone(&store));
+    /// // pass `store` to the socket server
+    /// ```
+    pub fn with_state_store(
+        state_store: std::sync::Arc<std::sync::Mutex<AgentStateTracker>>,
+    ) -> Self {
+        let config = WorkersConfig::default();
+        let nudge_engine = NudgeEngine::new(config.nudge.clone());
         Self {
-            config: WorkersConfig::default(),
+            config,
             backend: None,
             workers: HashMap::new(),
             router: MessageRouter::new(),
             activity_tracker: ActivityTracker::default(),
             log_tailer: LogTailer::new(),
             lifecycle: LifecycleManager::new(),
+            agent_state: state_store,
+            pubsub: Arc::new(Mutex::new(PubSub::new())),
+            nudge_engine,
+            last_notified_states: HashMap::new(),
             ctx: None,
+            launch_rx: None,
         }
+    }
+
+    /// Connect the plugin to the launch request channel.
+    ///
+    /// Must be called before [`Plugin::run`] to enable remote agent launching
+    /// via the Unix socket.  The matching sender end should be stored in the
+    /// [`LaunchSender`](crate::daemon::socket::LaunchSender) passed to
+    /// [`start_socket_server`](crate::daemon::socket::start_socket_server).
+    pub fn set_launch_receiver(&mut self, rx: tokio::sync::mpsc::Receiver<LaunchRequest>) {
+        self.launch_rx = Some(rx);
+    }
+
+    /// Return a clone of the shared agent state store.
+    ///
+    /// The returned `Arc` points to the same tracker that the `HookWatcher`
+    /// populates, so the socket server can read live state without a fresh
+    /// empty store.
+    pub fn state_store(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<AgentStateTracker>> {
+        Arc::clone(&self.agent_state)
+    }
+
+    /// Return a clone of the shared pub/sub registry.
+    ///
+    /// Pass this `Arc` to the socket server so that `subscribe` and
+    /// `unsubscribe` requests from the CLI are stored in the same registry
+    /// that the plugin uses for notification delivery.
+    pub fn pubsub_store(&self) -> Arc<Mutex<PubSub>> {
+        Arc::clone(&self.pubsub)
     }
 
     /// Get worker status for all configured agents
     #[allow(dead_code)]
     pub fn get_worker_states(&self) -> HashMap<String, WorkerState> {
         self.lifecycle.get_all_states()
+    }
+
+    /// Get turn-level agent states
+    #[allow(dead_code)]
+    pub fn get_agent_states(&self) -> HashMap<String, AgentState> {
+        self.agent_state.lock().unwrap().all_states()
+    }
+
+    /// Build the path to the hook events file.
+    ///
+    /// Path: `${ATM_HOME}/.claude/daemon/hooks/events.jsonl`
+    fn hook_events_path(ctx: &PluginContext) -> PathBuf {
+        ctx.system
+            .claude_root
+            .join("daemon")
+            .join("hooks")
+            .join("events.jsonl")
     }
 
     fn resolve_team_name<'a>(
@@ -127,6 +225,71 @@ impl WorkerAdapterPlugin {
             if let Err(e) = inbox_append(&lead_inbox, &warn_msg, team_name, "team-lead") {
                 error!("Failed to warn team-lead: {e}");
             }
+        }
+    }
+
+    /// Build the inbox path for an agent member by name.
+    ///
+    /// Path: `{claude_root}/teams/{team_name}/inboxes/{member_name}.json`
+    fn agent_inbox_path(&self, ctx: &PluginContext, team_name: &str, member_name: &str) -> PathBuf {
+        ctx.system
+            .claude_root
+            .join("teams")
+            .join(team_name)
+            .join("inboxes")
+            .join(format!("{member_name}.json"))
+    }
+
+    /// Trigger a nudge for `member_name` if it is currently `Idle` and has
+    /// unread messages. Called after a `Busy → Idle` state transition.
+    ///
+    /// This is a best-effort operation; errors are logged but not propagated.
+    async fn trigger_nudge_if_idle(&mut self, member_name: &str) {
+        // Only nudge if config is enabled
+        if !self.config.nudge.enabled {
+            return;
+        }
+
+        // Verify the agent is actually Idle right now
+        let current_state = {
+            self.agent_state
+                .lock()
+                .unwrap()
+                .get_state(member_name)
+        };
+
+        let Some(AgentState::Idle) = current_state else {
+            return;
+        };
+
+        // Resolve pane ID from the worker handle
+        let pane_id = match self.workers.get(member_name) {
+            Some(h) => h.backend_id.clone(),
+            None => {
+                debug!("Nudge: no worker handle for {member_name}, skipping");
+                return;
+            }
+        };
+
+        let ctx = match &self.ctx {
+            Some(c) => c.clone(),
+            None => return,
+        };
+
+        let team_name = if self.config.team_name.is_empty() {
+            ctx.system.default_team.clone()
+        } else {
+            self.config.team_name.clone()
+        };
+
+        let inbox_path = self.agent_inbox_path(&ctx, &team_name, member_name);
+
+        if let Err(e) = self
+            .nudge_engine
+            .on_idle_transition(member_name, &pane_id, &inbox_path)
+            .await
+        {
+            warn!("Nudge engine error for {member_name}: {e}");
         }
     }
 
@@ -218,6 +381,12 @@ impl WorkerAdapterPlugin {
 
         debug!("Sent message to worker {member_name}");
 
+        // Mark agent as Busy now that we've sent a message
+        {
+            let mut state = self.agent_state.lock().unwrap();
+            state.set_state(&member_name, AgentState::Busy);
+        }
+
         // Record activity after successful message send
         let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
             message: "Plugin context not initialized".to_string(),
@@ -304,6 +473,10 @@ impl WorkerAdapterPlugin {
             Box::pin(self.process_message(config_key, next_message)).await?;
         }
 
+        // Trigger nudge scan after this agent finishes (it may be Idle now
+        // from a hook event that arrived while we were capturing the response).
+        self.trigger_nudge_if_idle(&member_name).await;
+
         Ok(())
     }
 
@@ -331,6 +504,12 @@ impl WorkerAdapterPlugin {
 
         let handle = backend.spawn(member_name, command).await?;
         self.lifecycle.register_worker(member_name);
+        // Register agent in turn-level state tracker and store pane info
+        {
+            let mut state = self.agent_state.lock().unwrap();
+            state.register_agent(member_name);
+            state.set_pane_info(member_name, &handle.backend_id, &handle.log_file_path);
+        }
         self.workers.insert(member_name.to_string(), handle);
         debug!("Spawned worker for agent {config_key} (member: {member_name})");
 
@@ -375,6 +554,30 @@ impl WorkerAdapterPlugin {
         Ok(())
     }
 
+    /// Poll PIDs of all registered workers and mark killed agents.
+    ///
+    /// Runs every `PID_POLL_INTERVAL_SECS` seconds. On Unix, uses
+    /// `lifecycle::poll_worker_pid`. On other platforms is a no-op.
+    fn poll_pids_for_killed_agents(&self) {
+        let handles: Vec<(String, WorkerHandle)> = self
+            .workers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (member_name, handle) in handles {
+            if !lifecycle::poll_worker_pid(&handle) {
+                // PID is gone — transition to Killed if not already
+                let mut state = self.agent_state.lock().unwrap();
+                let current = state.get_state(&member_name);
+                if !matches!(current, Some(AgentState::Killed) | None) {
+                    warn!("Worker {member_name} PID gone — marking as Killed");
+                    state.set_state(&member_name, AgentState::Killed);
+                }
+            }
+        }
+    }
+
     /// Rotate log files for all workers if needed
     fn rotate_logs_if_needed(&self) {
         for handle in self.workers.values() {
@@ -382,6 +585,226 @@ impl WorkerAdapterPlugin {
                 error!("Failed to rotate log for {}: {e}", handle.agent_id);
             }
         }
+    }
+
+    /// Scan all registered workers and nudge those that are `Idle` with unread mail.
+    ///
+    /// Called periodically from the `run()` loop to catch hook-driven `Busy → Idle`
+    /// transitions that happen while the plugin is idle (no `process_message` in flight).
+    async fn scan_and_nudge_idle_agents(&mut self) {
+        if !self.config.nudge.enabled {
+            return;
+        }
+        let member_names: Vec<String> = self.workers.keys().cloned().collect();
+        for member_name in member_names {
+            self.trigger_nudge_if_idle(&member_name).await;
+        }
+    }
+
+    /// Deliver pub/sub notifications for `agent` transitioning to `new_state`.
+    ///
+    /// Looks up all non-expired subscribers interested in the event, then writes
+    /// an [`InboxMessage`] to each subscriber's inbox using the standard
+    /// [`inbox_append`] atomic writer.
+    ///
+    /// This is best-effort: individual delivery failures are logged as warnings
+    /// but do not stop delivery to other subscribers.
+    fn deliver_pubsub_notifications(&self, agent: &str, new_state: &str) {
+        let subscribers = {
+            self.pubsub
+                .lock()
+                .unwrap()
+                .matching_subscribers(agent, new_state)
+        };
+
+        if subscribers.is_empty() {
+            return;
+        }
+
+        let ctx = match &self.ctx {
+            Some(c) => c,
+            None => return,
+        };
+
+        let team_name = if self.config.team_name.is_empty() {
+            ctx.system.default_team.as_str()
+        } else {
+            self.config.team_name.as_str()
+        };
+
+        for subscriber in &subscribers {
+            let notification_text = format!("[AGENT STATE] {} is now {}", agent, new_state);
+            let msg = InboxMessage {
+                from: "daemon".to_string(),
+                text: notification_text,
+                timestamp: Utc::now().to_rfc3339(),
+                read: false,
+                summary: Some(format!("Agent {} → {}", agent, new_state)),
+                message_id: Some(Uuid::new_v4().to_string()),
+                unknown_fields: HashMap::new(),
+            };
+            let inbox_path = self.agent_inbox_path(ctx, team_name, subscriber);
+            if let Err(e) = inbox_append(&inbox_path, &msg, team_name, subscriber) {
+                warn!(
+                    "Failed to deliver pubsub notification to {subscriber}: {e}"
+                );
+            } else {
+                debug!(
+                    "Delivered pubsub notification to {subscriber}: {agent} → {new_state}"
+                );
+            }
+        }
+    }
+
+    /// Scan current agent states against the last-notified snapshot and deliver
+    /// notifications for any changes.
+    ///
+    /// Called periodically from the `run()` loop (every 5 s, sharing the nudge
+    /// scan timer) to catch state transitions driven by [`HookWatcher`] or
+    /// PID polling that happen asynchronously without going through
+    /// `process_message`.
+    fn scan_and_deliver_pubsub_notifications(&mut self) {
+        let current_states = self.agent_state.lock().unwrap().all_states();
+        for (agent, state) in &current_states {
+            let changed = self.last_notified_states.get(agent) != Some(state);
+            if changed {
+                self.deliver_pubsub_notifications(agent, &state.to_string());
+                self.last_notified_states.insert(agent.clone(), *state);
+            }
+        }
+    }
+
+    /// Handle a remote launch request from the socket server.
+    ///
+    /// 1. Validates the config.
+    /// 2. Builds the full env var map (`ATM_IDENTITY`, `ATM_TEAM`, plus any extras).
+    /// 3. Calls `backend.spawn_with_env()` to create the tmux pane.
+    /// 4. Registers the agent in the state tracker (`Launching` state).
+    /// 5. Polls for `Idle` state transition (up to `config.timeout_secs`).
+    /// 6. If a prompt is provided, sends it via `send_message`.
+    /// 7. Returns [`LaunchResult`].
+    ///
+    /// A timeout is treated as a warning rather than an error: the result still
+    /// contains the pane ID and a warning message, but the initial prompt is
+    /// still sent.
+    async fn handle_launch(
+        &mut self,
+        config: LaunchConfig,
+    ) -> Result<LaunchResult, String> {
+        // Validate
+        if config.agent.trim().is_empty() {
+            return Err("Launch config missing required field: 'agent'".to_string());
+        }
+        if config.team.trim().is_empty() {
+            return Err("Launch config missing required field: 'team'".to_string());
+        }
+
+        let backend = match self.backend.as_mut() {
+            Some(b) => b,
+            None => return Err("Worker backend not initialized".to_string()),
+        };
+
+        // Build env var map: ATM_IDENTITY + ATM_TEAM + extras
+        let mut env_vars = config.env_vars.clone();
+        env_vars
+            .entry("ATM_IDENTITY".to_string())
+            .or_insert_with(|| config.agent.clone());
+        env_vars
+            .entry("ATM_TEAM".to_string())
+            .or_insert_with(|| config.team.clone());
+
+        debug!(
+            "Launching agent '{}' in team '{}' with command '{}'",
+            config.agent, config.team, config.command
+        );
+
+        // Spawn the pane with env vars
+        let handle = backend
+            .spawn_with_env(&config.agent, &config.command, &env_vars)
+            .await
+            .map_err(|e| format!("Failed to spawn worker pane: {e}"))?;
+
+        let pane_id = handle.backend_id.clone();
+
+        // Register agent in lifecycle and state tracker
+        self.lifecycle.register_worker(&config.agent);
+        {
+            let mut state = self.agent_state.lock().unwrap();
+            state.register_agent(&config.agent);
+            state.set_state(&config.agent, AgentState::Launching);
+        }
+        self.workers.insert(config.agent.clone(), handle.clone());
+
+        info!(
+            "Agent '{}' launched in pane {} (team: {})",
+            config.agent, pane_id, config.team
+        );
+
+        // Poll for Idle state transition
+        let timeout = Duration::from_secs(u64::from(config.timeout_secs));
+        let poll_interval = Duration::from_millis(500);
+        let start = tokio::time::Instant::now();
+        let mut reached_idle = false;
+
+        loop {
+            {
+                let state = self.agent_state.lock().unwrap();
+                if matches!(state.get_state(&config.agent), Some(AgentState::Idle)) {
+                    reached_idle = true;
+                    break;
+                }
+            }
+            if start.elapsed() >= timeout {
+                break;
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        let warning = if !reached_idle {
+            warn!(
+                "Agent '{}' did not reach Idle within {}s; proceeding with prompt send",
+                config.agent, config.timeout_secs
+            );
+            Some(format!(
+                "Readiness timeout reached after {}s; agent may not be ready",
+                config.timeout_secs
+            ))
+        } else {
+            None
+        };
+
+        // Send initial prompt if provided
+        if let Some(ref prompt) = config.prompt {
+            if !prompt.is_empty() {
+                let backend = match self.backend.as_mut() {
+                    Some(b) => b,
+                    None => {
+                        return Err("Worker backend disappeared after spawn".to_string());
+                    }
+                };
+                backend
+                    .send_message(&handle, prompt)
+                    .await
+                    .map_err(|e| format!("Failed to send initial prompt: {e}"))?;
+                debug!("Sent initial prompt to agent '{}'", config.agent);
+            }
+        }
+
+        let current_state = {
+            self.agent_state
+                .lock()
+                .unwrap()
+                .get_state(&config.agent)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "launching".to_string())
+        };
+
+        Ok(LaunchResult {
+            agent: config.agent.clone(),
+            pane_id,
+            state: current_state,
+            warning,
+        })
     }
 
     /// Check for inactive agents and mark them as offline
@@ -436,6 +859,9 @@ impl Plugin for WorkerAdapterPlugin {
         } else {
             WorkersConfig::default()
         };
+
+        // Reinitialize nudge engine with the parsed config
+        self.nudge_engine = NudgeEngine::new(self.config.nudge.clone());
 
         // If disabled, skip backend setup
         if !self.config.enabled {
@@ -495,6 +921,14 @@ impl Plugin for WorkerAdapterPlugin {
                 &mut self.workers,
             )
             .await?;
+
+            // Register all auto-started workers in the turn-level state tracker
+            // and store pane info so socket queries can locate their log files.
+            for (member_name, handle) in &self.workers {
+                let mut state = self.agent_state.lock().unwrap();
+                state.register_agent(member_name);
+                state.set_pane_info(member_name, &handle.backend_id, &handle.log_file_path);
+            }
         }
 
         Ok(())
@@ -509,6 +943,23 @@ impl Plugin for WorkerAdapterPlugin {
 
         debug!("Worker Adapter plugin running with lifecycle management enabled");
 
+        // Start hook event watcher as a background task
+        if let Some(ctx) = &self.ctx {
+            let events_path = Self::hook_events_path(ctx);
+            // Ensure parent directory exists
+            if let Some(parent) = events_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    warn!("Could not create hook events directory {}: {e}", parent.display());
+                }
+            }
+            let watcher = HookWatcher::new(events_path, Arc::clone(&self.agent_state));
+            let watcher_cancel = cancel.clone();
+            tokio::spawn(async move {
+                watcher.run(watcher_cancel).await;
+            });
+            debug!("Hook event watcher started");
+        }
+
         // Set up periodic inactivity check (every 30 seconds)
         let mut inactivity_timer = interval(Duration::from_secs(30));
 
@@ -516,8 +967,21 @@ impl Plugin for WorkerAdapterPlugin {
         let health_check_interval = Duration::from_secs(self.config.health_check_interval_secs);
         let mut health_check_timer = interval(health_check_interval);
 
+        // Set up periodic PID poll (every 5 seconds — detects killed agents)
+        let mut pid_poll_timer = interval(Duration::from_secs(PID_POLL_INTERVAL_SECS));
+
         // Set up periodic log rotation check (every 5 minutes)
         let mut log_rotation_timer = interval(Duration::from_secs(300));
+
+        // Set up periodic nudge scan (every 5 seconds).
+        // This catches Busy → Idle transitions driven by hook events, which
+        // arrive asynchronously via HookWatcher and are not otherwise signalled
+        // to the plugin main loop.
+        let mut nudge_scan_timer = interval(Duration::from_secs(5));
+
+        // Set up periodic pub/sub GC (every 60 seconds) to evict expired
+        // subscriptions and keep memory usage bounded.
+        let mut pubsub_gc_timer = interval(Duration::from_secs(PUBSUB_GC_INTERVAL_SECS));
 
         loop {
             tokio::select! {
@@ -535,8 +999,35 @@ impl Plugin for WorkerAdapterPlugin {
                         error!("Failed to perform health checks: {e}");
                     }
                 }
+                _ = pid_poll_timer.tick() => {
+                    self.poll_pids_for_killed_agents();
+                }
                 _ = log_rotation_timer.tick() => {
                     self.rotate_logs_if_needed();
+                }
+                _ = nudge_scan_timer.tick() => {
+                    self.scan_and_nudge_idle_agents().await;
+                    self.scan_and_deliver_pubsub_notifications();
+                }
+                _ = pubsub_gc_timer.tick() => {
+                    let removed = self.pubsub.lock().unwrap().gc();
+                    if removed > 0 {
+                        debug!("PubSub GC: removed {removed} expired subscription(s)");
+                    }
+                }
+                // Handle remote launch requests from the socket server.
+                // The `if` guard keeps this arm disabled when no receiver is wired up.
+                Some(launch_req) = async {
+                    if let Some(rx) = self.launch_rx.as_mut() {
+                        rx.recv().await
+                    } else {
+                        // Never resolves when launch_rx is None
+                        std::future::pending::<Option<LaunchRequest>>().await
+                    }
+                } => {
+                    let result = self.handle_launch(launch_req.config).await;
+                    // Best-effort: ignore send error (CLI may have timed out)
+                    let _ = launch_req.response_tx.send(result);
                 }
             }
         }
@@ -561,8 +1052,9 @@ impl Plugin for WorkerAdapterPlugin {
                     error!("Failed to shut down worker for {member_name}: {e}");
                 }
 
-                // Unregister from lifecycle manager
+                // Unregister from lifecycle manager and state tracker
                 self.lifecycle.unregister_worker(&member_name);
+                self.agent_state.lock().unwrap().unregister_agent(&member_name);
             }
 
             info!("All workers shut down");
@@ -634,6 +1126,71 @@ impl Plugin for WorkerAdapterPlugin {
 mod tests {
     use super::*;
 
+    /// Helper to create a plugin that has a backend but no launch receiver.
+    fn make_plugin_without_backend() -> WorkerAdapterPlugin {
+        WorkerAdapterPlugin::new()
+    }
+
+    #[tokio::test]
+    async fn test_handle_launch_no_backend_returns_error() {
+        let mut plugin = make_plugin_without_backend();
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 5,
+            env_vars: std::collections::HashMap::new(),
+        };
+        let result = plugin.handle_launch(config).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("backend"), "Expected error about backend: {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_handle_launch_empty_agent_returns_error() {
+        let mut plugin = make_plugin_without_backend();
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "".to_string(),
+            team: "atm-dev".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 5,
+            env_vars: std::collections::HashMap::new(),
+        };
+        let result = plugin.handle_launch(config).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("agent"), "Expected error about 'agent': {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_handle_launch_empty_team_returns_error() {
+        let mut plugin = make_plugin_without_backend();
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 5,
+            env_vars: std::collections::HashMap::new(),
+        };
+        let result = plugin.handle_launch(config).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("team"), "Expected error about 'team': {msg}");
+    }
+
+    #[test]
+    fn test_set_launch_receiver_stores_receiver() {
+        let mut plugin = WorkerAdapterPlugin::new();
+        assert!(plugin.launch_rx.is_none());
+        let (_, rx) = tokio::sync::mpsc::channel(8);
+        plugin.set_launch_receiver(rx);
+        assert!(plugin.launch_rx.is_some());
+    }
+
     #[test]
     fn test_plugin_metadata() {
         let plugin = WorkerAdapterPlugin::new();
@@ -673,5 +1230,12 @@ mod tests {
 
         let formatted = plugin.format_message(&msg, "test-agent");
         assert_eq!(formatted, "Hello, agent!");
+    }
+
+    #[test]
+    fn test_agent_state_initially_empty() {
+        let plugin = WorkerAdapterPlugin::new();
+        let states = plugin.get_agent_states();
+        assert!(states.is_empty());
     }
 }

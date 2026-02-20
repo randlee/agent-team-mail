@@ -1,7 +1,7 @@
 //! Send command implementation
 
 use anyhow::Result;
-use agent_team_mail_core::config::{resolve_config, Config, ConfigOverrides};
+use agent_team_mail_core::config::{resolve_alias, resolve_config, Config, ConfigOverrides};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{inbox_append, WriteOutcome};
 use agent_team_mail_core::io::lock::acquire_lock;
@@ -81,8 +81,16 @@ pub fn execute(args: SendArgs) -> Result<()> {
             .unwrap_or_else(|| "human".to_string());
     }
 
-    // Parse addressing (agent@team or just agent)
-    let (agent_name, team_name) = parse_address(&args.agent, &args.team, &config.core.default_team)?;
+    // Parse addressing (agent@team or just agent) first so alias lookup runs on
+    // only the agent token, even when input uses @team suffix.
+    let (parsed_agent, team_name) = parse_address(&args.agent, &args.team, &config.core.default_team)?;
+    let agent_name = resolve_alias(&parsed_agent, &config.aliases);
+    if agent_name != parsed_agent {
+        eprintln!(
+            "Note: '{}' resolved via alias to '{}'",
+            parsed_agent, agent_name
+        );
+    }
 
     // Resolve team directory
     let team_dir = home_dir.join(".claude/teams").join(&team_name);
@@ -185,9 +193,26 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     let outcome = inbox_append(&inbox_path, &inbox_message, &team_name, &agent_name)?;
 
+    // Auto-subscribe the sender to the target agent's idle event (upsert — refreshes TTL
+    // if a subscription already exists). This is best-effort: errors are silently ignored
+    // because the daemon may not be running.
+    let _ = agent_team_mail_core::daemon_client::subscribe_to_agent(
+        &config.core.identity,
+        &agent_name,
+        &team_name,
+        &["idle".to_string()],
+    );
+
+    // Query the daemon for agent state to enrich the output (best-effort, silent fallback).
+    let agent_state_info = agent_team_mail_core::daemon_client::query_agent_state(
+        &agent_name,
+        &team_name,
+    )
+    .unwrap_or(None); // Ignore errors; daemon may not be running
+
     // Output result
     if args.json {
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "action": "send",
             "agent": agent_name,
             "team": team_name,
@@ -198,6 +223,12 @@ pub fn execute(args: SendArgs) -> Result<()> {
             },
             "message_id": inbox_message.message_id,
         });
+        if let Some(ref info) = agent_state_info {
+            output["agent_state"] = serde_json::json!({
+                "state": info.state,
+                "last_transition": info.last_transition,
+            });
+        }
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         match outcome {
@@ -211,6 +242,10 @@ pub fn execute(args: SendArgs) -> Result<()> {
                 eprintln!("Warning: Message queued for delivery (could not write to inbox immediately)");
                 eprintln!("Spool path: {spool_path:?}");
             }
+        }
+        // Print enriched agent state info when daemon is running
+        if let Some(ref info) = agent_state_info {
+            println!("  agent-state: {}", info.state);
         }
     }
 
