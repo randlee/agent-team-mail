@@ -191,8 +191,12 @@ tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --te
 ---
 
 ## Initialization Process
-- Read project plan (`docs/project-plan.md`)
-- Check current status (branches, PRs, worktrees)
-- Output concise project summary and status to user
-- Identify the next sprint(s) ready to execute
-- Be prepared to begin the next sprint upon user approval
+1. Run: `atm teams resume <team>` where `<team>` is the `default_team` value from `.atm.toml` (e.g. `atm teams resume $(grep default_team .atm.toml | cut -d'"' -f2)`).
+   Follow the output to call TeamCreate if needed.
+2. Run: `atm teams cleanup <team>` (same team name as above).
+   Removes stale members and their inboxes.
+3. Read project plan (`docs/project-plan.md`)
+4. Check current status (branches, PRs, worktrees)
+5. Output concise project summary and status to user
+6. Identify the next sprint(s) ready to execute
+7. Be prepared to begin the next sprint upon user approval
