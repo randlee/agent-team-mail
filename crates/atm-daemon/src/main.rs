@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::logging;
 use agent_team_mail_daemon::daemon;
 use agent_team_mail_daemon::daemon::{new_launch_sender, new_pubsub_store, new_session_registry, new_state_store, StatusWriter};
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
@@ -39,17 +40,12 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Initialize logging
-    let log_level = if args.verbose {
-        tracing::Level::DEBUG
-    } else {
-        tracing::Level::INFO
-    };
-
-    tracing_subscriber::fmt()
-        .with_max_level(log_level)
-        .with_target(false)
-        .init();
+    // Initialize shared logging. --verbose maps to ATM_LOG=debug.
+    if args.verbose {
+        // SAFETY: process-local env mutation during startup before worker tasks spawn.
+        unsafe { std::env::set_var("ATM_LOG", "debug") };
+    }
+    logging::init();
 
     info!("ATM Daemon starting...");
 

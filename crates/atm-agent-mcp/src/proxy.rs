@@ -549,6 +549,11 @@ impl ProxyServer {
 
                     let method = msg.get("method").and_then(|v| v.as_str()).map(String::from);
                     let id = msg.get("id").cloned();
+                    let req_id = id.as_ref().map_or_else(
+                        || "none".to_string(),
+                        |v| v.to_string(),
+                    );
+                    let _req_span = tracing::debug_span!("mcp_request", request_id = %req_id).entered();
 
                     match method.as_deref() {
                         Some("tools/call") => {

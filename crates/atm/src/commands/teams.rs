@@ -15,6 +15,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::io::Write;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::util::settings::get_home_dir;
@@ -357,10 +358,10 @@ fn resume(args: ResumeArgs) -> Result<()> {
             }
             Ok(None) => {
                 // Daemon not running or agent not found — proceed
-                eprintln!("Warning: daemon not running, assuming old session is dead");
+                warn!("daemon not running, assuming old session is dead");
             }
             Err(_) => {
-                eprintln!("Warning: daemon not running, assuming old session is dead");
+                warn!("daemon not running, assuming old session is dead");
             }
         }
     }
@@ -425,7 +426,7 @@ fn resume(args: ResumeArgs) -> Result<()> {
                 notified += 1;
             }
             Err(e) => {
-                eprintln!("Warning: Failed to notify {}: {e}", member.name);
+                warn!("Failed to notify {}: {e}", member.name);
             }
         }
     }
@@ -459,7 +460,7 @@ fn kill_process(pid: u32) {
 
     #[cfg(not(unix))]
     {
-        eprintln!("Warning: --kill is not supported on this platform; skipping SIGTERM");
+        warn!("--kill is not supported on this platform; skipping SIGTERM");
     }
 }
 
@@ -534,7 +535,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 if args.force {
                     true
                 } else {
-                    eprintln!(
+                    warn!(
                         "Warning: daemon unreachable, skipping {} — use --force to override",
                         member.name
                     );
@@ -545,7 +546,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             Err(e) => {
                 // Unexpected I/O error after connection was established — cannot
                 // determine liveness; skip the member to avoid unsafe removal.
-                eprintln!(
+                warn!(
                     "Warning: daemon query error for {}, skipping: {e}",
                     member.name
                 );
@@ -559,7 +560,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             let inbox_path = inboxes_dir.join(format!("{}.json", member.name));
             if inbox_path.exists() {
                 if let Err(e) = fs::remove_file(&inbox_path) {
-                    eprintln!("Warning: Failed to remove inbox for {}: {e}", member.name);
+                    warn!("Failed to remove inbox for {}: {e}", member.name);
                 }
             }
             removed_names.push(member.name.clone());
