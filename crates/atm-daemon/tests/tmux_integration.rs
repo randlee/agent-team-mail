@@ -251,7 +251,7 @@ concurrency_policy = "queue"
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires a real tmux backend; set ATM_TEST_TMUX=1 and run with --ignored"]
 fn tmux_worker_autostarts() {
     if !should_run() {
         return;
@@ -269,7 +269,7 @@ fn tmux_worker_autostarts() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires a real tmux backend; set ATM_TEST_TMUX=1 and run with --ignored"]
 async fn tmux_worker_receives_message() {
     if !should_run() {
         return;
@@ -312,7 +312,7 @@ async fn tmux_worker_receives_message() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires a real tmux backend; set ATM_TEST_TMUX=1 and run with --ignored"]
 async fn tmux_delivery_method_comparison() {
     if !should_run() {
         return;
