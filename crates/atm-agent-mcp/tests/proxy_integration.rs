@@ -153,41 +153,14 @@ fn spawn_proxy(
     (client_write, BufReader::new(client_read), handle)
 }
 
-// ─── Initialize pass-through ────────────────────────────────────────────
+// ─── Initialize handled by proxy ────────────────────────────────────────
 
 #[tokio::test]
 async fn test_initialize_passes_through() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
-    // Send initialize request — but first we need to trigger child spawn.
-    // The child is lazy-spawned on codex/codex-reply. For initialize, the child
-    // isn't spawned yet, so we need to send a codex call first, or accept that
-    // initialize returns an error.
-    //
-    // Actually, the proxy forwards all non-tools/call methods to child if spawned.
-    // Since child isn't spawned on initialize, it returns an error.
-    // Let's first spawn the child with a codex call, then test initialize.
-
-    // First, trigger child spawn with a codex tools/call
-    let codex_req = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": "codex",
-            "arguments": {"prompt": "hello"}
-        }
-    });
-    send_newline(&mut writer, &codex_req).await;
-
-    // Read all responses (events + final response)
-    let responses = read_all_responses(&mut reader, Duration::from_secs(5)).await;
-    assert!(
-        !responses.is_empty(),
-        "should have received at least one response"
-    );
-
-    // Now send initialize
+    // The proxy now handles `initialize` itself (no child spawn required).
+    // It responds with the proxy's own serverInfo regardless of child state.
     let init_req = json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -204,7 +177,8 @@ async fn test_initialize_passes_through() {
     assert!(resp.get("result").is_some(), "initialize should succeed");
     assert_eq!(
         resp["result"]["serverInfo"]["name"],
-        "echo-mcp-server"
+        "atm-agent-mcp",
+        "proxy must respond with its own serverInfo, not the child's"
     );
 
     drop(writer);
@@ -392,7 +366,8 @@ async fn test_unknown_method_passes_through() {
 async fn test_lazy_spawn_on_first_codex_call() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
-    // Before any codex call: send tools/list — should return error (no child)
+    // Before any codex call: send tools/list — now returns synthetic tools
+    // (proxy handles tools/list without needing the child to be spawned).
     let list_req = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -400,10 +375,17 @@ async fn test_lazy_spawn_on_first_codex_call() {
     });
     send_newline(&mut writer, &list_req).await;
 
-    let resp = read_response(&mut reader).await.expect("error response");
+    let resp = read_response(&mut reader).await.expect("tools/list response");
     assert_eq!(resp["id"], 1);
-    // Should be an error since child not spawned
-    assert!(resp.get("error").is_some(), "expected error for no child");
+    // Should return synthetic tools, not an error
+    assert!(
+        resp.get("error").is_none(),
+        "tools/list before child spawn should return synthetic tools, not an error; got: {resp}"
+    );
+    assert!(
+        resp["result"]["tools"].is_array(),
+        "expected tools array in result"
+    );
 
     // Now send codex — this should spawn the child
     let codex_req = json!({
@@ -840,4 +822,115 @@ async fn test_dropped_events_counter_accessible() {
     let config = AgentMcpConfig::default();
     let proxy = atm_agent_mcp::proxy::ProxyServer::new(config);
     assert_eq!(proxy.dropped_events.load(Ordering::Relaxed), 0);
+}
+
+// ─── initialize before child spawn ──────────────────────────────────────
+
+#[tokio::test]
+async fn test_initialize_returns_capabilities() {
+    let (mut writer, mut reader, handle) = spawn_proxy(5);
+
+    send_content_length(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }
+        }),
+    )
+    .await;
+
+    let response = read_response(&mut reader)
+        .await
+        .expect("should get initialize response");
+    assert!(
+        response.get("error").is_none(),
+        "should not have error: {response}"
+    );
+    let result = &response["result"];
+    assert_eq!(result["protocolVersion"], "2024-11-05");
+    assert_eq!(result["serverInfo"]["name"], "atm-agent-mcp");
+
+    drop(writer);
+    let _ = handle.await;
+}
+
+// ─── tools/list before child spawn ──────────────────────────────────────
+
+#[tokio::test]
+async fn test_tools_list_before_child_spawn_returns_synthetic_tools() {
+    let (mut writer, mut reader, handle) = spawn_proxy(5);
+
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+    )
+    .await;
+
+    let response = read_response(&mut reader)
+        .await
+        .expect("should get tools/list response");
+    assert!(
+        response.get("error").is_none(),
+        "should not have error: {response}"
+    );
+    let tools = response["result"]["tools"]
+        .as_array()
+        .expect("tools should be array");
+    assert_eq!(
+        tools.len(),
+        7,
+        "expected 7 synthetic tools, got {}",
+        tools.len()
+    );
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    for expected in &[
+        "atm_send",
+        "atm_read",
+        "atm_broadcast",
+        "atm_pending_count",
+        "agent_sessions",
+        "agent_status",
+        "agent_close",
+    ] {
+        assert!(
+            names.contains(expected),
+            "missing tool: {expected}, got: {names:?}"
+        );
+    }
+
+    drop(writer);
+    let _ = handle.await;
+}
+
+// ─── notifications/initialized before child spawn ───────────────────────
+
+#[tokio::test]
+async fn test_notifications_initialized_does_not_produce_response() {
+    let (mut writer, mut reader, handle) = spawn_proxy(5);
+
+    // Notifications have no id field — proxy must NOT send a response
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}),
+    )
+    .await;
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(200),
+        read_response(&mut reader),
+    )
+    .await;
+    assert!(result.is_err(), "notification must not produce a response");
+
+    drop(writer);
+    let _ = handle.await;
 }
