@@ -13,7 +13,7 @@ set -euo pipefail
 
 AGENT_NAME="${1:-}"
 WORKER_CMD="${2:-codex --yolo}"
-TEAM="${ATM_TEAM:-atm-dev}"
+TEAM="${ATM_TEAM:-default-team}"
 MODE="${LAUNCH_MODE:-session}"  # "session" (default) or "pane" (new pane in current window)
 
 if [[ -z "$AGENT_NAME" ]]; then

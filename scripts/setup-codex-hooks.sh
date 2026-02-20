@@ -9,7 +9,7 @@
 #
 # Defaults:
 #   --agent arch-ctm
-#   --team atm-dev
+#   --team default-team
 
 set -euo pipefail
 
@@ -17,7 +17,7 @@ set -euo pipefail
 AGENT="${1:---agent}"
 AGENT="${2:-arch-ctm}"
 TEAM="${3:---team}"
-TEAM="${4:-atm-dev}"
+TEAM="${4:-default-team}"
 
 # Handle flag-based arguments
 while [[ $# -gt 0 ]]; do
