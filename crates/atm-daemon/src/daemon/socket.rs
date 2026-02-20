@@ -49,7 +49,6 @@ use crate::daemon::session_registry::SharedSessionRegistry;
 /// # Platform Behaviour
 ///
 /// On non-Unix platforms this function returns `Ok(None)` immediately.
-#[allow(unused_variables)]
 pub async fn start_socket_server(
     home_dir: PathBuf,
     state_store: SharedStateStore,

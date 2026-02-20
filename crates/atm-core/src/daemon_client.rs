@@ -224,7 +224,6 @@ pub fn daemon_pid_path() -> anyhow::Result<PathBuf> {
 /// verifying the process is alive.
 ///
 /// Returns `false` on any error (missing file, invalid PID, dead process, etc.).
-#[allow(unused_variables)]
 pub fn daemon_is_running() -> bool {
     #[cfg(unix)]
     {
@@ -256,7 +255,6 @@ pub fn daemon_is_running() -> bool {
 /// # Platform Behaviour
 ///
 /// On non-Unix platforms this function always returns `Ok(None)`.
-#[allow(unused_variables)]
 pub fn query_daemon(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
     #[cfg(unix)]
     {

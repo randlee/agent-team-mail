@@ -2406,7 +2406,18 @@ async fn forward_event(
 /// function first checks the command queue for a pending `ClaudeReply`.  If one
 /// exists it is dispatched instead of auto-mail, preserving the priority order
 /// (FR-17.11: Close > ClaudeReply > AutoMailInject).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "all parameters are distinct concerns required by a single \
+              coordinated dispatch operation; splitting would require a \
+              context struct refactor tracked separately"
+)]
+#[expect(
+    clippy::type_complexity,
+    reason = "Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<ThreadCommandQueue>>>>> \
+              matches the shared-queue type used throughout the proxy; \
+              introducing a type alias is a follow-up refactor"
+)]
 async fn dispatch_auto_mail_if_available(
     agent_id: &str,
     identity: &str,

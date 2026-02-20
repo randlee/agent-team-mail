@@ -151,13 +151,11 @@ impl WorkerAdapterPlugin {
     }
 
     /// Get worker status for all configured agents
-    #[allow(dead_code)]
     pub fn get_worker_states(&self) -> HashMap<String, WorkerState> {
         self.lifecycle.get_all_states()
     }
 
     /// Get turn-level agent states
-    #[allow(dead_code)]
     pub fn get_agent_states(&self) -> HashMap<String, AgentState> {
         self.agent_state.lock().unwrap().all_states()
     }
@@ -325,7 +323,6 @@ impl WorkerAdapterPlugin {
     ///
     /// * `message` - Inbox message to format
     /// * `config_key` - Config key for the agent
-    #[allow(dead_code)]
     fn format_message(&self, message: &InboxMessage, config_key: &str) -> String {
         let template = self
             .config
@@ -346,7 +343,6 @@ impl WorkerAdapterPlugin {
     ///
     /// * `config_key` - Config key for the agent
     /// * `message` - Inbox message to process
-    #[allow(dead_code)]
     async fn process_message(
         &mut self,
         config_key: &str,
@@ -511,7 +507,6 @@ impl WorkerAdapterPlugin {
     /// # Arguments
     ///
     /// * `config_key` - Config key for the agent
-    #[allow(dead_code)]
     async fn spawn_worker(&mut self, config_key: &str) -> Result<(), PluginError> {
         let backend = self.backend.as_mut().ok_or_else(|| PluginError::Runtime {
             message: "Worker backend not initialized".to_string(),
