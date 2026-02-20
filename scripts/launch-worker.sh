@@ -13,7 +13,39 @@ set -euo pipefail
 
 AGENT_NAME="${1:-}"
 WORKER_CMD="${2:-codex --yolo}"
-TEAM="${ATM_TEAM:-atm-dev}"
+MODE="${LAUNCH_MODE:-session}"  # "session" (default) or "pane" (new pane in current window)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ATM_TOML="$REPO_ROOT/.atm.toml"
+
+if [[ ! -f "$ATM_TOML" ]]; then
+    echo "Error: .atm.toml not found at $ATM_TOML" >&2
+    echo "Set up [core].default_team in repo .atm.toml before launching workers." >&2
+    exit 1
+fi
+
+DEFAULT_TEAM="$(
+python3 - "$ATM_TOML" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+with path.open("rb") as f:
+    import tomllib
+    config = tomllib.load(f)
+
+team = config.get("core", {}).get("default_team")
+if not isinstance(team, str) or not team.strip():
+    raise SystemExit(2)
+print(team.strip())
+PY
+)" || {
+    echo "Error: failed to read [core].default_team from $ATM_TOML" >&2
+    echo "Ensure .atm.toml contains: [core] default_team = \"<team-name>\"" >&2
+    exit 1
+}
+
+TEAM="${ATM_TEAM:-$DEFAULT_TEAM}"
 
 if [[ -z "$AGENT_NAME" ]]; then
     echo "Usage: $0 <agent-name> [command]"
@@ -50,39 +82,64 @@ if [[ "$WORKER_CMD" == *"codex"* ]]; then
     fi
 fi
 
-# Check if session already exists
-if tmux has-session -t "$AGENT_NAME" 2>/dev/null; then
-    echo "tmux session '$AGENT_NAME' already exists."
-    echo ""
-    echo "  Attach:  tmux attach -t $AGENT_NAME"
-    echo "  Kill:    tmux kill-session -t $AGENT_NAME"
-    echo ""
-    read -rp "Attach to existing session? [Y/n] " answer
-    case "${answer:-Y}" in
-        [Nn]*) echo "Aborted."; exit 0 ;;
-        *)     exec tmux attach -t "$AGENT_NAME" ;;
-    esac
-fi
-
 # Build environment string for tmux
 ENV_VARS="ATM_IDENTITY=$AGENT_NAME ATM_TEAM=$TEAM"
 if [[ -n "${ATM_HOME:-}" ]]; then
     ENV_VARS="$ENV_VARS ATM_HOME=$ATM_HOME"
 fi
 
-# Create tmux session with environment variables and launch the command
-tmux new-session -d -s "$AGENT_NAME" "env $ENV_VARS $WORKER_CMD; echo ''; echo 'Worker exited. Press Enter to close.'; read"
+if [[ "$MODE" == "pane" ]]; then
+    # Launch as a new pane in the current tmux window
+    if [[ -z "${TMUX:-}" ]]; then
+        echo "Error: LAUNCH_MODE=pane requires an active tmux session." >&2
+        exit 1
+    fi
+    PANE_ID=$(tmux split-window -h -P -F '#{pane_id}' "env $ENV_VARS $WORKER_CMD; echo ''; echo 'Worker exited. Press Enter to close.'; read")
+    tmux select-layout even-horizontal
+    PANE_INFO="$PANE_ID (current window)"
 
-# Get pane info for daemon discovery
-PANE_INFO=$(tmux list-panes -t "$AGENT_NAME" -F '#{session_name}:#{window_index}.#{pane_index} (pid #{pane_pid})')
+    # Update tmuxPaneId in team config.json so Claude Code can inject messages
+    if atm teams add-member "$TEAM" "$AGENT_NAME" --pane-id "$PANE_ID" 2>/dev/null; then
+        echo "  Config:    tmuxPaneId=$PANE_ID registered via atm teams add-member"
+    else
+        echo "  Warning:   failed to register tmuxPaneId (member may not exist in team)" >&2
+    fi
 
-echo "Launched worker '$AGENT_NAME' in tmux session."
-echo ""
-echo "  Session:   $AGENT_NAME"
-echo "  Identity:  ATM_IDENTITY=$AGENT_NAME"
-echo "  Team:      ATM_TEAM=$TEAM"
-echo "  Command:   $WORKER_CMD"
-echo "  Pane:      $PANE_INFO"
-echo ""
-echo "  Attach:    tmux attach -t $AGENT_NAME"
-echo "  Send keys: tmux send-keys -t $AGENT_NAME 'your message' Enter"
+    echo "Launched worker '$AGENT_NAME' in new pane."
+    echo ""
+    echo "  Pane:      $PANE_INFO"
+    echo "  Identity:  ATM_IDENTITY=$AGENT_NAME"
+    echo "  Team:      ATM_TEAM=$TEAM"
+    echo "  Command:   $WORKER_CMD"
+    echo ""
+    echo "  Send keys: tmux send-keys -t $PANE_ID 'your message' Enter"
+else
+    # Default: launch as a new tmux session
+    if tmux has-session -t "$AGENT_NAME" 2>/dev/null; then
+        echo "tmux session '$AGENT_NAME' already exists."
+        echo ""
+        echo "  Attach:  tmux attach -t $AGENT_NAME"
+        echo "  Kill:    tmux kill-session -t $AGENT_NAME"
+        echo ""
+        read -rp "Attach to existing session? [Y/n] " answer
+        case "${answer:-Y}" in
+            [Nn]*) echo "Aborted."; exit 0 ;;
+            *)     exec tmux attach -t "$AGENT_NAME" ;;
+        esac
+    fi
+
+    tmux new-session -d -s "$AGENT_NAME" "env $ENV_VARS $WORKER_CMD; echo ''; echo 'Worker exited. Press Enter to close.'; read"
+
+    PANE_INFO=$(tmux list-panes -t "$AGENT_NAME" -F '#{session_name}:#{window_index}.#{pane_index} (pid #{pane_pid})')
+
+    echo "Launched worker '$AGENT_NAME' in tmux session."
+    echo ""
+    echo "  Session:   $AGENT_NAME"
+    echo "  Identity:  ATM_IDENTITY=$AGENT_NAME"
+    echo "  Team:      ATM_TEAM=$TEAM"
+    echo "  Command:   $WORKER_CMD"
+    echo "  Pane:      $PANE_INFO"
+    echo ""
+    echo "  Attach:    tmux attach -t $AGENT_NAME"
+    echo "  Send keys: tmux send-keys -t $AGENT_NAME 'your message' Enter"
+fi

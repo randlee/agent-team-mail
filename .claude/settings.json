@@ -10,6 +10,16 @@
           }
         ]
       }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/scripts/teammate-idle-relay.py"
+          }
+        ]
+      }
     ]
   }
 }
