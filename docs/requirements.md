@@ -633,6 +633,8 @@ and `atm-agent-mcp` so operators can filter by team and reconstruct state transi
   - Else: `${config_dir}/atm/events.jsonl` where `config_dir` is platform-native
     (`~/.config` on Linux/macOS, `%APPDATA%` equivalent on Windows)
 - Implementations may expose `ATM_LOG_PATH` override for tests and advanced ops.
+  - Canonical env override: `ATM_LOG_FILE`
+  - Backward-compat alias accepted: `ATM_LOG_PATH`
 
 #### Record Format
 
@@ -650,7 +652,8 @@ and `atm-agent-mcp` so operators can filter by team and reconstruct state transi
 - `act` → action
 - `team` → team name
 - `sid` → session id
-- `actor` → actor identity
+- `aid` → agent id
+- `anm` → agent name
 - `target` → target identity/resource
 - `res` → result
 - `mid` → message id
@@ -667,7 +670,7 @@ Every event record (`k = "e"`) must include:
 Rules:
 - `sid` is required in output; if unavailable/unrelated, emit `sid: "unknown"`.
 - `team` should be emitted whenever relevant to the operation.
-- Additional contextual fields (`actor`, `target`, `mid`, `rid`, `cnt`, `res`, `err`)
+- Additional contextual fields (`aid`, `anm`, `target`, `mid`, `rid`, `cnt`, `res`, `err`)
   are strongly recommended and should be added where available.
 
 #### Message Content Policy
@@ -679,6 +682,7 @@ Rules:
   - `full`: include full message text
 - Intended controls: config/env/CLI compatibility layer, with env override acceptable
   for initial C.1 rollout.
+  - `ATM_LOG_MSG=none|truncated|full`
 
 #### Rotation and Retention
 
@@ -694,6 +698,7 @@ Rules:
 - On sink write errors:
   - swallow and continue
   - optionally emit best-effort diagnostic to stderr/tracing
+ - `ATM_LOG=trace|debug|info|warn|error` controls console tracing verbosity for operators.
 
 #### Minimum Event Coverage (C.1 baseline)
 

@@ -258,7 +258,8 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                     action: "read_timeout",
                     team: Some(team_name.clone()),
                     session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-                    actor: Some(agent_name.clone()),
+                    agent_id: Some(agent_name.clone()),
+                    agent_name: Some(agent_name.clone()),
                     result: Some("timeout".to_string()),
                     ..Default::default()
                 });
@@ -321,7 +322,8 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         action: "read",
         team: Some(team_name.clone()),
         session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-        actor: Some(agent_name.clone()),
+        agent_id: Some(agent_name.clone()),
+        agent_name: Some(agent_name.clone()),
         result: Some("ok".to_string()),
         count: Some(filtered_messages.len() as u64),
         ..Default::default()
@@ -333,7 +335,8 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             action: "read_mark",
             team: Some(team_name.clone()),
             session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-            actor: Some(agent_name.clone()),
+            agent_id: Some(agent_name.clone()),
+            agent_name: Some(agent_name.clone()),
             result: Some("ok".to_string()),
             count: Some(marked_count),
             ..Default::default()

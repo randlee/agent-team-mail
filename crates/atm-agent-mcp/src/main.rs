@@ -8,12 +8,14 @@
 //! - `summary`  — Display saved session summary (Sprint A.3+)
 
 use clap::Parser;
+use agent_team_mail_core::logging;
 
 use atm_agent_mcp::cli::{Cli, Commands};
 use atm_agent_mcp::commands;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    logging::init();
     let cli = Cli::parse();
 
     match cli.command {

@@ -79,7 +79,8 @@ async fn main() -> Result<()> {
         action: "daemon_start",
         team: Some(config.core.default_team.clone()),
         session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-        actor: std::env::var("ATM_IDENTITY").ok(),
+        agent_id: std::env::var("ATM_IDENTITY").ok(),
+        agent_name: std::env::var("ATM_IDENTITY").ok(),
         result: Some("starting".to_string()),
         ..Default::default()
     });
@@ -259,7 +260,8 @@ async fn main() -> Result<()> {
             action: "daemon_stop",
             team: Some(plugin_ctx.config.core.default_team.clone()),
             session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-            actor: std::env::var("ATM_IDENTITY").ok(),
+            agent_id: std::env::var("ATM_IDENTITY").ok(),
+            agent_name: std::env::var("ATM_IDENTITY").ok(),
             result: Some("ok".to_string()),
             ..Default::default()
         }),
@@ -269,7 +271,8 @@ async fn main() -> Result<()> {
             action: "daemon_stop",
             team: Some(plugin_ctx.config.core.default_team.clone()),
             session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-            actor: std::env::var("ATM_IDENTITY").ok(),
+            agent_id: std::env::var("ATM_IDENTITY").ok(),
+            agent_name: std::env::var("ATM_IDENTITY").ok(),
             result: Some("error".to_string()),
             error: Some(e.to_string()),
             ..Default::default()

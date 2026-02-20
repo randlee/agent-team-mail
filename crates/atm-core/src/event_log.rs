@@ -3,13 +3,16 @@
 //! This module provides a compact, cross-process event sink used by `atm`,
 //! `atm-daemon`, and `atm-agent-mcp`.
 
+use crate::home::get_home_dir;
 use chrono::Utc;
 use serde_json::{Map, Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+// Requirements §4.6 default size-based rotation policy.
 const DEFAULT_MAX_BYTES: u64 = 50 * 1024 * 1024;
+// Requirements §4.6 default retained file count.
 const DEFAULT_MAX_FILES: u32 = 5;
 const DEFAULT_TRUNC_CHARS: usize = 200;
 
@@ -45,15 +48,12 @@ pub struct EventLogConfig {
 
 impl EventLogConfig {
     pub fn from_env() -> Self {
-        let default_path = if let Ok(atm_home) = std::env::var("ATM_HOME") {
-            PathBuf::from(atm_home).join("events.jsonl")
-        } else if let Some(cfg_dir) = dirs::config_dir() {
-            cfg_dir.join("atm").join("events.jsonl")
-        } else {
-            PathBuf::from("events.jsonl")
-        };
+        let default_path = get_home_dir()
+            .map(|h| h.join(".config/atm/events.jsonl"))
+            .unwrap_or_else(|_| PathBuf::from("events.jsonl"));
 
-        let path = std::env::var("ATM_LOG_PATH")
+        let path = std::env::var("ATM_LOG_FILE")
+            .or_else(|_| std::env::var("ATM_LOG_PATH"))
             .map(PathBuf::from)
             .unwrap_or(default_path);
         let max_bytes = std::env::var("ATM_LOG_MAX_BYTES")
@@ -89,7 +89,8 @@ pub struct EventFields {
     pub action: &'static str,
     pub team: Option<String>,
     pub session_id: Option<String>,
-    pub actor: Option<String>,
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
     pub target: Option<String>,
     pub result: Option<String>,
     pub message_id: Option<String>,
@@ -157,7 +158,8 @@ fn schema_header_line() -> String {
             "act": "action",
             "team": "team",
             "sid": "session_id",
-            "actor": "actor",
+            "aid": "agent_id",
+            "anm": "agent_name",
             "target": "target",
             "res": "result",
             "mid": "message_id",
@@ -218,8 +220,11 @@ pub fn emit_event_best_effort(mut fields: EventFields) {
         if let Some(v) = fields.session_id {
             obj.insert("sid".to_string(), Value::from(v));
         }
-        if let Some(v) = fields.actor {
-            obj.insert("actor".to_string(), Value::from(v));
+        if let Some(v) = fields.agent_id {
+            obj.insert("aid".to_string(), Value::from(v));
+        }
+        if let Some(v) = fields.agent_name {
+            obj.insert("anm".to_string(), Value::from(v));
         }
         if let Some(v) = fields.target {
             obj.insert("target".to_string(), Value::from(v));
@@ -255,14 +260,16 @@ pub fn emit_event_best_effort(mut fields: EventFields) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    use serial_test::serial;
+    use tempfile::{NamedTempFile, TempDir};
 
     #[test]
+    #[serial]
     fn test_emit_event_writes_header_and_event() {
         let tmp = TempDir::new().unwrap();
         let log_path = tmp.path().join("events.jsonl");
         unsafe {
-            std::env::set_var("ATM_LOG_PATH", &log_path);
+            std::env::set_var("ATM_LOG_FILE", &log_path);
             std::env::set_var("ATM_LOG_MSG", "none");
             std::env::set_var("CLAUDE_SESSION_ID", "sess-123");
         }
@@ -272,7 +279,8 @@ mod tests {
             source: "atm",
             action: "send",
             team: Some("atm-dev".to_string()),
-            actor: Some("arch-ctm".to_string()),
+            agent_id: Some("arch-ctm".to_string()),
+            agent_name: Some("arch-ctm".to_string()),
             target: Some("team-lead".to_string()),
             result: Some("ok".to_string()),
             ..Default::default()
@@ -288,5 +296,79 @@ mod tests {
         assert_eq!(event["team"], "atm-dev");
         assert_eq!(event["sid"], "sess-123");
         assert_eq!(event["act"], "send");
+        assert_eq!(event["aid"], "arch-ctm");
+    }
+
+    #[test]
+    #[serial]
+    fn test_rotate_if_needed_renames_file() {
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("events.jsonl");
+        fs::write(&log_path, b"1234567890").unwrap();
+        rotate_if_needed(&log_path, 5, 5).unwrap();
+        assert!(!log_path.exists());
+        assert!(tmp.path().join("events.jsonl.1").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn test_message_verbosity_truncated_and_full() {
+        let tmp = TempDir::new().unwrap();
+        let trunc_path = tmp.path().join("trunc.jsonl");
+        unsafe {
+            std::env::set_var("ATM_LOG_FILE", &trunc_path);
+            std::env::set_var("ATM_LOG_MSG", "truncated");
+            std::env::set_var("ATM_LOG_TRUNC_CHARS", "4");
+        }
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm",
+            action: "send",
+            message_text: Some("abcdef".to_string()),
+            ..Default::default()
+        });
+        let lines: Vec<String> = fs::read_to_string(&trunc_path)
+            .unwrap()
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
+        let trunc_event: Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(trunc_event["msg"], "abcd");
+
+        let full_path = tmp.path().join("full.jsonl");
+        unsafe {
+            std::env::set_var("ATM_LOG_FILE", &full_path);
+            std::env::set_var("ATM_LOG_MSG", "full");
+        }
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm",
+            action: "send",
+            message_text: Some("abcdef".to_string()),
+            ..Default::default()
+        });
+        let lines: Vec<String> = fs::read_to_string(&full_path)
+            .unwrap()
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
+        let full_event: Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(full_event["msg"], "abcdef");
+    }
+
+    #[test]
+    #[serial]
+    fn test_fail_open_when_path_unwritable() {
+        let file = NamedTempFile::new().unwrap();
+        unsafe {
+            std::env::set_var("ATM_LOG_FILE", file.path());
+        }
+        // Should not panic even though parent path cannot be created under file
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm",
+            action: "send",
+            ..Default::default()
+        });
     }
 }

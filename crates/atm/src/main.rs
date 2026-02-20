@@ -5,6 +5,7 @@
 
 use clap::Parser;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::logging;
 
 mod commands;
 mod util;
@@ -12,6 +13,7 @@ mod util;
 use commands::Cli;
 
 fn main() {
+    logging::init();
     let cli = Cli::parse();
 
     if let Err(e) = cli.execute() {

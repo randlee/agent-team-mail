@@ -12,6 +12,7 @@ use clap::Args;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use agent_team_mail_core::text::{truncate_chars_slice, validate_message_text, DEFAULT_MAX_MESSAGE_BYTES};
@@ -64,6 +65,7 @@ pub struct SendArgs {
 
 /// Execute the send command
 pub fn execute(args: SendArgs) -> Result<()> {
+    debug!("send command start");
     // Resolve configuration
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -190,7 +192,8 @@ pub fn execute(args: SendArgs) -> Result<()> {
             action: "send_dry_run",
             team: Some(team_name.clone()),
             session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-            actor: Some(config.core.identity.clone()),
+            agent_id: Some(config.core.identity.clone()),
+            agent_name: Some(config.core.identity.clone()),
             target: Some(agent_name.clone()),
             result: Some("ok".to_string()),
             message_text: Some(final_message_text.clone()),
@@ -238,7 +241,8 @@ pub fn execute(args: SendArgs) -> Result<()> {
         action: "send",
         team: Some(team_name.clone()),
         session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-        actor: Some(config.core.identity.clone()),
+        agent_id: Some(config.core.identity.clone()),
+        agent_name: Some(config.core.identity.clone()),
         target: Some(agent_name.clone()),
         result: Some(result_text.to_string()),
         message_id: inbox_message.message_id.clone(),
@@ -246,6 +250,10 @@ pub fn execute(args: SendArgs) -> Result<()> {
         message_text: Some(final_message_text.clone()),
         ..Default::default()
     });
+    info!(
+        "send outcome: team={} agent={} result={}",
+        team_name, agent_name, result_text
+    );
 
     // Auto-subscribe the sender to the target agent's idle event (upsert — refreshes TTL
     // if a subscription already exists). This is best-effort: errors are silently ignored

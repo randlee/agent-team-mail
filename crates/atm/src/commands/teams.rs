@@ -604,7 +604,8 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             action: "teams_cleanup",
             team: Some(args.team.clone()),
             session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-            actor: std::env::var("ATM_IDENTITY").ok(),
+            agent_id: std::env::var("ATM_IDENTITY").ok(),
+            agent_name: std::env::var("ATM_IDENTITY").ok(),
             result: Some("incomplete".to_string()),
             count: Some(removed_names.len() as u64),
             error: Some(format!(
@@ -626,7 +627,8 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         action: "teams_cleanup",
         team: Some(args.team.clone()),
         session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-        actor: std::env::var("ATM_IDENTITY").ok(),
+        agent_id: std::env::var("ATM_IDENTITY").ok(),
+        agent_name: std::env::var("ATM_IDENTITY").ok(),
         result: Some("ok".to_string()),
         count: Some(removed_names.len() as u64),
         ..Default::default()
