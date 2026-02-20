@@ -1,4 +1,5 @@
 pub mod event_loop;
+pub mod session_registry;
 pub mod shutdown;
 pub mod socket;
 pub mod spool_task;
@@ -6,6 +7,10 @@ pub mod status;
 pub mod watcher;
 
 pub use event_loop::run;
+pub use session_registry::{
+    is_pid_alive, new_session_registry, SessionRecord, SessionRegistry, SessionState,
+    SharedSessionRegistry,
+};
 pub use shutdown::graceful_shutdown;
 pub use spool_task::spool_drain_loop;
 pub use socket::{

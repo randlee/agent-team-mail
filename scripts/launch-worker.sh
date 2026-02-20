@@ -13,8 +13,39 @@ set -euo pipefail
 
 AGENT_NAME="${1:-}"
 WORKER_CMD="${2:-codex --yolo}"
-TEAM="${ATM_TEAM:-atm-dev}"
 MODE="${LAUNCH_MODE:-session}"  # "session" (default) or "pane" (new pane in current window)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ATM_TOML="$REPO_ROOT/.atm.toml"
+
+if [[ ! -f "$ATM_TOML" ]]; then
+    echo "Error: .atm.toml not found at $ATM_TOML" >&2
+    echo "Set up [core].default_team in repo .atm.toml before launching workers." >&2
+    exit 1
+fi
+
+DEFAULT_TEAM="$(
+python3 - "$ATM_TOML" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+with path.open("rb") as f:
+    import tomllib
+    config = tomllib.load(f)
+
+team = config.get("core", {}).get("default_team")
+if not isinstance(team, str) or not team.strip():
+    raise SystemExit(2)
+print(team.strip())
+PY
+)" || {
+    echo "Error: failed to read [core].default_team from $ATM_TOML" >&2
+    echo "Ensure .atm.toml contains: [core] default_team = \"<team-name>\"" >&2
+    exit 1
+}
+
+TEAM="${ATM_TEAM:-$DEFAULT_TEAM}"
 
 if [[ -z "$AGENT_NAME" ]]; then
     echo "Usage: $0 <agent-name> [command]"
@@ -66,6 +97,14 @@ if [[ "$MODE" == "pane" ]]; then
     PANE_ID=$(tmux split-window -h -P -F '#{pane_id}' "env $ENV_VARS $WORKER_CMD; echo ''; echo 'Worker exited. Press Enter to close.'; read")
     tmux select-layout even-horizontal
     PANE_INFO="$PANE_ID (current window)"
+
+    # Update tmuxPaneId in team config.json so Claude Code can inject messages
+    if atm teams add-member "$TEAM" "$AGENT_NAME" --pane-id "$PANE_ID" 2>/dev/null; then
+        echo "  Config:    tmuxPaneId=$PANE_ID registered via atm teams add-member"
+    else
+        echo "  Warning:   failed to register tmuxPaneId (member may not exist in team)" >&2
+    fi
+
     echo "Launched worker '$AGENT_NAME' in new pane."
     echo ""
     echo "  Pane:      $PANE_INFO"

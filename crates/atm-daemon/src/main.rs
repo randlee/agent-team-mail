@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use agent_team_mail_daemon::daemon;
-use agent_team_mail_daemon::daemon::{new_launch_sender, new_pubsub_store, new_state_store, StatusWriter};
+use agent_team_mail_daemon::daemon::{new_launch_sender, new_pubsub_store, new_session_registry, new_state_store, StatusWriter};
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
 use agent_team_mail_daemon::roster::RosterService;
 use clap::Parser;
@@ -154,6 +154,11 @@ async fn main() -> Result<()> {
     // LAUNCH_UNAVAILABLE for any "launch" commands.
     let launch_tx = new_launch_sender();
 
+    // Create the session registry for tracking Claude Code agent session IDs.
+    // Created here so it can be shared with the WorkerAdapterPlugin (for hook
+    // event population) and with the socket server (for session-query responses).
+    let session_registry = new_session_registry();
+
     // Register Worker Adapter plugin if configured
     if let Some(workers_config) = plugin_ctx.plugin_config("workers")
         && workers_config
@@ -178,8 +183,9 @@ async fn main() -> Result<()> {
             );
         pubsub_store = worker_plugin.pubsub_store();
         worker_plugin.set_launch_receiver(rx);
+        worker_plugin.set_session_registry(Arc::clone(&session_registry));
         registry.register(worker_plugin);
-        info!("Registered Worker Adapter plugin with launch channel");
+        info!("Registered Worker Adapter plugin with launch channel and session registry");
     }
 
     info!("Registered {} plugin(s)", registry.len());
@@ -232,6 +238,7 @@ async fn main() -> Result<()> {
         state_store,
         pubsub_store,
         launch_tx,
+        session_registry,
     )
     .await
     .context("Daemon event loop failed")?;
