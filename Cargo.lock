@@ -19,6 +19,7 @@ dependencies = [
  "serial_test",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
  "uuid",
 ]
 
@@ -40,6 +41,7 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
