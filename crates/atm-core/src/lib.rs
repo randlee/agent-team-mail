@@ -11,6 +11,7 @@
 pub mod config;
 pub mod context;
 pub mod daemon_client;
+pub mod event_log;
 pub mod home;
 pub mod io;
 pub mod retention;

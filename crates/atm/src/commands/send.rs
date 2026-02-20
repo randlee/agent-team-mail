@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use agent_team_mail_core::config::{resolve_alias, resolve_config, Config, ConfigOverrides};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{inbox_append, WriteOutcome};
 use agent_team_mail_core::io::lock::acquire_lock;
@@ -183,6 +184,18 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     // Dry run output
     if args.dry_run {
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm",
+            action: "send_dry_run",
+            team: Some(team_name.clone()),
+            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            actor: Some(config.core.identity.clone()),
+            target: Some(agent_name.clone()),
+            result: Some("ok".to_string()),
+            message_text: Some(final_message_text.clone()),
+            ..Default::default()
+        });
         if args.json {
             let output = serde_json::json!({
                 "action": "send",
@@ -212,6 +225,27 @@ pub fn execute(args: SendArgs) -> Result<()> {
     }
 
     let outcome = inbox_append(&inbox_path, &inbox_message, &team_name, &agent_name)?;
+    let (result_text, conflict_count): (&str, Option<u64>) = match &outcome {
+        WriteOutcome::Success => ("success", None),
+        WriteOutcome::ConflictResolved { merged_messages } => {
+            ("conflict_resolved", Some(*merged_messages as u64))
+        }
+        WriteOutcome::Queued { .. } => ("queued", None),
+    };
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "send",
+        team: Some(team_name.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        actor: Some(config.core.identity.clone()),
+        target: Some(agent_name.clone()),
+        result: Some(result_text.to_string()),
+        message_id: inbox_message.message_id.clone(),
+        count: conflict_count,
+        message_text: Some(final_message_text.clone()),
+        ..Default::default()
+    });
 
     // Auto-subscribe the sender to the target agent's idle event (upsert — refreshes TTL
     // if a subscription already exists). This is best-effort: errors are silently ignored

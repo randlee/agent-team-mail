@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::io::lock::acquire_lock;
@@ -597,12 +598,39 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     // Return an error if any members were skipped due to an unreachable daemon,
     // so the caller knows the cleanup was incomplete.
     if !skipped_names.is_empty() {
+        emit_event_best_effort(EventFields {
+            level: "warn",
+            source: "atm",
+            action: "teams_cleanup",
+            team: Some(args.team.clone()),
+            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            actor: std::env::var("ATM_IDENTITY").ok(),
+            result: Some("incomplete".to_string()),
+            count: Some(removed_names.len() as u64),
+            error: Some(format!(
+                "skipped={} daemon_unreachable",
+                skipped_names.len()
+            )),
+            ..Default::default()
+        });
         return Err(anyhow::anyhow!(
             "Cleanup incomplete: {} member(s) skipped because daemon liveness could not be determined. \
              Start the daemon or use --force to remove without confirmation.",
             skipped_names.len()
         ));
     }
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "teams_cleanup",
+        team: Some(args.team.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        actor: std::env::var("ATM_IDENTITY").ok(),
+        result: Some("ok".to_string()),
+        count: Some(removed_names.len() as u64),
+        ..Default::default()
+    });
 
     Ok(())
 }
