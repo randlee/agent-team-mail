@@ -136,6 +136,14 @@ pub struct ProxyServer {
     /// Consumed on the first `codex` or `codex-reply` developer-instructions
     /// injection and set to `None` thereafter.
     resume_context: Option<ResumeContext>,
+    /// Whether the upstream has sent `notifications/initialized`.
+    ///
+    /// Buffered for replay to the child when it is lazily spawned.  The MCP
+    /// protocol requires the server to receive this notification before it
+    /// processes other requests; since the child is spawned lazily (only on
+    /// the first `codex` tool call), we capture it here and replay it to the
+    /// child's stdin immediately after spawn.
+    initialized_received: bool,
 }
 
 /// Context from a previous session to prepend on resume (FR-6).
@@ -286,6 +294,7 @@ impl ProxyServer {
             shared_child_stdin: Arc::new(Mutex::new(None)),
             audit_log,
             resume_context: None,
+            initialized_received: false,
         }
     }
 
@@ -558,11 +567,54 @@ impl ProxyServer {
                         Some("initialize") => {
                             self.handle_initialize(id, &upstream_tx).await;
                         }
+                        Some("ping") => {
+                            // Handle ping at the proxy layer — never forward to child.
+                            // Returns an empty result object per the MCP specification.
+                            if let Some(req_id) = id {
+                                let response = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": req_id,
+                                    "result": {}
+                                });
+                                let _ = upstream_tx.send(response).await;
+                            }
+                        }
                         Some("notifications/initialized") => {
-                            // No-op when child not yet spawned; forward if child is running.
+                            if self.child.is_some() {
+                                // Child is already running — forward immediately.
+                                self.forward_to_child(msg, id, false, &pending, &upstream_tx)
+                                    .await;
+                            } else {
+                                // Buffer for replay when child spawns.
+                                self.initialized_received = true;
+                            }
+                        }
+                        Some("notifications/cancelled") => {
+                            // Clean up the pending map so we don't leak the oneshot sender.
+                            if let Some(params) = msg.get("params") {
+                                if let Some(cancelled_id) = params.get("requestId").cloned() {
+                                    let _ = pending.lock().await.complete(&cancelled_id);
+                                }
+                            }
+                            // Forward to child if alive.
                             if self.child.is_some() {
                                 self.forward_to_child(msg, id, false, &pending, &upstream_tx)
                                     .await;
+                            }
+                        }
+                        Some("resources/list")
+                        | Some("resources/read")
+                        | Some("prompts/list")
+                        | Some("prompts/get") => {
+                            // These methods are not supported by atm-agent-mcp.
+                            if let Some(req_id) = id {
+                                let err = make_error_response(
+                                    req_id,
+                                    ERR_METHOD_NOT_FOUND,
+                                    "Method not supported by atm-agent-mcp",
+                                    json!({"error_source": "proxy"}),
+                                );
+                                let _ = upstream_tx.send(err).await;
                             }
                         }
                         Some(method_name) => {
@@ -2318,6 +2370,23 @@ Session ending. Write a concise summary of:\n\
 
         // Populate the shared child stdin reference for the idle poller.
         *self.shared_child_stdin.lock().await = Some(Arc::clone(&shared_stdin));
+
+        // Replay `notifications/initialized` if it arrived before the child was spawned.
+        // The MCP protocol requires the server to receive this notification before
+        // processing further requests; we buffer it during lazy-spawn and replay it here.
+        if self.initialized_received {
+            let notification = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            });
+            let serialized = serde_json::to_string(&notification).unwrap_or_default();
+            let mut stdin_guard = shared_stdin.lock().await;
+            if let Err(e) = write_newline_delimited(&mut *stdin_guard, &serialized).await {
+                tracing::warn!("failed to replay notifications/initialized to child: {e}");
+            }
+            drop(stdin_guard);
+        }
 
         self.child = Some(ChildHandle {
             stdin: shared_stdin,

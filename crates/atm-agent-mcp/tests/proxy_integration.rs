@@ -934,3 +934,280 @@ async fn test_notifications_initialized_does_not_produce_response() {
     drop(writer);
     let _ = handle.await;
 }
+
+// ─── QA-001: ping handled at proxy layer ────────────────────────────────
+
+#[tokio::test]
+async fn test_ping_before_child_spawn_returns_empty_result() {
+    let (mut writer, mut reader, handle) = spawn_proxy(5);
+
+    // Send ping before any codex call (child not yet spawned).
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "id": 10, "method": "ping"}),
+    )
+    .await;
+
+    let resp = read_response(&mut reader)
+        .await
+        .expect("ping must return a response");
+    assert_eq!(resp["id"], 10, "response id must match request id");
+    assert!(
+        resp.get("result").is_some(),
+        "ping must return a result field"
+    );
+    assert_eq!(
+        resp["result"],
+        json!({}),
+        "ping result must be an empty object"
+    );
+    assert!(
+        resp.get("error").is_none(),
+        "ping must not return an error"
+    );
+
+    drop(writer);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_ping_after_spawn_handled_by_proxy() {
+    let (mut writer, mut reader, handle) = spawn_proxy(10);
+
+    // Trigger child spawn via a codex tool call.
+    send_content_length(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "codex", "arguments": {"prompt": "init"}}
+        }),
+    )
+    .await;
+    // Drain responses from the codex call (may be one or more).
+    let _ = read_all_responses(&mut reader, Duration::from_secs(5)).await;
+
+    // Now send ping — child is running but proxy must handle it itself.
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "id": 20, "method": "ping"}),
+    )
+    .await;
+
+    let resp = read_response(&mut reader)
+        .await
+        .expect("ping must return a response after spawn");
+    assert_eq!(resp["id"], 20, "response id must match request id");
+    assert_eq!(
+        resp["result"],
+        json!({}),
+        "ping result must be an empty object"
+    );
+    assert!(
+        resp.get("error").is_none(),
+        "ping must not return an error"
+    );
+
+    drop(writer);
+    let _ = handle.await;
+}
+
+// ─── QA-003: notifications/initialized buffer-and-replay ────────────────
+
+#[tokio::test]
+async fn test_notifications_initialized_sets_flag_when_child_absent() {
+    // When notifications/initialized arrives before child spawn, the proxy
+    // must buffer it (set initialized_received = true) without producing a
+    // response, and remain healthy for subsequent requests.
+    let (mut writer, mut reader, handle) = spawn_proxy(5);
+
+    // Send notifications/initialized before child exists.
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}),
+    )
+    .await;
+
+    // No response must be produced for a notification.
+    let result = tokio::time::timeout(
+        Duration::from_millis(200),
+        read_response(&mut reader),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "notifications/initialized must not produce a response"
+    );
+
+    // Proxy must still be alive: a ping must work.
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "id": 99, "method": "ping"}),
+    )
+    .await;
+    let ping_resp = read_response(&mut reader)
+        .await
+        .expect("proxy must still respond to ping after buffering initialized");
+    assert_eq!(ping_resp["id"], 99);
+    assert_eq!(ping_resp["result"], json!({}));
+
+    drop(writer);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_notifications_initialized_replayed_to_child_after_spawn() {
+    // Verifies that buffering notifications/initialized does not prevent the
+    // proxy from operating normally after the child is lazily spawned.
+    let (mut writer, mut reader, handle) = spawn_proxy(10);
+
+    // 1. Buffer the notification before spawn.
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}),
+    )
+    .await;
+
+    // 2. Trigger child spawn; the proxy replays the notification internally.
+    send_content_length(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "codex", "arguments": {"prompt": "hello"}}
+        }),
+    )
+    .await;
+    let responses = read_all_responses(&mut reader, Duration::from_secs(5)).await;
+
+    // The codex call must produce at least one response (echo-mcp-server replies).
+    assert!(
+        !responses.is_empty(),
+        "codex call must produce a response after notifications/initialized replay"
+    );
+    // The response must not be an internal error (child must be healthy).
+    let first = &responses[0];
+    let is_internal_error = first
+        .pointer("/error/code")
+        .and_then(|v| v.as_i64())
+        .map(|c| c == -32603)
+        .unwrap_or(false);
+    assert!(
+        !is_internal_error,
+        "child must start normally after notifications/initialized replay; got: {first}"
+    );
+
+    drop(writer);
+    let _ = handle.await;
+}
+
+// ─── QA-004: notifications/cancelled cleans pending map ─────────────────
+
+#[tokio::test]
+async fn test_notifications_cancelled_cleans_pending_map() {
+    // Verifies that receiving notifications/cancelled with a requestId that
+    // does not exist in the pending map does not panic and produces no response.
+    let (mut writer, mut reader, handle) = spawn_proxy(5);
+
+    send_content_length(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": "99", "reason": "user cancelled"}
+        }),
+    )
+    .await;
+
+    // Notifications must not produce a response.
+    let result = tokio::time::timeout(
+        Duration::from_millis(200),
+        read_response(&mut reader),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "notifications/cancelled must not produce a response"
+    );
+
+    // Proxy must remain healthy.
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "id": 42, "method": "ping"}),
+    )
+    .await;
+    let ping_resp = read_response(&mut reader)
+        .await
+        .expect("proxy must respond to ping after notifications/cancelled");
+    assert_eq!(ping_resp["id"], 42);
+    assert_eq!(ping_resp["result"], json!({}));
+
+    drop(writer);
+    let _ = handle.await;
+}
+
+// ─── QA-005: unsupported methods return ERR_METHOD_NOT_FOUND ────────────
+
+#[tokio::test]
+async fn test_unsupported_methods_return_method_not_found() {
+    let (mut writer, mut reader, handle) = spawn_proxy(5);
+
+    // resources/list must return -32601 (method not found).
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "id": 20, "method": "resources/list"}),
+    )
+    .await;
+
+    let resp = read_response(&mut reader)
+        .await
+        .expect("resources/list must return an error response");
+    assert_eq!(resp["id"], 20, "response id must match request id");
+    assert!(
+        resp.get("error").is_some(),
+        "resources/list must return an error"
+    );
+    assert_eq!(
+        resp["error"]["code"],
+        -32601,
+        "error code must be ERR_METHOD_NOT_FOUND (-32601)"
+    );
+
+    // resources/read must also return -32601.
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "id": 21, "method": "resources/read"}),
+    )
+    .await;
+    let resp2 = read_response(&mut reader)
+        .await
+        .expect("resources/read must return an error response");
+    assert_eq!(resp2["error"]["code"], -32601);
+
+    // prompts/list must also return -32601.
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "id": 22, "method": "prompts/list"}),
+    )
+    .await;
+    let resp3 = read_response(&mut reader)
+        .await
+        .expect("prompts/list must return an error response");
+    assert_eq!(resp3["error"]["code"], -32601);
+
+    // prompts/get must also return -32601.
+    send_content_length(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "id": 23, "method": "prompts/get"}),
+    )
+    .await;
+    let resp4 = read_response(&mut reader)
+        .await
+        .expect("prompts/get must return an error response");
+    assert_eq!(resp4["error"]["code"], -32601);
+
+    drop(writer);
+    let _ = handle.await;
+}
