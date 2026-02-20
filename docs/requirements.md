@@ -565,6 +565,45 @@ timestamps = "relative"             # relative | absolute | iso8601
 | `ATM_CONFIG` | Path to config file override |
 | `ATM_NO_COLOR` | Disable colored output |
 
+### 4.5 Recommended Hooks (Agent Teams)
+
+Use Claude Code hooks to enforce safe team behavior and to publish lifecycle
+events for daemon state tracking.
+
+**Hook team source of truth**:
+- For hook policy decisions, use repo `.atm.toml` `[core].default_team` as the required team.
+- Do not rely on `ATM_TEAM` for enforcement, because env state can be stale or missing.
+
+#### `PreToolUse` (`matcher: "Task"`)
+
+Required policy:
+- Block orchestrator spawns (`subagent_type = "scrum-master"`) unless they are named teammates (`name` provided).
+- Block any explicit `team_name` that does not match `.atm.toml` `[core].default_team`.
+- Return exit code `2` with actionable feedback when blocked.
+
+Rationale:
+- Prevents accidental teammate creation in the wrong team, which causes inbox/context divergence.
+
+#### `TeammateIdle`
+
+Recommended policy:
+- Emit a lightweight JSON event for daemon consumption (for example:
+  `${ATM_HOME:-$HOME}/.claude/daemon/hooks/events.jsonl`).
+- Include at least: `type`, `agent`, `team`, `session_id`, `received_at`.
+- Keep this hook non-blocking and fail-open (`exit 0` on relay errors).
+
+Rationale:
+- Provides low-latency state transitions (`Busy` → `Idle`) without expensive polling.
+
+#### `TaskCompleted`
+
+Recommended policy:
+- Run completion gates (for example: required tests, PR linkage, required status updates).
+- Return exit code `2` to prevent completion when policy checks fail.
+
+Rationale:
+- Stops tasks from being marked complete before required quality gates pass.
+
 ---
 
 ## 5. Plugin System (Daemon Only)

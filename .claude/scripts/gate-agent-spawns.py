@@ -13,9 +13,10 @@ orchestrators can accidentally spawn agents incorrectly, leading to:
 2. Lifecycle issues: Background agents without names can't compact and die at
    context limit. Orchestrators need full teammate status to survive long sprints.
 
-This gate enforces two rules:
+This gate enforces three rules:
 - Rule 1: Orchestrators (scrum-master) MUST be named teammates
 - Rule 2: Only the team LEAD can create named teammates (not orchestrators themselves)
+- Rule 3: team_name must match .atm.toml [core].default_team when provided
 
 ## Mode Compatibility
 
@@ -37,6 +38,24 @@ from pathlib import Path
 ORCHESTRATORS = {"scrum-master"}
 
 DEBUG_LOG = Path("/tmp/gate-agent-spawns-debug.jsonl")
+
+
+def get_required_team() -> str | None:
+    """Read default_team from .atm.toml in the project root.
+
+    Returns None if file is missing or unparseable (fail open).
+    """
+    try:
+        import tomllib
+
+        toml_path = Path(".atm.toml")
+        if not toml_path.exists():
+            return None
+        with toml_path.open("rb") as f:
+            config = tomllib.load(f)
+        return config.get("core", {}).get("default_team")
+    except Exception:
+        return None
 
 
 def get_lead_session_id(team_name: str) -> str | None:
@@ -77,6 +96,7 @@ def main() -> int:
     teammate_name = tool_input.get("name", "")  # If present, spawns named teammate
     team_name = tool_input.get("team_name", "")  # If present, spawns into team
     session_id = data.get("session_id", "")
+    required_team = get_required_team()
 
     # Rule 1: Orchestrators must be spawned with teammate_name
     # WHY: They need full lifecycle (compaction, proper shutdown) to coordinate
@@ -90,6 +110,20 @@ def main() -> int:
             f"\n"
             f"Wrong:\n"
             f'  Task(subagent_type="{subagent_type}", run_in_background=true)  # no name = dies at context limit\n'
+        )
+        return 2
+
+    # Rule 3: Any explicit team_name must match .atm.toml default_team.
+    # WHY: Wrong team_name can create/target the wrong team and hide ATM messages.
+    if team_name and str(team_name).strip() and required_team and team_name != required_team:
+        sys.stderr.write(
+            f"BLOCKED: team_name must match .atm.toml core.default_team.\n"
+            f"\n"
+            f"Required team_name: {required_team!r}\n"
+            f"Got team_name:      {team_name!r}\n"
+            f"\n"
+            f"Use:\n"
+            f'  Task(..., team_name="{required_team}", ...)\n'
         )
         return 2
 
