@@ -51,9 +51,9 @@ impl EventLogConfig {
         let default_path = std::env::var("ATM_HOME")
             .map(|atm_home| PathBuf::from(atm_home).join("events.jsonl"))
             .unwrap_or_else(|_| {
-                dirs::config_dir()
-                    .map(|p| p.join("atm/events.jsonl"))
-                    .or_else(|| get_home_dir().ok().map(|h| h.join(".config/atm/events.jsonl")))
+                get_home_dir()
+                    .ok()
+                    .map(|h| h.join(".config/atm/events.jsonl"))
                     .unwrap_or_else(|| PathBuf::from("events.jsonl"))
             });
 
