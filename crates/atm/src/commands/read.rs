@@ -128,18 +128,22 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         None
     };
 
-    // Filter by read status (unless --all or since-last-seen)
-    if !args.all && !use_since_last_seen {
-        filtered_messages.retain(|m| !m.read);
-    }
-
-    // Filter by last-seen timestamp
-    if let Some(last_seen_dt) = last_seen {
-        filtered_messages.retain(|m| {
-            DateTime::parse_from_rfc3339(&m.timestamp)
-                .map(|dt| dt > last_seen_dt)
-                .unwrap_or(false)
-        });
+    // Visibility filter:
+    // - Default mode: unread only
+    // - Since-last-seen mode: unread OR newer-than-last-seen
+    if !args.all {
+        if use_since_last_seen {
+            if let Some(last_seen_dt) = last_seen {
+                filtered_messages.retain(|m| {
+                    !m.read
+                        || DateTime::parse_from_rfc3339(&m.timestamp)
+                            .map(|dt| dt > last_seen_dt)
+                            .unwrap_or(false)
+                });
+            }
+        } else {
+            filtered_messages.retain(|m| !m.read);
+        }
     }
 
     // Filter by sender
@@ -194,16 +198,19 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                 let mut new_filtered = new_messages.clone();
 
                 // Re-apply the same filters
-                if !args.all && !use_since_last_seen {
-                    new_filtered.retain(|m| !m.read);
-                }
-
-                if let Some(last_seen_dt) = last_seen {
-                    new_filtered.retain(|m| {
-                        DateTime::parse_from_rfc3339(&m.timestamp)
-                            .map(|dt| dt > last_seen_dt)
-                            .unwrap_or(false)
-                    });
+                if !args.all {
+                    if use_since_last_seen {
+                        if let Some(last_seen_dt) = last_seen {
+                            new_filtered.retain(|m| {
+                                !m.read
+                                    || DateTime::parse_from_rfc3339(&m.timestamp)
+                                        .map(|dt| dt > last_seen_dt)
+                                        .unwrap_or(false)
+                            });
+                        }
+                    } else {
+                        new_filtered.retain(|m| !m.read);
+                    }
                 }
 
                 if let Some(ref from_name) = args.from {

@@ -419,6 +419,97 @@ fn test_read_since_last_seen_default() {
 }
 
 #[test]
+fn test_read_since_last_seen_still_shows_older_unread_messages() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Older unread message",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": false,
+            "message_id": "msg-100"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Newer read message",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": true,
+            "message_id": "msg-101"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    // Seed last-seen after both messages so timestamp filtering alone would hide everything.
+    let state_path = temp_dir.path().join("state.json");
+    let state = serde_json::json!({
+        "last_seen": {
+            "test-team": {
+                "test-agent": "2026-02-11T12:00:00Z"
+            }
+        }
+    });
+    fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Older unread message"))
+        .stdout(predicates::str::contains("Newer read message").not());
+}
+
+#[test]
+fn test_read_all_ignores_last_seen_filter() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Older unread message",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": false,
+            "message_id": "msg-200"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Older read message",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": true,
+            "message_id": "msg-201"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    // Seed last-seen after both messages; --all should still show both.
+    let state_path = temp_dir.path().join("state.json");
+    let state = serde_json::json!({
+        "last_seen": {
+            "test-team": {
+                "test-agent": "2026-02-11T12:00:00Z"
+            }
+        }
+    });
+    fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("test-agent")
+        .arg("--all")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Older unread message"))
+        .stdout(predicates::str::contains("Older read message"));
+}
+
+#[test]
 fn test_read_no_update_seen() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = setup_test_team(&temp_dir, "test-team");
