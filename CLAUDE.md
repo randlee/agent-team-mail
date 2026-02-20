@@ -46,7 +46,7 @@
 - Agent team execution: Scrum Master → Dev(s) + QA(s), Opus Architect on escalation
 - All work on dedicated worktrees via `sc-git-worktree`
 
-**Current Status**: Pre-development — requirements and plan under review
+**Current Status**: Active development on `develop` with ongoing sprint execution via worktrees
 
 ---
 
@@ -78,35 +78,13 @@ Every sprint follows this pattern:
 5. **Commit/Push/PR** to phase integration branch
 6. **Agent-teams review** documenting what worked/didn't
 
-### Phase Integration Branch Strategy
-
-Each phase gets a dedicated integration branch off `develop`:
-
-```
-main
-  └── develop
-        └── integrate/phase-N              ← created at phase start
-              ├── feature/pN-s1-...        ← PR targets integrate/phase-N
-              ├── feature/pN-s2-...        ← PR targets integrate/phase-N
-              └── feature/pN-s3-...        ← PR targets integrate/phase-N
-
-        After all sprints merge → one PR: integrate/phase-N → develop
-```
-
-**Rules:**
-- Sprint PRs target `integrate/phase-N` (not `develop` directly)
-- After each sprint merges to the integration branch, subsequent sprints merge latest `integrate/phase-N` into their feature branch before creating their PR
-- When all phase sprints are complete, one final PR merges `integrate/phase-N → develop`
-- Phase integration branch is then cleaned up
-
 ### Worktree Cleanup Policy
 
 **Do NOT clean up worktrees until the user has reviewed them.** The user reviews each sprint's worktree separately to check for design divergence before approving cleanup. Worktree cleanup is only performed when explicitly requested.
 
 ### Branch Flow
 
-- Sprint PRs → `integrate/phase-N` (phase integration branch)
-- Phase completion PR → `develop` (integration branch)
+- Sprint PRs → `develop` (integration branch)
 - Release PR → `main` (after user review/approval)
 - Post-merge CI runs as safety net at each level
 
@@ -131,14 +109,38 @@ main
 
 ### Team Configuration
 
-- **Team**: `atm-dev` (persistent across sessions)
-- **ARCH-ATM** (you) is `team-lead` — start and maintain the `atm-dev` team for the session duration
+- **Team source of truth**: repo `.atm.toml` `[core].default_team`
+- **ARCH-ATM** (you) is `team-lead` — start and maintain the configured team for the session duration
 - **ARCH-CTM** is a Codex agent — communicates **exclusively** via ATM CLI messages (not Claude Code team API)
 - **All other Claude agents** communicate using Claude Code's built-in team messaging API (`SendMessage` tool)
 
+### Mandatory Team Bootstrap (Resume-First)
+
+Before any teammate spawn, Claude MUST follow this order:
+
+1. Read required team from repo `.atm.toml` `[core].default_team`.
+2. Run `atm teams resume <team-from-toml>`.
+3. Call `TeamCreate(team_name="<team-from-.atm.toml>", ...)`.
+4. Run `atm teams resume <team-from-toml>` again.
+5. If needed, call `TeamCreate(team_name="<team-from-.atm.toml>", ...)` one more time.
+
+Behavior requirements:
+- `TeamCreate` must always use the exact team name from `.atm.toml` `[core].default_team`.
+- If `.atm.toml` is missing, `default_team` is unset/empty, or the resolved name does not match the name being used for `TeamCreate`: tell the user and stop.
+- Use `atm teams resume` as the primary fix before treating team-name drift as a hard failure.
+- If the sequence above still fails after the second `TeamCreate`, escalate to the user.
+- If a non-lead agent attempts this flow and gets an authorization error, stop and escalate to `team-lead` instead of creating a new team name.
+
+Required `TeamCreate` syntax:
+```text
+TeamCreate(team_name="<team-from-.atm.toml>", description="<short description>")
+```
+
+Never invent or auto-generate a different team name when `.atm.toml` defines `default_team`.
+
 ### Identity
 
-`.atm.toml` at repo root sets `identity = "team-lead"` and `default_team = "atm-dev"`, so all ATM CLI commands automatically use the correct identity and team. No need to prefix with `ATM_IDENTITY=` or `--team`.
+`.atm.toml` at repo root sets `identity` and `default_team`; these are the required defaults for CLI and team bootstrap behavior.
 
 **Note**: ARCH-CTM gets his identity from `ATM_IDENTITY=arch-ctm` set in his tmux session via `launch-worker.sh`.
 
@@ -169,7 +171,7 @@ ARCH-CTM runs in a tmux pane. Discover the pane, then send-keys:
 tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_title} #{pane_current_command}'
 
 # Send nudge (use the correct pane ID from above)
-tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --team atm-dev" && sleep 0.5 && tmux send-keys -t <pane-id> Enter
+tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --team <team-from-.atm.toml>" && sleep 0.5 && tmux send-keys -t <pane-id> Enter
 ```
 
 ### Communication Rules
@@ -191,6 +193,7 @@ tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --te
 ---
 
 ## Initialization Process
+- Resolve team from `.atm.toml`, then run: `resume → TeamCreate → resume → TeamCreate` using the same team name
 - Read project plan (`docs/project-plan.md`)
 - Check current status (branches, PRs, worktrees)
 - Output concise project summary and status to user
