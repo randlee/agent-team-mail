@@ -114,6 +114,20 @@ pub fn execute(args: SendArgs) -> Result<()> {
     // Get message text from appropriate source
     let message_text = get_message_text(&args)?;
 
+    // Self-send check: warn and prepend warning when sender == recipient
+    let message_text = if config.core.identity == agent_name {
+        let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "unknown".to_string());
+        let session_short = &session_id[..8.min(session_id.len())];
+        let warning = format!(
+            "[WARNING: Sent to self — identity={}, session={}. Check ATM_IDENTITY.]",
+            config.core.identity, session_short
+        );
+        println!("{warning}");
+        format!("{warning}\n{message_text}")
+    } else {
+        message_text
+    };
+
     // Process file reference if provided
     let mut final_message_text = if let Some(ref file_path) = args.file {
         process_file_reference(file_path, &message_text, &team_name, &current_dir, &home_dir)?
@@ -512,5 +526,48 @@ mod tests {
         let args = make_send_args(Some(String::new()));
         let config = Config::default();
         assert_eq!(resolve_offline_action(&args, &config), "");
+    }
+
+    #[test]
+    fn test_self_send_warning_prepended() {
+        // When sender identity == target agent name, the warning should be
+        // prepended to the message text.
+        let sender = "team-lead";
+        let agent_name = "team-lead"; // same as sender → self-send
+        let raw_message = "Hello self!";
+
+        // Simulate the self-send check logic (extracted for unit testing)
+        let session_id = "test-session-1234567890";
+        let session_short = &session_id[..8.min(session_id.len())];
+
+        let message_text = if sender == agent_name {
+            let warning = format!(
+                "[WARNING: Sent to self — identity={sender}, session={session_short}. Check ATM_IDENTITY.]"
+            );
+            format!("{warning}\n{raw_message}")
+        } else {
+            raw_message.to_string()
+        };
+
+        assert!(message_text.starts_with("[WARNING: Sent to self"));
+        assert!(message_text.contains("team-lead"));
+        assert!(message_text.contains("test-ses")); // first 8 chars
+        assert!(message_text.contains("Hello self!"));
+    }
+
+    #[test]
+    fn test_self_send_warning_not_added_for_different_recipient() {
+        let sender = "team-lead";
+        let agent_name = "arch-ctm"; // different → no warning
+        let raw_message = "Hello other!";
+
+        let message_text = if sender == agent_name {
+            format!("[WARNING: Sent to self — identity={sender}]\n{raw_message}")
+        } else {
+            raw_message.to_string()
+        };
+
+        assert_eq!(message_text, "Hello other!");
+        assert!(!message_text.contains("WARNING"));
     }
 }

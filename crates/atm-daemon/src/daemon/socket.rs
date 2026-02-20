@@ -26,6 +26,8 @@ use anyhow::Result;
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 
+use crate::daemon::session_registry::SharedSessionRegistry;
+
 // ── Public API (cross-platform stubs) ────────────────────────────────────────
 
 /// Start the Unix socket server and return a handle that cleans up the socket
@@ -41,6 +43,7 @@ use tracing::{debug, error, info, warn};
 ///   Pass [`new_launch_sender()`] (with an empty inner `Option`) when the
 ///   worker adapter is disabled; the socket server will return a
 ///   `LAUNCH_UNAVAILABLE` error for any `"launch"` requests.
+/// * `session_registry` - Shared session registry for `session-query` requests
 /// * `cancel` - Cancellation token; server stops accepting when cancelled
 ///
 /// # Platform Behaviour
@@ -52,13 +55,21 @@ pub async fn start_socket_server(
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
+    session_registry: SharedSessionRegistry,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
     {
-        start_unix_socket_server(home_dir, state_store, pubsub_store, launch_tx, cancel)
-            .await
-            .map(Some)
+        start_unix_socket_server(
+            home_dir,
+            state_store,
+            pubsub_store,
+            launch_tx,
+            session_registry,
+            cancel,
+        )
+        .await
+        .map(Some)
     }
 
     #[cfg(not(unix))]
@@ -165,6 +176,7 @@ async fn start_unix_socket_server(
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
+    session_registry: SharedSessionRegistry,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -203,6 +215,7 @@ async fn start_unix_socket_server(
             state_store,
             pubsub_store,
             launch_tx,
+            session_registry,
             cancel,
             &accept_socket_path,
             &accept_pid_path,
@@ -217,11 +230,13 @@ async fn start_unix_socket_server(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 async fn run_accept_loop(
     listener: tokio::net::UnixListener,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
+    session_registry: SharedSessionRegistry,
     cancel: tokio_util::sync::CancellationToken,
     socket_path: &std::path::Path,
     _pid_path: &std::path::Path,
@@ -240,8 +255,9 @@ async fn run_accept_loop(
                         let store = state_store.clone();
                         let ps = pubsub_store.clone();
                         let tx = launch_tx.clone();
+                        let sr = session_registry.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, store, ps, tx).await {
+                            if let Err(e) = handle_connection(stream, store, ps, tx, sr).await {
                                 error!("Socket connection handler error: {e}");
                             }
                         });
@@ -265,6 +281,7 @@ async fn handle_connection(
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
+    session_registry: SharedSessionRegistry,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -293,7 +310,7 @@ async fn handle_connection(
     let response = if is_launch_command(request_str) {
         handle_launch_command(request_str, &launch_tx).await
     } else {
-        match parse_and_dispatch(request_str, &state_store, &pubsub_store) {
+        match parse_and_dispatch(request_str, &state_store, &pubsub_store, &session_registry) {
             Ok(resp) => resp,
             Err(e) => {
                 error!("Failed to dispatch socket request: {e}");
@@ -466,6 +483,7 @@ fn parse_and_dispatch(
     request_str: &str,
     state_store: &SharedStateStore,
     pubsub_store: &SharedPubSubStore,
+    session_registry: &SharedSessionRegistry,
 ) -> Result<SocketResponse> {
     use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
 
@@ -505,6 +523,7 @@ fn parse_and_dispatch(
         "agent-pane" => handle_agent_pane(&request, state_store),
         "subscribe" => handle_subscribe(&request, pubsub_store),
         "unsubscribe" => handle_unsubscribe(&request, pubsub_store),
+        "session-query" => handle_session_query(&request, session_registry),
         // "launch" is handled asynchronously before parse_and_dispatch is called.
         // If it somehow reaches here, return a clear internal error.
         "launch" => make_error_response(
@@ -520,6 +539,48 @@ fn parse_and_dispatch(
     };
 
     Ok(response)
+}
+
+/// Handle the `session-query` command.
+///
+/// Payload: `{"name": "<agent-name>"}`
+/// Response (found, alive):   `{"session_id": "...", "process_id": 12345, "alive": true}`
+/// Response (found, dead):    `{"session_id": "...", "process_id": 12345, "alive": false}`
+/// Response (not found):      error with code `AGENT_NOT_FOUND`
+fn handle_session_query(
+    request: &agent_team_mail_core::daemon_client::SocketRequest,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    let name = match request.payload.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'name'",
+            );
+        }
+    };
+
+    let registry = session_registry.lock().unwrap();
+    match registry.query(&name) {
+        Some(record) => {
+            let alive = record.is_process_alive();
+            make_ok_response(
+                &request.request_id,
+                serde_json::json!({
+                    "session_id": record.session_id,
+                    "process_id": record.process_id,
+                    "alive": alive,
+                }),
+            )
+        }
+        None => make_error_response(
+            &request.request_id,
+            "AGENT_NOT_FOUND",
+            &format!("No session record for agent '{name}'"),
+        ),
+    }
 }
 
 /// Handle the `agent-state` command.
@@ -789,6 +850,7 @@ fn format_elapsed_as_iso8601(elapsed: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::session_registry::new_session_registry;
     use crate::plugins::worker_adapter::AgentStateTracker;
     use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
 
@@ -798,6 +860,10 @@ mod tests {
 
     fn make_ps() -> SharedPubSubStore {
         new_pubsub_store()
+    }
+
+    fn make_sr() -> SharedSessionRegistry {
+        new_session_registry()
     }
 
     fn make_request(command: &str, payload: serde_json::Value) -> SocketRequest {
@@ -876,8 +942,9 @@ mod tests {
         // because the async path should have handled it, but the payload may be inspected.
         let store = make_store();
         let ps = make_ps();
+        let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r1","command":"launch","payload":{"agent":"","team":"atm-dev","command":"codex","timeout_secs":30,"env_vars":{}}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
         // In parse_and_dispatch the "launch" arm returns INTERNAL_ERROR
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
@@ -904,8 +971,9 @@ mod tests {
     fn test_parse_and_dispatch_unknown_command() {
         let store = make_store();
         let ps = make_ps();
+        let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r1","command":"bogus","payload":{}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "UNKNOWN_COMMAND");
     }
@@ -914,7 +982,8 @@ mod tests {
     fn test_parse_and_dispatch_malformed_json() {
         let store = make_store();
         let ps = make_ps();
-        let resp = parse_and_dispatch("not-json{{", &store, &ps).unwrap();
+        let sr = make_sr();
+        let resp = parse_and_dispatch("not-json{{", &store, &ps, &sr).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INVALID_REQUEST");
     }
@@ -923,8 +992,9 @@ mod tests {
     fn test_parse_and_dispatch_version_mismatch() {
         let store = make_store();
         let ps = make_ps();
+        let sr = make_sr();
         let req_json = r#"{"version":99,"request_id":"r1","command":"agent-state","payload":{}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
     }
@@ -1125,7 +1195,7 @@ mod tests {
 
         // Start the socket server
         let launch_tx = new_launch_sender();
-        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
+        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, make_sr(), cancel.clone())
             .await
             .unwrap()
             .expect("Expected socket server handle on unix");
@@ -1183,7 +1253,7 @@ mod tests {
         }
 
         let launch_tx = new_launch_sender();
-        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
+        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, make_sr(), cancel.clone())
             .await
             .unwrap()
             .expect("Expected socket server handle on unix");
@@ -1233,6 +1303,7 @@ mod tests {
             make_store(),
             new_pubsub_store(),
             launch_tx,
+            make_sr(),
             cancel.clone(),
         )
         .await
@@ -1282,7 +1353,7 @@ mod tests {
         let state_store = make_store();
 
         let launch_tx = new_launch_sender();
-        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
+        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, make_sr(), cancel.clone())
             .await
             .unwrap()
             .expect("Expected socket server handle on unix");
@@ -1311,7 +1382,7 @@ mod tests {
 
         {
             let launch_tx = new_launch_sender();
-            let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
+            let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, make_sr(), cancel.clone())
                 .await
                 .unwrap()
                 .expect("Expected handle");
@@ -1322,5 +1393,59 @@ mod tests {
         assert!(!socket_path.exists(), "Socket should be removed after handle drop");
 
         cancel.cancel();
+    }
+
+    // ── session-query handler tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_session_query_missing_name_field() {
+        let sr = make_sr();
+        let req = make_request("session-query", serde_json::json!({}));
+        let resp = handle_session_query(&req, &sr);
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
+    }
+
+    #[test]
+    fn test_session_query_agent_not_found() {
+        let sr = make_sr();
+        let req = make_request("session-query", serde_json::json!({"name": "ghost"}));
+        let resp = handle_session_query(&req, &sr);
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "AGENT_NOT_FOUND");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_session_query_agent_alive() {
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert("team-lead", "sess-abc123", std::process::id());
+        }
+        let req = make_request("session-query", serde_json::json!({"name": "team-lead"}));
+        let resp = handle_session_query(&req, &sr);
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["session_id"].as_str().unwrap(), "sess-abc123");
+        assert_eq!(payload["process_id"].as_u64().unwrap(), std::process::id() as u64);
+        assert!(payload["alive"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_session_query_agent_dead_pid() {
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            // i32::MAX is an impossibly large PID; always dead
+            reg.upsert("stale-agent", "sess-deadbeef", i32::MAX as u32);
+        }
+        let req = make_request("session-query", serde_json::json!({"name": "stale-agent"}));
+        let resp = handle_session_query(&req, &sr);
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["session_id"].as_str().unwrap(), "sess-deadbeef");
+        // alive is false because the PID doesn't exist (non-unix: always false)
+        assert!(!payload["alive"].as_bool().unwrap());
     }
 }
