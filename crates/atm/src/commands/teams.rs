@@ -889,6 +889,54 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn test_cleanup_skips_and_errors_when_daemon_unreachable_no_force() {
+        // Without --force, cleanup must not remove members when daemon liveness
+        // cannot be determined; it should return an incomplete-cleanup error.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            force: false,
+        };
+
+        let result = cleanup(args);
+        assert!(result.is_err(), "cleanup should fail when daemon is unreachable without --force");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cleanup incomplete"),
+            "error should indicate incomplete cleanup, got: {err}"
+        );
+
+        // Member should not be removed.
+        assert!(inbox.exists(), "publisher inbox should remain");
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(config.members.iter().any(|m| m.name == "publisher"));
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
     fn test_write_team_config_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("config.json");
@@ -1072,7 +1120,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_cleanup_single_agent_mode_prints_alive_warning() {
+    fn test_cleanup_force_removes_when_daemon_unreachable_single_agent() {
         // In single-agent mode (`args.agent.is_some()`), an alive member
         // should produce a warning.  Since no daemon is running, query_session
         // returns Ok(None) and with --force the member is treated as dead —

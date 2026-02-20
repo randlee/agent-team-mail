@@ -1851,7 +1851,44 @@ Sprints are sequential (each depends on the previous). Scope aligned with `requi
 | Sprint | Name | Status | PR |
 |--------|------|--------|-----|
 | B.1 | Daemon session tracking + `atm teams resume` + `atm teams cleanup` | PLANNED | — |
-| B.2 | Unicode-safe message truncation + input validation | IN PROGRESS | — |
+| B.2 | Unicode-safe message truncation + input validation | MERGED | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
+| B.3 | Cleanup safety hardening + documentation alignment | IN PROGRESS | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
+
+---
+
+### Sprint B.3 — Cleanup Safety Hardening + Documentation Alignment
+
+**Branch**: `feature/pB-s3-stabilization`
+**Crate(s)**: `crates/atm` (`teams cleanup` safety behavior + tests), `docs` (plan alignment)
+
+#### Problem
+
+`atm teams cleanup` needed two follow-up hardening steps:
+1. Team-lead must be protected from automated cleanup removal, including forced cleanup runs.
+2. Daemon-unreachable behavior in no-force mode required an explicit companion test to lock the incomplete-cleanup error path.
+
+Additionally, Phase B plan tracking drifted: the sprint summary table did not list B.2 merged status and had no B.3 entry.
+
+#### Solution
+
+1. **Team-lead protection in cleanup path**:
+   - `cleanup` now always skips member `team-lead` (single-agent and full-team modes), with warning when explicitly targeted.
+
+2. **Daemon-unreachable safety coverage**:
+   - Added companion test asserting no-force cleanup skips removal and returns `Cleanup incomplete` when daemon liveness is unavailable.
+   - Renamed misleading single-agent force test to reflect actual behavior.
+
+3. **Project plan synchronization**:
+   - Added B.3 sprint entry (scope + exit criteria).
+   - Updated Phase B sprint summary table to include B.2 merged PR and B.3 in-progress PR.
+
+#### Exit Criteria
+
+- [x] `atm teams cleanup` never removes `team-lead`, including `--force` paths
+- [x] Companion no-force daemon-unreachable test added (`Cleanup incomplete` asserted)
+- [x] Misleading cleanup test name corrected for behavior clarity
+- [x] Phase B sprint summary table includes B.2 and B.3 with PR references
+- [x] B.3 scope and exit criteria documented in this plan
 
 ---
 
