@@ -1985,6 +1985,12 @@ Add to **Initialization Process** section:
 - [ ] `cleanup atm-dev <agent>` targets single agent correctly
 - [ ] Summary output lists removed members
 
+**`atm send` self-send warning:**
+- [ ] If sender identity == recipient, prepend warning to message: `[WARNING: Sent to self — identity=<name>, session=<uuid8>. Check ATM_IDENTITY.]`
+- [ ] Message is still delivered normally (not blocked)
+- [ ] Warning printed to sender's stdout
+- [ ] `read` flag NOT set on delivery (message stays unread for legitimate recipient)
+
 **General:**
 - [ ] Daemon survives resume/cleanup calls without restart
 - [ ] All existing tests pass
