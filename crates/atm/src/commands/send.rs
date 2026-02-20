@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+use agent_team_mail_core::text::{truncate_chars_slice, validate_message_text, DEFAULT_MAX_MESSAGE_BYTES};
+
 use crate::util::addressing::parse_address;
 use crate::util::file_policy::check_file_reference;
 use crate::util::settings::get_home_dir;
@@ -154,6 +156,10 @@ pub fn execute(args: SendArgs) -> Result<()> {
             final_message_text = format!("[{action_text}] {final_message_text}");
         }
     }
+
+    // Validate final payload text after all expansions/rewrites.
+    validate_message_text(&final_message_text, DEFAULT_MAX_MESSAGE_BYTES)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Set sender heartbeat (isActive: true, lastActive timestamp)
     if let Err(e) = set_sender_heartbeat(&team_config_path, &config.core.identity) {
@@ -340,15 +346,14 @@ fn generate_summary(text: &str) -> String {
     const MAX_LEN: usize = 100;
 
     let trimmed = text.trim();
-    if trimmed.len() <= MAX_LEN {
+    if trimmed.chars().count() <= MAX_LEN {
         trimmed.to_string()
     } else {
-        // Find a good break point (space, newline)
-        let truncated = &trimmed[..MAX_LEN];
-        if let Some(pos) = truncated.rfind(|c: char| c.is_whitespace()) {
-            format!("{}...", truncated[..pos].trim())
+        let slice = truncate_chars_slice(trimmed, MAX_LEN);
+        if let Some(pos) = slice.rfind(|c: char| c.is_whitespace()) {
+            format!("{}...", slice[..pos].trim())
         } else {
-            format!("{truncated}...")
+            format!("{slice}...")
         }
     }
 }
