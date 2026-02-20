@@ -14,7 +14,6 @@ use tokio::time::{sleep, Duration};
 #[derive(Debug, Clone, Default)]
 struct MockState {
     /// Files stored in memory: path -> content
-    #[allow(clippy::zero_sized_map_values)]
     files: HashMap<PathBuf, Vec<u8>>,
 
     /// Connection status

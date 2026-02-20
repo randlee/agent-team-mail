@@ -459,16 +459,22 @@ atm read --all                   # read all messages (not just unread)
 
 **Behavior**:
 - Reads the target inbox JSON file via `atm-core`
-- By default shows only unread messages (`read: false`)
+- Default visibility uses seen-state + unread union:
+  - with `since-last-seen` enabled (default), shows messages where `read == false` **or** `timestamp > last_seen`
+  - with `--no-since-last-seen`, shows only unread messages (`read: false`)
 - Marks displayed messages as `read: true` (atomic write back)
 - `--no-mark` flag to read without marking
+- Updates local seen-state to the maximum timestamp of **displayed** messages (unless disabled), never from hidden/filtered messages
 
 **Options**:
 
 | Flag | Description |
 |------|-------------|
 | `--all` | Show all messages, not just unread |
+| `--since-last-seen` | Enable seen-state filtering (default) |
+| `--no-since-last-seen` | Disable seen-state filtering; show unread-only behavior |
 | `--no-mark` | Don't mark messages as read |
+| `--no-update-seen` | Don't update local seen-state watermark after reading |
 | `--limit <n>` | Show only last N messages |
 | `--since <timestamp>` | Show messages after timestamp |
 | `--json` | Output as JSON |

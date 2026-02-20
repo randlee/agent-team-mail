@@ -49,7 +49,6 @@ use crate::daemon::session_registry::SharedSessionRegistry;
 /// # Platform Behaviour
 ///
 /// On non-Unix platforms this function returns `Ok(None)` immediately.
-#[allow(unused_variables)]
 pub async fn start_socket_server(
     home_dir: PathBuf,
     state_store: SharedStateStore,
@@ -230,7 +229,10 @@ async fn start_unix_socket_server(
 }
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "accept loop requires shared daemon resources and paths passed from startup"
+)]
 async fn run_accept_loop(
     listener: tokio::net::UnixListener,
     state_store: SharedStateStore,

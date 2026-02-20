@@ -506,6 +506,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     let mut skipped_names: Vec<String> = Vec::new();
 
     for member in &members_to_check {
+        // Safety rule: never remove team-lead via cleanup.
+        if member.name == "team-lead" {
+            if args.agent.is_some() {
+                println!("Warning: team-lead is protected and cannot be removed by cleanup");
+            }
+            continue;
+        }
+
         // Query daemon for liveness.
         // Safety rule: only remove a member when the daemon *explicitly* confirms
         // the session is gone.  If the daemon is unreachable we cannot determine
@@ -881,6 +889,54 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn test_cleanup_skips_and_errors_when_daemon_unreachable_no_force() {
+        // Without --force, cleanup must not remove members when daemon liveness
+        // cannot be determined; it should return an incomplete-cleanup error.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            force: false,
+        };
+
+        let result = cleanup(args);
+        assert!(result.is_err(), "cleanup should fail when daemon is unreachable without --force");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cleanup incomplete"),
+            "error should indicate incomplete cleanup, got: {err}"
+        );
+
+        // Member should not be removed.
+        assert!(inbox.exists(), "publisher inbox should remain");
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(config.members.iter().any(|m| m.name == "publisher"));
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
     fn test_write_team_config_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("config.json");
@@ -1015,8 +1071,8 @@ mod tests {
     #[serial]
     fn test_cleanup_removes_multiple_dead_members() {
         // When no specific agent is named, cleanup removes all dead members.
-        // With no daemon running and --force, all members (including team-lead)
-        // are removed without daemon confirmation.
+        // With no daemon running and --force, non-team-lead members are removed.
+        // team-lead is protected and must never be removed by cleanup.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team_multi_dead(&temp_dir, "atm-dev");
@@ -1040,15 +1096,18 @@ mod tests {
         assert!(!team_dir.join("inboxes/agent-a.json").exists());
         assert!(!team_dir.join("inboxes/agent-b.json").exists());
 
-        // With --force and no daemon all members are removed (including team-lead)
+        // With --force and no daemon, non-team-lead members are removed.
+        // team-lead remains present.
         let config_path = team_dir.join("config.json");
         let config: TeamConfig =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-        assert!(
-            config.members.is_empty(),
-            "all members removed when --force and no daemon: {:?}",
+        assert_eq!(
+            config.members.len(),
+            1,
+            "only team-lead should remain: {:?}",
             config.members.iter().map(|m| &m.name).collect::<Vec<_>>()
         );
+        assert_eq!(config.members[0].name, "team-lead");
 
         // SAFETY: test-only cleanup
         unsafe {
@@ -1061,7 +1120,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_cleanup_single_agent_mode_prints_alive_warning() {
+    fn test_cleanup_force_removes_when_daemon_unreachable_single_agent() {
         // In single-agent mode (`args.agent.is_some()`), an alive member
         // should produce a warning.  Since no daemon is running, query_session
         // returns Ok(None) and with --force the member is treated as dead —

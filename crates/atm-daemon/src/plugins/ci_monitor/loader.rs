@@ -12,7 +12,6 @@ use tracing::{debug, warn};
 /// Each library must export a C-ABI function named `atm_create_ci_provider_factory`.
 pub struct CiProviderLoader {
     /// Keep loaded libraries alive (they must not be dropped while factories exist)
-    #[allow(dead_code)]
     libraries: Vec<Library>,
 }
 

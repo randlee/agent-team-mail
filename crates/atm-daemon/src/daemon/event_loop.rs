@@ -49,7 +49,10 @@ use tracing::{debug, error, info, warn};
 ///   `new_launch_sender()` (with empty inner) when the plugin is absent.
 /// * `session_registry` - Shared session registry for `session-query` socket
 ///   commands. Pass `new_session_registry()` from `crate::daemon`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "event loop wiring needs shared runtime handles and plugin coordination state"
+)]
 pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
