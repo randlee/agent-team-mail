@@ -805,7 +805,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_cleanup_no_team_is_ok() {
+    fn test_cleanup_no_team_returns_err() {
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
 
