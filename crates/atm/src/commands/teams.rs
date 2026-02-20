@@ -506,6 +506,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     let mut skipped_names: Vec<String> = Vec::new();
 
     for member in &members_to_check {
+        // Safety rule: never remove team-lead via cleanup.
+        if member.name == "team-lead" {
+            if args.agent.is_some() {
+                println!("Warning: team-lead is protected and cannot be removed by cleanup");
+            }
+            continue;
+        }
+
         // Query daemon for liveness.
         // Safety rule: only remove a member when the daemon *explicitly* confirms
         // the session is gone.  If the daemon is unreachable we cannot determine
@@ -1015,8 +1023,8 @@ mod tests {
     #[serial]
     fn test_cleanup_removes_multiple_dead_members() {
         // When no specific agent is named, cleanup removes all dead members.
-        // With no daemon running and --force, all members (including team-lead)
-        // are removed without daemon confirmation.
+        // With no daemon running and --force, non-team-lead members are removed.
+        // team-lead is protected and must never be removed by cleanup.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team_multi_dead(&temp_dir, "atm-dev");
@@ -1040,15 +1048,18 @@ mod tests {
         assert!(!team_dir.join("inboxes/agent-a.json").exists());
         assert!(!team_dir.join("inboxes/agent-b.json").exists());
 
-        // With --force and no daemon all members are removed (including team-lead)
+        // With --force and no daemon, non-team-lead members are removed.
+        // team-lead remains present.
         let config_path = team_dir.join("config.json");
         let config: TeamConfig =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-        assert!(
-            config.members.is_empty(),
-            "all members removed when --force and no daemon: {:?}",
+        assert_eq!(
+            config.members.len(),
+            1,
+            "only team-lead should remain: {:?}",
             config.members.iter().map(|m| &m.name).collect::<Vec<_>>()
         );
+        assert_eq!(config.members[0].name, "team-lead");
 
         // SAFETY: test-only cleanup
         unsafe {
