@@ -3,6 +3,7 @@
 use super::config::BridgePluginConfig;
 use super::self_write_filter::SelfWriteFilter;
 use super::sync::SyncEngine;
+#[cfg(feature = "ssh")]
 use super::transport::Transport;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use std::sync::Arc;
