@@ -2082,7 +2082,191 @@ Add to **Initialization Process** section:
 
 ---
 
-## 14. Future Plugins
+## 14. Phase C: Observability + Codex JSON Mode
+
+**Status**: IN PROGRESS
+**Goal**: (1) Unified structured logging across all crates so every event — message delivery, tool call, daemon lifecycle — is traceable. (2) Prove that `codex exec --json` can replace the MCP stdio transport for real-time TUI streaming and non-destructive stdin-based nudging.
+
+**Integration branch**: `integrate/phase-C`
+
+### Phase C Sprint Summary
+
+| Sprint | Name | Status | PR |
+|--------|------|--------|-----|
+| C.1 | Unified logging infrastructure | IN PROGRESS | — |
+| C.2a | Transport trait + McpTransport refactor | PLANNED (blocked on C.1) | — |
+| C.2b | JsonTransport + stdin queue + integration tests | PLANNED (blocked on C.2a QA) | — |
+
+**Execution model**: C.2b scrum-master launches as soon as C.2a QA approves — does not wait for C.2a CI/merge. C.2b branches off C.2a feature branch.
+
+---
+
+### Sprint C.1 — Unified Logging Infrastructure
+
+**Branch**: `feature/pC-s1-unified-logging`
+**Worktree**: `../agent-team-mail-worktrees/feature/pC-s1-unified-logging`
+**Crate(s)**: `crates/atm-core`, `crates/atm-daemon`, `crates/atm-agent-mcp`
+**Owner**: arch-ctm (design + implementation lead)
+**Depends on**: nothing
+**Status**: Worktree created off develop `aa7c500`; arch-ctm scoping and implementing
+
+#### Problem
+
+ATM has no unified observability layer. Errors surface as stderr noise or are silently swallowed. There is no way to correlate a message delivery failure, a daemon event, and an MCP proxy event back to a single causal chain. Debugging comms reliability requires grepping multiple ad-hoc log calls.
+
+#### Solution
+
+Structured, JSONL-friendly logging built on `tracing` + `tracing-subscriber`:
+
+1. **`atm-core` logging primitives** — shared `init_logging()` that respects `ATM_LOG` / `ATM_LOG_FILE` env vars; structured fields: `session_id`, `agent_id`, `team`, `message_id`, `span` for causal tracing
+2. **Per-crate instrumentation** — `#[instrument]` on key paths: message send/receive/mark-read, daemon plugin dispatch, MCP proxy request/response
+3. **JSONL log file** — optional `ATM_LOG_FILE=~/.config/atm/atm.log` for persistent structured output; rotated by size/date
+4. **Log levels** — `ERROR` (delivery failures, daemon crashes), `WARN` (retries, stale state), `INFO` (message lifecycle), `DEBUG` (protocol frames, tool calls), `TRACE` (raw bytes)
+5. **Session/agent correlation** — every log entry carries `session_id` + `agent_name` so events from arch-ctm, team-lead, and the proxy can be correlated in a single log stream
+
+#### Exit Criteria
+
+- [ ] `tracing` + `tracing-subscriber` added to workspace deps
+- [ ] `atm_core::logging::init()` initialises env-filter + optional JSONL file appender
+- [ ] All three crates call `init()` at startup; no raw `eprintln!` / `println!` in hot paths
+- [ ] Message send/receive/mark-read emit `INFO` structured events with `message_id`, `agent`, `team`
+- [ ] Daemon plugin dispatch emits `DEBUG` span with plugin name + event type
+- [ ] MCP proxy request/response emits `DEBUG` span with `request_id`
+- [ ] `ATM_LOG=debug atm send arch-ctm "hi"` shows structured output
+- [ ] JSONL file appender writes to `ATM_LOG_FILE` when set
+- [ ] All existing tests pass; new unit tests for log field correctness
+- [ ] C.2 can add log instrumentation without touching the logging init
+
+---
+
+### Sprint C.2a — Transport Trait + McpTransport Refactor
+
+**Branch**: `feature/pC-s2a-transport-trait`
+**Crate(s)**: `crates/atm-agent-mcp`
+**Depends on**: C.1 (logging infrastructure)
+**Owner**: scrum-master (Claude)
+
+#### Problem
+
+`atm-agent-mcp` proxy is tightly coupled to `codex mcp-server` with no transport abstraction. Adding JSON mode requires a clean seam.
+
+#### Solution
+
+Extract `CodexTransport` trait; wrap existing MCP protocol in `McpTransport`. Zero behaviour change — all existing tests must pass unchanged.
+
+```rust
+pub trait CodexTransport: Send {
+    async fn send_frame(&mut self, msg: serde_json::Value) -> Result<()>;
+    async fn recv_frame(&mut self) -> Result<Option<serde_json::Value>>;
+    async fn is_idle(&self) -> bool;
+    async fn shutdown(&mut self) -> Result<()>;
+}
+// McpTransport — Content-Length framed protocol, wraps existing impl
+```
+
+#### Exit Criteria
+
+- [ ] `CodexTransport` trait defined in `crates/atm-agent-mcp/src/transport.rs`
+- [ ] `McpTransport` wraps existing proxy protocol; no behaviour change
+- [ ] Proxy dispatches through trait; `transport = "mcp"` in `.atm.toml` selects `McpTransport`
+- [ ] All existing tests pass unchanged
+- [ ] C.1 structured log events emitted for transport init/shutdown
+
+---
+
+### Sprint C.2b — JsonTransport + Stdin Queue + Integration Tests
+
+**Branch**: `feature/pC-s2b-json-transport` (branches off `feature/pC-s2a-transport-trait`)
+**Crate(s)**: `crates/atm-agent-mcp`
+**Depends on**: C.2a QA approval (does not wait for C.2a CI/merge)
+**Owner**: scrum-master (Claude)
+
+#### Problem
+
+`atm-agent-mcp` is hardcoded to `codex mcp-server` (MCP stdio protocol). This prevents:
+- Non-destructive message injection at natural idle points (no tmux required)
+- Running Codex without MCP server overhead
+- Future TUI streaming of agent output (Phase D)
+
+`codex exec --json` streams all agent events (messages, tool calls, file changes) as JSONL to stdout and accepts tool results via stdin. This is a simpler, more observable protocol.
+
+#### Solution
+
+`JsonTransport` implementation + stdin queue for message injection.
+
+**Stdin queue for message injection**:
+- Queue: `~/.config/atm/agent-sessions/<team>/<agent>/stdin_queue/`
+- Atomic rename `<uuid>.json` → `<uuid>.claimed` prevents double-delivery
+- Drain on `idle` event in JSONL stream OR 30s timeout
+- Messages encoded as Codex tool result JSON (matching `codex exec --json` stdin format)
+- Identity injected in initial prompt (same as MCP context injection today)
+- TTL cleanup: entries older than 10 minutes deleted on drain
+
+**JSONL Event Schema** (from `codex exec --json`):
+
+| Event type | Meaning |
+|------------|---------|
+| `agent_message` | Model output text |
+| `tool_call` | Tool invocation with name + args |
+| `tool_result` | Tool execution result |
+| `file_change` | File write/edit event |
+| `idle` | Agent waiting for input — **nudge window** |
+| `done` | Session complete |
+
+**Nudging mechanism**: `idle` event → drain stdin queue → write ATM messages as tool result JSON to Codex stdin → Codex continues. No tmux needed.
+
+**Note**: TUI streaming (pub/sub fanout of JSONL stream) is deferred to Phase D.
+
+#### Exit Criteria
+
+**JsonTransport:**
+- [ ] `JsonTransport` spawns `codex exec --json`, reads JSONL stream, parses all event types
+- [ ] Transport selected via config: `transport = "mcp" | "json"` in `.atm.toml`
+- [ ] Idle detection fires within 2s of Codex entering wait state
+
+**Stdin queue:**
+- [ ] Queue directory created atomically on first use
+- [ ] `*.json` → `*.claimed` rename is atomic; no double-delivery under concurrent writers
+- [ ] Queue drained on `idle` event or 30s timeout
+- [ ] TTL cleanup: entries older than 10 minutes deleted on drain
+
+**Integration:**
+- [ ] `codex exec --json` spawned successfully; JSONL stream parsed without panics
+- [ ] ATM message injected via stdin queue reaches Codex mid-session
+- [ ] C.1 structured log events emitted for every inject/idle/drain cycle
+
+**Local integration tests** (`#[ignore]`, not run in CI):
+- [ ] Both transport modes tested with `codex-mini-latest`
+- [ ] `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` verified in MCP mode
+- [ ] `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` verified in JSON mode
+- [ ] Run with: `cargo test --test mcp_integration -- --ignored`
+
+**Docs:**
+- [ ] `codex exec --json` event schema documented in `docs/codex-json-schema.md`
+- [ ] ADR written: `docs/adr/003-json-mode-transport.md`
+- [ ] All existing tests pass
+
+---
+
+## 15. Phase D: TUI Streaming
+
+**Status**: PLANNED (blocked on Phase C)
+**Goal**: Real-time streaming of Codex agent output to a terminal UI. Fan out the `codex exec --json` JSONL stream to a TUI sink via the Phase 10 pub/sub event bus. Allows human observers to watch agent sessions live without polling.
+
+**Integration branch**: `integrate/phase-D`
+
+### Phase D Sprint Summary
+
+| Sprint | Name | Status |
+|--------|------|--------|
+| D.1 | TUI sink + pub/sub fanout | PLANNED |
+| D.2 | Interactive controls (pause, inject, filter) | PLANNED |
+
+*Details to be planned when Phase C is complete.*
+
+---
+
+## 16. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
 
@@ -2094,7 +2278,7 @@ Additional plugins planned (each is a self-contained sprint series):
 
 ---
 
-## 14. Sprint Summary
+## 17. Sprint Summary
 
 | Phase | Sprint | Name | Status | PR |
 |-------|--------|------|--------|-----|
@@ -2146,10 +2330,21 @@ Additional plugins planned (each is a self-contained sprint series):
 | **A** | A.1 | Crate scaffold + config | ✅ | [#100](https://github.com/randlee/agent-team-mail/pull/100) |
 | **A** | A.2 | MCP stdio proxy core | ✅ | [#101](https://github.com/randlee/agent-team-mail/pull/101) |
 | **A** | A.3 | Identity binding + context injection | ✅ | [#102](https://github.com/randlee/agent-team-mail/pull/102) |
+| **A** | A.4 | ATM communication tools | ✅ | [#105](https://github.com/randlee/agent-team-mail/pull/105), [#106](https://github.com/randlee/agent-team-mail/pull/106) |
+| **A** | A.5 | Session registry + persistence | ✅ | [#107](https://github.com/randlee/agent-team-mail/pull/107) |
+| **A** | A.6 | Thread lifecycle state machine | ✅ | [#108](https://github.com/randlee/agent-team-mail/pull/108) |
+| **A** | A.7 | Auto mail injection + polling | ✅ | [#109](https://github.com/randlee/agent-team-mail/pull/109) |
+| **A** | A.8 | Shutdown + resume + arch review | ✅ | [#110](https://github.com/randlee/agent-team-mail/pull/110), [#111](https://github.com/randlee/agent-team-mail/pull/111) |
+| **B** | B.1 | Teams daemon session tracking + resume | ✅ | [#119](https://github.com/randlee/agent-team-mail/pull/119) |
+| **B** | B.2 | Unicode-safe message truncation | ✅ | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
+| **B** | B.3 | Teams session stabilization | ✅ | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
+| **C** | C.1 | Unified structured JSONL logging | 🔄 | [#125](https://github.com/randlee/agent-team-mail/pull/125) |
+| **C** | C.2a | Transport trait + McpTransport refactor | ⏳ | — |
+| **C** | C.2b | JsonTransport + stdin queue + integration tests | ⏳ | — |
 
-**Completed**: 54 sprints across 11 phases (CI green)
-**Current version**: v0.10.0
-**Next**: Phase A sprints A.4–A.8, then integrate/phase-A → develop
+**Completed**: 62 sprints across 13 phases (CI green)
+**Current version**: v0.12.0
+**Next**: C.1 QA fix (proxy.rs !Send + #[ignore] reasons), then C.2a → C.2b
 
 **Sprint PRs (Phase 9)**:
 | Sprint | PR | Description |
@@ -2172,8 +2367,9 @@ Additional plugins planned (each is a self-contained sprint series):
 | Phase 9 | [#75](https://github.com/randlee/agent-team-mail/pull/75) | ✅ Merged |
 | Phase 8 | [#59](https://github.com/randlee/agent-team-mail/pull/59) | ✅ Merged |
 | Phase 10 | [#93](https://github.com/randlee/agent-team-mail/pull/93) | ✅ Merged |
-| Phase A | TBD | IN PROGRESS |
-| Phase B | TBD | PLANNED |
+| Phase A | [#103](https://github.com/randlee/agent-team-mail/pull/103) | ✅ Merged |
+| Phase B | [#121](https://github.com/randlee/agent-team-mail/pull/121) | ✅ Merged |
+| Phase C | TBD | 🔄 IN PROGRESS |
 
 ---
 
