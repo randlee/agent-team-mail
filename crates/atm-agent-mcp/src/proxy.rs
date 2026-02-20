@@ -26,13 +26,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 use tracing::Instrument;
 
 use crate::audit::AuditLog;
 use crate::config::AgentMcpConfig;
+use crate::transport::{CodexTransport, make_transport};
 use crate::context::detect_context;
 use crate::elicitation::ElicitationRegistry;
 use crate::framing::{UpstreamReader, write_newline_delimited};
@@ -137,6 +138,11 @@ pub struct ProxyServer {
     /// Consumed on the first `codex` or `codex-reply` developer-instructions
     /// injection and set to `None` thereafter.
     resume_context: Option<ResumeContext>,
+    /// Transport implementation used to spawn the Codex child process.
+    ///
+    /// Stored as a trait object so Sprint C.2b can inject `JsonTransport`
+    /// without modifying `ProxyServer`.
+    transport: Box<dyn CodexTransport>,
 }
 
 /// Context from a previous session to prepend on resume (FR-6).
@@ -176,7 +182,7 @@ impl std::fmt::Debug for ChildHandle {
 }
 
 /// Tracks in-flight requests waiting for a response from the child.
-struct PendingRequests {
+pub(crate) struct PendingRequests {
     map: HashMap<Value, oneshot::Sender<Value>>,
     /// Request IDs that correspond to `tools/list` requests and need interception.
     tools_list_ids: std::collections::HashSet<Value>,
@@ -268,6 +274,7 @@ impl ProxyServer {
         const ELICITATION_TIMEOUT_SECS: u64 = 30;
         let mail_poller = MailPoller::new(&config);
         let audit_log = AuditLog::new(&team_str);
+        let transport = make_transport(&config, &team_str);
         Self {
             config,
             child: None,
@@ -287,6 +294,7 @@ impl ProxyServer {
             shared_child_stdin: Arc::new(Mutex::new(None)),
             audit_log,
             resume_context: None,
+            transport,
         }
     }
 
@@ -2120,37 +2128,22 @@ Session ending. Write a concise summary of:\n\
         }
     }
 
-    /// Spawn the Codex child process.
+    /// Spawn the Codex child process via the configured transport.
+    ///
+    /// Delegates the actual child-process creation to `self.transport.spawn()`,
+    /// then wires up the background stdout-reader and wait tasks.
     async fn spawn_child(
         &mut self,
         pending: &Arc<Mutex<PendingRequests>>,
         upstream_tx: &mpsc::Sender<Value>,
         dropped: &Arc<AtomicU64>,
     ) -> anyhow::Result<()> {
-        let mut cmd = Command::new(&self.config.codex_bin);
-        cmd.arg("mcp-server");
+        let raw = self.transport.spawn().await?;
 
-        // Pass model if configured
-        if let Some(ref model) = self.config.model {
-            cmd.arg("-m").arg(model);
-        }
-
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-
-        let mut child: Child = cmd.spawn()?;
-
-        let stdin = child.stdin.take().expect("child stdin must be piped");
-        let stdout = child.stdout.take().expect("child stdout must be piped");
-
-        let exit_status: Arc<Mutex<Option<ExitStatus>>> = Arc::new(Mutex::new(None));
-
-        // Wrap stdin in Arc<Mutex> so it can be shared with timeout tasks for cancellation
-        let shared_stdin = Arc::new(Mutex::new(stdin));
-
-        // Wrap the child process so we can force-kill on shutdown
-        let process: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
+        let shared_stdin = raw.stdin;
+        let stdout = raw.stdout;
+        let exit_status = raw.exit_status;
+        let process = raw.process;
 
         // Channel for messages from child stdout reader
         let (child_tx, child_rx) = mpsc::channel::<Value>(UPSTREAM_CHANNEL_CAPACITY);

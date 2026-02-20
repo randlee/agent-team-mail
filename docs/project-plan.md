@@ -2094,7 +2094,7 @@ Add to **Initialization Process** section:
 | Sprint | Name | Status | PR |
 |--------|------|--------|-----|
 | C.1 | Unified logging infrastructure | IN PROGRESS | — |
-| C.2a | Transport trait + McpTransport refactor | PLANNED (blocked on C.1) | — |
+| C.2a | Transport trait + McpTransport refactor | PR OPEN | — |
 | C.2b | JsonTransport + stdin queue + integration tests | PLANNED (blocked on C.2a QA) | — |
 
 **Execution model**: C.2b scrum-master launches as soon as C.2a QA approves — does not wait for C.2a CI/merge. C.2b branches off C.2a feature branch.
@@ -2338,13 +2338,13 @@ Additional plugins planned (each is a self-contained sprint series):
 | **B** | B.1 | Teams daemon session tracking + resume | ✅ | [#119](https://github.com/randlee/agent-team-mail/pull/119) |
 | **B** | B.2 | Unicode-safe message truncation | ✅ | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
 | **B** | B.3 | Teams session stabilization | ✅ | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
-| **C** | C.1 | Unified structured JSONL logging | 🔄 | [#125](https://github.com/randlee/agent-team-mail/pull/125) |
-| **C** | C.2a | Transport trait + McpTransport refactor | ⏳ | — |
+| **C** | C.1 | Unified structured JSONL logging | ✅ | [#125](https://github.com/randlee/agent-team-mail/pull/125) |
+| **C** | C.2a | Transport trait + McpTransport refactor | 🔄 | — |
 | **C** | C.2b | JsonTransport + stdin queue + integration tests | ⏳ | — |
 
-**Completed**: 62 sprints across 13 phases (CI green)
+**Completed**: 63 sprints across 13 phases (CI green)
 **Current version**: v0.12.0
-**Next**: C.1 QA fix (proxy.rs !Send + #[ignore] reasons), then C.2a → C.2b
+**Next**: C.2a PR review + merge, then C.2b
 
 **Sprint PRs (Phase 9)**:
 | Sprint | PR | Description |
