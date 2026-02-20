@@ -555,6 +555,16 @@ impl ProxyServer {
                             self.handle_tools_call(msg, &pending, &upstream_tx, &dropped)
                                 .await;
                         }
+                        Some("initialize") => {
+                            self.handle_initialize(id, &upstream_tx).await;
+                        }
+                        Some("notifications/initialized") => {
+                            // No-op when child not yet spawned; forward if child is running.
+                            if self.child.is_some() {
+                                self.forward_to_child(msg, id, false, &pending, &upstream_tx)
+                                    .await;
+                            }
+                        }
                         Some(method_name) => {
                             let is_tools_list = method_name == "tools/list";
                             self.forward_to_child(msg, id, is_tools_list, &pending, &upstream_tx)
@@ -895,15 +905,57 @@ Session ending. Write a concise summary of:\n\
                     }
                 });
             }
-        } else if let Some(req_id) = id {
-            let err = make_error_response(
-                req_id,
-                ERR_INTERNAL,
-                "Child process not yet spawned",
-                json!({"error_source": "proxy"}),
-            );
-            let _ = upstream_tx.send(err).await;
+        } else {
+            // Child not yet spawned.
+            if is_tools_list {
+                if let Some(req_id) = id {
+                    let response = json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "tools": crate::tools::synthetic_tools()
+                        }
+                    });
+                    let _ = upstream_tx.send(response).await;
+                }
+                return;
+            }
+            // All other methods: error.
+            if let Some(req_id) = id {
+                let err = make_error_response(
+                    req_id,
+                    ERR_INTERNAL,
+                    "Child process not yet spawned",
+                    json!({"error_source": "proxy"}),
+                );
+                let _ = upstream_tx.send(err).await;
+            }
         }
+    }
+
+    /// Respond to an MCP `initialize` request without forwarding to the child.
+    ///
+    /// The child process is lazily spawned only on the first `codex` or
+    /// `codex-reply` tool call, so `initialize` must be answered by the proxy
+    /// itself to avoid a `ERR_INTERNAL -32603 "Child process not yet spawned"`
+    /// error that would break the MCP handshake.
+    async fn handle_initialize(&self, id: Option<Value>, upstream_tx: &mpsc::Sender<Value>) {
+        let Some(req_id) = id else { return };
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "atm-agent-mcp",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        });
+        let _ = upstream_tx.send(response).await;
     }
 
     /// Handle a `tools/call` request from upstream.
