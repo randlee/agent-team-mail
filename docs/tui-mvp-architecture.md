@@ -214,3 +214,19 @@ Correlation:
 - finalize interrupt confirmation policy (`always`, `never`, `configurable`)
 - define persistent per-user UI preferences file location and schema
 
+---
+
+## 12. Implementation Gating and Policy
+
+Current capability status:
+
+- control protocol messages in `docs/tui-control-protocol.md` are **draft contracts**
+- daemon command handlers for these control message types are not yet implemented
+- TUI must feature-gate control actions behind explicit capability checks
+
+Security and policy baseline:
+
+- receiver must enforce same-team scoping for control actions
+- receiver must authorize sender identity before accepting control requests
+- all denied control attempts must be audit logged with `request_id`, `team`, `agent_id`, and rejection reason
+- TUI must never silently downgrade control input to mailbox send

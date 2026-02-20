@@ -18,6 +18,12 @@ Defines message contracts for TUI control actions:
 These contracts are for live worker-session control (Codex/Gemini).  
 ATM mailbox delivery uses existing mail commands and is not redefined here.
 
+Status:
+
+- this protocol is a target contract for Phase C
+- current daemon command surface does not yet expose `control.stdin.*` / `control.interrupt.*` handlers
+- implementations must gate send paths on receiver capability discovery
+
 ---
 
 ## 2. Envelope
@@ -163,6 +169,15 @@ Rules:
   - `result = "ok"`
   - `duplicate = true`
 
+Receiver dedupe store requirements:
+
+- dedupe key: `(team, session_id, agent_id, request_id)`
+- keep accepted keys for a bounded TTL window (recommended: 10 minutes)
+- dedupe lookup/insert must be atomic per key
+- receiver restart behavior must be explicit:
+  - MVP allowed: in-memory dedupe only (duplicates possible after restart)
+  - follow-up: durable dedupe store for restart-safe semantics
+
 Default retry policy:
 
 - ack timeout target: `2s`
@@ -194,6 +209,14 @@ Optional:
 
 - `expires_at`
 
+`content_ref` receiver constraints:
+
+- path must resolve under an allowed local base directory
+- canonicalized path escape (e.g. `..`) must be rejected
+- symlink traversal outside allowed base must be rejected
+- receiver must verify `size_bytes` and `sha256` before use
+- expired references (`expires_at`) must be rejected
+
 ---
 
 ## 7. Logging and Audit
@@ -211,6 +234,16 @@ Message text logging:
 - full text only when verbose message logging is enabled
 - default mode should avoid full payload logging
 - include `request_id` on all related events for correlation
+
+Minimum audit fields for both request and ack events:
+
+- `request_id`
+- `team`
+- `session_id`
+- `agent_id`
+- `sender` (if available)
+- `result`
+- `duplicate`
 
 ---
 
@@ -313,3 +346,18 @@ Message text logging:
 - signed control messages for cross-host relays
 - streaming partial-ack protocol for very large reference payload workflows
 
+---
+
+## 10. Security and AuthZ Baseline
+
+Receiver must enforce:
+
+- same-team authorization (`sender.team == target.team`)
+- sender identity validity and membership
+- deny-by-default for unknown sender or unknown target session
+- explicit rejection (`result = "rejected"` with detail) for policy violations
+
+Replay safety:
+
+- requests older than a configurable max age should be rejected
+- `sent_at` skew tolerance should be validated (recommended: bounded clock-skew window)
