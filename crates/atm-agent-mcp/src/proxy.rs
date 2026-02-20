@@ -38,7 +38,9 @@ use crate::framing::{UpstreamReader, write_newline_delimited};
 use crate::inject::{build_session_context, inject_developer_instructions};
 use crate::lifecycle::{ThreadCommand, ThreadCommandQueue};
 use crate::lock::{acquire_lock, check_lock, release_lock};
-use crate::mail_inject::{MailPoller, fetch_unread_mail, format_mail_turn_content, mark_messages_read};
+use crate::mail_inject::{
+    MailPoller, fetch_unread_mail, format_mail_turn_content, mark_messages_read,
+};
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
 
@@ -407,8 +409,7 @@ impl ProxyServer {
         {
             let elicitation_registry_bg = Arc::clone(&self.elicitation_registry);
             tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(tokio::time::Duration::from_secs(5));
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
                 loop {
                     interval.tick().await;
                     let expired = elicitation_registry_bg.lock().await.expire_timeouts();
@@ -456,10 +457,7 @@ impl ProxyServer {
 
                     for (agent_id, identity, thread_id_opt) in idle_sessions {
                         // Per-thread override takes precedence over global setting (FR-8.8)
-                        let enabled = per_thread_overrides
-                            .get(&agent_id)
-                            .copied()
-                            .unwrap_or(true);
+                        let enabled = per_thread_overrides.get(&agent_id).copied().unwrap_or(true);
                         if !enabled {
                             continue;
                         }
@@ -495,14 +493,12 @@ impl ProxyServer {
         // Cross-platform shutdown signal handler (FR-7.1, FR-7.4).
         #[cfg(unix)]
         let shutdown_signal = async {
-            let mut sigterm = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            )
-            .expect("failed to install SIGTERM handler");
-            let mut sigint = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::interrupt(),
-            )
-            .expect("failed to install SIGINT handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
+            let mut sigint =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("failed to install SIGINT handler");
             tokio::select! {
                 _ = sigterm.recv() => { tracing::info!("received SIGTERM"); }
                 _ = sigint.recv() => { tracing::info!("received SIGINT"); }
@@ -780,8 +776,7 @@ Session ending. Write a concise summary of:\n\
 
             if let Some(ch) = self.child.as_mut() {
                 loop {
-                    let remaining =
-                        deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() {
                         tracing::warn!(
                             agent_id = %agent_id,
@@ -855,9 +850,8 @@ Session ending. Write a concise summary of:\n\
                     "no summary received; session marked as interrupted"
                 );
                 let interrupted_msg = "[Session interrupted — no summary available]";
-                let _ =
-                    crate::summary::write_summary(&team, identity, thread_id, interrupted_msg)
-                        .await;
+                let _ = crate::summary::write_summary(&team, identity, thread_id, interrupted_msg)
+                    .await;
             }
         }
     }
@@ -1154,7 +1148,8 @@ Session ending. Write a concise summary of:\n\
         // prepare_* methods take &mut self, so they must be called before we
         // take any reference to self.child.
         // effective_tool_name may have been rewritten to "codex-reply" for resume flows.
-        let (msg_to_forward, expected_agent_id, state_agent_id) = if effective_tool_name == "codex" {
+        let (msg_to_forward, expected_agent_id, state_agent_id) = if effective_tool_name == "codex"
+        {
             match self.prepare_codex_message(&id, msg, upstream_tx).await {
                 PrepareResult::Error => return, // error already sent
                 PrepareResult::Ok {
@@ -1186,34 +1181,34 @@ Session ending. Write a concise summary of:\n\
         // Resolve the agent_id for thread state tracking.  For `codex` calls the
         // agent_id is known from session registration; for `codex-reply` calls we
         // resolve it via the threadId.
-        let resolved_agent_id_for_state: Option<String> =
-            if effective_tool_name == "codex" || effective_tool_name == "codex-reply" {
-                if let Some(ref aid) = expected_agent_id {
-                    Some(aid.clone())
-                } else {
-                    // codex-reply without expected_agent_id: resolve via threadId
-                    let thread_id_from_msg = msg_to_forward
-                        .pointer("/params/arguments/threadId")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    if let Some(tid) = thread_id_from_msg {
-                        if let Some(agent_id) = self.thread_to_agent.lock().await.get(&tid).cloned()
-                        {
-                            Some(agent_id)
-                        } else {
-                            let reg = self.registry.lock().await;
-                            reg.list_all()
-                                .iter()
-                                .find(|e| e.thread_id.as_deref() == Some(tid.as_str()))
-                                .map(|e| e.agent_id.clone())
-                        }
-                    } else {
-                        None
-                    }
-                }
+        let resolved_agent_id_for_state: Option<String> = if effective_tool_name == "codex"
+            || effective_tool_name == "codex-reply"
+        {
+            if let Some(ref aid) = expected_agent_id {
+                Some(aid.clone())
             } else {
-                None
-            };
+                // codex-reply without expected_agent_id: resolve via threadId
+                let thread_id_from_msg = msg_to_forward
+                    .pointer("/params/arguments/threadId")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                if let Some(tid) = thread_id_from_msg {
+                    if let Some(agent_id) = self.thread_to_agent.lock().await.get(&tid).cloned() {
+                        Some(agent_id)
+                    } else {
+                        let reg = self.registry.lock().await;
+                        reg.list_all()
+                            .iter()
+                            .find(|e| e.thread_id.as_deref() == Some(tid.as_str()))
+                            .map(|e| e.agent_id.clone())
+                    }
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // Fix 4: If this is a codex-reply and the thread is currently Busy
         // (e.g. an auto-mail turn is in-flight), queue the command instead of
@@ -1261,11 +1256,15 @@ Session ending. Write a concise summary of:\n\
                                     tracing::debug!("queued ClaudeReply dropped (child died)");
                                 }
                                 Err(_elapsed) => {
-                                    tracing::warn!("queued ClaudeReply timed out after {timeout_secs}s");
+                                    tracing::warn!(
+                                        "queued ClaudeReply timed out after {timeout_secs}s"
+                                    );
                                     let err = make_error_response(
                                         id,
                                         ERR_TIMEOUT,
-                                        &format!("Queued codex-reply timed out after {timeout_secs}s"),
+                                        &format!(
+                                            "Queued codex-reply timed out after {timeout_secs}s"
+                                        ),
                                         json!({"error_source": "proxy"}),
                                     );
                                     let _ = upstream_tx_clone.send(err).await;
@@ -1395,16 +1394,15 @@ Session ending. Write a concise summary of:\n\
                             )
                             .await
                             {
-                                tracing::warn!("failed to persist registry after set_thread_id: {e}");
+                                tracing::warn!(
+                                    "failed to persist registry after set_thread_id: {e}"
+                                );
                             }
                         } else if effective_tool_name_for_task == "codex-reply" {
                             // codex-reply response — set the originating agent's thread to Idle.
                             // We resolve the agent_id via the threadId that just arrived.
-                            let agent_id_opt = thread_to_agent_task
-                                .lock()
-                                .await
-                                .get(thread_id)
-                                .cloned();
+                            let agent_id_opt =
+                                thread_to_agent_task.lock().await.get(thread_id).cloned();
                             if let Some(aid) = agent_id_opt {
                                 {
                                     let mut reg = registry_for_thread_map.lock().await;
@@ -1605,11 +1603,10 @@ Session ending. Write a concise summary of:\n\
         if let Err(e) = acquire_lock(&team, &identity, &entry.agent_id).await {
             // Roll back registry entry
             self.registry.lock().await.close(&entry.agent_id);
-            let sessions_path =
-                crate::lock::sessions_dir().join(&team).join("registry.json");
-            if let Err(pe) =
-                Self::persist_registry(&self.registry, &sessions_path).await
-            {
+            let sessions_path = crate::lock::sessions_dir()
+                .join(&team)
+                .join("registry.json");
+            if let Err(pe) = Self::persist_registry(&self.registry, &sessions_path).await {
                 tracing::warn!("failed to persist registry after lock-rollback close: {pe}");
             }
             let _ = upstream_tx
@@ -1643,7 +1640,9 @@ Session ending. Write a concise summary of:\n\
         }
 
         // Persist registry after successful registration (FR-5.5)
-        let sessions_path = crate::lock::sessions_dir().join(&team).join("registry.json");
+        let sessions_path = crate::lock::sessions_dir()
+            .join(&team)
+            .join("registry.json");
         if let Err(e) = Self::persist_registry(&self.registry, &sessions_path).await {
             tracing::warn!("failed to persist registry after register: {e}");
         }
@@ -1705,7 +1704,12 @@ Session ending. Write a concise summary of:\n\
             .and_then(|v| v.as_str())
             .unwrap_or("");
         self.audit_log
-            .log_codex_forward("codex", Some(&entry.agent_id), Some(&identity), prompt_for_audit)
+            .log_codex_forward(
+                "codex",
+                Some(&entry.agent_id),
+                Some(&identity),
+                prompt_for_audit,
+            )
             .await;
 
         PrepareResult::Ok {
@@ -1962,9 +1966,7 @@ Session ending. Write a concise summary of:\n\
                     "atm_send" => args.get("to").and_then(|v| v.as_str()),
                     _ => None,
                 };
-                let message_summary = args
-                    .get("message")
-                    .and_then(|v| v.as_str());
+                let message_summary = args.get("message").and_then(|v| v.as_str());
                 // Resolve agent_id from the thread→agent map when a threadId is present.
                 // ATM tools called directly by the user-facing Claude session (no threadId)
                 // have no associated Codex agent_id, so None is the correct value there.
@@ -2014,11 +2016,7 @@ Session ending. Write a concise summary of:\n\
                         .filter(|e| e.status == crate::session::SessionStatus::Active)
                         .map(|e| {
                             home_opt.as_deref().map_or(0, |home| {
-                                atm_tools::count_unread_for_identity(
-                                    &e.identity,
-                                    &self.team,
-                                    home,
-                                )
+                                atm_tools::count_unread_for_identity(&e.identity, &self.team, home)
                             })
                         })
                         .sum()
@@ -2043,10 +2041,7 @@ Session ending. Write a concise summary of:\n\
                 )
                 .await;
                 let is_success = resp.get("error").is_none()
-                    && resp
-                        .pointer("/result/isError")
-                        .and_then(|v| v.as_bool())
-                        != Some(true);
+                    && resp.pointer("/result/isError").and_then(|v| v.as_bool()) != Some(true);
                 if is_success {
                     let sessions_path = crate::lock::sessions_dir()
                         .join(&self.team)
@@ -2154,9 +2149,7 @@ Session ending. Write a concise summary of:\n\
 
                         // Defect 2 fix: check for auto-mail response before
                         // completing the regular pending entry.
-                        if let Some(auto_agent_id) =
-                            pending_guard.take_auto_mail(resp_id)
-                        {
+                        if let Some(auto_agent_id) = pending_guard.take_auto_mail(resp_id) {
                             // Auto-mail response: transition Busy -> Idle, then
                             // chain the post-turn mail check (FR-8.1).
                             let _ = pending_guard.complete(resp_id);
@@ -2383,7 +2376,11 @@ async fn dispatch_auto_mail_if_available(
             let mut q = q_arc.lock().await;
             if let Some(cmd) = q.pop_next() {
                 match cmd {
-                    ThreadCommand::ClaudeReply { request_id, args, respond_tx } => {
+                    ThreadCommand::ClaudeReply {
+                        request_id,
+                        args,
+                        respond_tx,
+                    } => {
                         tracing::info!(
                             agent_id = %agent_id,
                             "dispatching queued ClaudeReply (Fix 3/4)"
@@ -2420,7 +2417,9 @@ async fn dispatch_auto_mail_if_available(
                                         .lock()
                                         .await
                                         .set_thread_state(agent_id, ThreadState::Idle);
-                                    tracing::warn!("failed to write queued ClaudeReply to child stdin");
+                                    tracing::warn!(
+                                        "failed to write queued ClaudeReply to child stdin"
+                                    );
                                 }
                             }
                         }
@@ -2437,26 +2436,27 @@ async fn dispatch_auto_mail_if_available(
         }
     }
 
-    // Single-flight guard: only inject if still Idle (FR-8.9).
-    let still_idle = {
-        let reg = registry.lock().await;
-        reg.get(agent_id)
-            .map(|e| {
-                e.status == SessionStatus::Active && e.thread_state == ThreadState::Idle
-            })
-            .unwrap_or(false)
-    };
-    if !still_idle {
+    // Single-flight guard: reserve the thread (Idle -> Busy) before fetching
+    // mail to avoid TOCTOU races with concurrent codex-reply requests.
+    if !try_reserve_thread_for_auto_mail(agent_id, registry).await {
         return;
     }
 
     let envelopes = fetch_unread_mail(identity, team, max_messages, max_message_length);
     if envelopes.is_empty() {
+        registry
+            .lock()
+            .await
+            .set_thread_state(agent_id, ThreadState::Idle);
         return;
     }
 
     let child_stdin_opt = shared_stdin.lock().await.clone();
     let Some(child_stdin) = child_stdin_opt else {
+        registry
+            .lock()
+            .await
+            .set_thread_state(agent_id, ThreadState::Idle);
         return;
     };
 
@@ -2476,14 +2476,13 @@ async fn dispatch_auto_mail_if_available(
         }
     });
     let Ok(serialized) = serde_json::to_string(&auto_msg) else {
+        registry
+            .lock()
+            .await
+            .set_thread_state(agent_id, ThreadState::Idle);
         return;
     };
 
-    // Mark Busy before write.
-    registry
-        .lock()
-        .await
-        .set_thread_state(agent_id, ThreadState::Busy);
     let write_ok = {
         let mut stdin = child_stdin.lock().await;
         write_newline_delimited(&mut *stdin, &serialized)
@@ -2514,6 +2513,23 @@ async fn dispatch_auto_mail_if_available(
             .set_thread_state(agent_id, ThreadState::Idle);
         tracing::warn!("chained auto-mail: failed to write codex-reply to child stdin");
     }
+}
+
+/// Attempt to reserve a thread for auto-mail dispatch by transitioning
+/// `Idle -> Busy` atomically under the registry lock.
+async fn try_reserve_thread_for_auto_mail(
+    agent_id: &str,
+    registry: &Arc<Mutex<SessionRegistry>>,
+) -> bool {
+    let mut reg = registry.lock().await;
+    let can_reserve = reg
+        .get(agent_id)
+        .map(|e| e.status == SessionStatus::Active && e.thread_state == ThreadState::Idle)
+        .unwrap_or(false);
+    if can_reserve {
+        reg.set_thread_state(agent_id, ThreadState::Busy);
+    }
+    can_reserve
 }
 
 /// Route a message received from the child to the appropriate destination.
@@ -2585,10 +2601,7 @@ async fn route_child_message(
             }
             if let Some(params) = upstream_msg.get_mut("params") {
                 if let Some(obj) = params.as_object_mut() {
-                    obj.insert(
-                        "agent_id".to_string(),
-                        Value::String(agent_id.clone()),
-                    );
+                    obj.insert("agent_id".to_string(), Value::String(agent_id.clone()));
                 }
             }
 
@@ -2866,6 +2879,40 @@ mod tests {
         assert_eq!(ERR_TIMEOUT, -32006);
         assert_eq!(ERR_INVALID_SESSION_PARAMS, -32007);
         assert_eq!(ERR_AGENT_FILE_NOT_FOUND, -32008);
+    }
+
+    #[tokio::test]
+    async fn auto_mail_reservation_is_single_flight() {
+        let registry = Arc::new(Mutex::new(SessionRegistry::new(8)));
+        let agent_id = {
+            let mut reg = registry.lock().await;
+            let entry = reg
+                .register(
+                    "auto-mail-agent".to_string(),
+                    "default".to_string(),
+                    ".".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            reg.set_thread_state(&entry.agent_id, ThreadState::Idle);
+            entry.agent_id
+        };
+
+        // First reservation transitions Idle -> Busy.
+        assert!(try_reserve_thread_for_auto_mail(&agent_id, &registry).await);
+
+        // While Busy, a second reservation must fail.
+        assert!(!try_reserve_thread_for_auto_mail(&agent_id, &registry).await);
+
+        let state = registry
+            .lock()
+            .await
+            .get(&agent_id)
+            .map(|e| e.thread_state.clone())
+            .unwrap();
+        assert_eq!(state, ThreadState::Busy);
     }
 
     #[test]
@@ -3390,5 +3437,86 @@ mod tests {
             data.get("existing_agent_id").is_none(),
             "error data must NOT have 'existing_agent_id' key"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn agent_close_allows_immediate_codex_reuse_same_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let atm_home = dir.path().to_string_lossy().to_string();
+        unsafe { std::env::set_var("ATM_HOME", &atm_home) };
+
+        let config = crate::config::AgentMcpConfig::default();
+        let mut proxy = ProxyServer::new(config);
+        let (upstream_tx, mut upstream_rx) = mpsc::channel::<Value>(8);
+
+        let first_id = json!(701);
+        let first_msg = json!({
+            "jsonrpc": "2.0",
+            "id": first_id,
+            "method": "tools/call",
+            "params": {
+                "name": "codex",
+                "arguments": {
+                    "identity": "reuse-after-close",
+                    "prompt": "first turn"
+                }
+            }
+        });
+
+        let first_agent_id = match proxy
+            .prepare_codex_message(&first_id, first_msg, &upstream_tx)
+            .await
+        {
+            PrepareResult::Ok {
+                expected_agent_id: Some(agent_id),
+                ..
+            } => agent_id,
+            _ => panic!("expected first prepare_codex_message to succeed"),
+        };
+        assert!(
+            upstream_rx.try_recv().is_err(),
+            "unexpected upstream error on first codex call"
+        );
+
+        let close_resp = crate::atm_tools::handle_agent_close(
+            &json!(702),
+            &json!({"agent_id": first_agent_id}),
+            Arc::clone(&proxy.registry),
+            Arc::clone(&proxy.elicitation_registry),
+        )
+        .await;
+        assert!(
+            close_resp.get("error").is_none(),
+            "agent_close should succeed: {close_resp}"
+        );
+
+        let second_id = json!(703);
+        let second_msg = json!({
+            "jsonrpc": "2.0",
+            "id": second_id,
+            "method": "tools/call",
+            "params": {
+                "name": "codex",
+                "arguments": {
+                    "identity": "reuse-after-close",
+                    "prompt": "second turn"
+                }
+            }
+        });
+
+        let second = proxy
+            .prepare_codex_message(&second_id, second_msg, &upstream_tx)
+            .await;
+        match second {
+            PrepareResult::Ok { .. } => {}
+            _ => panic!("expected second codex call to succeed"),
+        }
+        assert!(
+            upstream_rx.try_recv().is_err(),
+            "expected no ERR_IDENTITY_CONFLICT after agent_close"
+        );
+
+        unsafe { std::env::remove_var("ATM_HOME") };
     }
 }
