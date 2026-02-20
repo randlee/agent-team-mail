@@ -26,7 +26,7 @@ Download the latest release for your platform from [GitHub Releases](https://git
 | macOS (Apple Silicon) | `atm_<version>_aarch64-apple-darwin.tar.gz` |
 | Windows (x86_64) | `atm_<version>_x86_64-pc-windows-msvc.zip` |
 
-Extract and place `atm` (and optionally `atm-daemon`) somewhere in your `$PATH`.
+Extract and place `atm` (and optionally `atm-daemon` and `atm-agent-mcp`) somewhere in your `$PATH`.
 
 ### Homebrew (macOS/Linux)
 
@@ -43,6 +43,9 @@ cargo install agent-team-mail
 
 # Install the daemon (optional)
 cargo install agent-team-mail-daemon
+
+# Install the MCP proxy (optional)
+cargo install atm-agent-mcp
 ```
 
 ### Build from Source
@@ -53,9 +56,11 @@ cd agent-team-mail
 cargo install --path crates/atm
 # Optionally install the daemon:
 cargo install --path crates/atm-daemon
+# Optionally install the MCP proxy:
+cargo install --path crates/atm-agent-mcp
 ```
 
-The `atm` (and `atm-daemon`) binaries will be available in your `$PATH`.
+The `atm`, `atm-daemon`, and `atm-agent-mcp` binaries will be available in your `$PATH`.
 
 ## Quick Start
 
@@ -161,9 +166,10 @@ The project is organized as a Cargo workspace with three crates:
 ```
 agent-team-mail/
 ├── crates/
-│   ├── atm-core/    # Shared library (schema types, atomic I/O, config)
-│   ├── atm/         # CLI binary (commands, output formatting)
-│   └── atm-daemon/  # Daemon with plugin system (post-MVP)
+│   ├── atm-core/       # Shared library (schema types, atomic I/O, config)
+│   ├── atm/            # CLI binary (commands, output formatting)
+│   ├── atm-daemon/     # Daemon with plugin system
+│   └── atm-agent-mcp/  # MCP proxy for agent tool access
 ```
 
 ### `atm-core`
