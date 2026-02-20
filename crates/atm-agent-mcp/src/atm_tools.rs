@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use agent_team_mail_core::InboxMessage;
 use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::text::{truncate_chars, truncate_chars_slice};
 use agent_team_mail_core::io::{inbox_append, inbox_update};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -74,34 +75,24 @@ pub fn resolve_identity(args: &Value, config_identity: Option<&str>) -> Option<S
 
 /// Truncate `text` to [`MAX_MESSAGE_LEN`] and append [`TRUNCATION_SUFFIX`] when truncated.
 fn maybe_truncate(text: &str) -> String {
-    match char_boundary_at_limit(text, MAX_MESSAGE_LEN) {
-        Some(cutoff) => {
-            let mut truncated = text[..cutoff].to_string();
-            truncated.push_str(TRUNCATION_SUFFIX);
-            truncated
-        }
-        None => text.to_string(),
+    if text.chars().count() <= MAX_MESSAGE_LEN {
+        text.to_string()
+    } else {
+        truncate_chars(text, MAX_MESSAGE_LEN, TRUNCATION_SUFFIX)
     }
 }
 
 /// Auto-generate a summary from the first 60 characters of a message.
 fn auto_summary(message: &str) -> String {
     let trimmed = message.trim();
-    match char_boundary_at_limit(trimmed, 60) {
-        Some(cutoff) => {
-            let mut summary = trimmed[..cutoff].to_string();
-            summary.push_str("...");
-            summary
-        }
-        None => trimmed.to_string(),
+    if trimmed.is_empty() {
+        return "(empty message)".to_string();
     }
-}
-
-/// Return the byte index of the first character past `max_chars`.
-///
-/// Returns `None` when `text` has `max_chars` or fewer characters.
-fn char_boundary_at_limit(text: &str, max_chars: usize) -> Option<usize> {
-    text.char_indices().nth(max_chars).map(|(idx, _)| idx)
+    if trimmed.chars().count() <= 60 {
+        trimmed.to_string()
+    } else {
+        format!("{}...", truncate_chars_slice(trimmed, 60))
+    }
 }
 
 /// Parse the `to` field into `(agent, team)`.
@@ -1058,7 +1049,9 @@ mod tests {
         let result = maybe_truncate(&long_msg);
         assert!(result.len() <= MAX_MESSAGE_LEN + TRUNCATION_SUFFIX.len());
         assert!(result.ends_with(TRUNCATION_SUFFIX));
-        assert_eq!(&result[..MAX_MESSAGE_LEN], &long_msg[..MAX_MESSAGE_LEN]);
+        let result_prefix: String = result.chars().take(MAX_MESSAGE_LEN).collect();
+        let expected_prefix: String = long_msg.chars().take(MAX_MESSAGE_LEN).collect();
+        assert_eq!(result_prefix, expected_prefix);
     }
 
     #[test]
@@ -1092,7 +1085,8 @@ mod tests {
         let msg = "This is a message longer than sixty characters for testing summary generation";
         let summary = auto_summary(msg);
         assert!(summary.ends_with("..."));
-        assert_eq!(summary.len(), 63); // 60 chars + "..."
+        // 60 chars + "..." — char count, not byte count
+        assert_eq!(summary.chars().count(), 63);
     }
 
     #[test]

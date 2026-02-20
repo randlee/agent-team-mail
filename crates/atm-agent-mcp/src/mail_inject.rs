@@ -22,6 +22,7 @@ use std::time::Duration;
 use agent_team_mail_core::InboxMessage;
 use agent_team_mail_core::home::get_home_dir;
 use agent_team_mail_core::io::inbox_update;
+use agent_team_mail_core::text::truncate_chars;
 use serde::{Deserialize, Serialize};
 
 use crate::config::AgentMcpConfig;
@@ -134,7 +135,7 @@ pub fn build_mail_envelopes(
         .filter(|m| !m.read && m.message_id.is_some())
         .take(max_messages)
         .map(|m| {
-            let text = truncate_utf8_chars(&m.text, max_message_length, TRUNCATION_SUFFIX);
+            let text = truncate_chars(&m.text, max_message_length, TRUNCATION_SUFFIX);
             MailEnvelope {
                 sender: m.from.clone(),
                 timestamp: m.timestamp.clone(),
@@ -143,17 +144,6 @@ pub fn build_mail_envelopes(
             }
         })
         .collect()
-}
-
-fn truncate_utf8_chars(text: &str, max_chars: usize, suffix: &str) -> String {
-    match text.char_indices().nth(max_chars).map(|(idx, _)| idx) {
-        Some(cutoff) => {
-            let mut out = text[..cutoff].to_string();
-            out.push_str(suffix);
-            out
-        }
-        None => text.to_string(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,8 +448,10 @@ mod tests {
         let envelopes = build_mail_envelopes(&messages, 10, 10);
         assert_eq!(envelopes.len(), 1);
         assert!(envelopes[0].text.ends_with(" [...truncated]"));
-        // Should be exactly 10 chars of content + suffix
-        assert_eq!(&envelopes[0].text[..10], &long_text[..10]);
+        // Verify first 10 chars of content preserved
+        let expected_prefix: String = long_text.chars().take(10).collect();
+        let actual_prefix: String = envelopes[0].text.chars().take(10).collect();
+        assert_eq!(actual_prefix, expected_prefix);
     }
 
     #[test]

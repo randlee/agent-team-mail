@@ -1,6 +1,6 @@
 //! Main daemon event loop
 
-use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedPubSubStore, SharedStateStore};
+use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedPubSubStore, SharedSessionRegistry, SharedStateStore};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use anyhow::{Context, Result};
@@ -47,6 +47,12 @@ use tracing::{debug, error, info, warn};
 ///   the inner `Option` with the sender half of the channel and pass the
 ///   receiver to `WorkerAdapterPlugin::set_launch_receiver`.  Pass
 ///   `new_launch_sender()` (with empty inner) when the plugin is absent.
+/// * `session_registry` - Shared session registry for `session-query` socket
+///   commands. Pass `new_session_registry()` from `crate::daemon`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "event loop wiring needs shared runtime handles and plugin coordination state"
+)]
 pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
@@ -55,6 +61,7 @@ pub async fn run(
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: crate::daemon::LaunchSender,
+    session_registry: SharedSessionRegistry,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -112,7 +119,7 @@ pub async fn run(
             agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
         });
     let socket_cancel = cancel.clone();
-    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, socket_cancel).await {
+    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, session_registry, socket_cancel).await {
         Ok(handle) => {
             if handle.is_some() {
                 info!("Unix socket server started successfully");

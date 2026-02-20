@@ -3,8 +3,12 @@
 //! Watches `${ATM_HOME}/.claude/daemon/hooks/events.jsonl` for new hook events
 //! appended by the `atm-hook-relay.sh` script (Sprint 10.0). On each file
 //! change, reads only new lines from the last-known offset (incremental, no
-//! re-reading the full file). Parses JSON lines and routes `agent-turn-complete`
-//! events to the [`AgentStateTracker`].
+//! re-reading the full file). Parses JSON lines and routes events to the
+//! appropriate trackers:
+//!
+//! - `agent-turn-complete` → [`AgentStateTracker`] (agent transitions to Idle)
+//! - `session-start` → [`SessionRegistry`] (`upsert` with session ID and PID)
+//! - `session-end` → [`SessionRegistry`] (`mark_dead` for the agent)
 //!
 //! ## Event Format
 //!
@@ -15,8 +19,12 @@
 //!  "thread-id":"...","turn-id":"...","received_at":"2026-02-16T22:30:00Z"}
 //! ```
 //!
-//! `type = "agent-turn-complete"` → AfterAgent hook from Codex notify system
-//! → agent transitions to [`AgentState::Idle`].
+//! Session lifecycle events carry additional fields:
+//!
+//! ```json
+//! {"type":"session-start","agent":"arch-ctm","sessionId":"uuid","processId":12345}
+//! {"type":"session-end","agent":"arch-ctm","sessionId":"uuid"}
+//! ```
 //!
 //! ## Truncation Handling
 //!
@@ -24,6 +32,7 @@
 //! the offset resets to 0 and the file is read from the beginning.
 
 use super::agent_state::{AgentState, AgentStateTracker};
+use crate::daemon::session_registry::SharedSessionRegistry;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use std::fs::File;
@@ -38,7 +47,7 @@ use tracing::{debug, warn};
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct HookEvent {
-    /// Event type. Currently only `"agent-turn-complete"` is produced by Codex notify.
+    /// Event type: `"agent-turn-complete"`, `"session-start"`, or `"session-end"`.
     #[serde(rename = "type")]
     pub event_type: String,
     /// ATM identity of the agent that fired the hook (e.g., `"arch-ctm"`).
@@ -51,25 +60,54 @@ pub struct HookEvent {
     pub turn_id: Option<String>,
     /// ISO-8601 timestamp added by the relay script.
     pub received_at: Option<String>,
+    /// Claude Code session UUID (present on `session-start` and `session-end`).
+    ///
+    /// Field name in JSON is `sessionId` (camelCase), but we use `#[serde(rename)]`
+    /// because `kebab-case` cannot express camelCase.
+    #[serde(rename = "sessionId")]
+    pub session_id: Option<String>,
+    /// OS process ID of the agent process (present on `session-start`).
+    ///
+    /// Field name in JSON is `processId` (camelCase).
+    #[serde(rename = "processId")]
+    pub process_id: Option<u32>,
 }
 
-/// Watches `events.jsonl` for new hook events and updates [`AgentStateTracker`].
+/// Watches `events.jsonl` for new hook events and updates [`AgentStateTracker`]
+/// and [`SessionRegistry`].
 pub struct HookWatcher {
     /// Path to the `events.jsonl` file.
     path: PathBuf,
     /// Shared state tracker to update on each event.
     state: Arc<Mutex<AgentStateTracker>>,
+    /// Shared session registry for session lifecycle events.
+    session_registry: Option<SharedSessionRegistry>,
 }
 
 impl HookWatcher {
-    /// Create a new hook watcher.
+    /// Create a new hook watcher with agent-state tracking only.
     ///
     /// # Arguments
     ///
     /// * `path` - Path to `events.jsonl`
     /// * `state` - Shared agent state tracker
     pub fn new(path: PathBuf, state: Arc<Mutex<AgentStateTracker>>) -> Self {
-        Self { path, state }
+        Self { path, state, session_registry: None }
+    }
+
+    /// Create a new hook watcher that also updates the session registry.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to `events.jsonl`
+    /// * `state` - Shared agent state tracker
+    /// * `session_registry` - Shared session registry for `session-start`/`session-end` events
+    pub fn new_with_session_registry(
+        path: PathBuf,
+        state: Arc<Mutex<AgentStateTracker>>,
+        session_registry: SharedSessionRegistry,
+    ) -> Self {
+        Self { path, state, session_registry: Some(session_registry) }
     }
 
     /// Run the watcher until cancellation.
@@ -117,7 +155,7 @@ impl HookWatcher {
         let mut offset: u64 = 0;
 
         // Do an initial read in case events were written before we started watching.
-        offset = read_new_events(&self.path, offset, &self.state);
+        offset = read_new_events(&self.path, offset, &self.state, self.session_registry.as_ref());
 
         loop {
             tokio::select! {
@@ -127,7 +165,7 @@ impl HookWatcher {
                 }
                 Some(event) = rx.recv() => {
                     if should_process_event(&event, &self.path) {
-                        offset = read_new_events(&self.path, offset, &self.state);
+                        offset = read_new_events(&self.path, offset, &self.state, self.session_registry.as_ref());
                     }
                 }
             }
@@ -178,6 +216,7 @@ fn read_new_events(
     path: &Path,
     offset: u64,
     state: &Arc<Mutex<AgentStateTracker>>,
+    session_registry: Option<&SharedSessionRegistry>,
 ) -> u64 {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -218,7 +257,7 @@ fn read_new_events(
                 new_offset += n as u64;
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
-                    process_hook_line(trimmed, state);
+                    process_hook_line(trimmed, state, session_registry);
                 }
             }
             Err(e) => {
@@ -232,7 +271,11 @@ fn read_new_events(
 }
 
 /// Parse and apply a single JSON line from `events.jsonl`.
-fn process_hook_line(line: &str, state: &Arc<Mutex<AgentStateTracker>>) {
+fn process_hook_line(
+    line: &str,
+    state: &Arc<Mutex<AgentStateTracker>>,
+    session_registry: Option<&SharedSessionRegistry>,
+) {
     let event: HookEvent = match serde_json::from_str(line) {
         Ok(e) => e,
         Err(e) => {
@@ -241,11 +284,16 @@ fn process_hook_line(line: &str, state: &Arc<Mutex<AgentStateTracker>>) {
         }
     };
 
-    apply_hook_event(&event, state);
+    apply_hook_event(&event, state, session_registry);
 }
 
-/// Apply the semantic effect of a hook event to the state tracker.
-fn apply_hook_event(event: &HookEvent, state: &Arc<Mutex<AgentStateTracker>>) {
+/// Apply the semantic effect of a hook event to the state tracker and session
+/// registry.
+fn apply_hook_event(
+    event: &HookEvent,
+    state: &Arc<Mutex<AgentStateTracker>>,
+    session_registry: Option<&SharedSessionRegistry>,
+) {
     match event.event_type.as_str() {
         "agent-turn-complete" => {
             let agent_id = match &event.agent {
@@ -271,6 +319,42 @@ fn apply_hook_event(event: &HookEvent, state: &Arc<Mutex<AgentStateTracker>>) {
                 tracker.set_state(&agent_id, AgentState::Idle);
             }
         }
+        "session-start" => {
+            let agent_id = match &event.agent {
+                Some(id) => id.clone(),
+                None => {
+                    warn!("session-start event missing 'agent' field, skipping");
+                    return;
+                }
+            };
+            let session_id = match &event.session_id {
+                Some(sid) => sid.clone(),
+                None => {
+                    warn!("session-start event for {agent_id} missing 'sessionId', skipping");
+                    return;
+                }
+            };
+            let process_id = event.process_id.unwrap_or(0);
+            debug!(
+                "SessionStart hook received for {agent_id} (session: {session_id}, pid: {process_id})"
+            );
+            if let Some(registry) = session_registry {
+                registry.lock().unwrap().upsert(&agent_id, &session_id, process_id);
+            }
+        }
+        "session-end" => {
+            let agent_id = match &event.agent {
+                Some(id) => id.clone(),
+                None => {
+                    warn!("session-end event missing 'agent' field, skipping");
+                    return;
+                }
+            };
+            debug!("SessionEnd hook received for {agent_id}");
+            if let Some(registry) = session_registry {
+                registry.lock().unwrap().mark_dead(&agent_id);
+            }
+        }
         unknown => {
             debug!("Unrecognised hook event type '{unknown}', ignoring");
         }
@@ -280,6 +364,7 @@ fn apply_hook_event(event: &HookEvent, state: &Arc<Mutex<AgentStateTracker>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::session_registry::new_session_registry;
 
     fn make_state() -> Arc<Mutex<AgentStateTracker>> {
         Arc::new(Mutex::new(AgentStateTracker::new()))
@@ -296,15 +381,36 @@ mod tests {
         assert_eq!(event.team.as_deref(), Some("atm-dev"));
         assert_eq!(event.thread_id.as_deref(), Some("t1"));
         assert_eq!(event.turn_id.as_deref(), Some("42"));
+        assert!(event.session_id.is_none());
+        assert!(event.process_id.is_none());
+    }
+
+    #[test]
+    fn test_parse_session_start_event() {
+        let json = r#"{"type":"session-start","agent":"arch-ctm","sessionId":"uuid-1234","processId":9876}"#;
+        let event: HookEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event_type, "session-start");
+        assert_eq!(event.agent.as_deref(), Some("arch-ctm"));
+        assert_eq!(event.session_id.as_deref(), Some("uuid-1234"));
+        assert_eq!(event.process_id, Some(9876));
+    }
+
+    #[test]
+    fn test_parse_session_end_event() {
+        let json = r#"{"type":"session-end","agent":"arch-ctm","sessionId":"uuid-1234"}"#;
+        let event: HookEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event_type, "session-end");
+        assert_eq!(event.agent.as_deref(), Some("arch-ctm"));
+        assert_eq!(event.session_id.as_deref(), Some("uuid-1234"));
     }
 
     #[test]
     fn test_malformed_json_does_not_panic() {
         let state = make_state();
         // Should log a warning and return without panicking.
-        process_hook_line("not json at all", &state);
-        process_hook_line("{broken", &state);
-        process_hook_line("", &state);
+        process_hook_line("not json at all", &state, None);
+        process_hook_line("{broken", &state, None);
+        process_hook_line("", &state, None);
         // State should be unchanged.
         assert!(state.lock().unwrap().all_states().is_empty());
     }
@@ -319,7 +425,7 @@ mod tests {
             .set_state("arch-ctm", AgentState::Launching);
 
         let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev"}"#;
-        process_hook_line(json, &state);
+        process_hook_line(json, &state, None);
 
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -337,7 +443,7 @@ mod tests {
             .set_state("arch-ctm", AgentState::Busy);
 
         let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev"}"#;
-        process_hook_line(json, &state);
+        process_hook_line(json, &state, None);
 
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -350,7 +456,7 @@ mod tests {
         let state = make_state();
         // Agent not pre-registered.
         let json = r#"{"type":"agent-turn-complete","agent":"new-agent","team":"atm-dev"}"#;
-        process_hook_line(json, &state);
+        process_hook_line(json, &state, None);
 
         assert_eq!(
             state.lock().unwrap().get_state("new-agent"),
@@ -363,7 +469,7 @@ mod tests {
         let state = make_state();
         // event_type present but agent field missing
         let json = r#"{"type":"agent-turn-complete","team":"atm-dev"}"#;
-        process_hook_line(json, &state);
+        process_hook_line(json, &state, None);
         // Nothing should be added to state.
         assert!(state.lock().unwrap().all_states().is_empty());
     }
@@ -372,8 +478,72 @@ mod tests {
     fn test_unknown_event_type_ignored() {
         let state = make_state();
         let json = r#"{"type":"after-tool-use","agent":"arch-ctm"}"#;
-        process_hook_line(json, &state);
+        process_hook_line(json, &state, None);
         assert!(state.lock().unwrap().all_states().is_empty());
+    }
+
+    // ── session-start / session-end events ───────────────────────────────
+
+    #[test]
+    fn test_session_start_calls_upsert_on_registry() {
+        let state = make_state();
+        let registry = new_session_registry();
+
+        let json = r#"{"type":"session-start","agent":"arch-ctm","sessionId":"sess-abc","processId":4242}"#;
+        process_hook_line(json, &state, Some(&registry));
+
+        let reg = registry.lock().unwrap();
+        let record = reg.query("arch-ctm").expect("arch-ctm should be in registry");
+        assert_eq!(record.session_id, "sess-abc");
+        assert_eq!(record.process_id, 4242);
+        use crate::daemon::session_registry::SessionState;
+        assert_eq!(record.state, SessionState::Active);
+    }
+
+    #[test]
+    fn test_session_end_calls_mark_dead_on_registry() {
+        let state = make_state();
+        let registry = new_session_registry();
+
+        // First register via session-start
+        registry.lock().unwrap().upsert("arch-ctm", "sess-abc", 4242);
+
+        let json = r#"{"type":"session-end","agent":"arch-ctm","sessionId":"sess-abc"}"#;
+        process_hook_line(json, &state, Some(&registry));
+
+        let reg = registry.lock().unwrap();
+        let record = reg.query("arch-ctm").expect("arch-ctm should be in registry");
+        use crate::daemon::session_registry::SessionState;
+        assert_eq!(record.state, SessionState::Dead);
+    }
+
+    #[test]
+    fn test_session_start_without_registry_does_not_panic() {
+        let state = make_state();
+        // No registry provided — should not panic.
+        let json = r#"{"type":"session-start","agent":"arch-ctm","sessionId":"sess-abc","processId":1}"#;
+        process_hook_line(json, &state, None);
+        // State tracker should not be affected.
+        assert!(state.lock().unwrap().all_states().is_empty());
+    }
+
+    #[test]
+    fn test_session_start_missing_session_id_skips() {
+        let state = make_state();
+        let registry = new_session_registry();
+        let json = r#"{"type":"session-start","agent":"arch-ctm"}"#;
+        process_hook_line(json, &state, Some(&registry));
+        // Registry should remain empty because sessionId is missing.
+        assert!(registry.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_session_start_missing_agent_skips() {
+        let state = make_state();
+        let registry = new_session_registry();
+        let json = r#"{"type":"session-start","sessionId":"sess-abc","processId":1}"#;
+        process_hook_line(json, &state, Some(&registry));
+        assert!(registry.lock().unwrap().is_empty());
     }
 
     // ── incremental file reading ──────────────────────────────────────────
@@ -385,7 +555,7 @@ mod tests {
         let path = dir.path().join("events.jsonl");
         std::fs::write(&path, b"").unwrap();
 
-        let new_offset = read_new_events(&path, 0, &state);
+        let new_offset = read_new_events(&path, 0, &state, None);
         assert_eq!(new_offset, 0);
     }
 
@@ -399,7 +569,7 @@ mod tests {
         let line = "{\"type\":\"agent-turn-complete\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\"}\n";
         std::fs::write(&path, line.as_bytes()).unwrap();
 
-        let new_offset = read_new_events(&path, 0, &state);
+        let new_offset = read_new_events(&path, 0, &state, None);
         assert_eq!(new_offset, line.len() as u64);
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -419,7 +589,7 @@ mod tests {
         std::fs::write(&path, line1.as_bytes()).unwrap();
 
         // First read
-        let offset1 = read_new_events(&path, 0, &state);
+        let offset1 = read_new_events(&path, 0, &state, None);
         assert_eq!(offset1, line1.len() as u64);
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -436,7 +606,7 @@ mod tests {
         drop(file);
 
         // Second read should only process line2
-        let offset2 = read_new_events(&path, offset1, &state);
+        let offset2 = read_new_events(&path, offset1, &state, None);
         assert_eq!(offset2, (line1.len() + line2.len()) as u64);
         assert_eq!(
             state.lock().unwrap().get_state("agent-b"),
@@ -455,7 +625,7 @@ mod tests {
         std::fs::write(&path, line.as_bytes()).unwrap();
 
         // offset beyond file size (simulating truncation)
-        let new_offset = read_new_events(&path, 9999, &state);
+        let new_offset = read_new_events(&path, 9999, &state, None);
         // Should re-read from 0, process the line, and return correct offset
         assert_eq!(new_offset, line.len() as u64);
         assert_eq!(
@@ -468,8 +638,27 @@ mod tests {
     fn test_read_new_events_file_not_found() {
         let state = make_state();
         let path = std::path::PathBuf::from("/nonexistent/path/events.jsonl");
-        let new_offset = read_new_events(&path, 42, &state);
+        let new_offset = read_new_events(&path, 42, &state, None);
         // Should return the same offset unchanged
         assert_eq!(new_offset, 42);
+    }
+
+    #[test]
+    fn test_read_new_events_session_start_updates_registry() {
+        let state = make_state();
+        let registry = new_session_registry();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let line = "{\"type\":\"session-start\",\"agent\":\"arch-ctm\",\"sessionId\":\"sess-xyz\",\"processId\":999}\n";
+        std::fs::write(&path, line.as_bytes()).unwrap();
+
+        let new_offset = read_new_events(&path, 0, &state, Some(&registry));
+        assert_eq!(new_offset, line.len() as u64);
+
+        let reg = registry.lock().unwrap();
+        let record = reg.query("arch-ctm").expect("agent should be in registry");
+        assert_eq!(record.session_id, "sess-xyz");
+        assert_eq!(record.process_id, 999);
     }
 }

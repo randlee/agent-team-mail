@@ -15,6 +15,7 @@ pub mod home;
 pub mod io;
 pub mod retention;
 pub mod schema;
+pub mod text;
 
 pub use schema::{
     AgentMember, InboxMessage, Permissions, SettingsJson, TaskItem, TaskStatus, TeamConfig,

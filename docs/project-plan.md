@@ -1851,6 +1851,90 @@ Sprints are sequential (each depends on the previous). Scope aligned with `requi
 | Sprint | Name | Status | PR |
 |--------|------|--------|-----|
 | B.1 | Daemon session tracking + `atm teams resume` + `atm teams cleanup` | PLANNED | — |
+| B.2 | Unicode-safe message truncation + input validation | MERGED | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
+| B.3 | Cleanup safety hardening + documentation alignment | IN PROGRESS | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
+
+---
+
+### Sprint B.3 — Cleanup Safety Hardening + Documentation Alignment
+
+**Branch**: `feature/pB-s3-stabilization`
+**Crate(s)**: `crates/atm` (`teams cleanup` safety behavior + tests), `docs` (plan alignment)
+
+#### Problem
+
+`atm teams cleanup` needed two follow-up hardening steps:
+1. Team-lead must be protected from automated cleanup removal, including forced cleanup runs.
+2. Daemon-unreachable behavior in no-force mode required an explicit companion test to lock the incomplete-cleanup error path.
+
+Additionally, Phase B plan tracking drifted: the sprint summary table did not list B.2 merged status and had no B.3 entry.
+
+#### Solution
+
+1. **Team-lead protection in cleanup path**:
+   - `cleanup` now always skips member `team-lead` (single-agent and full-team modes), with warning when explicitly targeted.
+
+2. **Daemon-unreachable safety coverage**:
+   - Added companion test asserting no-force cleanup skips removal and returns `Cleanup incomplete` when daemon liveness is unavailable.
+   - Renamed misleading single-agent force test to reflect actual behavior.
+
+3. **Project plan synchronization**:
+   - Added B.3 sprint entry (scope + exit criteria).
+   - Updated Phase B sprint summary table to include B.2 merged PR and B.3 in-progress PR.
+
+#### Exit Criteria
+
+- [x] `atm teams cleanup` never removes `team-lead`, including `--force` paths
+- [x] Companion no-force daemon-unreachable test added (`Cleanup incomplete` asserted)
+- [x] Misleading cleanup test name corrected for behavior clarity
+- [x] Phase B sprint summary table includes B.2 and B.3 with PR references
+- [x] B.3 scope and exit criteria documented in this plan
+
+---
+
+### Sprint B.2 — Unicode-Safe Message Truncation + Input Validation
+
+**Branch**: `feature/pB-s2-unicode-validation`
+**Crate(s)**: `crates/atm-core` (new `text` module), `crates/atm` (send/broadcast/request), `crates/atm-agent-mcp` (atm_tools, mail_inject)
+
+#### Problem
+
+Several truncation helpers across the codebase performed byte-index slicing on UTF-8 strings (e.g. `&text[..100]`), which panics on multi-byte characters (em dash, CJK, emoji) at a boundary. Additionally, no validation existed to reject null bytes or oversized (>1 MiB) messages before they were written to disk.
+
+#### Solution
+
+1. **New shared module `crates/atm-core/src/text`** — canonical Unicode-safe utilities:
+   - `truncate_chars(text, max_chars, suffix)` — allocating truncation with suffix
+   - `truncate_chars_slice(text, max_chars)` — zero-copy truncation returning `&str`
+   - `validate_message_text(text, max_bytes)` — rejects null bytes and oversized messages
+   - `DEFAULT_MAX_MESSAGE_BYTES = 1_048_576` (1 MiB)
+
+2. **Fixed `generate_summary()`** in `send.rs`, `broadcast.rs`, `request.rs` — replaced `&trimmed[..MAX_LEN]` byte slicing with `truncate_chars_slice`
+
+3. **Fixed `one_line()`** in `request.rs` — replaced `&single[..120]` byte slicing with `truncate_chars`
+
+4. **Removed private duplicates** in `atm-agent-mcp`: `char_boundary_at_limit` (atm_tools.rs) and `truncate_utf8_chars` (mail_inject.rs) replaced with shared utilities
+
+5. **Input validation** added in `send.rs`, `broadcast.rs`, `request.rs` — `validate_message_text()` called before any I/O
+
+#### MSRV Note
+
+All truncation uses `char_indices().nth(n)` — MSRV 1.85 compatible. `str::floor_char_boundary` (requires Rust 1.91) is explicitly prohibited.
+
+#### Exit Criteria
+
+- [x] `crates/atm-core/src/text` module exported from `lib.rs`
+- [x] All `generate_summary()` functions use char-based truncation
+- [x] `one_line()` in request.rs uses char-based truncation
+- [x] No private duplicate truncation helpers remain
+- [x] `validate_message_text()` called before I/O in send/broadcast/request
+- [x] Error messages are user-facing and actionable (`--file` suggestion for oversized)
+- [x] Tests for em dash, CJK, emoji, grapheme cluster, null byte, oversize, exact-MAX boundary
+- [x] 7 dedicated `one_line()` tests including multi-byte at 120-char boundary
+- [x] 6 dedicated `generate_summary()` tests in request.rs
+- [x] `cargo test` 1218 tests, 0 failures
+- [x] `cargo clippy -- -D warnings` clean
+- [x] MSRV 1.85 compliant (no `floor_char_boundary`)
 
 ---
 

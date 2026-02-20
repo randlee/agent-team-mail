@@ -9,6 +9,8 @@ use clap::Args;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use agent_team_mail_core::text::{truncate_chars_slice, validate_message_text, DEFAULT_MAX_MESSAGE_BYTES};
+
 use crate::util::settings::get_home_dir;
 
 /// Broadcast a message to all agents in a team
@@ -87,6 +89,9 @@ pub fn execute(args: BroadcastArgs) -> Result<()> {
 
     // Get message text from appropriate source
     let message_text = get_message_text(&args)?;
+
+    validate_message_text(&message_text, DEFAULT_MAX_MESSAGE_BYTES)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Generate summary
     let summary = args
@@ -198,15 +203,14 @@ fn generate_summary(text: &str) -> String {
     const MAX_LEN: usize = 100;
 
     let trimmed = text.trim();
-    if trimmed.len() <= MAX_LEN {
+    if trimmed.chars().count() <= MAX_LEN {
         trimmed.to_string()
     } else {
-        // Find a good break point (space, newline)
-        let truncated = &trimmed[..MAX_LEN];
-        if let Some(pos) = truncated.rfind(|c: char| c.is_whitespace()) {
-            format!("{}...", truncated[..pos].trim())
+        let slice = truncate_chars_slice(trimmed, MAX_LEN);
+        if let Some(pos) = slice.rfind(|c: char| c.is_whitespace()) {
+            format!("{}...", slice[..pos].trim())
         } else {
-            format!("{truncated}...")
+            format!("{slice}...")
         }
     }
 }

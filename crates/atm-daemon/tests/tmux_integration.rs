@@ -31,7 +31,7 @@ fn unique_session_name() -> String {
 struct DaemonEnv {
     workdir: tempfile::TempDir,
     atm_home: PathBuf,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "held for test environment lifetime; not read directly")]
     team: String,
     agent: String,
     session: String,
