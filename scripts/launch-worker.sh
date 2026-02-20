@@ -66,6 +66,14 @@ if [[ "$MODE" == "pane" ]]; then
     PANE_ID=$(tmux split-window -h -P -F '#{pane_id}' "env $ENV_VARS $WORKER_CMD; echo ''; echo 'Worker exited. Press Enter to close.'; read")
     tmux select-layout even-horizontal
     PANE_INFO="$PANE_ID (current window)"
+
+    # Update tmuxPaneId in team config.json so Claude Code can inject messages
+    if atm teams add-member "$TEAM" "$AGENT_NAME" --pane-id "$PANE_ID" 2>/dev/null; then
+        echo "  Config:    tmuxPaneId=$PANE_ID registered via atm teams add-member"
+    else
+        echo "  Warning:   failed to register tmuxPaneId (member may not exist in team)" >&2
+    fi
+
     echo "Launched worker '$AGENT_NAME' in new pane."
     echo ""
     echo "  Pane:      $PANE_INFO"
