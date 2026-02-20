@@ -34,6 +34,7 @@ use agent_team_mail_core::io::{inbox_append, inbox_update};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
+use crate::lock::release_lock;
 use crate::session::{SessionRegistry, SessionStatus, ThreadState};
 
 /// Maximum allowed message length in characters (FR-8.4).
@@ -564,7 +565,10 @@ pub fn handle_atm_pending_count(id: &Value, _args: &Value, identity: &str, team:
     let content = match std::fs::read(&path) {
         Ok(c) => c,
         Err(e) => {
-            return make_mcp_error_result(id, &format!("atm_pending_count: cannot read inbox: {e}"));
+            return make_mcp_error_result(
+                id,
+                &format!("atm_pending_count: cannot read inbox: {e}"),
+            );
         }
     };
 
@@ -602,43 +606,46 @@ pub fn handle_atm_pending_count(id: &Value, _args: &Value, identity: &str, team:
 /// # Returns
 ///
 /// MCP result whose text is a pretty-printed JSON array of session objects.
-pub async fn handle_agent_sessions(
-    id: &Value,
-    registry: Arc<Mutex<SessionRegistry>>,
-) -> Value {
+pub async fn handle_agent_sessions(id: &Value, registry: Arc<Mutex<SessionRegistry>>) -> Value {
     let guard = registry.lock().await;
-    let sessions: Vec<Value> = guard.list_all().iter().map(|e| {
-        let status_str = match e.status {
-            SessionStatus::Active => "active",
-            SessionStatus::Stale => "stale",
-            SessionStatus::Closed => "closed",
-        };
-        let thread_state_str = match e.thread_state {
-            ThreadState::Busy => "busy",
-            ThreadState::Idle => "idle",
-            ThreadState::Closed => "closed",
-        };
-        let resumable = e.status == SessionStatus::Stale && e.thread_id.is_some();
-        let agent_name = e.agent_source.as_deref()
-            .and_then(|p| std::path::Path::new(p).file_stem())
-            .and_then(|s| s.to_str())
-            .unwrap_or(&e.identity)
-            .to_string();
-        json!({
-            "agent_id": e.agent_id,
-            "backend": "codex",
-            "backend_id": e.thread_id,
-            "team": e.team,
-            "identity": e.identity,
-            "agent_name": agent_name,
-            "agent_source": e.agent_source,
-            "tag": e.tag,
-            "status": status_str,
-            "thread_state": thread_state_str,
-            "last_active": e.last_active,
-            "resumable": resumable,
+    let sessions: Vec<Value> = guard
+        .list_all()
+        .iter()
+        .map(|e| {
+            let status_str = match e.status {
+                SessionStatus::Active => "active",
+                SessionStatus::Stale => "stale",
+                SessionStatus::Closed => "closed",
+            };
+            let thread_state_str = match e.thread_state {
+                ThreadState::Busy => "busy",
+                ThreadState::Idle => "idle",
+                ThreadState::Closed => "closed",
+            };
+            let resumable = e.status == SessionStatus::Stale && e.thread_id.is_some();
+            let agent_name = e
+                .agent_source
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).file_stem())
+                .and_then(|s| s.to_str())
+                .unwrap_or(&e.identity)
+                .to_string();
+            json!({
+                "agent_id": e.agent_id,
+                "backend": "codex",
+                "backend_id": e.thread_id,
+                "team": e.team,
+                "identity": e.identity,
+                "agent_name": agent_name,
+                "agent_source": e.agent_source,
+                "tag": e.tag,
+                "status": status_str,
+                "thread_state": thread_state_str,
+                "last_active": e.last_active,
+                "resumable": resumable,
+            })
         })
-    }).collect();
+        .collect();
 
     let text = serde_json::to_string_pretty(&sessions).unwrap_or_else(|_| "[]".to_string());
     make_mcp_success(id, text)
@@ -658,11 +665,10 @@ pub fn count_unread_for_identity(identity: &str, team: &str, home: &std::path::P
         Ok(c) => c,
         Err(_) => return 0,
     };
-    let messages: Vec<agent_team_mail_core::InboxMessage> =
-        match serde_json::from_slice(&content) {
-            Ok(m) => m,
-            Err(_) => return 0,
-        };
+    let messages: Vec<agent_team_mail_core::InboxMessage> = match serde_json::from_slice(&content) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
     messages.iter().filter(|m| !m.read).count() as u64
 }
 
@@ -696,16 +702,12 @@ pub async fn handle_agent_status(
     let busy_count = guard
         .list_all()
         .iter()
-        .filter(|e| {
-            e.status == SessionStatus::Active && e.thread_state == ThreadState::Busy
-        })
+        .filter(|e| e.status == SessionStatus::Active && e.thread_state == ThreadState::Busy)
         .count();
     let idle_count = guard
         .list_all()
         .iter()
-        .filter(|e| {
-            e.status == SessionStatus::Active && e.thread_state == ThreadState::Idle
-        })
+        .filter(|e| e.status == SessionStatus::Active && e.thread_state == ThreadState::Idle)
         .count();
     let identity_map: serde_json::Map<String, Value> = guard
         .list_all()
@@ -767,7 +769,7 @@ pub async fn handle_agent_close(
     registry: Arc<Mutex<SessionRegistry>>,
     elicitation_registry: Arc<Mutex<crate::elicitation::ElicitationRegistry>>,
 ) -> Value {
-    use crate::proxy::{ERR_SESSION_NOT_FOUND};
+    use crate::proxy::ERR_SESSION_NOT_FOUND;
 
     // Resolve agent_id from args
     let explicit_agent_id = args
@@ -834,16 +836,24 @@ pub async fn handle_agent_close(
     };
 
     // Idempotent: already closed → success no-op (FR-17.9)
-    if entry.status == SessionStatus::Closed
-        || entry.thread_state == ThreadState::Closed
-    {
+    if entry.status == SessionStatus::Closed || entry.thread_state == ThreadState::Closed {
         drop(guard);
+        if let Err(e) = release_lock(&entry.team, &entry.identity).await {
+            tracing::debug!(
+                team = %entry.team,
+                identity = %entry.identity,
+                "agent_close: lock release skipped/failed for already-closed session: {e:#}"
+            );
+        }
         let result = json!({
             "closed": true,
             "agent_id": resolved_agent_id,
             "status": "already_closed"
         });
-        return make_mcp_success(id, serde_json::to_string_pretty(&result).unwrap_or_default());
+        return make_mcp_success(
+            id,
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        );
     }
 
     // Determine close status based on current thread state
@@ -857,6 +867,14 @@ pub async fn handle_agent_close(
     guard.close(&resolved_agent_id);
     drop(guard);
 
+    if let Err(e) = release_lock(&entry.team, &entry.identity).await {
+        tracing::warn!(
+            team = %entry.team,
+            identity = %entry.identity,
+            "agent_close: failed to release identity lock: {e:#}"
+        );
+    }
+
     // Cancel any pending elicitations for this agent (FR-18.5)
     elicitation_registry.lock().await.cancel_for_agent(
         &resolved_agent_id,
@@ -868,7 +886,10 @@ pub async fn handle_agent_close(
         "agent_id": resolved_agent_id,
         "status": close_status
     });
-    make_mcp_success(id, serde_json::to_string_pretty(&result).unwrap_or_default())
+    make_mcp_success(
+        id,
+        serde_json::to_string_pretty(&result).unwrap_or_default(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +899,7 @@ pub async fn handle_agent_close(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lock::{acquire_lock, check_lock};
     use serde_json::json;
     use serial_test::serial;
     use std::fs;
@@ -1689,10 +1711,7 @@ mod tests {
         let resp = handle_agent_sessions(&id, Arc::clone(&reg)).await;
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         let sessions: Vec<Value> = serde_json::from_str(text).unwrap();
-        let session = sessions
-            .iter()
-            .find(|s| s["agent_id"] == agent_id)
-            .unwrap();
+        let session = sessions.iter().find(|s| s["agent_id"] == agent_id).unwrap();
         assert_eq!(session["status"], "stale");
         assert_eq!(session["resumable"], json!(true));
     }
@@ -1808,16 +1827,8 @@ mod tests {
     async fn test_agent_status_no_sessions() {
         let reg = make_test_registry(10);
         let id = json!(200);
-        let resp = handle_agent_status(
-            &id,
-            reg,
-            false,
-            "atm-dev",
-            "2026-02-18T00:00:00Z",
-            42,
-            0,
-        )
-        .await;
+        let resp =
+            handle_agent_status(&id, reg, false, "atm-dev", "2026-02-18T00:00:00Z", 42, 0).await;
         assert!(resp.get("error").is_none());
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         let status: Value = serde_json::from_str(text).unwrap();
@@ -1864,7 +1875,10 @@ mod tests {
         assert_eq!(status["child_alive"], json!(true));
         assert_eq!(status["active_thread_count"], json!(1));
         let map = status["identity_map"].as_object().unwrap();
-        assert_eq!(map.get("arch-ctm").and_then(|v| v.as_str()), Some("thread-abc"));
+        assert_eq!(
+            map.get("arch-ctm").and_then(|v| v.as_str()),
+            Some("thread-abc")
+        );
         let _ = agent_id;
     }
 
@@ -1886,16 +1900,7 @@ mod tests {
             guard.mark_all_stale();
         }
         let id = json!(202);
-        let resp = handle_agent_status(
-            &id,
-            reg,
-            false,
-            "team",
-            "2026-02-18T00:00:00Z",
-            0,
-            0,
-        )
-        .await;
+        let resp = handle_agent_status(&id, reg, false, "team", "2026-02-18T00:00:00Z", 0, 0).await;
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         let status: Value = serde_json::from_str(text).unwrap();
         assert_eq!(status["active_thread_count"], json!(0));
@@ -1907,9 +1912,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_test_elicitation_registry() -> Arc<Mutex<crate::elicitation::ElicitationRegistry>> {
-        Arc::new(Mutex::new(
-            crate::elicitation::ElicitationRegistry::new(30),
-        ))
+        Arc::new(Mutex::new(crate::elicitation::ElicitationRegistry::new(30)))
     }
 
     #[tokio::test]
@@ -2065,9 +2068,94 @@ mod tests {
         let rejection_val = rejection.unwrap();
         assert_eq!(rejection_val["error"]["code"], json!(-32003));
         // The elicitation should no longer be pending — trying to resolve it returns false
-        let resolved_again =
-            elicit_reg.lock().await.resolve(&serde_json::json!(999), serde_json::json!({}));
-        assert!(!resolved_again, "elicitation should have been removed by cancel_for_agent");
+        let resolved_again = elicit_reg
+            .lock()
+            .await
+            .resolve(&serde_json::json!(999), serde_json::json!({}));
+        assert!(
+            !resolved_again,
+            "elicitation should have been removed by cancel_for_agent"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_agent_close_releases_identity_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let _atm_home = set_atm_home(&dir);
+
+        let reg = make_test_registry(10);
+        let (agent_id, identity, team) = {
+            let mut guard = reg.lock().await;
+            let e = guard
+                .register(
+                    "lock-release".to_string(),
+                    "team-lock".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            guard.set_thread_state(&e.agent_id, ThreadState::Idle);
+            (e.agent_id.clone(), e.identity.clone(), e.team.clone())
+        };
+        acquire_lock(&team, &identity, &agent_id).await.unwrap();
+        assert!(
+            check_lock(&team, &identity).await.is_some(),
+            "lock should exist before close"
+        );
+
+        let elicit_reg = make_test_elicitation_registry();
+        let id = json!(305);
+        let args = json!({"agent_id": agent_id});
+        let _resp = handle_agent_close(&id, &args, reg, elicit_reg).await;
+
+        assert!(
+            check_lock(&team, &identity).await.is_none(),
+            "lock should be removed after agent_close"
+        );
+        unset_atm_home();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_agent_close_already_closed_releases_stale_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let _atm_home = set_atm_home(&dir);
+
+        let reg = make_test_registry(10);
+        let (agent_id, identity, team) = {
+            let mut guard = reg.lock().await;
+            let e = guard
+                .register(
+                    "lock-release-closed".to_string(),
+                    "team-lock".to_string(),
+                    "/tmp".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            guard.close(&e.agent_id);
+            (e.agent_id.clone(), e.identity.clone(), e.team.clone())
+        };
+        acquire_lock(&team, &identity, &agent_id).await.unwrap();
+        assert!(
+            check_lock(&team, &identity).await.is_some(),
+            "stale lock should exist before idempotent close"
+        );
+
+        let elicit_reg = make_test_elicitation_registry();
+        let id = json!(306);
+        let args = json!({"agent_id": agent_id});
+        let _resp = handle_agent_close(&id, &args, reg, elicit_reg).await;
+
+        assert!(
+            check_lock(&team, &identity).await.is_none(),
+            "idempotent close should also clear stale lock"
+        );
+        unset_atm_home();
     }
 
     // -----------------------------------------------------------------------
