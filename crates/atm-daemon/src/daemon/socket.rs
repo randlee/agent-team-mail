@@ -230,7 +230,10 @@ async fn start_unix_socket_server(
 }
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "accept loop requires shared daemon resources and paths passed from startup"
+)]
 async fn run_accept_loop(
     listener: tokio::net::UnixListener,
     state_store: SharedStateStore,
