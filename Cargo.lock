@@ -193,6 +193,7 @@ version = "0.11.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
+ "async-trait",
  "clap",
  "dirs",
  "libc",

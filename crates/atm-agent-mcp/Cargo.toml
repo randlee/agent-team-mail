@@ -19,6 +19,7 @@ path = "tests/fixtures/echo_mcp_server.rs"
 
 [dependencies]
 agent-team-mail-core.workspace = true
+async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
