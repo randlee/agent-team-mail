@@ -25,6 +25,10 @@ target
 
 /target
 
+# Python bytecode/cache
+*.pyc
+__pycache__/
+
 # Temporary/archived documentation
 temp/
 
