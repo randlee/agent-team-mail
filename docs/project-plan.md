@@ -2428,7 +2428,7 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 |--------|------|------------|--------|
 | E.1 | Fix `atm teams resume` session ID reliability | Phase D | 🔄 IN PROGRESS |
 | E.2 | Fix inbox read marking other agents' messages as read | — | ⏳ PLANNED |
-| E.3 | Hook-to-daemon state bridge | E.1 | 🔄 IN PROGRESS |
+| E.3 | Hook-to-daemon state bridge | E.1 | ✅ PR #152 |
 
 **Execution model**: E.1 is priority (unblocks session startup). E.2 and E.3 can run in parallel after E.1 merges.
 
