@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use agent_team_mail_core::daemon_client::AgentSummary;
 
+use crate::config::TuiConfig;
+
 /// A single row shown in the Dashboard panel.
 #[derive(Debug, Clone)]
 pub struct MemberRow {
@@ -82,11 +84,33 @@ pub struct App {
     ///
     /// The UI renders a `[FROZEN]` indicator in the stream pane when this is set.
     pub stream_source_error: Option<String>,
+    /// User preferences loaded from `~/.config/atm/tui.toml` at startup.
+    pub config: TuiConfig,
+    /// When `true`, a `Ctrl-I` was pressed while [`InterruptPolicy::Confirm`] is
+    /// active. The status bar shows `"Send interrupt? [y/N]"` and the next
+    /// `y`/`Enter` dispatches the interrupt; `n`/`Esc` cancels.
+    pub confirm_interrupt_pending: bool,
+    /// Whether the stream pane auto-scrolls to the latest line on each append.
+    ///
+    /// Toggled at runtime with `F`. Initialized from
+    /// [`TuiConfig::follow_mode_default`].
+    pub follow_mode: bool,
+    /// Current scroll offset for the stream pane, counted from the top of
+    /// [`stream_lines`](Self::stream_lines).
+    ///
+    /// When [`follow_mode`](Self::follow_mode) is `true` this is updated
+    /// automatically on every [`append_stream_lines`](Self::append_stream_lines)
+    /// call so the view stays pinned to the bottom. When follow mode is off the
+    /// value is preserved, allowing the user to read earlier output.
+    pub stream_scroll_offset: usize,
 }
 
 impl App {
-    /// Create a new [`App`] for the given team.
-    pub fn new(team: String) -> Self {
+    /// Create a new [`App`] for the given team with the provided user config.
+    ///
+    /// `follow_mode` is initialised from [`TuiConfig::follow_mode_default`].
+    pub fn new(team: String, config: TuiConfig) -> Self {
+        let follow_mode = config.follow_mode_default;
         Self {
             team,
             members: Vec::new(),
@@ -103,6 +127,10 @@ impl App {
             status_message: None,
             pending_control: None,
             stream_source_error: None,
+            config,
+            confirm_interrupt_pending: false,
+            follow_mode,
+            stream_scroll_offset: 0,
         }
     }
 
@@ -141,12 +169,23 @@ impl App {
 
     /// Append new log lines to [`stream_lines`](Self::stream_lines), keeping
     /// the buffer bounded to the last 1000 lines.
+    ///
+    /// When [`follow_mode`](Self::follow_mode) is `true`,
+    /// [`stream_scroll_offset`](Self::stream_scroll_offset) is updated so the
+    /// stream pane remains pinned to the bottom of the buffer. When follow mode
+    /// is `false` the offset is preserved as-is.
     pub fn append_stream_lines(&mut self, new_lines: Vec<String>) {
         self.stream_lines.extend(new_lines);
         const MAX_LINES: usize = 1000;
         if self.stream_lines.len() > MAX_LINES {
             let drain_count = self.stream_lines.len() - MAX_LINES;
             self.stream_lines.drain(..drain_count);
+        }
+        if self.follow_mode {
+            // The UI renders the last `visible_height` lines; the offset is the
+            // index into stream_lines where the visible window starts. Pinning
+            // to `len()` here lets the draw function clamp correctly.
+            self.stream_scroll_offset = self.stream_lines.len();
         }
     }
 
@@ -156,6 +195,7 @@ impl App {
         self.stream_pos = 0;
         self.session_log_path = None;
         self.stream_source_error = None;
+        self.stream_scroll_offset = 0;
     }
 
     /// Returns `true` if the selected agent is "live" (control input is available).
@@ -191,10 +231,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TuiConfig;
+
+    fn new_app(team: &str) -> App {
+        App::new(team.to_string(), TuiConfig::default())
+    }
 
     #[test]
     fn test_select_next_wraps() {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app("atm-dev");
         app.members = vec![
             MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 },
             MemberRow { agent: "b".into(), state: "idle".into(), inbox_count: 0 },
@@ -206,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_select_previous_wraps() {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app("atm-dev");
         app.members = vec![
             MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 },
             MemberRow { agent: "b".into(), state: "idle".into(), inbox_count: 0 },
@@ -218,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_append_stream_lines_bounded() {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app("atm-dev");
         // Fill past the 1000-line limit.
         let lines: Vec<String> = (0..1100).map(|i| format!("line {i}")).collect();
         app.append_stream_lines(lines);
@@ -230,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_cycle_focus() {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app("atm-dev");
         assert_eq!(app.focus, FocusPanel::Dashboard);
         app.cycle_focus();
         assert_eq!(app.focus, FocusPanel::AgentTerminal);
@@ -240,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_is_live_idle() {
-        let mut app = App::new("test".to_string());
+        let mut app = new_app("test");
         app.members =
             vec![MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 }];
         assert!(app.is_live());
@@ -248,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_is_live_busy() {
-        let mut app = App::new("test".to_string());
+        let mut app = new_app("test");
         app.members =
             vec![MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 }];
         assert!(app.is_live());
@@ -256,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_not_live_launching() {
-        let mut app = App::new("test".to_string());
+        let mut app = new_app("test");
         app.members =
             vec![MemberRow { agent: "a".into(), state: "launching".into(), inbox_count: 0 }];
         assert!(!app.is_live());
@@ -265,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_not_live_killed() {
-        let mut app = App::new("test".to_string());
+        let mut app = new_app("test");
         app.members =
             vec![MemberRow { agent: "a".into(), state: "killed".into(), inbox_count: 0 }];
         assert!(!app.is_live());
@@ -274,7 +319,7 @@ mod tests {
 
     #[test]
     fn test_not_live_stale() {
-        let mut app = App::new("test".to_string());
+        let mut app = new_app("test");
         app.members =
             vec![MemberRow { agent: "a".into(), state: "stale".into(), inbox_count: 0 }];
         assert!(!app.is_live());
@@ -283,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_not_live_closed() {
-        let mut app = App::new("test".to_string());
+        let mut app = new_app("test");
         app.members =
             vec![MemberRow { agent: "a".into(), state: "closed".into(), inbox_count: 0 }];
         assert!(!app.is_live());
@@ -292,14 +337,14 @@ mod tests {
 
     #[test]
     fn test_not_live_no_members() {
-        let app = App::new("test".to_string());
+        let app = new_app("test");
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Not live"));
     }
 
     #[test]
     fn test_not_live_unknown_state() {
-        let mut app = App::new("test".to_string());
+        let mut app = new_app("test");
         app.members =
             vec![MemberRow { agent: "a".into(), state: "unknown-state".into(), inbox_count: 0 }];
         assert!(!app.is_live());
@@ -308,7 +353,7 @@ mod tests {
 
     #[test]
     fn test_live_reason_is_none_for_idle() {
-        let mut app = App::new("test".to_string());
+        let mut app = new_app("test");
         app.members =
             vec![MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 }];
         assert_eq!(app.not_live_reason(), None);
@@ -316,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_live_reason_is_none_for_busy() {
-        let mut app = App::new("test".to_string());
+        let mut app = new_app("test");
         app.members =
             vec![MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 }];
         assert_eq!(app.not_live_reason(), None);
@@ -325,7 +370,7 @@ mod tests {
     /// Stale agents must not be considered live — TUI must block control input.
     #[test]
     fn test_is_live_returns_false_for_stale_state() {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app("atm-dev");
         app.members = vec![
             MemberRow { agent: "arch-ctm".into(), state: "stale".into(), inbox_count: 0 },
         ];
@@ -336,11 +381,74 @@ mod tests {
     /// Closed agents must not be considered live — TUI must block control input.
     #[test]
     fn test_is_live_returns_false_for_closed_state() {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app("atm-dev");
         app.members = vec![
             MemberRow { agent: "arch-ctm".into(), state: "closed".into(), inbox_count: 0 },
         ];
         app.selected_index = 0;
         assert!(!app.is_live(), "closed agent must not be live");
+    }
+
+    // ── Follow mode ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_follow_mode_initialized_from_config() {
+        let mut cfg = TuiConfig::default();
+        cfg.follow_mode_default = false;
+        let app = App::new("test".to_string(), cfg);
+        assert!(!app.follow_mode, "follow_mode must reflect config default");
+    }
+
+    #[test]
+    fn test_follow_mode_updates_scroll_offset_on_append() {
+        let mut app = new_app("test");
+        app.follow_mode = true;
+        let lines: Vec<String> = (0..50).map(|i| format!("line {i}")).collect();
+        app.append_stream_lines(lines);
+        assert_eq!(
+            app.stream_scroll_offset, 50,
+            "scroll offset must equal line count when follow mode is on"
+        );
+    }
+
+    #[test]
+    fn test_follow_mode_off_preserves_scroll_offset() {
+        let mut app = new_app("test");
+        app.follow_mode = false;
+        app.stream_scroll_offset = 7;
+        let lines: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
+        app.append_stream_lines(lines);
+        assert_eq!(
+            app.stream_scroll_offset, 7,
+            "scroll offset must not change when follow mode is off"
+        );
+    }
+
+    #[test]
+    fn test_reset_stream_clears_scroll_offset() {
+        let mut app = new_app("test");
+        app.stream_scroll_offset = 42;
+        app.reset_stream();
+        assert_eq!(app.stream_scroll_offset, 0, "reset_stream must clear scroll offset");
+    }
+
+    /// Stress test: append 10,000 lines in rapid succession.
+    /// Validates that the 1000-line bound is enforced and no panic occurs.
+    /// SLO: append + bound enforcement < 200ms for 10k lines.
+    #[test]
+    fn test_stress_stream_append_bounded() {
+        let mut app = new_app("test");
+        let start = std::time::Instant::now();
+        let lines: Vec<String> = (0..10_000).map(|i| format!("line {i}")).collect();
+        // Simulate batched appends as would happen in production
+        for chunk in lines.chunks(100) {
+            app.append_stream_lines(chunk.to_vec());
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(app.stream_lines.len(), 1000, "buffer must stay bounded at 1000");
+        assert!(
+            elapsed.as_millis() < 200,
+            "10k line stress append must complete in <200ms, took {elapsed:?}"
+        );
     }
 }

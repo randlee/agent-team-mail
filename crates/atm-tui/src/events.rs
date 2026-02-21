@@ -14,6 +14,7 @@
 //! | `↑` | Move selection up |
 //! | `↓` | Move selection down |
 //! | `Tab` | Cycle panel focus |
+//! | `F` | Toggle follow mode (uppercase) |
 //!
 //! ## Agent Terminal panel (when selected agent is live)
 //!
@@ -22,20 +23,43 @@
 //! | _printable char_ | Append to control input |
 //! | `Enter` | Submit stdin text (non-empty) |
 //! | `Backspace` | Delete last character |
-//! | `Ctrl-I` | Send interrupt |
-//! | `Esc` | Clear control input |
+//! | `Ctrl-I` | Send interrupt (subject to [`InterruptPolicy`]) |
+//! | `Esc` | Clear control input / cancel pending interrupt confirmation |
+//!
+//! ### Interrupt confirmation dialog (`interrupt_policy = "confirm"`)
+//!
+//! When [`InterruptPolicy::Confirm`] is active, `Ctrl-I` sets
+//! `confirm_interrupt_pending = true` and shows `"Send interrupt? [y/N]"` in
+//! the status bar. While the dialog is open:
+//!
+//! | Key | Action |
+//! |-----|--------|
+//! | `y` / `Y` / `Enter` | Confirm — dispatch interrupt |
+//! | `n` / `N` / `Esc` | Cancel — dismiss dialog |
+//! | _other_ | Ignored |
 //!
 //! Dashboard panel ignores character input — it is mail-only.
+//!
+//! [`InterruptPolicy`]: crate::config::InterruptPolicy
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{App, FocusPanel, PendingControl};
+use crate::config::InterruptPolicy;
 
 /// Process a single terminal input event and update [`App`] state accordingly.
 ///
 /// Returns `true` if the application should quit after this event.
 pub fn handle_event(event: &Event, app: &mut App) -> bool {
     if let Event::Key(KeyEvent { code, modifiers, .. }) = event {
+        // ── Interrupt confirmation dialog (higher priority) ────────────────────
+        // When a confirmation is pending, only accept y/Y/Enter (confirm) or
+        // n/N/Esc (cancel). All other keys are silently discarded so the user
+        // does not accidentally trigger other bindings while the dialog is open.
+        if app.confirm_interrupt_pending {
+            return handle_confirm_interrupt(code, app);
+        }
+
         // ── Global bindings ───────────────────────────────────────────────────
         match (code, modifiers) {
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
@@ -54,6 +78,11 @@ pub fn handle_event(event: &Event, app: &mut App) -> bool {
                 app.cycle_focus();
                 return false;
             }
+            // 'F' (uppercase) toggles follow mode globally regardless of panel.
+            (KeyCode::Char('F'), m) if !m.contains(KeyModifiers::CONTROL) => {
+                app.follow_mode = !app.follow_mode;
+                return false;
+            }
             _ => {}
         }
 
@@ -66,23 +95,56 @@ pub fn handle_event(event: &Event, app: &mut App) -> bool {
     false
 }
 
+/// Handle the `y/N` interrupt confirmation dialog.
+///
+/// Called when `app.confirm_interrupt_pending` is `true`. Clears the pending
+/// flag in all cases; dispatches the interrupt only on confirmation.
+///
+/// Returns `true` only if the application should quit (never for this dialog).
+fn handle_confirm_interrupt(code: &KeyCode, app: &mut App) -> bool {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            app.confirm_interrupt_pending = false;
+            app.status_message = None;
+            app.pending_control = Some(PendingControl::Interrupt);
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.confirm_interrupt_pending = false;
+            app.status_message = None;
+        }
+        // Any other key is silently ignored while the dialog is open.
+        _ => {}
+    }
+    false
+}
+
 /// Handle keys while the Agent Terminal panel is focused.
 fn handle_agent_terminal_key(
     code: &KeyCode,
     modifiers: &KeyModifiers,
     app: &mut App,
 ) -> bool {
-    // Ctrl-I sends interrupt only when agent is live.
-    // When not live, the interrupt is dropped client-side to avoid
-    // sending to a session that cannot receive input.
+    // Ctrl-I — interrupt, gated by InterruptPolicy.
     if matches!(code, KeyCode::Char('i')) && modifiers.contains(KeyModifiers::CONTROL) {
         if app.is_live() {
-            app.pending_control = Some(PendingControl::Interrupt);
+            match app.config.interrupt_policy {
+                InterruptPolicy::Always => {
+                    app.pending_control = Some(PendingControl::Interrupt);
+                }
+                InterruptPolicy::Never => {
+                    // Silently discard.
+                }
+                InterruptPolicy::Confirm => {
+                    app.confirm_interrupt_pending = true;
+                    app.status_message =
+                        Some("Send interrupt? [y/N]".to_string());
+                }
+            }
         }
         return false;
     }
 
-    // Esc → clear control input
+    // Esc → clear control input (interrupt confirmation is handled above)
     if matches!(code, KeyCode::Esc) {
         app.control_input.clear();
         return false;
@@ -140,6 +202,7 @@ fn handle_dashboard_key(code: &KeyCode, app: &mut App) -> bool {
 mod tests {
     use super::*;
     use crate::app::{FocusPanel, MemberRow};
+    use crate::config::{InterruptPolicy, TuiConfig};
     use crossterm::event::{KeyEventKind, KeyEventState};
 
     fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -151,8 +214,12 @@ mod tests {
         })
     }
 
+    fn new_app() -> App {
+        App::new("atm-dev".to_string(), TuiConfig::default())
+    }
+
     fn app_with_members() -> App {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app();
         app.members = vec![
             MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 },
             MemberRow { agent: "b".into(), state: "busy".into(), inbox_count: 1 },
@@ -161,11 +228,23 @@ mod tests {
         app
     }
 
+    fn app_with_policy(policy: InterruptPolicy) -> App {
+        let mut cfg = TuiConfig::default();
+        cfg.interrupt_policy = policy;
+        let mut app = App::new("atm-dev".to_string(), cfg);
+        app.members = vec![
+            MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 },
+        ];
+        app.focus = FocusPanel::AgentTerminal;
+        app.selected_index = 0;
+        app
+    }
+
     // ── Global bindings ───────────────────────────────────────────────────────
 
     #[test]
     fn test_q_quits_on_dashboard() {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app();
         assert_eq!(app.focus, FocusPanel::Dashboard);
         let quit = handle_event(&key_event(KeyCode::Char('q'), KeyModifiers::NONE), &mut app);
         assert!(quit);
@@ -184,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_c_quits() {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app();
         let quit = handle_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL), &mut app);
         assert!(quit);
         assert!(app.should_quit);
@@ -208,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_tab_cycles_focus() {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app();
         assert_eq!(app.focus, FocusPanel::Dashboard);
         handle_event(&key_event(KeyCode::Tab, KeyModifiers::NONE), &mut app);
         assert_eq!(app.focus, FocusPanel::AgentTerminal);
@@ -218,10 +297,28 @@ mod tests {
 
     #[test]
     fn test_other_key_ignored_on_dashboard() {
-        let mut app = App::new("atm-dev".to_string());
+        let mut app = new_app();
         let quit = handle_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE), &mut app);
         assert!(!quit);
         assert!(!app.should_quit);
+    }
+
+    // ── Follow mode toggle ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_uppercase_f_toggles_follow_mode_on() {
+        let mut app = new_app();
+        app.follow_mode = false;
+        handle_event(&key_event(KeyCode::Char('F'), KeyModifiers::NONE), &mut app);
+        assert!(app.follow_mode, "F must enable follow mode when it was off");
+    }
+
+    #[test]
+    fn test_uppercase_f_toggles_follow_mode_off() {
+        let mut app = new_app();
+        app.follow_mode = true;
+        handle_event(&key_event(KeyCode::Char('F'), KeyModifiers::NONE), &mut app);
+        assert!(!app.follow_mode, "F must disable follow mode when it was on");
     }
 
     // ── Agent Terminal input bindings ─────────────────────────────────────────
@@ -287,16 +384,122 @@ mod tests {
         assert!(app.pending_control.is_none(), "Whitespace-only input should not set pending");
     }
 
+    // ── Interrupt policy: Always ──────────────────────────────────────────────
+
     #[test]
-    fn test_ctrl_i_sets_pending_interrupt() {
+    fn test_ctrl_i_always_policy_dispatches_immediately() {
+        let mut app = app_with_policy(InterruptPolicy::Always);
+        handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
+        assert!(
+            matches!(app.pending_control, Some(PendingControl::Interrupt)),
+            "Always policy must dispatch interrupt immediately"
+        );
+        assert!(!app.confirm_interrupt_pending);
+    }
+
+    // ── Interrupt policy: Never ───────────────────────────────────────────────
+
+    #[test]
+    fn test_ctrl_i_never_policy_discards_silently() {
+        let mut app = app_with_policy(InterruptPolicy::Never);
+        handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
+        assert!(app.pending_control.is_none(), "Never policy must discard interrupt");
+        assert!(!app.confirm_interrupt_pending);
+    }
+
+    // ── Interrupt policy: Confirm ─────────────────────────────────────────────
+
+    #[test]
+    fn test_ctrl_i_confirm_policy_sets_pending_dialog() {
+        let mut app = app_with_policy(InterruptPolicy::Confirm);
+        handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
+        assert!(app.confirm_interrupt_pending, "Confirm policy must open dialog");
+        assert_eq!(app.status_message.as_deref(), Some("Send interrupt? [y/N]"));
+        assert!(app.pending_control.is_none(), "Control must not be dispatched yet");
+    }
+
+    #[test]
+    fn test_confirm_dialog_y_dispatches_interrupt() {
+        let mut app = app_with_policy(InterruptPolicy::Confirm);
+        app.confirm_interrupt_pending = true;
+        app.status_message = Some("Send interrupt? [y/N]".to_string());
+        handle_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE), &mut app);
+        assert!(
+            matches!(app.pending_control, Some(PendingControl::Interrupt)),
+            "y must dispatch interrupt"
+        );
+        assert!(!app.confirm_interrupt_pending, "dialog must be cleared");
+        assert!(app.status_message.is_none(), "status message must be cleared");
+    }
+
+    #[test]
+    fn test_confirm_dialog_uppercase_y_dispatches_interrupt() {
+        let mut app = app_with_policy(InterruptPolicy::Confirm);
+        app.confirm_interrupt_pending = true;
+        handle_event(&key_event(KeyCode::Char('Y'), KeyModifiers::NONE), &mut app);
+        assert!(matches!(app.pending_control, Some(PendingControl::Interrupt)));
+        assert!(!app.confirm_interrupt_pending);
+    }
+
+    #[test]
+    fn test_confirm_dialog_enter_dispatches_interrupt() {
+        let mut app = app_with_policy(InterruptPolicy::Confirm);
+        app.confirm_interrupt_pending = true;
+        handle_event(&key_event(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert!(matches!(app.pending_control, Some(PendingControl::Interrupt)));
+        assert!(!app.confirm_interrupt_pending);
+    }
+
+    #[test]
+    fn test_confirm_dialog_n_cancels() {
+        let mut app = app_with_policy(InterruptPolicy::Confirm);
+        app.confirm_interrupt_pending = true;
+        app.status_message = Some("Send interrupt? [y/N]".to_string());
+        handle_event(&key_event(KeyCode::Char('n'), KeyModifiers::NONE), &mut app);
+        assert!(app.pending_control.is_none(), "n must cancel interrupt");
+        assert!(!app.confirm_interrupt_pending, "dialog must be cleared");
+        assert!(app.status_message.is_none(), "status message must be cleared");
+    }
+
+    #[test]
+    fn test_confirm_dialog_uppercase_n_cancels() {
+        let mut app = app_with_policy(InterruptPolicy::Confirm);
+        app.confirm_interrupt_pending = true;
+        handle_event(&key_event(KeyCode::Char('N'), KeyModifiers::NONE), &mut app);
+        assert!(app.pending_control.is_none());
+        assert!(!app.confirm_interrupt_pending);
+    }
+
+    #[test]
+    fn test_confirm_dialog_esc_cancels() {
+        let mut app = app_with_policy(InterruptPolicy::Confirm);
+        app.confirm_interrupt_pending = true;
+        handle_event(&key_event(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        assert!(app.pending_control.is_none(), "Esc must cancel interrupt confirmation");
+        assert!(!app.confirm_interrupt_pending);
+    }
+
+    #[test]
+    fn test_confirm_dialog_other_key_ignored() {
+        let mut app = app_with_policy(InterruptPolicy::Confirm);
+        app.confirm_interrupt_pending = true;
+        handle_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE), &mut app);
+        // Dialog stays open; no control dispatched.
+        assert!(app.confirm_interrupt_pending, "unrecognised key must leave dialog open");
+        assert!(app.pending_control.is_none());
+    }
+
+    // ── Legacy interrupt tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_ctrl_i_sets_pending_interrupt_default_policy() {
+        // Default policy is Confirm — Ctrl-I should open dialog, not dispatch.
         let mut app = app_with_members();
         app.focus = FocusPanel::AgentTerminal;
         app.selected_index = 1; // "b" is "busy"
         handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
-        assert!(
-            matches!(app.pending_control, Some(PendingControl::Interrupt)),
-            "Expected Interrupt pending"
-        );
+        // With Confirm policy, dialog opens rather than dispatching directly.
+        assert!(app.confirm_interrupt_pending, "default Confirm policy must open dialog");
     }
 
     #[test]
@@ -307,6 +510,7 @@ mod tests {
         app.selected_index = 0;
         handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
         assert!(app.pending_control.is_none(), "Interrupt should not be set for non-live agent");
+        assert!(!app.confirm_interrupt_pending, "dialog must not open for non-live agent");
     }
 
     #[test]

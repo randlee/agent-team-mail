@@ -32,6 +32,7 @@
 
 mod agent_terminal;
 mod app;
+mod config;
 mod dashboard;
 mod events;
 mod ui;
@@ -59,6 +60,7 @@ use agent_team_mail_core::{
 };
 
 use app::{App, MemberRow, PendingControl};
+use config::{TuiConfig, load_tui_config};
 use dashboard::{get_inbox_count, session_log_path};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -81,6 +83,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let team = cli.team.clone();
 
+    // Load user preferences before terminal setup so parse warnings go to stderr.
+    let config = load_tui_config();
+
     emit_event_best_effort(EventFields {
         level: "info",
         source: "atm-tui",
@@ -97,7 +102,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let result = run_app(&mut terminal, team.clone()).await;
+    let result = run_app(&mut terminal, team.clone(), config).await;
 
     // Restore terminal on exit (even on error)
     disable_raw_mode().ok();
@@ -126,8 +131,9 @@ async fn main() -> Result<()> {
 async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     team: String,
+    config: TuiConfig,
 ) -> Result<()> {
-    let mut app = App::new(team.clone());
+    let mut app = App::new(team.clone(), config);
 
     // Rate-limit daemon/inbox queries to 2-second intervals.
     const DAEMON_REFRESH: Duration = Duration::from_secs(2);
@@ -242,7 +248,11 @@ async fn run_app<B: ratatui::backend::Backend>(
 
         // ── Control action dispatch ───────────────────────────────────────────
         if let Some(pending) = app.pending_control.take() {
-            let result = execute_control(&team, &app.streaming_agent, pending).await;
+            let stdin_timeout = app.config.stdin_timeout_secs;
+            let interrupt_timeout = app.config.interrupt_timeout_secs;
+            let result =
+                execute_control(&team, &app.streaming_agent, pending, stdin_timeout, interrupt_timeout)
+                    .await;
             app.status_message = Some(result);
         }
 
@@ -346,11 +356,16 @@ fn emit_stream_detach_event(team: &str, agent: &str) {
 ///
 /// If no agent is selected, returns an error message without touching the
 /// daemon.  On a first-attempt [`ControlResult::Timeout`] the request is
-/// retried once after a 2-second delay with the same idempotency key.
+/// retried once after `timeout_secs / 2` seconds with the same idempotency key.
+///
+/// `stdin_timeout_secs` controls the total retry budget for stdin actions;
+/// `interrupt_timeout_secs` controls the budget for interrupt actions.
 async fn execute_control(
     team: &str,
     streaming_agent: &Option<String>,
     action: PendingControl,
+    stdin_timeout_secs: u64,
+    interrupt_timeout_secs: u64,
 ) -> String {
     let Some(agent_id) = streaming_agent else {
         return "No agent selected".to_string();
@@ -362,6 +377,12 @@ async fn execute_control(
     let (control_action, payload) = match &action {
         PendingControl::Stdin(text) => (ControlAction::Stdin, Some(text.clone())),
         PendingControl::Interrupt => (ControlAction::Interrupt, None),
+    };
+
+    // Select per-action timeout from config before control_action is moved.
+    let timeout_secs = match &control_action {
+        ControlAction::Stdin => stdin_timeout_secs,
+        ControlAction::Interrupt => interrupt_timeout_secs,
     };
 
     let msg_type = match &control_action {
@@ -398,7 +419,7 @@ async fn execute_control(
         ..Default::default()
     });
 
-    let ack = send_with_retry(&request).await;
+    let ack = send_with_retry(&request, timeout_secs).await;
 
     let result_str = match &ack {
         Ok(a) => format_ack_result(a),
@@ -422,13 +443,19 @@ async fn execute_control(
 ///
 /// Uses [`tokio::task::spawn_blocking`] because [`send_control`] performs
 /// blocking Unix socket I/O.
-async fn send_with_retry(request: &ControlRequest) -> anyhow::Result<ControlAck> {
+///
+/// On a first-attempt timeout the function sleeps for `timeout_secs / 2`
+/// seconds before issuing one retry with the same idempotency key. The
+/// `timeout_secs` value comes from the per-action TUI config fields
+/// (`stdin_timeout_secs` or `interrupt_timeout_secs`).
+async fn send_with_retry(request: &ControlRequest, timeout_secs: u64) -> anyhow::Result<ControlAck> {
     let req1 = request.clone();
     let result = tokio::task::spawn_blocking(move || send_control(&req1)).await??;
 
     if result.result == ControlResult::Timeout {
-        // Single retry after 2 s with the same idempotency key.
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Single retry after half the configured timeout budget.
+        let delay = Duration::from_secs(timeout_secs / 2);
+        tokio::time::sleep(delay).await;
         let req2 = request.clone();
         return tokio::task::spawn_blocking(move || send_control(&req2)).await?;
     }
@@ -525,7 +552,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_control_no_agent_returns_message() {
         // When streaming_agent is None, execute_control returns a "no agent" message.
-        let result = execute_control("atm-dev", &None, PendingControl::Interrupt).await;
+        let result = execute_control("atm-dev", &None, PendingControl::Interrupt, 10, 5).await;
         assert_eq!(result, "No agent selected");
     }
 
@@ -537,6 +564,8 @@ mod tests {
             "atm-dev",
             &Some("arch-ctm".to_string()),
             PendingControl::Stdin("hello".to_string()),
+            10,
+            5,
         )
         .await;
         assert!(!result.is_empty(), "result should be non-empty on daemon error");
