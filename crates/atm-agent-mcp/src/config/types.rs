@@ -133,8 +133,12 @@ pub struct AgentMcpConfig {
 
     /// Transport implementation to use for the Codex child process.
     ///
-    /// Currently only `"mcp"` (the default) is supported.  Sprint C.2b will
-    /// add `"json"`.  An absent or unrecognised value falls back to `"mcp"`.
+    /// Supported values:
+    /// - `"mcp"` (default) — spawns `codex mcp-server` (MCP stdio protocol)
+    /// - `"json"` — spawns `codex exec --json` (JSONL event stream protocol)
+    /// - `"mock"` — in-memory test double (no child process; for testing only)
+    ///
+    /// An absent or unrecognised value falls back to `"mcp"`.
     #[serde(default)]
     pub transport: Option<String>,
 }

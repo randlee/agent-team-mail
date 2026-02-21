@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::process::{Child, ChildStdin};
+use tokio::process::Child;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 use tracing::Instrument;
@@ -45,6 +45,14 @@ use crate::mail_inject::{
 };
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
+
+/// Type alias for the shared child stdin writer.
+///
+/// Shared between the proxy and background tasks (timeout cancellation, idle
+/// mail poller) so they can write JSON-RPC messages to the child without going
+/// through the proxy's main select loop.  The outer `Arc<Mutex<Option<...>>>`
+/// allows the value to be populated lazily when the child is first spawned.
+type SharedChildStdin = Arc<Mutex<Option<Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>>>>;
 
 /// Channel buffer capacity for upstream message delivery.
 ///
@@ -98,7 +106,6 @@ pub const ERR_AGENT_FILE_NOT_FOUND: i64 = -32008;
 pub const ERR_IDENTITY_REQUIRED: i64 = -32009;
 
 /// Manages the MCP proxy lifecycle: upstream I/O, child process, and message routing.
-#[derive(Debug)]
 pub struct ProxyServer {
     config: AgentMcpConfig,
     child: Option<ChildHandle>,
@@ -131,7 +138,7 @@ pub struct ProxyServer {
     /// Populated when the child is lazily spawned.  The idle mail poller task
     /// uses this to write codex-reply messages to the child without going
     /// through the proxy's main select loop.
-    shared_child_stdin: Arc<Mutex<Option<Arc<Mutex<ChildStdin>>>>>,
+    shared_child_stdin: SharedChildStdin,
     /// Append-only audit log for ATM tool calls and Codex forwards (FR-9).
     audit_log: AuditLog,
     /// Resume context loaded at startup via `--resume` (FR-6).
@@ -140,9 +147,20 @@ pub struct ProxyServer {
     resume_context: Option<ResumeContext>,
     /// Transport implementation used to spawn the Codex child process.
     ///
-    /// Stored as a trait object so Sprint C.2b can inject `JsonTransport`
+    /// Stored as a trait object so Sprint C.2b can inject `MockTransport`
     /// without modifying `ProxyServer`.
     transport: Box<dyn CodexTransport>,
+}
+
+impl std::fmt::Debug for ProxyServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyServer")
+            .field("team", &self.team)
+            .field("config", &self.config)
+            .field("transport", &self.transport)
+            .field("shared_child_stdin", &"<AsyncWrite>")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Context from a previous session to prepend on resume (FR-6).
@@ -161,22 +179,28 @@ pub struct ResumeContext {
 /// Handle to the spawned Codex child process.
 struct ChildHandle {
     /// Shared stdin writer; shared so timeout tasks can send cancellation notifications.
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     /// Receives responses and notifications from the child stdout reader task.
     response_rx: mpsc::Receiver<Value>,
     /// If the child has exited, contains the exit status.
     exit_status: Arc<Mutex<Option<ExitStatus>>>,
     /// The child process handle, kept for force-kill on shutdown.
     process: Arc<Mutex<Option<Child>>>,
+    /// Background task handle for the 30-second periodic stdin queue drain (JSON mode only).
+    ///
+    /// `None` for MCP and Mock transports.  Aborted during graceful shutdown so
+    /// the task does not outlive the proxy.
+    drain_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for ChildHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChildHandle")
-            .field("stdin", &"<ChildStdin>")
+            .field("stdin", &"<Box<dyn AsyncWrite>>")
             .field("response_rx", &"<Receiver>")
             .field("exit_status", &"<Mutex<Option<ExitStatus>>>")
             .field("process", &"<Mutex<Option<Child>>>")
+            .field("drain_task", &self.drain_task.as_ref().map(|_| "<JoinHandle>"))
             .finish()
     }
 }
@@ -702,7 +726,11 @@ impl ProxyServer {
         }
 
         // Shutdown: signal child and force-kill if it ignores stdin EOF
-        if let Some(handle) = self.child.take() {
+        if let Some(mut handle) = self.child.take() {
+            // Abort the periodic drain background task (JSON mode only).
+            if let Some(drain_handle) = handle.drain_task.take() {
+                drain_handle.abort();
+            }
             // Drop stdin to signal EOF to child
             drop(handle.stdin);
             // Grace period: give child time to flush output
@@ -2140,13 +2168,53 @@ Session ending. Write a concise summary of:\n\
     ) -> anyhow::Result<()> {
         let raw = self.transport.spawn().await?;
 
+        tracing::debug!(
+            is_idle = self.transport.is_idle(),
+            "child spawned via transport"
+        );
+
         let shared_stdin = raw.stdin;
         let stdout = raw.stdout;
         let exit_status = raw.exit_status;
         let process = raw.process;
+        let idle_flag = raw.idle_flag;
 
         // Channel for messages from child stdout reader
         let (child_tx, child_rx) = mpsc::channel::<Value>(UPSTREAM_CHANNEL_CAPACITY);
+
+        // JSON mode: start a 30-second periodic stdin queue drain timer.
+        // Only runs when the transport provides an idle_flag (i.e. JsonCodecTransport).
+        // The JoinHandle is stored so the task can be aborted on graceful shutdown.
+        let periodic_drain_task: Option<tokio::task::JoinHandle<()>> = if idle_flag.is_some() {
+            let drain_team = self.team.clone();
+            let drain_stdin = Arc::clone(&self.shared_child_stdin);
+            let drain_thread_to_agent = Arc::clone(&self.thread_to_agent);
+            Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                // Skip the first immediate tick
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    // Drain for all active agent sessions (keyed by actual agent_id).
+                    let agent_ids: Vec<String> = {
+                        let map = drain_thread_to_agent.lock().await;
+                        map.values().cloned().collect()
+                    };
+                    let stdin_guard = drain_stdin.lock().await;
+                    if let Some(ref stdin_arc) = *stdin_guard {
+                        drain_stdin_queue_for_agents(
+                            &drain_team,
+                            &agent_ids,
+                            stdin_arc,
+                            Duration::from_secs(600),
+                        )
+                        .await;
+                    }
+                }
+            }))
+        } else {
+            None
+        };
 
         // Spawn child stdout reader task
         let pending_clone = Arc::clone(pending);
@@ -2158,6 +2226,8 @@ Session ending. Write a concise summary of:\n\
         let queues_for_reader = Arc::clone(&self.queues);
         let request_counter_for_reader = Arc::clone(&self.request_counter);
         let team_for_reader = self.team.clone();
+        let idle_flag_for_reader = idle_flag;
+        let thread_to_agent_for_reader = Arc::clone(&self.thread_to_agent);
         let mail_enabled_for_reader = self.mail_poller.is_enabled();
         let mail_max_messages_reader = self.mail_poller.max_messages;
         let mail_max_length_reader = self.mail_poller.max_message_length;
@@ -2177,6 +2247,67 @@ Session ending. Write a concise summary of:\n\
                         continue;
                     }
                 };
+
+                // JSON transport JSONL event detection.
+                if let Some(ref idle_flag) = idle_flag_for_reader {
+                    let event_type = parse_jsonl_event_type(&line);
+                    match event_type {
+                        JsonlEventType::Idle => {
+                            idle_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            agent_team_mail_core::event_log::emit_event_best_effort(
+                                agent_team_mail_core::event_log::EventFields {
+                                    level: "info",
+                                    source: "atm-agent-mcp",
+                                    action: "idle_detected",
+                                    team: Some(team_for_reader.clone()),
+                                    result: Some("json".to_string()),
+                                    ..Default::default()
+                                },
+                            );
+
+                            // Drain for all active agent sessions (keyed by actual agent_id).
+                            let agent_ids: Vec<String> = {
+                                let map = thread_to_agent_for_reader.lock().await;
+                                map.values().cloned().collect()
+                            };
+                            let drain_team = team_for_reader.clone();
+                            let drain_stdin = Arc::clone(&shared_stdin_for_reader);
+                            tokio::spawn(async move {
+                                let stdin_guard = drain_stdin.lock().await;
+                                if let Some(ref stdin_arc) = *stdin_guard {
+                                    drain_stdin_queue_for_agents(
+                                        &drain_team,
+                                        &agent_ids,
+                                        stdin_arc,
+                                        Duration::from_secs(600),
+                                    )
+                                    .await;
+                                }
+                            });
+
+                            // Don't forward the idle event upstream as a JSON-RPC message
+                            continue;
+                        }
+                        JsonlEventType::Done => {
+                            agent_team_mail_core::event_log::emit_event_best_effort(
+                                agent_team_mail_core::event_log::EventFields {
+                                    level: "info",
+                                    source: "atm-agent-mcp",
+                                    action: "codex_done",
+                                    team: Some(team_for_reader.clone()),
+                                    result: Some("json".to_string()),
+                                    ..Default::default()
+                                },
+                            );
+                            // Don't forward the done event upstream as a JSON-RPC message
+                            continue;
+                        }
+                        _ => {
+                            // Reset idle flag on any non-idle event (agent is active again)
+                            idle_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                }
 
                 tracing::debug!(direction = "child->proxy", %msg);
 
@@ -2326,6 +2457,7 @@ Session ending. Write a concise summary of:\n\
             response_rx: child_rx,
             exit_status,
             process,
+            drain_task: periodic_drain_task,
         });
 
         Ok(())
@@ -2396,6 +2528,71 @@ async fn forward_event(
     }
 }
 
+/// JSONL event type as parsed from a raw event line.
+///
+/// Used by the stdout reader task in JSON transport mode to handle each
+/// event kind appropriately.
+#[derive(Debug)]
+enum JsonlEventType {
+    AgentMessage,
+    ToolCall,
+    ToolResult,
+    FileChange,
+    Idle,
+    Done,
+    /// An unrecognised or malformed event type.  The inner string is logged at
+    /// `tracing::debug` level and is intentionally unused elsewhere.
+    #[expect(
+        dead_code,
+        reason = "inner String is for Debug display only; not used in match arms"
+    )]
+    Unknown(String),
+}
+
+/// Parse the `type` field from a raw JSONL event line and return the corresponding
+/// [`JsonlEventType`].
+///
+/// Returns [`JsonlEventType::Unknown`] for unrecognised types or parse errors.
+fn parse_jsonl_event_type(line: &str) -> JsonlEventType {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .map(|t| match t.as_str() {
+            "agent_message" => JsonlEventType::AgentMessage,
+            "tool_call" => JsonlEventType::ToolCall,
+            "tool_result" => JsonlEventType::ToolResult,
+            "file_change" => JsonlEventType::FileChange,
+            "idle" => JsonlEventType::Idle,
+            "done" => JsonlEventType::Done,
+            other => JsonlEventType::Unknown(other.to_string()),
+        })
+        .unwrap_or_else(|| JsonlEventType::Unknown("(parse error)".to_string()))
+}
+
+/// Drain the stdin queue for all active agent sessions.
+///
+/// Called both on `idle` JSONL events and by the 30-second periodic timer.
+/// Iterates over all provided `agent_ids` and calls
+/// [`crate::stdin_queue::drain`] for each, logging results.
+async fn drain_stdin_queue_for_agents(
+    team: &str,
+    agent_ids: &[String],
+    shared_stdin: &Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
+    ttl: Duration,
+) {
+    for agent_id in agent_ids {
+        match crate::stdin_queue::drain(team, agent_id, shared_stdin, ttl).await {
+            Ok(count) if count > 0 => {
+                tracing::debug!(agent_id, count, "stdin queue drained");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(agent_id, error = %e, "stdin queue drain error");
+            }
+        }
+    }
+}
+
 /// Dispatch an auto-mail codex-reply to the child if unread mail is available.
 ///
 /// This is the shared logic used by both the post-turn path (in the response
@@ -2429,7 +2626,7 @@ async fn dispatch_auto_mail_if_available(
     max_message_length: usize,
     registry: &Arc<Mutex<SessionRegistry>>,
     queues: &Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<ThreadCommandQueue>>>>>,
-    shared_stdin: &Arc<Mutex<Option<Arc<Mutex<ChildStdin>>>>>,
+    shared_stdin: &SharedChildStdin,
     pending: &Arc<Mutex<PendingRequests>>,
     request_counter: &Arc<AtomicU64>,
 ) {

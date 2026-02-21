@@ -94,7 +94,7 @@ impl<R: AsyncRead + Unpin> UpstreamReader<R> {
 /// # Errors
 ///
 /// Returns an I/O error if writing or flushing fails.
-pub async fn write_newline_delimited<W: AsyncWrite + Unpin>(
+pub async fn write_newline_delimited<W: AsyncWrite + Unpin + ?Sized>(
     writer: &mut W,
     json: &str,
 ) -> io::Result<()> {
