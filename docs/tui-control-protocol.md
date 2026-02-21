@@ -24,11 +24,25 @@ Status:
 - current daemon command surface does not yet expose `control.stdin.*` / `control.interrupt.*` handlers
 - implementations must gate send paths on receiver capability discovery
 
+Phase alignment:
+
+- Phase C target is a lightweight receiver contract/stub (`C.3`): endpoint, validation, ack, dedupe skeleton
+- full interactive TUI control flows are Phase D scope
+
 ---
 
 ## 2. Envelope
 
-All control messages are JSON objects with:
+Control messages are carried as payloads inside the existing daemon socket envelope.
+
+Socket envelope (existing daemon API):
+
+- `version` (integer): daemon socket protocol version
+- `request_id` (string): socket request id
+- `command` (string): daemon command
+- `payload` (object): control message object described below
+
+Control payload object fields:
 
 - `type` (string): message type
 - `v` (integer): schema version (current: `1`)
@@ -42,6 +56,11 @@ Optional:
 
 - `thread_id` (string): backend-native thread/conversation handle
 - `meta` (object): transport/UI metadata
+
+Versioning rule:
+
+- `version` applies to daemon socket framing
+- `v` applies only to control payload schema
 
 ---
 
@@ -117,6 +136,11 @@ Optional fields:
 - `thread_id`
 - `meta.retry_count`
 - `meta.ui_source`
+
+Implementation note (current state):
+
+- interrupt contract is defined, but receiver execution path is not implemented yet in lifecycle queue
+- until implemented, receiver should return explicit unsupported response (`rejected` or `not_live` with detail)
 
 ### 3.4 `control.interrupt.ack`
 

@@ -71,6 +71,11 @@ Behavior:
 - idle/disconnected: replay from session log
 - control input disabled when target is not live
 
+Live definition (normative):
+
+- `live` means `SessionStatus::Active` AND `AgentState` in `{Idle, Busy}`
+- `Launching`, `Killed`, `Stale`, and `Closed` are not live
+
 ### 3.3 Event Log
 
 Purpose:
@@ -230,3 +235,9 @@ Security and policy baseline:
 - receiver must authorize sender identity before accepting control requests
 - all denied control attempts must be audit logged with `request_id`, `team`, `agent_id`, and rejection reason
 - TUI must never silently downgrade control input to mailbox send
+
+Phase alignment:
+
+- these docs define a contract baseline for Phase C validation work and Phase D UI implementation
+- recommended Phase C scope is a lightweight `C.3` receiver stub/contract (endpoint, validation, ack, dedupe skeleton)
+- full interactive TUI control UX remains a Phase D deliverable
