@@ -1,5 +1,5 @@
 [package]
-name = "atm-tui"
+name = "agent-team-mail-tui"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
