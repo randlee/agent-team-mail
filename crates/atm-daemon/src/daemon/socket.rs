@@ -2829,9 +2829,8 @@ mod tests {
 
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
-        assert_eq!(
-            payload["processed"].as_bool().unwrap(),
-            false,
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
             "processed must be false when session_id is empty"
         );
         assert_eq!(
