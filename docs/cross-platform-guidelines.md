@@ -69,6 +69,39 @@ Always run before declaring implementation complete:
 cargo clippy -- -D warnings
 ```
 
+## Temporary Files and Directories
+
+**Problem**: `/tmp/` is a Unix-only path. Windows has no `/tmp/` directory — hardcoding it causes immediate failure on Windows CI.
+
+**Solution**: Use `std::env::temp_dir()` for any temporary file path in production code. Use `tempfile::TempDir` for test isolation.
+
+```rust
+// BAD: Unix-only, fails on Windows
+let path = PathBuf::from("/tmp/atm-session-id");
+
+// GOOD: cross-platform
+let path = std::env::temp_dir().join("atm-session-id");
+```
+
+**In tests**, always use a scoped `TempDir` rather than a fixed temp path — this avoids both the `/tmp` problem and test interference:
+
+```rust
+// BAD: hardcoded /tmp path in test
+let path = PathBuf::from("/tmp/test-artifact");
+
+// GOOD: temp_env-isolated TempDir
+let dir = tempfile::tempdir().expect("temp dir");
+let path = dir.path().join("test-artifact");
+```
+
+### Verification
+
+Before declaring dev work complete, grep for hardcoded `/tmp`:
+```bash
+grep -rn '"/tmp/' crates/ && echo "FAIL: Found /tmp hardcoding" || echo "OK"
+grep -rn "'/tmp/" crates/ && echo "FAIL: Found /tmp hardcoding" || echo "OK"
+```
+
 ## File Paths
 
 - Use `std::path::Path` and `PathBuf` for all file operations (not string concatenation).
