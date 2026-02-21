@@ -319,7 +319,7 @@ Phase E exit gates (recommended):
 
 **Control input activation model (D.2 MVP)**: The Agent Terminal control input box uses a **single-state activation model** — panel focus equals input active. When `FocusPanel::AgentTerminal` is focused and the session is live, all printable character input goes directly to the control input field. The `control_input_active` field in `App` is reserved for a future two-state model (e.g. pressing Enter to enter edit mode) and is not wired in D.2. The two-state model is deferred to D.3+.
 
-**Interrupt gating (D.2 MVP)**: Ctrl-I interrupt requests are gated **client-side** on `is_live()`. Interrupt is only sent when the target agent is in `{idle, busy}` state. For non-live agents, the interrupt is silently dropped at the client (no socket send). This is consistent with the live-state contract — non-live sessions cannot receive control input.
+**Interrupt gating (D.2 MVP)**: Ctrl-K interrupt requests are gated **client-side** on `is_live()`. Ctrl-I is accepted as a legacy fallback only when terminal key encoding distinguishes it from Tab. Interrupt is only sent when the target agent is in `{idle, busy}` state. For non-live agents, the interrupt is silently dropped at the client (no socket send). This is consistent with the live-state contract — non-live sessions cannot receive control input.
 
 ---
 
