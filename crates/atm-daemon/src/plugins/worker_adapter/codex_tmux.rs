@@ -104,33 +104,6 @@ impl CodexTmuxBackend {
         Ok(())
     }
 
-    /// Get the pane ID of a newly created window
-    #[allow(dead_code)]
-    fn get_pane_id(&self) -> Result<String, PluginError> {
-        let output = Command::new("tmux")
-            .arg("display-message")
-            .arg("-p")
-            .arg("#{pane_id}")
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Failed to get pane ID: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(PluginError::Runtime {
-                message: format!("Failed to get pane ID: {stderr}"),
-                source: None,
-            });
-        }
-
-        let pane_id = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string();
-        Ok(pane_id)
-    }
-
     /// Generate a log file path for an agent
     fn log_path(&self, agent_id: &str) -> PathBuf {
         // Sanitize agent_id for use in filename

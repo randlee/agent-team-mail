@@ -459,16 +459,22 @@ atm read --all                   # read all messages (not just unread)
 
 **Behavior**:
 - Reads the target inbox JSON file via `atm-core`
-- By default shows only unread messages (`read: false`)
+- Default visibility uses seen-state + unread union:
+  - with `since-last-seen` enabled (default), shows messages where `read == false` **or** `timestamp > last_seen`
+  - with `--no-since-last-seen`, shows only unread messages (`read: false`)
 - Marks displayed messages as `read: true` (atomic write back)
 - `--no-mark` flag to read without marking
+- Updates local seen-state to the maximum timestamp of **displayed** messages (unless disabled), never from hidden/filtered messages
 
 **Options**:
 
 | Flag | Description |
 |------|-------------|
 | `--all` | Show all messages, not just unread |
+| `--since-last-seen` | Enable seen-state filtering (default) |
+| `--no-since-last-seen` | Disable seen-state filtering; show unread-only behavior |
 | `--no-mark` | Don't mark messages as read |
+| `--no-update-seen` | Don't update local seen-state watermark after reading |
 | `--limit <n>` | Show only last N messages |
 | `--since <timestamp>` | Show messages after timestamp |
 | `--json` | Output as JSON |
@@ -603,6 +609,112 @@ Recommended policy:
 
 Rationale:
 - Stops tasks from being marked complete before required quality gates pass.
+
+---
+
+### 4.6 Unified Event Logging (Phase C.1)
+
+`atm` must provide a **single structured event stream** across `atm`, `atm-daemon`,
+and `atm-agent-mcp` so operators can filter by team and reconstruct state transitions.
+
+#### Goals
+
+- One common sink for all binaries (CLI, daemon, MCP proxy)
+- Compact JSONL records suitable for standard log viewers and stream tools
+- Team/session traceability by default
+- Visibility into state transitions: send/receive, read-flag changes, watermark updates,
+  cleanup/resume/session lifecycle transitions
+- Logging must be fail-open (never block command execution or daemon progress)
+
+#### Sink Path and Cross-Platform Behavior
+
+- Canonical event sink path:
+  - If `ATM_HOME` is set: `${ATM_HOME}/events.jsonl`
+  - Else: `${config_dir}/atm/events.jsonl` where `config_dir` is platform-native
+    (`~/.config` on Linux/macOS, `%APPDATA%` equivalent on Windows)
+- Implementations may expose `ATM_LOG_PATH` override for tests and advanced ops.
+  - Canonical env override: `ATM_LOG_FILE`
+  - Backward-compat alias accepted: `ATM_LOG_PATH`
+
+#### Record Format
+
+- File format: JSONL (one JSON object per line).
+- Compact key names for storage efficiency.
+- First line in each new/rotated file should be a header/mapping object so tools can
+  discover explicit field meanings.
+
+**Header record (`k = "h"`) example mapping**:
+- `v` → schema version
+- `k` → record kind (`h` header, `e` event)
+- `ts` → timestamp
+- `lv` → level
+- `src` → source binary/component
+- `act` → action
+- `team` → team name
+- `sid` → session id
+- `aid` → agent id
+- `anm` → agent name
+- `target` → target identity/resource
+- `res` → result
+- `mid` → message id
+- `rid` → request id
+- `cnt` → count
+- `err` → error text
+- `msg` → message text (subject to verbosity policy)
+
+#### Mandatory and Optional Fields
+
+Every event record (`k = "e"`) must include:
+- `v`, `k`, `ts`, `lv`, `src`, `act`, `team`, `sid`
+
+Rules:
+- `sid` is required in output; if unavailable/unrelated, emit `sid: "unknown"`.
+- `team` should be emitted whenever relevant to the operation.
+- Additional contextual fields (`aid`, `anm`, `target`, `mid`, `rid`, `cnt`, `res`, `err`)
+  are strongly recommended and should be added where available.
+
+#### Message Content Policy
+
+- Default: no message body in event logs.
+- Verbosity modes:
+  - `none` (default): omit `msg`
+  - `truncated`: include Unicode-safe truncated message text
+  - `full`: include full message text
+- Intended controls: config/env/CLI compatibility layer, with env override acceptable
+  for initial C.1 rollout.
+  - `ATM_LOG_MSG=none|truncated|full`
+
+#### Rotation and Retention
+
+- Size-based rotation only.
+- Default policy:
+  - rotate at `50 MiB`
+  - retain `5` files (`events.jsonl`, `events.jsonl.1` … `.5`)
+- Rotation/retention failures must be non-fatal; emit best-effort warning and continue.
+
+#### Reliability / Failure Semantics
+
+- Logging must never cause command or daemon failure.
+- On sink write errors:
+  - swallow and continue
+  - optionally emit best-effort diagnostic to stderr/tracing
+ - `ATM_LOG=trace|debug|info|warn|error` controls console tracing verbosity for operators.
+
+#### Minimum Event Coverage (C.1 baseline)
+
+- `atm` CLI:
+  - `send`, `broadcast`, `request` outcomes
+  - `read` outcomes (including timeout)
+  - read-flag updates (`read=false` → `read=true`) with counts
+  - seen/watermark updates
+  - teams session operations (`resume`, `cleanup`)
+- `atm-daemon`:
+  - daemon start/stop lifecycle
+  - session registry transitions
+  - plugin lifecycle and significant warnings/errors
+- `atm-agent-mcp`:
+  - tool-call audit events mirrored into common sink
+  - session/identity context preserved where available
 
 ---
 
@@ -986,7 +1098,7 @@ The core has no awareness of whether a team member is local or remote.
 | Serialization | `serde` + `serde_json` | JSON file I/O with `#[serde(flatten)]` for round-trip |
 | Error handling | `thiserror` (lib) / `anyhow` (bin) | Per Pragmatic Rust Guidelines |
 | Config | `toml` + `serde` | `.atm.toml` parsing |
-| Logging | `tracing` | Structured logging, compatible with daemon mode |
+| Logging | JSONL event sink + `tracing` | Unified structured events across binaries, plus operational diagnostics |
 | Plugin registry | `inventory` | Compile-time auto-registration |
 | File locking | `flock` (libc) | Advisory locks for atm-to-atm coordination |
 | Testing | Built-in + `tempfile` + `assert_cmd` | Standard Rust test ecosystem |

@@ -1,8 +1,9 @@
 //! Main daemon event loop
 
-use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedPubSubStore, SharedStateStore};
+use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedPubSubStore, SharedSessionRegistry, SharedStateStore};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -47,6 +48,12 @@ use tracing::{debug, error, info, warn};
 ///   the inner `Option` with the sender half of the channel and pass the
 ///   receiver to `WorkerAdapterPlugin::set_launch_receiver`.  Pass
 ///   `new_launch_sender()` (with empty inner) when the plugin is absent.
+/// * `session_registry` - Shared session registry for `session-query` socket
+///   commands. Pass `new_session_registry()` from `crate::daemon`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "event loop wiring needs shared runtime handles and plugin coordination state"
+)]
 pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
@@ -55,6 +62,7 @@ pub async fn run(
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: crate::daemon::LaunchSender,
+    session_registry: SharedSessionRegistry,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -112,7 +120,7 @@ pub async fn run(
             agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
         });
     let socket_cancel = cancel.clone();
-    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, socket_cancel).await {
+    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, session_registry, socket_cancel).await {
         Ok(handle) => {
             if handle.is_some() {
                 info!("Unix socket server started successfully");
@@ -170,6 +178,13 @@ pub async fn run(
                     break;
                 }
                 Some(event) = event_rx.recv() => {
+                    let dispatch_span = tracing::info_span!(
+                        "daemon_dispatch",
+                        team = %event.team,
+                        agent = %event.agent,
+                        path = %event.path.display()
+                    );
+                    let _span_guard = dispatch_span.enter();
                     debug!("Dispatching event: team={}, agent={}, kind={:?}",
                            event.team, event.agent, event.kind);
 
@@ -199,6 +214,19 @@ pub async fn run(
                     }
 
                     for mut inbox_msg in inbox_msgs {
+                        emit_event_best_effort(EventFields {
+                            level: "info",
+                            source: "atm-daemon",
+                            action: "dispatch_message",
+                            team: Some(event.team.clone()),
+                            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+                            agent_id: Some(event.agent.clone()),
+                            agent_name: Some(event.agent.clone()),
+                            message_id: inbox_msg.message_id.clone(),
+                            result: Some("received".to_string()),
+                            ..Default::default()
+                        });
+
                         // Attach routing metadata for plugins
                         inbox_msg
                             .unknown_fields
@@ -224,6 +252,20 @@ pub async fn run(
                                 let mut plugin = plugin_arc.lock().await;
                                 debug!("Dispatching to plugin: {}", metadata.name);
                                 if let Err(e) = plugin.handle_message(&inbox_msg).await {
+                                    emit_event_best_effort(EventFields {
+                                        level: "error",
+                                        source: "atm-daemon",
+                                        action: "dispatch_plugin_error",
+                                        team: Some(event.team.clone()),
+                                        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+                                        agent_id: Some(event.agent.clone()),
+                                        agent_name: Some(event.agent.clone()),
+                                        message_id: inbox_msg.message_id.clone(),
+                                        target: Some(metadata.name.to_string()),
+                                        result: Some("error".to_string()),
+                                        error: Some(e.to_string()),
+                                        ..Default::default()
+                                    });
                                     error!("Plugin {} handle_message error: {}", metadata.name, e);
                                 }
                             }

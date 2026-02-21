@@ -3,6 +3,7 @@
 use anyhow::Result;
 use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
 use agent_team_mail_core::io::inbox::{inbox_append, inbox_update};
+use agent_team_mail_core::text::{truncate_chars, truncate_chars_slice, validate_message_text, DEFAULT_MAX_MESSAGE_BYTES};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use chrono::Utc;
 use clap::Args;
@@ -99,6 +100,8 @@ pub fn execute(args: RequestArgs) -> Result<()> {
     let request_id = Uuid::new_v4().to_string();
     let start = Instant::now();
     let request_text = format!("{}\n\nRequest-ID: {}", args.message, request_id);
+    validate_message_text(&request_text, DEFAULT_MAX_MESSAGE_BYTES)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let summary = generate_summary(&request_text);
 
     let inbox_message = InboxMessage {
@@ -204,17 +207,17 @@ fn generate_summary(text: &str) -> String {
         return "(empty message)".to_string();
     }
     let max_len = 100;
-    if trimmed.len() <= max_len {
+    if trimmed.chars().count() <= max_len {
         trimmed.to_string()
     } else {
-        format!("{}...", &trimmed[..max_len])
+        format!("{}...", truncate_chars_slice(trimmed, max_len))
     }
 }
 
 fn one_line(text: &str) -> String {
     let single = text.replace(['\n', '\r'], " ");
-    if single.len() > 120 {
-        format!("{}...", &single[..120])
+    if single.chars().count() > 120 {
+        truncate_chars(&single, 120, "...")
     } else {
         single
     }
@@ -230,6 +233,126 @@ mod tests {
         let content = serde_json::to_string_pretty(messages).unwrap();
         std::fs::write(path, content).unwrap();
     }
+
+    // -----------------------------------------------------------------------
+    // one_line() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_one_line_short_text() {
+        assert_eq!(one_line("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_one_line_replaces_newlines() {
+        assert_eq!(one_line("line1\nline2\rline3"), "line1 line2 line3");
+    }
+
+    #[test]
+    fn test_one_line_truncates_ascii_at_120() {
+        let text = "a".repeat(130);
+        let result = one_line(&text);
+        assert!(result.ends_with("..."));
+        assert!(result.chars().count() <= 123); // 120 chars + "..."
+    }
+
+    #[test]
+    fn test_one_line_exact_120_chars_no_truncation() {
+        let text = "a".repeat(120);
+        let result = one_line(&text);
+        assert_eq!(result, text);
+        assert!(!result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_one_line_multibyte_at_boundary() {
+        // 119 ASCII chars followed by a 3-byte CJK character followed by 'x'
+        // The char boundary is at char position 120 (the CJK char), not byte position 120
+        let text = format!("{}{}", "a".repeat(119), "中x");
+        let result = one_line(&text);
+        // Total chars = 121, which is > 120, so it should be truncated
+        assert!(result.ends_with("..."));
+        // Result must be valid UTF-8 (no panic means success, but verify no truncation mid-char)
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        // Should be 120 chars of content + "..."
+        assert_eq!(result.chars().count(), 123);
+    }
+
+    #[test]
+    fn test_one_line_all_emoji_truncated() {
+        // Each emoji is 4 bytes; 121 emoji far exceeds 120-char limit
+        let text = "🦀".repeat(121);
+        let result = one_line(&text);
+        assert!(result.ends_with("..."));
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_one_line_cjk_string_truncated() {
+        // 121 CJK chars (each 3 bytes) — should truncate at 120 chars
+        let text = "中".repeat(121);
+        let result = one_line(&text);
+        assert!(result.ends_with("..."));
+        // Check the content before "..." is exactly 120 chars
+        let content: &str = result.strip_suffix("...").unwrap();
+        assert_eq!(content.chars().count(), 120);
+    }
+
+    // -----------------------------------------------------------------------
+    // generate_summary() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_generate_summary_empty() {
+        assert_eq!(generate_summary(""), "(empty message)");
+    }
+
+    #[test]
+    fn test_generate_summary_short() {
+        assert_eq!(generate_summary("Short request"), "Short request");
+    }
+
+    #[test]
+    fn test_generate_summary_long_ascii() {
+        let text = "This is a very long request message that exceeds the maximum summary length of one hundred characters total";
+        let summary = generate_summary(text);
+        assert!(summary.ends_with("..."));
+        // Content before "..." must be <= 100 chars
+        let content = summary.strip_suffix("...").unwrap();
+        assert!(content.chars().count() <= 100);
+    }
+
+    #[test]
+    fn test_generate_summary_exactly_100_chars() {
+        let text = "a".repeat(100);
+        let result = generate_summary(&text);
+        assert_eq!(result, text);
+        assert!(!result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_generate_summary_101_chars_unicode_safe() {
+        // 101 CJK characters — truncation must not panic or produce invalid UTF-8
+        let text = "中".repeat(101);
+        let result = generate_summary(&text);
+        assert!(result.ends_with("..."));
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        let content = result.strip_suffix("...").unwrap();
+        assert_eq!(content.chars().count(), 100);
+    }
+
+    #[test]
+    fn test_generate_summary_emoji_unicode_safe() {
+        // 105 emoji — truncation must not panic
+        let text = "🦀".repeat(105);
+        let result = generate_summary(&text);
+        assert!(result.ends_with("..."));
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // read_and_mark_response() tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_read_and_mark_response_matches_unknown_field_request_id() {

@@ -26,6 +26,7 @@ chrono = "0.4"
 dirs = "5"
 thiserror = "2"
 notify = "7"
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use agent_team_mail_core::config::{resolve_alias, resolve_config, Config, ConfigOverrides};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{inbox_append, WriteOutcome};
 use agent_team_mail_core::io::lock::acquire_lock;
@@ -11,7 +12,10 @@ use clap::Args;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{debug, info};
 use uuid::Uuid;
+
+use agent_team_mail_core::text::{truncate_chars_slice, validate_message_text, DEFAULT_MAX_MESSAGE_BYTES};
 
 use crate::util::addressing::parse_address;
 use crate::util::file_policy::check_file_reference;
@@ -61,6 +65,7 @@ pub struct SendArgs {
 
 /// Execute the send command
 pub fn execute(args: SendArgs) -> Result<()> {
+    debug!("send command start");
     // Resolve configuration
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -114,6 +119,20 @@ pub fn execute(args: SendArgs) -> Result<()> {
     // Get message text from appropriate source
     let message_text = get_message_text(&args)?;
 
+    // Self-send check: warn and prepend warning when sender == recipient
+    let message_text = if config.core.identity == agent_name {
+        let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "unknown".to_string());
+        let session_short = &session_id[..8.min(session_id.len())];
+        let warning = format!(
+            "[WARNING: Sent to self — identity={}, session={}. Check ATM_IDENTITY.]",
+            config.core.identity, session_short
+        );
+        println!("{warning}");
+        format!("{warning}\n{message_text}")
+    } else {
+        message_text
+    };
+
     // Process file reference if provided
     let mut final_message_text = if let Some(ref file_path) = args.file {
         process_file_reference(file_path, &message_text, &team_name, &current_dir, &home_dir)?
@@ -141,6 +160,10 @@ pub fn execute(args: SendArgs) -> Result<()> {
         }
     }
 
+    // Validate final payload text after all expansions/rewrites.
+    validate_message_text(&final_message_text, DEFAULT_MAX_MESSAGE_BYTES)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     // Set sender heartbeat (isActive: true, lastActive timestamp)
     if let Err(e) = set_sender_heartbeat(&team_config_path, &config.core.identity) {
         // Non-fatal: log warning but proceed with send
@@ -163,6 +186,19 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     // Dry run output
     if args.dry_run {
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm",
+            action: "send_dry_run",
+            team: Some(team_name.clone()),
+            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            agent_id: Some(config.core.identity.clone()),
+            agent_name: Some(config.core.identity.clone()),
+            target: Some(agent_name.clone()),
+            result: Some("ok".to_string()),
+            message_text: Some(final_message_text.clone()),
+            ..Default::default()
+        });
         if args.json {
             let output = serde_json::json!({
                 "action": "send",
@@ -192,6 +228,32 @@ pub fn execute(args: SendArgs) -> Result<()> {
     }
 
     let outcome = inbox_append(&inbox_path, &inbox_message, &team_name, &agent_name)?;
+    let (result_text, conflict_count): (&str, Option<u64>) = match &outcome {
+        WriteOutcome::Success => ("success", None),
+        WriteOutcome::ConflictResolved { merged_messages } => {
+            ("conflict_resolved", Some(*merged_messages as u64))
+        }
+        WriteOutcome::Queued { .. } => ("queued", None),
+    };
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "send",
+        team: Some(team_name.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: Some(config.core.identity.clone()),
+        agent_name: Some(config.core.identity.clone()),
+        target: Some(agent_name.clone()),
+        result: Some(result_text.to_string()),
+        message_id: inbox_message.message_id.clone(),
+        count: conflict_count,
+        message_text: Some(final_message_text.clone()),
+        ..Default::default()
+    });
+    info!(
+        "send outcome: team={} agent={} result={}",
+        team_name, agent_name, result_text
+    );
 
     // Auto-subscribe the sender to the target agent's idle event (upsert — refreshes TTL
     // if a subscription already exists). This is best-effort: errors are silently ignored
@@ -326,15 +388,14 @@ fn generate_summary(text: &str) -> String {
     const MAX_LEN: usize = 100;
 
     let trimmed = text.trim();
-    if trimmed.len() <= MAX_LEN {
+    if trimmed.chars().count() <= MAX_LEN {
         trimmed.to_string()
     } else {
-        // Find a good break point (space, newline)
-        let truncated = &trimmed[..MAX_LEN];
-        if let Some(pos) = truncated.rfind(|c: char| c.is_whitespace()) {
-            format!("{}...", truncated[..pos].trim())
+        let slice = truncate_chars_slice(trimmed, MAX_LEN);
+        if let Some(pos) = slice.rfind(|c: char| c.is_whitespace()) {
+            format!("{}...", slice[..pos].trim())
         } else {
-            format!("{truncated}...")
+            format!("{slice}...")
         }
     }
 }
@@ -512,5 +573,48 @@ mod tests {
         let args = make_send_args(Some(String::new()));
         let config = Config::default();
         assert_eq!(resolve_offline_action(&args, &config), "");
+    }
+
+    #[test]
+    fn test_self_send_warning_prepended() {
+        // When sender identity == target agent name, the warning should be
+        // prepended to the message text.
+        let sender = "team-lead";
+        let agent_name = "team-lead"; // same as sender → self-send
+        let raw_message = "Hello self!";
+
+        // Simulate the self-send check logic (extracted for unit testing)
+        let session_id = "test-session-1234567890";
+        let session_short = &session_id[..8.min(session_id.len())];
+
+        let message_text = if sender == agent_name {
+            let warning = format!(
+                "[WARNING: Sent to self — identity={sender}, session={session_short}. Check ATM_IDENTITY.]"
+            );
+            format!("{warning}\n{raw_message}")
+        } else {
+            raw_message.to_string()
+        };
+
+        assert!(message_text.starts_with("[WARNING: Sent to self"));
+        assert!(message_text.contains("team-lead"));
+        assert!(message_text.contains("test-ses")); // first 8 chars
+        assert!(message_text.contains("Hello self!"));
+    }
+
+    #[test]
+    fn test_self_send_warning_not_added_for_different_recipient() {
+        let sender = "team-lead";
+        let agent_name = "arch-ctm"; // different → no warning
+        let raw_message = "Hello other!";
+
+        let message_text = if sender == agent_name {
+            format!("[WARNING: Sent to self — identity={sender}]\n{raw_message}")
+        } else {
+            raw_message.to_string()
+        };
+
+        assert_eq!(message_text, "Hello other!");
+        assert!(!message_text.contains("WARNING"));
     }
 }

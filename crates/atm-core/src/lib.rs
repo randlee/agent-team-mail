@@ -10,11 +10,15 @@
 
 pub mod config;
 pub mod context;
+pub mod control;
 pub mod daemon_client;
+pub mod event_log;
 pub mod home;
 pub mod io;
+pub mod logging;
 pub mod retention;
 pub mod schema;
+pub mod text;
 
 pub use schema::{
     AgentMember, InboxMessage, Permissions, SettingsJson, TaskItem, TaskStatus, TeamConfig,

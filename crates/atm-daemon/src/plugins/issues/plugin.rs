@@ -416,7 +416,7 @@ impl Plugin for IssuesPlugin {
                             for issue in issues {
                                 let msg = self.issue_to_message(&issue);
                                 if let Err(e) = ctx.mail.send(&self.config.team, &self.config.agent, &msg) {
-                                    eprintln!("Issues plugin: Failed to send message for issue #{}: {e}", issue.number);
+                                    warn!("Issues plugin: Failed to send message for issue #{}: {e}", issue.number);
                                 }
                             }
 
@@ -424,7 +424,7 @@ impl Plugin for IssuesPlugin {
                             self.last_poll = Some(chrono::Utc::now().to_rfc3339());
                         }
                         Err(e) => {
-                            eprintln!("Issues plugin: Failed to fetch issues: {e}");
+                            warn!("Issues plugin: Failed to fetch issues: {e}");
                             // Continue polling after error
                         }
                     }
@@ -477,7 +477,7 @@ impl Plugin for IssuesPlugin {
                         // Successfully posted comment
                     }
                     Err(e) => {
-                        eprintln!(
+                        warn!(
                             "Issues plugin: Failed to post comment on issue #{issue_number}: {e}"
                         );
                     }

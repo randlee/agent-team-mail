@@ -8,7 +8,6 @@ mod broadcast;
 mod cleanup;
 mod config_cmd;
 mod daemon;
-mod error;
 mod inbox;
 pub mod launch;
 mod members;

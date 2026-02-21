@@ -4,7 +4,8 @@ use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::{Platform, SystemContext};
 use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
 use agent_team_mail_daemon::plugins::worker_adapter::{
-    AgentConfig, MockCall, MockTmuxBackend, WorkerAdapter, WorkerAdapterPlugin, WorkersConfig,
+    AgentConfig, CaptureConfig, LogTailer, MockCall, MockTmuxBackend, WorkerAdapter,
+    WorkerAdapterPlugin, WorkersConfig,
 };
 use agent_team_mail_daemon::roster::RosterService;
 use std::collections::HashMap;
@@ -365,7 +366,7 @@ mod tmux_tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires active tmux server — run locally with `cargo test -- --ignored`
+    #[ignore = "requires active tmux server; run locally with cargo test -- --ignored"]
     async fn test_real_tmux_spawn_requires_tmux() {
         if !tmux_available() {
             eprintln!("Skipping test: tmux not available");
@@ -629,6 +630,15 @@ concurrency_policy = "reject"
     assert_eq!(qa.concurrency_policy, "reject");
 }
 
+/// Verifies that `handle_message` returns `Err` when the codex-tmux backend
+/// cannot complete a real spawn/capture cycle (no actual tmux worker present).
+///
+/// Requires a live tmux session named "test-session" and a real `codex` binary
+/// to produce meaningful output.  Run manually with `ATM_TEST_TMUX=1`:
+/// ```text
+/// ATM_TEST_TMUX=1 cargo test test_handle_message_routes_to_agent -- --ignored
+/// ```
+#[ignore = "requires a real tmux backend; set ATM_TEST_TMUX=1 and run with --ignored"]
 #[tokio::test]
 async fn test_handle_message_routes_to_agent() {
     use agent_team_mail_core::schema::InboxMessage;
@@ -691,6 +701,14 @@ async fn test_handle_message_routes_to_agent() {
     ctx.config = Arc::new(config);
 
     let mut plugin = WorkerAdapterPlugin::new();
+    // Use a 1-second capture timeout so the test completes quickly when no real
+    // worker output arrives (default is 60 seconds).
+    plugin.set_log_tailer(LogTailer::with_config(CaptureConfig {
+        timeout_ms: 1_000,
+        poll_interval_ms: 50,
+        max_response_bytes: 1_024,
+        idle_timeout_ms: 500,
+    }));
     plugin.init(&ctx).await.unwrap();
 
     // Create a message with recipient in unknown_fields
@@ -710,13 +728,14 @@ async fn test_handle_message_routes_to_agent() {
         unknown_fields,
     };
 
-    // Handle the message (will spawn worker and process message)
-    // This is a lightweight test that verifies routing logic without needing to manipulate internals
+    // Handle the message.  Without a real worker producing log output the
+    // capture step (or the spawn step) must fail — routing to a codex-tmux
+    // backend with no live agent is always an error path.
     let result = plugin.handle_message(&message).await;
-
-    // Test verifies that the message routing logic identifies the correct target agent
-    // The actual spawn will fail (no real tmux), but routing logic succeeds
-    assert!(result.is_err() || result.is_ok());
+    assert!(
+        result.is_err(),
+        "Expected routing to fail without a real tmux backend/worker; got: {result:?}"
+    );
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@
 use super::config::BridgePluginConfig;
 use super::self_write_filter::SelfWriteFilter;
 use super::sync::SyncEngine;
-#[allow(unused_imports)] // Required for Transport trait method dispatch (.connect())
+#[cfg(feature = "ssh")]
 use super::transport::Transport;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use std::sync::Arc;
@@ -24,7 +24,6 @@ pub struct BridgePlugin {
 
     /// Self-write filter to prevent feedback loops
     /// TODO: Wire up with watcher events once event handling is implemented
-    #[allow(dead_code)]
     self_write_filter: Arc<Mutex<SelfWriteFilter>>,
 
     /// Team directory
