@@ -22,9 +22,17 @@ def read_atm_toml() -> dict[str, Any] | None:
     """Read .atm.toml from current working directory.
 
     Returns the parsed config dict, or None if not present / unreadable.
+    Supports Python 3.11+ (tomllib) and older versions via tomli fallback.
     """
     try:
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ImportError:
+                return None  # Cannot parse TOML; treat as absent
+
         toml_path = Path(".atm.toml")
         if not toml_path.exists():
             return None
@@ -37,7 +45,7 @@ def read_atm_toml() -> dict[str, Any] | None:
 # ── Socket helper ─────────────────────────────────────────────────────────────
 
 def send_hook_event(payload: dict[str, Any]) -> None:
-    """Send hook_event to daemon socket. Fail-open: any error is silently swallowed."""
+    """Send hook_event to daemon socket. Fail-open: any error is logged to stderr."""
     import socket as _socket
     import uuid
     atm_home = Path(os.environ.get("ATM_HOME", str(Path.home())))
@@ -58,8 +66,8 @@ def send_hook_event(payload: dict[str, Any]) -> None:
             s.sendall(msg)
             # Drain response (ignore content)
             s.recv(4096)
-    except Exception:
-        pass  # Fail-open
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[atm-hook] socket send failed: {exc}\n")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -76,37 +84,41 @@ def main() -> int:
     session_id: str = data.get("session_id", "") or ""
     source: str = data.get("source", "init") or "init"
 
-    # Always print SESSION_ID to stdout for Claude context injection
+    # Always print SESSION_ID to stdout for Claude context injection.
+    # This is pure stdout output — safe for all Claude sessions, no file I/O.
     if session_id:
         if source == "compact":
             print(f"SESSION_ID={session_id} (returning from compact)")
         else:
             print(f"SESSION_ID={session_id} (starting fresh)")
 
-    # Read .atm.toml — guards both the context output AND the socket call
+    # From here: guard ALL side effects with .atm.toml presence.
+    # File I/O and socket sends only happen when this is an ATM project session.
     atm_config = read_atm_toml()
-    if atm_config is not None:
-        core = atm_config.get("core", {}) if isinstance(atm_config.get("core"), dict) else {}
-        default_team: str = core.get("default_team", "") or ""
-        identity: str = core.get("identity", "") or ""
-        welcome_message: str = core.get("welcome-message", "") or ""
+    if atm_config is None:
+        return 0  # Not an ATM project session — do nothing further
 
-        if default_team:
-            print(f"ATM team: {default_team}")
-        if welcome_message:
-            print(f"Welcome: {welcome_message}")
+    core = atm_config.get("core", {}) if isinstance(atm_config.get("core"), dict) else {}
+    default_team: str = core.get("default_team", "") or ""
+    identity: str = core.get("identity", "") or ""
+    welcome_message: str = core.get("welcome-message", "") or ""
 
-        # Send hook event to daemon socket (only when .atm.toml present)
-        if session_id:
-            payload: dict[str, Any] = {
-                "event": "session_start",
-                "session_id": session_id,
-                "agent": identity,
-                "team": default_team,
-                "source": source if source == "compact" else "init",
-                "process_id": os.getpid(),
-            }
-            send_hook_event(payload)
+    if default_team:
+        print(f"ATM team: {default_team}")
+    if welcome_message:
+        print(f"Welcome: {welcome_message}")
+
+    # Send hook event to daemon socket (only when .atm.toml present)
+    if session_id:
+        payload: dict[str, Any] = {
+            "event": "session_start",
+            "session_id": session_id,
+            "agent": identity,
+            "team": default_team,
+            "source": source if source == "compact" else "init",
+            "process_id": os.getpid(),
+        }
+        send_hook_event(payload)
 
     return 0
 

@@ -24,9 +24,17 @@ def read_atm_toml() -> dict[str, Any] | None:
     """Read .atm.toml from current working directory.
 
     Returns the parsed config dict, or None if not present / unreadable.
+    Supports Python 3.11+ (tomllib) and older versions via tomli fallback.
     """
     try:
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ImportError:
+                return None  # Cannot parse TOML; treat as absent
+
         toml_path = Path(".atm.toml")
         if not toml_path.exists():
             return None
@@ -39,7 +47,7 @@ def read_atm_toml() -> dict[str, Any] | None:
 # ── Socket helper ─────────────────────────────────────────────────────────────
 
 def send_hook_event(payload: dict[str, Any]) -> None:
-    """Send hook_event to daemon socket. Fail-open: any error is silently swallowed."""
+    """Send hook_event to daemon socket. Fail-open: any error is logged to stderr."""
     import socket as _socket
     import uuid
     atm_home = Path(os.environ.get("ATM_HOME", str(Path.home())))
@@ -60,8 +68,8 @@ def send_hook_event(payload: dict[str, Any]) -> None:
             s.sendall(msg)
             # Drain response (ignore content)
             s.recv(4096)
-    except Exception:
-        pass  # Fail-open
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[atm-hook] socket send failed: {exc}\n")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -75,26 +83,28 @@ def main() -> int:
     except Exception:
         data = {}
 
-    session_id: str = data.get("session_id", "") or ""
-
-    # Only act when .atm.toml is present in cwd
+    # Guard ALL side effects with .atm.toml presence.
+    # If .atm.toml is absent this is not an ATM project session — do nothing.
     atm_config = read_atm_toml()
-    if atm_config is not None:
-        core = atm_config.get("core", {}) if isinstance(atm_config.get("core"), dict) else {}
-        default_team: str = core.get("default_team", "") or ""
-        identity: str = core.get("identity", "") or ""
+    if atm_config is None:
+        return 0  # Not an ATM project session — do nothing
 
-        if not session_id:
-            return 0
+    session_id: str = data.get("session_id", "") or ""
+    core = atm_config.get("core", {}) if isinstance(atm_config.get("core"), dict) else {}
+    default_team: str = core.get("default_team", "") or ""
+    identity: str = core.get("identity", "") or ""
 
-        payload: dict[str, Any] = {
-            "event": "session_end",
-            "session_id": session_id,
-            "agent": identity,
-            "team": default_team,
-            "reason": "session_exit",
-        }
-        send_hook_event(payload)
+    if not session_id:
+        return 0
+
+    payload: dict[str, Any] = {
+        "event": "session_end",
+        "session_id": session_id,
+        "agent": identity,
+        "team": default_team,
+        "reason": "session_exit",
+    }
+    send_hook_event(payload)
 
     return 0
 

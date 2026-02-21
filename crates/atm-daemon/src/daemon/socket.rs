@@ -444,20 +444,24 @@ async fn handle_hook_event_command(
 
     match event_type.as_str() {
         "session_start" => {
-            if !session_id.is_empty() {
-                let pid = process_id.unwrap_or(0);
-                session_registry
-                    .lock()
-                    .unwrap()
-                    .upsert(&agent, &session_id, pid);
+            if session_id.is_empty() {
+                return make_ok_response(
+                    &request.request_id,
+                    serde_json::json!({"processed": false, "reason": "missing session_id"}),
+                );
             }
+            let pid = process_id.unwrap_or(0);
+            session_registry
+                .lock()
+                .unwrap()
+                .upsert(&agent, &session_id, pid);
             {
                 let mut tracker = state_store.lock().unwrap();
                 if tracker.get_state(&agent).is_none() {
                     tracker.register_agent(&agent);
                 }
             }
-            info!("hook_event session_start: agent={agent} session_id={session_id}");
+            info!(agent = %agent, session_id = %session_id, "hook_event.session_start");
         }
         "teammate_idle" => {
             {
@@ -2795,5 +2799,89 @@ mod tests {
         assert_eq!(payload["session_id"].as_str().unwrap(), "sess-deadbeef");
         // alive is false because the PID doesn't exist (non-unix: always false)
         assert!(!payload["alive"].as_bool().unwrap());
+    }
+
+    // ── hook-event session_start with empty session_id tests ──────────────────
+
+    /// When session_id is empty in a session_start event, the handler must
+    /// return processed=false immediately without mutating session registry or
+    /// agent state tracker.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_session_start_empty_session_id_returns_not_processed() {
+        let state_store = make_store();
+        let sr = make_sr();
+
+        let request = SocketRequest {
+            version: agent_team_mail_core::daemon_client::PROTOCOL_VERSION,
+            request_id: "req-empty-sid".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "team-lead",
+                "session_id": "",
+                "process_id": 12345_u32,
+            }),
+        };
+        let req_str = serde_json::to_string(&request).unwrap();
+
+        let resp = handle_hook_event_command(&req_str, &state_store, &sr).await;
+
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(
+            payload["processed"].as_bool().unwrap(),
+            false,
+            "processed must be false when session_id is empty"
+        );
+        assert_eq!(
+            payload["reason"].as_str().unwrap(),
+            "missing session_id",
+        );
+
+        // Session registry must remain empty — no upsert occurred
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query("team-lead").is_none(),
+            "session registry must not be mutated when session_id is empty"
+        );
+        drop(reg);
+
+        // State tracker must remain empty — no register_agent occurred
+        let tracker = state_store.lock().unwrap();
+        assert!(
+            tracker.get_state("team-lead").is_none(),
+            "agent state tracker must not be mutated when session_id is empty"
+        );
+    }
+
+    /// Confirm that the agent is NOT registered in the state tracker when
+    /// session_id is absent, even if the agent field is present.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_session_start_no_agent_registration_without_session_id() {
+        let state_store = make_store();
+        let sr = make_sr();
+
+        let request = SocketRequest {
+            version: agent_team_mail_core::daemon_client::PROTOCOL_VERSION,
+            request_id: "req-no-reg".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "session_id": "",
+            }),
+        };
+        let req_str = serde_json::to_string(&request).unwrap();
+
+        let _resp = handle_hook_event_command(&req_str, &state_store, &sr).await;
+
+        // Agent must NOT appear in the tracker after an empty-session_id event
+        let tracker = state_store.lock().unwrap();
+        assert!(
+            tracker.get_state("arch-ctm").is_none(),
+            "arch-ctm must not be registered when session_id is empty"
+        );
     }
 }

@@ -38,11 +38,14 @@ def _make_payload(
     }
 
 
+_TOML_WITH_TEAM = '[core]\ndefault_team = "atm-dev"\nidentity = "arch-ctm"\n'
+
+
 class TestTeammateIdleRelayFileWrite(unittest.TestCase):
-    """Original file-write behaviour must still work."""
+    """Original file-write behaviour must still work (with .atm.toml present)."""
 
     def _run(self, stdin_data: dict, *, atm_home: Path) -> int:
-        mod = _load_module("teammate_idle_relay", _RELAY_PATH)
+        """Run in current working directory (caller must ensure .atm.toml is present)."""
         stdin_text = json.dumps(stdin_data)
         with patch("sys.stdin", StringIO(stdin_text)), \
              patch.dict(os.environ, {"ATM_HOME": str(atm_home)}):
@@ -50,28 +53,40 @@ class TestTeammateIdleRelayFileWrite(unittest.TestCase):
             return mod.main()
 
     def test_appends_jsonl_event(self):
-        """Event is written to events.jsonl."""
+        """Event is written to events.jsonl when .atm.toml is present."""
         with tempfile.TemporaryDirectory() as tmpdir:
             atm_home = Path(tmpdir)
-            rc = self._run(_make_payload(), atm_home=atm_home)
-            self.assertEqual(rc, 0)
-            events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
-            self.assertTrue(events_file.exists())
-            lines = events_file.read_text().strip().splitlines()
-            self.assertEqual(len(lines), 1)
-            event = json.loads(lines[0])
-            self.assertEqual(event["type"], "teammate-idle")
-            self.assertEqual(event["agent"], "arch-ctm")
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
+                rc = self._run(_make_payload(), atm_home=atm_home)
+                self.assertEqual(rc, 0)
+                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                self.assertTrue(events_file.exists())
+                lines = events_file.read_text().strip().splitlines()
+                self.assertEqual(len(lines), 1)
+                event = json.loads(lines[0])
+                self.assertEqual(event["type"], "teammate-idle")
+                self.assertEqual(event["agent"], "arch-ctm")
+            finally:
+                os.chdir(orig_dir)
 
     def test_multiple_events_appended(self):
-        """Multiple calls append multiple lines."""
+        """Multiple calls append multiple lines when .atm.toml is present."""
         with tempfile.TemporaryDirectory() as tmpdir:
             atm_home = Path(tmpdir)
-            for _ in range(3):
-                self._run(_make_payload(), atm_home=atm_home)
-            events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
-            lines = events_file.read_text().strip().splitlines()
-            self.assertEqual(len(lines), 3)
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
+                for _ in range(3):
+                    self._run(_make_payload(), atm_home=atm_home)
+                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                lines = events_file.read_text().strip().splitlines()
+                self.assertEqual(len(lines), 3)
+            finally:
+                os.chdir(orig_dir)
 
     def test_team_from_toml(self):
         """Team is read from .atm.toml when not in payload."""
@@ -92,13 +107,19 @@ class TestTeammateIdleRelayFileWrite(unittest.TestCase):
                 os.chdir(orig_dir)
 
     def test_exit_zero_on_bad_stdin(self):
-        """Malformed stdin → exits 0 (fail-open)."""
+        """Malformed stdin → exits 0 (fail-open), even with .atm.toml present."""
         with tempfile.TemporaryDirectory() as tmpdir:
             atm_home = Path(tmpdir)
-            with patch("sys.stdin", StringIO("not-json{{{")), \
-                 patch.dict(os.environ, {"ATM_HOME": str(atm_home)}):
-                mod = _load_module("teammate_idle_relay", _RELAY_PATH)
-                rc = mod.main()
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
+                with patch("sys.stdin", StringIO("not-json{{{")), \
+                     patch.dict(os.environ, {"ATM_HOME": str(atm_home)}):
+                    mod = _load_module("teammate_idle_relay", _RELAY_PATH)
+                    rc = mod.main()
+            finally:
+                os.chdir(orig_dir)
         self.assertEqual(rc, 0)
 
 
@@ -224,6 +245,86 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [], "No connect attempt when socket file is absent")
+
+
+class TestTeammateIdleRelayGuards(unittest.TestCase):
+    """Tests for C-1 and I-1: .atm.toml guard and tomllib fallback."""
+
+    def test_no_atm_toml_no_file_write_and_no_socket(self):
+        """When .atm.toml is absent, BOTH file write AND socket send are skipped."""
+        socket_calls = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            orig_dir = os.getcwd()
+            try:
+                # chdir to a separate empty dir (no .atm.toml)
+                run_dir = Path(tmpdir) / "run"
+                run_dir.mkdir()
+                os.chdir(run_dir)
+
+                stdin_text = json.dumps(_make_payload())
+                with patch("sys.stdin", StringIO(stdin_text)), \
+                     patch.dict(os.environ, {"ATM_HOME": str(atm_home)}), \
+                     patch("socket.socket") as mock_sock:
+                    mock_sock.side_effect = lambda *a, **kw: socket_calls.append(1) or MagicMock()
+                    mod = _load_module("teammate_idle_relay", _RELAY_PATH)
+                    rc = mod.main()
+            finally:
+                os.chdir(orig_dir)
+
+        self.assertEqual(rc, 0)
+        # No socket send
+        self.assertEqual(socket_calls, [], "Socket must not be called when .atm.toml is absent")
+        # No file write — events.jsonl must not exist
+        events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+        self.assertFalse(
+            events_file.exists(),
+            "events.jsonl must NOT be created when .atm.toml is absent"
+        )
+
+    def test_tomllib_unavailable_no_side_effects(self):
+        """When both tomllib and tomli are unavailable, no file write and no socket send occur."""
+        import builtins
+        real_import = builtins.__import__
+
+        def import_blocker(name, *args, **kwargs):
+            if name in ("tomllib", "tomli"):
+                raise ImportError(f"Simulated missing: {name}")
+            return real_import(name, *args, **kwargs)
+
+        socket_calls = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            orig_dir = os.getcwd()
+            try:
+                run_dir = Path(tmpdir) / "run"
+                run_dir.mkdir()
+                os.chdir(run_dir)
+                # Write .atm.toml — but tomllib import will be blocked
+                (run_dir / ".atm.toml").write_text(
+                    '[core]\ndefault_team = "atm-dev"\nidentity = "team-lead"\n'
+                )
+
+                stdin_text = json.dumps(_make_payload())
+                with patch("sys.stdin", StringIO(stdin_text)), \
+                     patch.dict(os.environ, {"ATM_HOME": str(atm_home)}), \
+                     patch("builtins.__import__", side_effect=import_blocker), \
+                     patch("socket.socket") as mock_sock:
+                    mock_sock.side_effect = lambda *a, **kw: socket_calls.append(1) or MagicMock()
+                    mod = _load_module("teammate_idle_relay", _RELAY_PATH)
+                    rc = mod.main()
+            finally:
+                os.chdir(orig_dir)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(socket_calls, [], "Socket must not be called when tomllib is unavailable")
+        events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+        self.assertFalse(
+            events_file.exists(),
+            "events.jsonl must NOT be created when tomllib is unavailable"
+        )
 
 
 if __name__ == "__main__":

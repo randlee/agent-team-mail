@@ -241,5 +241,117 @@ class TestSessionStartSocketSend(unittest.TestCase):
         self.assertEqual(request["payload"]["team"], "atm-dev")
 
 
+class TestSessionStartGuards(unittest.TestCase):
+    """Tests for C-1 and I-1: .atm.toml guard and tomllib fallback."""
+
+    def _run_main_in_tmpdir(
+        self,
+        stdin_data: dict,
+        *,
+        toml_content: str | None = None,
+        mock_mkdir=None,
+        mock_open=None,
+    ) -> tuple[int, str]:
+        """Run session-start.main() in a temp dir, return (exit_code, stdout)."""
+        captured = StringIO()
+        stdin_text = json.dumps(stdin_data)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                if toml_content is not None:
+                    Path(tmpdir, ".atm.toml").write_text(toml_content)
+
+                patches = [
+                    patch("sys.stdin", StringIO(stdin_text)),
+                    patch("sys.stdout", captured),
+                ]
+                if mock_mkdir is not None:
+                    patches.append(patch("pathlib.Path.mkdir", mock_mkdir))
+                if mock_open is not None:
+                    patches.append(patch("builtins.open", mock_open))
+
+                with patches[0], patches[1]:
+                    mod = _load_module("session_start", _SESSION_START_PATH)
+                    rc = mod.main()
+            finally:
+                os.chdir(orig_dir)
+
+        return rc, captured.getvalue()
+
+    def test_no_atm_toml_no_file_io(self):
+        """When .atm.toml is absent, no file I/O or directory creation occurs."""
+        mkdir_calls = []
+        open_calls = []
+
+        def fake_mkdir(self_path, *args, **kwargs):
+            mkdir_calls.append(str(self_path))
+
+        def fake_open(path, *args, **kwargs):
+            open_calls.append(str(path))
+            raise AssertionError(f"open() must not be called without .atm.toml, got: {path}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                # No .atm.toml written — guard should prevent all I/O
+                stdin_text = json.dumps({"session_id": "test-sid", "source": "init"})
+                captured = StringIO()
+                with patch("sys.stdin", StringIO(stdin_text)), \
+                     patch("sys.stdout", captured):
+                    mod = _load_module("session_start", _SESSION_START_PATH)
+                    rc = mod.main()
+            finally:
+                os.chdir(orig_dir)
+
+        self.assertEqual(rc, 0)
+        # SESSION_ID stdout is unconditional — that is expected
+        self.assertIn("SESSION_ID=test-sid", captured.getvalue())
+        # No socket, no file writes: open_calls stays empty (no fake_open was triggered)
+        self.assertEqual(open_calls, [])
+
+    def test_tomllib_unavailable_exits_zero(self):
+        """When both tomllib and tomli are unavailable, script exits 0 with no side effects."""
+        import builtins
+        real_import = builtins.__import__
+
+        def import_blocker(name, *args, **kwargs):
+            if name in ("tomllib", "tomli"):
+                raise ImportError(f"Simulated missing: {name}")
+            return real_import(name, *args, **kwargs)
+
+        captured = StringIO()
+        socket_calls = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                # Write a valid .atm.toml — but tomllib can't parse it
+                Path(tmpdir, ".atm.toml").write_text(
+                    '[core]\ndefault_team = "atm-dev"\nidentity = "team-lead"\n'
+                )
+                stdin_text = json.dumps({"session_id": "sid-no-toml", "source": "init"})
+                with patch("sys.stdin", StringIO(stdin_text)), \
+                     patch("sys.stdout", captured), \
+                     patch("builtins.__import__", side_effect=import_blocker), \
+                     patch("socket.socket") as mock_sock:
+                    mock_sock.return_value.__enter__ = MagicMock(return_value=MagicMock())
+                    mock_sock.return_value.__exit__ = MagicMock(return_value=False)
+                    mock_sock.side_effect = lambda *a, **kw: socket_calls.append(1) or MagicMock()
+                    mod = _load_module("session_start", _SESSION_START_PATH)
+                    rc = mod.main()
+            finally:
+                os.chdir(orig_dir)
+
+        self.assertEqual(rc, 0)
+        # SESSION_ID stdout still printed (unconditional)
+        self.assertIn("SESSION_ID=sid-no-toml", captured.getvalue())
+        # No socket send — tomllib unavailable means read_atm_toml() returned None
+        self.assertEqual(socket_calls, [], "Socket must not be called when tomllib is unavailable")
+
+
 if __name__ == "__main__":
     unittest.main()
