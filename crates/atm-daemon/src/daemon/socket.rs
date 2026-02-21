@@ -30,14 +30,34 @@ use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use tracing::{debug, error, info, warn};
 
-use crate::daemon::dedup::{DedupeKey, DedupeStore};
+use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
 use crate::daemon::session_registry::SharedSessionRegistry;
 use crate::plugins::worker_adapter::AgentState;
 
 // ── Public API (cross-platform stubs) ────────────────────────────────────────
+
+/// Shared durable dedupe store, threaded through the socket server.
+///
+/// Wraps a [`DurableDedupeStore`] in an `Arc<Mutex<_>>` so it can be
+/// cloned cheaply and shared across connection-handler tasks.
+pub type SharedDedupeStore =
+    std::sync::Arc<std::sync::Mutex<DurableDedupeStore>>;
+
+/// Create a new [`SharedDedupeStore`] from the given home directory.
+///
+/// Reads `ATM_DEDUP_CAPACITY` and `ATM_DEDUP_TTL_SECS` from the environment.
+/// The backing file is `{home_dir}/.claude/daemon/dedup.jsonl`.
+///
+/// # Errors
+///
+/// Returns an error if the daemon directory cannot be created or the existing
+/// backing file cannot be read.
+pub fn new_dedup_store(home_dir: &std::path::Path) -> Result<SharedDedupeStore> {
+    let store = DurableDedupeStore::from_env(home_dir)?;
+    Ok(std::sync::Arc::new(std::sync::Mutex::new(store)))
+}
 
 /// Start the Unix socket server and return a handle that cleans up the socket
 /// on drop.
@@ -53,6 +73,8 @@ use crate::plugins::worker_adapter::AgentState;
 ///   worker adapter is disabled; the socket server will return a
 ///   `LAUNCH_UNAVAILABLE` error for any `"launch"` requests.
 /// * `session_registry` - Shared session registry for `session-query` requests
+/// * `dedup_store` - Shared durable dedupe store for idempotency across restarts.
+///   Create with [`new_dedup_store()`].
 /// * `cancel` - Cancellation token; server stops accepting when cancelled
 ///
 /// # Platform Behaviour
@@ -64,6 +86,7 @@ pub async fn start_socket_server(
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
+    dedup_store: SharedDedupeStore,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
@@ -74,6 +97,7 @@ pub async fn start_socket_server(
             pubsub_store,
             launch_tx,
             session_registry,
+            dedup_store,
             cancel,
         )
         .await
@@ -151,11 +175,6 @@ pub fn new_pubsub_store() -> SharedPubSubStore {
     std::sync::Arc::new(std::sync::Mutex::new(PubSub::new()))
 }
 
-fn control_dedupe_store() -> &'static std::sync::Mutex<DedupeStore> {
-    static STORE: OnceLock<std::sync::Mutex<DedupeStore>> = OnceLock::new();
-    STORE.get_or_init(|| std::sync::Mutex::new(DedupeStore::from_env()))
-}
-
 // ── Launch channel types ──────────────────────────────────────────────────────
 
 /// A request to launch a new agent, sent from the socket handler to the
@@ -193,6 +212,7 @@ async fn start_unix_socket_server(
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
+    dedup_store: SharedDedupeStore,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -225,10 +245,12 @@ async fn start_unix_socket_server(
     tokio::spawn(async move {
         run_accept_loop(
             listener,
+            home_dir,
             state_store,
             pubsub_store,
             launch_tx,
             session_registry,
+            dedup_store,
             cancel,
             &accept_socket_path,
             &accept_pid_path,
@@ -249,10 +271,12 @@ async fn start_unix_socket_server(
 )]
 async fn run_accept_loop(
     listener: tokio::net::UnixListener,
+    home_dir: std::path::PathBuf,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
+    dedup_store: SharedDedupeStore,
     cancel: tokio_util::sync::CancellationToken,
     socket_path: &std::path::Path,
     _pid_path: &std::path::Path,
@@ -268,12 +292,14 @@ async fn run_accept_loop(
             result = listener.accept() => {
                 match result {
                     Ok((stream, _addr)) => {
+                        let home = home_dir.clone();
                         let store = state_store.clone();
                         let ps = pubsub_store.clone();
                         let tx = launch_tx.clone();
                         let sr = session_registry.clone();
+                        let dd = dedup_store.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, store, ps, tx, sr).await {
+                            if let Err(e) = handle_connection(stream, home, store, ps, tx, sr, dd).await {
                                 error!("Socket connection handler error: {e}");
                             }
                         });
@@ -294,10 +320,12 @@ async fn run_accept_loop(
 #[cfg(unix)]
 async fn handle_connection(
     stream: tokio::net::UnixStream,
+    home: std::path::PathBuf,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
+    dedup_store: SharedDedupeStore,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -326,7 +354,8 @@ async fn handle_connection(
     let response = if is_launch_command(request_str) {
         handle_launch_command(request_str, &launch_tx).await
     } else if is_control_command(request_str) {
-        handle_control_command(request_str, &state_store, &session_registry).await
+        handle_control_command(request_str, &home, &state_store, &session_registry, &dedup_store)
+            .await
     } else if is_hook_event_command(request_str) {
         handle_hook_event_command(request_str, &state_store, &session_registry).await
     } else {
@@ -628,8 +657,10 @@ async fn handle_launch_command(request_str: &str, launch_tx: &LaunchSender) -> S
 #[cfg(unix)]
 async fn handle_control_command(
     request_str: &str,
+    home: &std::path::Path,
     state_store: &SharedStateStore,
     session_registry: &SharedSessionRegistry,
+    dedup_store: &SharedDedupeStore,
 ) -> SocketResponse {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
 
@@ -666,7 +697,8 @@ async fn handle_control_command(
         }
     };
 
-    let ack = process_control_request(control, state_store, session_registry).await;
+    let ack =
+        process_control_request(control, home, state_store, session_registry, dedup_store).await;
     make_ok_response(
         &request.request_id,
         serde_json::to_value(ack).unwrap_or_else(|_| serde_json::json!({})),
@@ -763,7 +795,7 @@ fn control_request_is_live(
 }
 
 #[cfg(unix)]
-fn validate_control_request(control: &ControlRequest) -> Option<String> {
+pub(crate) fn validate_control_request(control: &ControlRequest) -> Option<String> {
     if control.v != CONTROL_SCHEMA_VERSION {
         return Some(format!(
             "unsupported control schema version {}; expected {}",
@@ -845,8 +877,12 @@ fn read_content_ref_text(content_ref: &ContentRef) -> Result<String, String> {
 }
 
 #[cfg(unix)]
-async fn enqueue_stdin_message(team: &str, agent_id: &str, content: &str) -> Result<(), String> {
-    let home = agent_team_mail_core::home::get_home_dir().map_err(|e| e.to_string())?;
+async fn enqueue_stdin_message(
+    home: &std::path::Path,
+    team: &str,
+    agent_id: &str,
+    content: &str,
+) -> Result<(), String> {
     let dir = home
         .join(".config/atm/agent-sessions")
         .join(team)
@@ -865,8 +901,10 @@ async fn enqueue_stdin_message(team: &str, agent_id: &str, content: &str) -> Res
 #[cfg(unix)]
 async fn process_control_request(
     control: ControlRequest,
+    home: &std::path::Path,
     state_store: &SharedStateStore,
     session_registry: &SharedSessionRegistry,
+    dedup_store: &SharedDedupeStore,
 ) -> ControlAck {
     emit_control_request_event(&control);
 
@@ -915,7 +953,7 @@ async fn process_control_request(
         &control.agent_id,
         &control.request_id,
     );
-    let is_duplicate = control_dedupe_store().lock().unwrap().check_and_insert(key);
+    let is_duplicate = dedup_store.lock().unwrap().check_and_insert(key);
     if is_duplicate {
         let ack = control_ack(
             &control.request_id,
@@ -977,7 +1015,7 @@ async fn process_control_request(
                     Some("stdin payload cannot be empty".to_string()),
                 )
             } else {
-                match enqueue_stdin_message(&control.team, &control.agent_id, &content).await {
+                match enqueue_stdin_message(home, &control.team, &control.agent_id, &content).await {
                     Ok(()) => control_ack(
                         &control.request_id,
                         ControlResult::Ok,
@@ -1376,10 +1414,12 @@ fn format_elapsed_as_iso8601(elapsed: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::dedup::DurableDedupeStore;
     use crate::daemon::session_registry::new_session_registry;
     use crate::plugins::worker_adapter::AgentStateTracker;
     use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+    use std::time::Duration;
 
     fn make_store() -> SharedStateStore {
         std::sync::Arc::new(std::sync::Mutex::new(AgentStateTracker::new()))
@@ -1391,6 +1431,19 @@ mod tests {
 
     fn make_sr() -> SharedSessionRegistry {
         new_session_registry()
+    }
+
+    fn make_dd() -> (SharedDedupeStore, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("dedup.jsonl");
+        let store = DurableDedupeStore::new(path, Duration::from_secs(600), 1000).unwrap();
+        (std::sync::Arc::new(std::sync::Mutex::new(store)), dir)
+    }
+
+    fn make_dd_in(dir: &tempfile::TempDir) -> SharedDedupeStore {
+        let path = dir.path().join("dedup.jsonl");
+        let store = DurableDedupeStore::new(path, Duration::from_secs(600), 1000).unwrap();
+        std::sync::Arc::new(std::sync::Mutex::new(store))
     }
 
     fn make_request(command: &str, payload: serde_json::Value) -> SocketRequest {
@@ -1565,10 +1618,11 @@ mod tests {
     #[test]
     fn test_agent_pane_found() {
         let store = make_store();
+        let log_path = std::env::temp_dir().join("arch-ctm.log");
         {
             let mut tracker = store.lock().unwrap();
             tracker.register_agent("arch-ctm");
-            tracker.set_pane_info("arch-ctm", "%42", std::path::Path::new("/tmp/arch-ctm.log"));
+            tracker.set_pane_info("arch-ctm", "%42", &log_path);
         }
 
         let req = make_request("agent-pane", serde_json::json!({"agent": "arch-ctm"}));
@@ -1576,7 +1630,10 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert_eq!(payload["pane_id"].as_str().unwrap(), "%42");
-        assert_eq!(payload["log_path"].as_str().unwrap(), "/tmp/arch-ctm.log");
+        assert_eq!(
+            payload["log_path"].as_str().unwrap(),
+            log_path.to_str().unwrap()
+        );
     }
 
     #[test]
@@ -1717,14 +1774,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    #[serial_test::serial]
     async fn test_control_stdin_enqueues_payload() {
         use crate::plugins::worker_adapter::AgentState;
         use uuid::Uuid;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: serialized test; env var restored by process teardown.
-        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
 
         let state_store = make_store();
         {
@@ -1754,7 +1808,8 @@ mod tests {
             content_ref: None,
         };
 
-        let ack = process_control_request(req, &state_store, &sr).await;
+        let dd = make_dd_in(&tmp);
+        let ack = process_control_request(req, tmp.path(), &state_store, &sr, &dd).await;
         assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
         assert!(!ack.duplicate);
 
@@ -1772,14 +1827,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    #[serial_test::serial]
     async fn test_control_duplicate_does_not_reenqueue() {
         use crate::plugins::worker_adapter::AgentState;
         use uuid::Uuid;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: serialized test; env var restored by process teardown.
-        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
 
         let state_store = make_store();
         {
@@ -1809,8 +1861,9 @@ mod tests {
             content_ref: None,
         };
 
-        let ack1 = process_control_request(mk_req(), &state_store, &sr).await;
-        let ack2 = process_control_request(mk_req(), &state_store, &sr).await;
+        let dd = make_dd_in(&tmp);
+        let ack1 = process_control_request(mk_req(), tmp.path(), &state_store, &sr, &dd).await;
+        let ack2 = process_control_request(mk_req(), tmp.path(), &state_store, &sr, &dd).await;
         assert_eq!(
             ack1.result,
             agent_team_mail_core::control::ControlResult::Ok
@@ -1864,7 +1917,8 @@ mod tests {
             payload: None,
             content_ref: None,
         };
-        let ack = process_control_request(req, &state_store, &sr).await;
+        let (dd, _dd_dir) = make_dd();
+        let ack = process_control_request(req, _dd_dir.path(), &state_store, &sr, &dd).await;
         assert_eq!(
             ack.result,
             agent_team_mail_core::control::ControlResult::Rejected
@@ -1911,8 +1965,9 @@ mod tests {
             content_ref: None,
         };
 
-        let ack1 = process_control_request(mk_req(), &state_store, &sr).await;
-        let ack2 = process_control_request(mk_req(), &state_store, &sr).await;
+        let (dd, _dd_dir) = make_dd();
+        let ack1 = process_control_request(mk_req(), _dd_dir.path(), &state_store, &sr, &dd).await;
+        let ack2 = process_control_request(mk_req(), _dd_dir.path(), &state_store, &sr, &dd).await;
         assert_eq!(
             ack1.result,
             agent_team_mail_core::control::ControlResult::Rejected
@@ -1959,7 +2014,8 @@ mod tests {
             payload: Some("payload".to_string()),
             content_ref: None,
         };
-        let ack = process_control_request(req, &state_store, &sr).await;
+        let (dd, _dd_dir) = make_dd();
+        let ack = process_control_request(req, _dd_dir.path(), &state_store, &sr, &dd).await;
         assert_eq!(
             ack.result,
             agent_team_mail_core::control::ControlResult::Rejected
@@ -1989,12 +2045,14 @@ mod tests {
 
         // Start the socket server
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             state_store,
             new_pubsub_store(),
             launch_tx,
             make_sr(),
+            dd,
             cancel.clone(),
         )
         .await
@@ -2054,12 +2112,14 @@ mod tests {
         }
 
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             state_store,
             new_pubsub_store(),
             launch_tx,
             make_sr(),
+            dd,
             cancel.clone(),
         )
         .await
@@ -2110,12 +2170,14 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             make_store(),
             new_pubsub_store(),
             launch_tx,
             make_sr(),
+            dd,
             cancel.clone(),
         )
         .await
@@ -2188,12 +2250,14 @@ mod tests {
         }
 
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             state_store,
             new_pubsub_store(),
             launch_tx,
             sr,
+            dd,
             cancel.clone(),
         )
         .await
@@ -2251,12 +2315,14 @@ mod tests {
         let state_store = make_store();
 
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             state_store,
             new_pubsub_store(),
             launch_tx,
             make_sr(),
+            dd,
             cancel.clone(),
         )
         .await
@@ -2478,12 +2544,14 @@ mod tests {
         let session_registry = make_sr();
 
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             state_store.clone(),
             new_pubsub_store(),
             launch_tx,
             session_registry.clone(),
+            dd,
             cancel.clone(),
         )
         .await
@@ -2592,12 +2660,14 @@ mod tests {
         }
 
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             state_store.clone(),
             new_pubsub_store(),
             launch_tx,
             session_registry.clone(),
+            dd,
             cancel.clone(),
         )
         .await
@@ -2718,12 +2788,14 @@ mod tests {
 
         {
             let launch_tx = new_launch_sender();
+            let (dd, _dd_dir) = make_dd();
             let _handle = start_socket_server(
                 home_dir.clone(),
                 state_store,
                 new_pubsub_store(),
                 launch_tx,
                 make_sr(),
+                dd,
                 cancel.clone(),
             )
             .await
@@ -2829,9 +2901,8 @@ mod tests {
 
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
-        assert_eq!(
-            payload["processed"].as_bool().unwrap(),
-            false,
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
             "processed must be false when session_id is empty"
         );
         assert_eq!(
@@ -2883,5 +2954,83 @@ mod tests {
             tracker.get_state("arch-ctm").is_none(),
             "arch-ctm must not be registered when session_id is empty"
         );
+    }
+
+    // ── sent_at skew validation unit tests ────────────────────────────────────
+
+    /// Helper: build a minimal valid ControlRequest with the given sent_at string.
+    #[cfg(unix)]
+    fn make_control_req_with_sent_at(sent_at: &str) -> ControlRequest {
+        ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: "req-skew-test".to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
+            sent_at: sent_at.to_string(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-skew".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("hello".to_string()),
+            content_ref: None,
+        }
+    }
+
+    /// A `sent_at` timestamp 400 seconds in the past exceeds the default 300s window.
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_sent_at_too_old_rejected() {
+        let old = chrono::Utc::now() - chrono::Duration::seconds(400);
+        let req = make_control_req_with_sent_at(&old.to_rfc3339());
+        let err = validate_control_request(&req);
+        assert!(err.is_some(), "should be rejected");
+        assert!(
+            err.unwrap().contains("skew"),
+            "error should mention skew"
+        );
+    }
+
+    /// A `sent_at` timestamp within the default 300s window is accepted.
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_sent_at_within_window_accepted() {
+        let recent = chrono::Utc::now() - chrono::Duration::seconds(100);
+        let req = make_control_req_with_sent_at(&recent.to_rfc3339());
+        let err = validate_control_request(&req);
+        assert!(err.is_none(), "should be accepted, got: {:?}", err);
+    }
+
+    /// A `sent_at` timestamp 400 seconds in the future exceeds the default 300s window.
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_sent_at_future_skew_rejected() {
+        let future = chrono::Utc::now() + chrono::Duration::seconds(400);
+        let req = make_control_req_with_sent_at(&future.to_rfc3339());
+        let err = validate_control_request(&req);
+        assert!(err.is_some(), "future skew should be rejected");
+        assert!(
+            err.unwrap().contains("skew"),
+            "error should mention skew"
+        );
+    }
+
+    /// A `sent_at` timestamp at "now" (within a few seconds) is accepted.
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_sent_at_now_accepted() {
+        let now = chrono::Utc::now();
+        let req = make_control_req_with_sent_at(&now.to_rfc3339());
+        let err = validate_control_request(&req);
+        assert!(err.is_none(), "current timestamp should be accepted, got: {:?}", err);
+    }
+
+    /// A malformed `sent_at` value fails RFC3339 parse → rejected.
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_sent_at_malformed_rejected() {
+        let req = make_control_req_with_sent_at("not-a-timestamp");
+        let err = validate_control_request(&req);
+        assert!(err.is_some(), "malformed sent_at should be rejected");
     }
 }

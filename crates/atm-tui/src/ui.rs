@@ -188,16 +188,26 @@ fn draw_stream_pane(
         .as_deref()
         .unwrap_or("(none selected)");
 
-    let source_badge = if app.session_log_path.as_ref().is_some_and(|p| p.exists()) {
-        Span::styled("[LIVE] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    // Choose stream badge based on error/live/waiting state.
+    let source_badge = if app.stream_source_error.is_some() {
+        Span::styled(
+            "[FROZEN] ",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if app.session_log_path.as_ref().is_some_and(|p| p.exists()) {
+        Span::styled(
+            "[LIVE] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
         Span::styled("[WAITING] ", Style::default().fg(Color::DarkGray))
     };
 
-    let title_line = Line::from(vec![
-        source_badge,
-        Span::raw(agent_label),
-    ]);
+    let title_line = Line::from(vec![source_badge, Span::raw(agent_label)]);
 
     let block = Block::default()
         .title(title_line)
@@ -205,16 +215,32 @@ fn draw_stream_pane(
         .border_type(if focused { BorderType::Rounded } else { BorderType::Plain })
         .border_style(border_style);
 
-    // Show the last N lines that fit in the viewport
-    let inner_height = area.height.saturating_sub(2) as usize; // subtract top border + potential title
+    // Compute visible log lines (last N that fit in viewport).
+    let inner_height = area.height.saturating_sub(2) as usize; // subtract top border + title
+
+    // Prepend a freeze indicator line when the stream is frozen.
+    let freeze_line: Option<Line> = app.stream_source_error.as_ref().map(|msg| {
+        Line::from(Span::styled(
+            format!("[{msg}]"),
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD | Modifier::ITALIC),
+        ))
+    });
+
     let start = app.stream_lines.len().saturating_sub(inner_height.max(1));
-    let visible: Vec<Line> = app.stream_lines[start..]
+    let mut visible: Vec<Line> = app.stream_lines[start..]
         .iter()
         .map(|line| {
             let expanded = expand_keys(line);
             Line::from(Span::raw(expanded))
         })
         .collect();
+
+    // Insert freeze indicator at the top if present.
+    if let Some(fl) = freeze_line {
+        visible.insert(0, fl);
+    }
 
     if visible.is_empty() {
         let placeholder = if app.streaming_agent.is_none() {
@@ -285,6 +311,14 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled(" ✓ ", Style::default().fg(Color::Green)),
             Span::raw(msg.as_str()),
+        ])
+    } else if let Some(ref err) = app.stream_source_error {
+        Line::from(vec![
+            Span::styled(
+                " [FROZEN] ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(err.as_str(), Style::default().fg(Color::Yellow)),
         ])
     } else {
         Line::from(vec![

@@ -14,8 +14,9 @@ pub use session_registry::{
 };
 pub use shutdown::graceful_shutdown;
 pub use socket::{
-    LaunchRequest, LaunchSender, SharedPubSubStore, SharedStateStore, SocketServerHandle,
-    new_launch_sender, new_pubsub_store, new_state_store, start_socket_server,
+    LaunchRequest, LaunchSender, SharedDedupeStore, SharedPubSubStore, SharedStateStore,
+    SocketServerHandle, new_dedup_store, new_launch_sender, new_pubsub_store, new_state_store,
+    start_socket_server,
 };
 pub use spool_task::spool_drain_loop;
 pub use status::{DaemonStatus, PluginStatus, PluginStatusKind, StatusWriter};

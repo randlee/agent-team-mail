@@ -77,6 +77,11 @@ pub struct App {
     pub status_message: Option<String>,
     /// Pending control action to execute on the next loop iteration.
     pub pending_control: Option<PendingControl>,
+    /// Set when the stream source is unavailable (log file missing or unreadable
+    /// after streaming had started). Cleared on the next successful read.
+    ///
+    /// The UI renders a `[FROZEN]` indicator in the stream pane when this is set.
+    pub stream_source_error: Option<String>,
 }
 
 impl App {
@@ -97,6 +102,7 @@ impl App {
             control_input_active: false,
             status_message: None,
             pending_control: None,
+            stream_source_error: None,
         }
     }
 
@@ -149,6 +155,7 @@ impl App {
         self.stream_lines.clear();
         self.stream_pos = 0;
         self.session_log_path = None;
+        self.stream_source_error = None;
     }
 
     /// Returns `true` if the selected agent is "live" (control input is available).
@@ -313,5 +320,27 @@ mod tests {
         app.members =
             vec![MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 }];
         assert_eq!(app.not_live_reason(), None);
+    }
+
+    /// Stale agents must not be considered live — TUI must block control input.
+    #[test]
+    fn test_is_live_returns_false_for_stale_state() {
+        let mut app = App::new("atm-dev".to_string());
+        app.members = vec![
+            MemberRow { agent: "arch-ctm".into(), state: "stale".into(), inbox_count: 0 },
+        ];
+        app.selected_index = 0;
+        assert!(!app.is_live(), "stale agent must not be live");
+    }
+
+    /// Closed agents must not be considered live — TUI must block control input.
+    #[test]
+    fn test_is_live_returns_false_for_closed_state() {
+        let mut app = App::new("atm-dev".to_string());
+        app.members = vec![
+            MemberRow { agent: "arch-ctm".into(), state: "closed".into(), inbox_count: 0 },
+        ];
+        app.selected_index = 0;
+        assert!(!app.is_live(), "closed agent must not be live");
     }
 }
