@@ -65,6 +65,7 @@ Control payload object fields:
 
 Optional:
 
+- `thread_id` (string): [MCP-internal adapter only] backend-native thread/conversation handle — not part of the public TUI control API; set only by MCP adapter layer
 - `meta` (object): transport/UI metadata
 
 Versioning rule:
@@ -99,6 +100,7 @@ Required fields:
 
 Optional fields:
 
+- `thread_id` [MCP-internal adapter only]
 - `content_encoding` (default: `utf-8`)
 - `content_preview`
 - `interrupt` (default: `false`)
@@ -147,6 +149,7 @@ Required fields:
 
 Optional fields:
 
+- `thread_id` [MCP-internal adapter only]
 - `meta.retry_count`
 - `meta.ui_source`
 
