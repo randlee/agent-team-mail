@@ -2324,8 +2324,9 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| D.1 | TUI crate + live stream view (read-only) | C.2b | ⏳ PLANNED |
-| D.2 | Interactive controls (stdin inject, interrupt) | C.3 | ⏳ PLANNED |
+| D.1 | TUI crate + live stream view (read-only) | C.2b | ✅ [#136](https://github.com/randlee/agent-team-mail/pull/136) |
+| D.2 | Interactive controls (stdin inject, interrupt) | C.3 | 🔄 IN PROGRESS |
+| D.3 | Identifier cleanup + user demo | D.1, D.2 | ⏳ PLANNED |
 
 **Execution model**: D.1 and D.2 launch in parallel after Phase C integration merges to develop. D.1 needs only C.2b (session log tail + pub/sub). D.2 needs C.3 (control receiver endpoint).
 
@@ -2389,7 +2390,51 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 ---
 
-## 16. Future Plugins
+### Sprint D.3 — Identifier Cleanup (`thread_id` MCP-internal only) + User Demo
+
+**Branch**: `feature/pD-s3-identifier-cleanup`
+**Crate(s)**: `crates/atm-tui`, `crates/atm-daemon`, `crates/atm-agent-mcp` (boundary mapping), docs
+**Depends on**: D.1 merged + D.2 merged
+
+#### Scope
+
+1. Enforce `agent_id` as the only public conversation identifier in TUI/control docs and user-facing contracts.
+2. Remove `thread_id` from public TUI/control payload definitions and examples.
+3. Audit for non-MCP `thread_id` usage and either rename to backend-neutral `agent_id` or move behind MCP-internal adapters.
+4. Specifically review `crates/atm-daemon/src/plugins/worker_adapter/hook_watcher.rs` for non-MCP `thread_id` exposure and align naming/boundary docs.
+5. Add regression checks proving non-MCP public APIs do not require `thread_id`.
+6. Run a scripted user demo covering dashboard, agent terminal, control send/ack path, and one degraded scenario.
+
+#### Exit Criteria
+
+- [ ] No `thread_id` in `docs/tui-*.md` payload definitions/examples (except explicit MCP-internal notes).
+- [ ] No non-MCP public API surface requires `thread_id`.
+- [ ] Remaining `thread_id` usage is MCP-internal and documented as adapter-only.
+- [ ] `rg -n "thread_id|threadId" docs/tui-*.md crates/atm/src crates/atm-daemon/src` returns only approved exceptions.
+- [ ] User demo script is committed, runnable from clean checkout, and includes one degraded/failure scenario (`daemon unavailable` or `not_live` target).
+- [ ] Demo artifacts captured (logs/screenshots) and team-lead sign-off recorded.
+
+---
+
+## 16. Phase E (Planned): TUI Hardening and Production Readiness
+
+**Status**: PLANNED
+**Goal**: Harden Phase D TUI deliverables for reliability, observability, performance, and operator confidence under sustained real-world load.
+
+Planned scope:
+
+1. Reliability hardening (restart/reconnect handling, failure injection, queue/backpressure behavior).
+2. Performance tuning (render responsiveness under sustained stream load, control-ack visibility latency).
+3. UX/accessibility polish (focus consistency, keyboard ergonomics, high-noise workflow usability).
+4. Operational validation (repeatable runbooks, SLO-oriented checks, troubleshooting guidance).
+
+Gate intent:
+
+- Phase D provides functional end-to-end behavior.
+- Phase E raises operational quality for broader rollout.
+
+---
+## 17. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
 
@@ -2401,7 +2446,7 @@ Additional plugins planned (each is a self-contained sprint series):
 
 ---
 
-## 17. Sprint Summary
+## 18. Sprint Summary
 
 | Phase | Sprint | Name | Status | PR |
 |-------|--------|------|--------|-----|

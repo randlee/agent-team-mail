@@ -16,6 +16,18 @@ pub struct ControlRequest {
     pub v: u32,
     /// Stable idempotency key for this logical request.
     pub request_id: String,
+    /// Control message type per protocol spec §3.1 and §3.3.
+    ///
+    /// - `"control.stdin.request"` for [`ControlAction::Stdin`]
+    /// - `"control.interrupt.request"` for [`ControlAction::Interrupt`]
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    /// Signal field required for interrupt requests per protocol spec §3.3.
+    ///
+    /// Must be `"interrupt"` when `action == ControlAction::Interrupt`.
+    /// `None` for all other actions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
     /// RFC3339 UTC timestamp from sender.
     pub sent_at: String,
     /// Team namespace.
@@ -28,8 +40,11 @@ pub struct ControlRequest {
     pub sender: String,
     /// Control action kind.
     pub action: ControlAction,
-    /// Optional inline stdin payload.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Inline stdin payload (UTF-8 text).
+    ///
+    /// Required for [`ControlAction::Stdin`] requests unless `content_ref` is set.
+    /// Serialized as `"content"` per the control protocol spec §3.1.
+    #[serde(rename = "content", skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
     /// Optional file reference for oversized stdin payloads.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +103,8 @@ mod tests {
         let req = ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
             request_id: "req-1".to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
             sent_at: "2026-02-21T00:00:00Z".to_string(),
             team: "atm-dev".to_string(),
             session_id: "sess-1".to_string(),
@@ -98,6 +115,15 @@ mod tests {
             content_ref: None,
         };
         let json = serde_json::to_string(&req).expect("serialize request");
+        // Verify the wire-format key is "content", not "payload" (protocol spec §3.1).
+        assert!(
+            json.contains("\"content\":"),
+            "serialized ControlRequest must use key \"content\" not \"payload\"; got: {json}"
+        );
+        assert!(
+            !json.contains("\"payload\":"),
+            "serialized ControlRequest must not contain key \"payload\"; got: {json}"
+        );
         let decoded: ControlRequest = serde_json::from_str(&json).expect("deserialize request");
         assert_eq!(decoded, req);
     }
