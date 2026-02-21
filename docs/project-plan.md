@@ -2447,15 +2447,21 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 #### Scope
 
-1. `atm teams resume` accepts `--session-id <id>` flag for explicit override
+1. `atm teams resume` accepts `--session-id <id>` flag for explicit override (Option B)
 2. Fallback: read session ID from gate debug log (`/tmp/gate-agent-spawns-debug.jsonl`) when env var is absent/stale
-3. Or: gate hook writes a stable session ID file (`/tmp/atm-session-id`) that `atm` reads reliably
+3. Or: gate hook writes a stable session ID file (`/tmp/atm-session-id`) that `atm` reads reliably (Option A)
 4. Update `CLAUDE.md` initialization process to use the fixed command reliably
+
+> *Note: Scope item 2 (reading gate debug log) was superseded by Scope item 3 (`/tmp/atm-session-id` file). Both Options A and B are implemented: the gate hook writes `/tmp/atm-session-id` on every Task tool call (Option A), and `--session-id` provides an explicit override (Option B).*
 
 #### Exit Criteria
 
 - [ ] `atm teams resume atm-dev` sets `leadSessionId` to the correct current session ID without manual Python workaround
+- [ ] `atm teams resume atm-dev --session-id <uuid>` explicit flag works and writes that ID to `config.json`
+- [ ] Fallback order verified: `--session-id` flag → `CLAUDE_SESSION_ID` env → `/tmp/atm-session-id` file → error with helpful message
+- [ ] Gate hook writes `/tmp/atm-session-id` on every Task tool call (pass and block paths)
 - [ ] Verification: gate hook allows named teammate spawning immediately after `atm teams resume`
+- [ ] CLAUDE.md initialization process updated (no Python workaround)
 - [ ] `cargo clippy --workspace -- -D warnings` clean
 - [ ] `cargo test --workspace` passes
 
