@@ -2565,6 +2565,99 @@ Add `SocketCommand::HookEvent` variant. Handler updates session registry and age
 
 ---
 
+### Sprint E.4 — TUI Reliability Hardening (Restart, Reconnect, Failure Injection)
+
+**Branch**: `feature/pE-s4-tui-reliability`
+**Crate(s)**: `crates/atm-tui`, `crates/atm-daemon` (dedupe store, socket handler)
+**Depends on**: E.3 (hook-to-daemon bridge provides live state updates)
+**Design refs**: `docs/tui-mvp-architecture.md` §12, §14; `docs/tui-control-protocol.md` §5, §11
+
+#### Problem
+
+Phase D shipped a functional TUI MVP with in-memory dedupe, basic retry, and log-tail streaming. Several reliability gaps remain from the MVP vs Hardening boundary defined in the TUI design docs:
+
+- Dedupe store is memory-only — duplicates possible after daemon restart
+- No failure-injection tests for daemon restart, stale sessions, or queue backlog
+- Stream source interruption auto-reconnect is untested under sustained load
+- Control ack timeout behavior and backpressure are not validated end-to-end
+
+#### Scope
+
+1. **Restart-safe dedupe store**: replace in-memory dedupe with a durable store (file-backed or SQLite) that survives daemon restart. Bounded TTL window (10 min recommended) with atomic lookup/insert.
+2. **Failure-injection test suite**: automated tests covering:
+   - Daemon restart mid-stream (TUI reconnects, no lost events)
+   - Stale session cleanup (TUI detects and displays degraded state)
+   - Queue backlog under sustained control input (no UI starvation)
+   - Socket unavailable → graceful degradation → reconnect on availability
+3. **Stream reconnect hardening**: verify auto-reconnect to log tail after source interruption; add explicit source/error indicator on freeze.
+4. **`sent_at` skew validation**: reject control requests older than configurable max age; bounded clock-skew tolerance window.
+
+#### Exit Criteria
+
+- [ ] Dedupe store survives daemon restart — integration test: send request, restart daemon, retry same `request_id`, get `duplicate: true`
+- [ ] Failure-injection tests pass: daemon restart, stale session, queue backlog, socket unavailable
+- [ ] Stream auto-reconnect verified under sustained load (no silent data loss)
+- [ ] `sent_at` skew rejection implemented and tested
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint E.5 — TUI Performance, UX Polish, and Operational Validation
+
+**Branch**: `feature/pE-s5-tui-polish`
+**Crate(s)**: `crates/atm-tui`, docs
+**Depends on**: E.4 (reliability hardening provides stable base for perf testing)
+**Design refs**: `docs/tui-mvp-architecture.md` §7, §14, §15
+
+#### Problem
+
+The TUI MVP is functional but untested under sustained real-world load. Several UX and operational items were deferred from Phase D:
+
+- No performance validation under sustained stream + control activity
+- Interrupt confirmation policy not finalized (`always`/`never`/`configurable`)
+- No per-user UI preferences file
+- No documented SLO targets for render responsiveness or ack visibility latency
+- No operational runbooks or troubleshooting guidance for TUI operators
+
+#### Scope
+
+1. **Performance validation**: stress test with sustained stream output + concurrent control activity. Measure and document render responsiveness and control-ack visibility latency. Define SLO targets.
+2. **Interrupt confirmation policy**: implement configurable policy (`always`, `never`, `confirm`) for Ctrl+C interrupt in Agent Terminal. Default: `confirm`.
+3. **Per-user UI preferences**: define file location (`~/.config/atm/tui.toml` or similar) and schema for:
+   - Interrupt confirmation policy
+   - Follow-mode default
+   - Color theme (if applicable)
+   - Default filters for event log
+4. **Richer timeout/backoff policy**: configurable per-action-type timeout and backoff (stdin vs interrupt may have different latency tolerance).
+5. **Operational documentation**: troubleshooting guide covering common failure modes, daemon connectivity issues, and TUI recovery steps.
+
+#### Exit Criteria
+
+- [ ] Stress test passes: sustained stream + control activity without UI starvation (documented SLO met)
+- [ ] Interrupt confirmation policy is configurable via preferences file
+- [ ] Per-user preferences file (`tui.toml`) schema defined, parsed, and applied on TUI startup
+- [ ] Per-action-type timeout/backoff configurable
+- [ ] Operational troubleshooting section added to TUI docs
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Phase E Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| E.1 | `atm teams resume` session ID reliability | Phase D | ✅ MERGED (#147) |
+| E.2 | Inbox read scoping | E.1 (or parallel) | 🔄 IN PROGRESS |
+| E.3 | Hook-to-daemon state bridge | E.1 (parallel with E.2) | 🔄 IN PROGRESS |
+| E.4 | TUI reliability hardening (restart, reconnect, failure injection) | E.3 | ⏳ PLANNED |
+| E.5 | TUI performance, UX polish, and operational validation | E.4 | ⏳ PLANNED |
+
+**Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4.
+
+---
+
 ## 16.5 Phase F: Team Installer (`atm team init`)
 
 **Status**: PLANNED
