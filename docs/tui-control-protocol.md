@@ -28,6 +28,7 @@ Phase alignment:
 
 - Phase C target is a lightweight receiver contract/stub (`C.3`): endpoint, validation, ack, dedupe skeleton
 - full interactive TUI control flows are Phase D scope
+- provider-native ids (such as Codex `threadId`) are MCP-internal details and must not appear in public TUI/control payloads
 
 Compatibility note (important):
 

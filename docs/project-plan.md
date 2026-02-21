@@ -2082,10 +2082,10 @@ Add to **Initialization Process** section:
 
 ---
 
-## 14. Phase C: Unified Logging + Codex JSON Mode
+## 14. Phase C: Observability + Codex JSON Mode
 
-**Status**: MERGED (integrate/phase-C → develop)
-**Goal**: Add structured event logging infrastructure and Codex JSON output transport for downstream TUI consumption.
+**Status**: IN PROGRESS
+**Goal**: (1) Unified structured logging across all crates so every event — message delivery, tool call, daemon lifecycle — is traceable. (2) Prove that `codex exec --json` can replace the MCP stdio transport for real-time TUI streaming and non-destructive stdin-based nudging.
 
 **Integration branch**: `integrate/phase-C`
 
@@ -2093,127 +2093,348 @@ Add to **Initialization Process** section:
 
 | Sprint | Name | Status | PR |
 |--------|------|--------|-----|
-| C.1 | Unified logging infrastructure | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
-| C.2a | Transport trait abstraction | ✅ | [#128](https://github.com/randlee/agent-team-mail/pull/128) |
-| C.2b | JSON transport implementation | ✅ | [#129](https://github.com/randlee/agent-team-mail/pull/129) |
-| C.3 | Control receiver stub (endpoint, validation, ack, dedupe) | ✅ | [#133](https://github.com/randlee/agent-team-mail/pull/133) |
+| C.1 | Unified logging infrastructure | ✅ | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
+| C.2a | Transport trait + McpTransport refactor | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
+| C.2b | JsonTransport + stdin queue + integration tests | 🔄 IN PROGRESS | — |
+| C.3 | Control receiver stub (daemon endpoint + dedupe) | ⏳ PLANNED | — |
+
+**Execution model**: C.2b scrum-master launches as soon as C.2a QA approves — does not wait for C.2a CI/merge. C.2b branches off C.2a feature branch. C.3 starts after C.2b merges to `integrate/phase-C`.
 
 ---
 
-## 15. Phase D: TUI MVP
+### Sprint C.1 — Unified Logging Infrastructure
 
-**Status**: IN PROGRESS
-**Goal**: Build an interactive terminal UI for ATM — providing live agent stream viewing, team/member dashboards, and interactive control input for live worker sessions.
+**Branch**: `feature/pC-s1-unified-logging`
+**Worktree**: `../agent-team-mail-worktrees/feature/pC-s1-unified-logging`
+**Crate(s)**: `crates/atm-core`, `crates/atm-daemon`, `crates/atm-agent-mcp`
+**Owner**: arch-ctm (design + implementation lead)
+**Depends on**: nothing
+**Status**: Worktree created off develop `aa7c500`; arch-ctm scoping and implementing
 
-**Integration branch**: `integrate/phase-D`
-**Depends on**: Phase C (control receiver stub from C.3, logging from C.1)
-**Design docs**: `docs/tui-mvp-architecture.md`, `docs/tui-control-protocol.md`
+#### Problem
 
-### Phase D Sprint Summary
+ATM has no unified observability layer. Errors surface as stderr noise or are silently swallowed. There is no way to correlate a message delivery failure, a daemon event, and an MCP proxy event back to a single causal chain. Debugging comms reliability requires grepping multiple ad-hoc log calls.
 
-| Sprint | Name | Status | PR |
-|--------|------|--------|-----|
-| D.1 | `atm-tui` crate scaffold — dashboard + stream viewer | IN PROGRESS | — |
-| D.2 | Interactive controls — stdin inject + interrupt | IN PROGRESS | — |
-| D.3 | Identifier cleanup — remove non-MCP `thread_id` usage | TODO | — |
+#### Solution
 
-### Sprint D.1 — `atm-tui` Crate + Stream Viewer
+Structured, JSONL-friendly logging built on `tracing` + `tracing-subscriber`:
 
-**Branch**: `feature/pD-s1-tui-stream`
-**Crate(s)**: `crates/atm-tui` (new binary crate)
-
-#### Deliverables
-
-- `atm-tui` binary crate added to workspace
-- Dashboard panel: team member list with state/inbox badges (from daemon `list-agents`)
-- Agent Terminal panel: session log tail with JSONL key expansion
-- 100ms tick loop with 2s rate-limited daemon refresh
-- `emit_event_best_effort` for tui_start, stream_attach, stream_detach events
+1. **`atm-core` logging primitives** — shared `init_logging()` that respects `ATM_LOG` / `ATM_LOG_FILE` env vars; structured fields: `session_id`, `agent_id`, `team`, `message_id`, `span` for causal tracing
+2. **Per-crate instrumentation** — `#[instrument]` on key paths: message send/receive/mark-read, daemon plugin dispatch, MCP proxy request/response
+3. **JSONL log file** — optional `ATM_LOG_FILE=~/.config/atm/atm.log` for persistent structured output; rotated by size/date
+4. **Log levels** — `ERROR` (delivery failures, daemon crashes), `WARN` (retries, stale state), `INFO` (message lifecycle), `DEBUG` (protocol frames, tool calls), `TRACE` (raw bytes)
+5. **Session/agent correlation** — every log entry carries `session_id` + `agent_name` so events from arch-ctm, team-lead, and the proxy can be correlated in a single log stream
 
 #### Exit Criteria
 
-- `atm-tui --team <team>` launches and renders without panics
-- Dashboard shows member list refreshed from daemon every 2s
-- Agent Terminal tails session log file at 100ms rate
-- JSONL compact keys expanded to full column names in stream display
-- `cargo test -p atm-tui` passes; `cargo clippy --workspace -- -D warnings` clean
+- [ ] `tracing` + `tracing-subscriber` added to workspace deps
+- [ ] `atm_core::logging::init()` initialises env-filter + optional JSONL file appender
+- [ ] All three crates call `init()` at startup; no raw `eprintln!` / `println!` in hot paths
+- [ ] Message send/receive/mark-read emit `INFO` structured events with `message_id`, `agent`, `team`
+- [ ] Daemon plugin dispatch emits `DEBUG` span with plugin name + event type
+- [ ] MCP proxy request/response emits `DEBUG` span with `request_id`
+- [ ] `ATM_LOG=debug atm send arch-ctm "hi"` shows structured output
+- [ ] JSONL file appender writes to `ATM_LOG_FILE` when set
+- [ ] All existing tests pass; new unit tests for log field correctness
+- [ ] C.2 can add log instrumentation without touching the logging init
+
+---
+
+### Sprint C.2a — Transport Trait + McpTransport Refactor
+
+**Branch**: `feature/pC-s2a-transport-trait`
+**Crate(s)**: `crates/atm-agent-mcp`
+**Depends on**: C.1 (logging infrastructure)
+**Owner**: scrum-master (Claude)
+
+#### Problem
+
+`atm-agent-mcp` proxy is tightly coupled to `codex mcp-server` with no transport abstraction. Adding JSON mode requires a clean seam.
+
+#### Solution
+
+Extract `CodexTransport` trait; wrap existing MCP protocol in `McpTransport`. Zero behaviour change — all existing tests must pass unchanged.
+
+```rust
+pub trait CodexTransport: Send {
+    async fn send_frame(&mut self, msg: serde_json::Value) -> Result<()>;
+    async fn recv_frame(&mut self) -> Result<Option<serde_json::Value>>;
+    async fn is_idle(&self) -> bool;
+    async fn shutdown(&mut self) -> Result<()>;
+}
+// McpTransport — Content-Length framed protocol, wraps existing impl
+```
+
+#### Exit Criteria
+
+- [ ] `CodexTransport` trait defined in `crates/atm-agent-mcp/src/transport.rs`
+- [ ] `McpTransport` wraps existing proxy protocol; no behaviour change
+- [ ] Proxy dispatches through trait; `transport = "mcp"` in `.atm.toml` selects `McpTransport`
+- [ ] All existing tests pass unchanged
+- [ ] C.1 structured log events emitted for transport init/shutdown
+
+---
+
+### Sprint C.2b — JsonTransport + Stdin Queue + Integration Tests
+
+**Branch**: `feature/pC-s2b-json-transport` (branches off `feature/pC-s2a-transport-trait`)
+**Crate(s)**: `crates/atm-agent-mcp`
+**Depends on**: C.2a QA approval (does not wait for C.2a CI/merge)
+**Owner**: scrum-master (Claude)
+
+#### Problem
+
+`atm-agent-mcp` is hardcoded to `codex mcp-server` (MCP stdio protocol). This prevents:
+- Non-destructive message injection at natural idle points (no tmux required)
+- Running Codex without MCP server overhead
+- Future TUI streaming of agent output (Phase D)
+
+`codex exec --json` streams all agent events (messages, tool calls, file changes) as JSONL to stdout and accepts tool results via stdin. This is a simpler, more observable protocol.
+
+#### Solution
+
+`JsonTransport` implementation + stdin queue for message injection.
+
+**Stdin queue for message injection**:
+- Queue: `~/.config/atm/agent-sessions/<team>/<agent>/stdin_queue/`
+- Atomic rename `<uuid>.json` → `<uuid>.claimed` prevents double-delivery
+- Drain on `idle` event in JSONL stream OR 30s timeout
+- Messages encoded as Codex tool result JSON (matching `codex exec --json` stdin format)
+- Identity injected in initial prompt (same as MCP context injection today)
+- TTL cleanup: entries older than 10 minutes deleted on drain
+
+**JSONL Event Schema** (from `codex exec --json`):
+
+| Event type | Meaning |
+|------------|---------|
+| `agent_message` | Model output text |
+| `tool_call` | Tool invocation with name + args |
+| `tool_result` | Tool execution result |
+| `file_change` | File write/edit event |
+| `idle` | Agent waiting for input — **nudge window** |
+| `done` | Session complete |
+
+**Nudging mechanism**: `idle` event → drain stdin queue → write ATM messages as tool result JSON to Codex stdin → Codex continues. No tmux needed.
+
+**Note**: TUI streaming (pub/sub fanout of JSONL stream) is deferred to Phase D.
+
+#### Exit Criteria
+
+**JsonTransport:**
+- [ ] `JsonTransport` spawns `codex exec --json`, reads JSONL stream, parses all event types
+- [ ] Transport selected via config: `transport = "mcp" | "json"` in `.atm.toml`
+- [ ] Idle detection fires within 2s of Codex entering wait state
+
+**Stdin queue:**
+- [ ] Queue directory created atomically on first use
+- [ ] `*.json` → `*.claimed` rename is atomic; no double-delivery under concurrent writers
+- [ ] Queue drained on `idle` event or 30s timeout
+- [ ] TTL cleanup: entries older than 10 minutes deleted on drain
+
+**Integration:**
+- [ ] `codex exec --json` spawned successfully; JSONL stream parsed without panics
+- [ ] ATM message injected via stdin queue reaches Codex mid-session
+- [ ] C.1 structured log events emitted for every inject/idle/drain cycle
+
+**Local integration tests** (`#[ignore]`, not run in CI):
+- [ ] Both transport modes tested with `codex-mini-latest`
+- [ ] `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` verified in MCP mode
+- [ ] `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` verified in JSON mode
+- [ ] Run with: `cargo test --test mcp_integration -- --ignored`
+
+**Docs:**
+- [ ] `codex exec --json` event schema documented in `docs/codex-json-schema.md`
+- [ ] ADR written: `docs/adr/003-json-mode-transport.md`
+- [ ] All existing tests pass
+
+---
+
+### Sprint C.3 — Control Receiver Stub (Daemon Endpoint + Validation + Dedupe)
+
+**Branch**: `feature/pC-s3-control-receiver`
+**Worktree**: `../agent-team-mail-worktrees/feature/pC-s3-control-receiver`
+**Crate(s)**: `crates/atm-daemon` (socket handler, dedup module), `crates/atm-core` (control message types)
+**Depends on**: C.2b merged to `integrate/phase-C`
+**Design refs**: `docs/tui-mvp-architecture.md`, `docs/tui-control-protocol.md`
+
+#### Problem
+
+The TUI control protocol (`docs/tui-control-protocol.md`) defines `control.stdin.request` and `control.interrupt.request` message contracts, but the daemon Unix socket server has no handler for either. Phase D (TUI) cannot build interactive controls without a real receiver endpoint to target. Building the receiver in Phase C de-risks protocol drift and lets Phase D UI work build on proven contract behavior.
+
+#### Solution
+
+Three self-contained components (can be developed with one dev agent in sequence):
+
+1. **Control message types** (`crates/atm-core/src/control.rs` or `crates/atm-daemon/src/control.rs`):
+   - `ControlRequest` struct: `v`, `request_id`, `sent_at`, `team`, `session_id`, `agent_id`, `sender`, `action` (`stdin` | `interrupt`), `payload: Option<String>`, `content_ref: Option<ContentRef>`
+   - `ControlAck` struct: `request_id`, `result: ControlResult`, `duplicate: bool`, `detail: Option<String>`, `ack_at`
+   - `ControlResult` enum: `Ok`, `NotLive`, `NotFound`, `Busy`, `Timeout`, `Rejected`, `InternalError`
+   - `ContentRef` struct: `path`, `size_bytes`, `sha256`, `mime`, `expires_at: Option<DateTime>`
+   - Full serde round-trip with snake_case field names
+
+2. **Dedupe store** (`crates/atm-daemon/src/dedup.rs`):
+   - Key: `(team, session_id, agent_id, request_id)` as a composite `DedupeKey` newtype
+   - Bounded `HashMap<DedupeKey, Instant>` — capacity 1 000 entries (configurable via `ATM_DEDUP_CAPACITY`)
+   - TTL: 10 minutes (configurable via `ATM_DEDUP_TTL_SECS`)
+   - `check_and_insert(&mut self, key: DedupeKey) -> bool` — returns `true` if duplicate (key already present and not expired); inserts with current timestamp on non-duplicate
+   - Eviction: on capacity overflow, evict oldest entry (LRU approximation via insertion order)
+   - **Not** async — plain `Mutex<DedupeStore>` in daemon shared state
+
+3. **Daemon socket control handler** (extend `crates/atm-daemon/src/daemon/socket.rs`):
+   - New `SocketCommand::Control` variant in the existing command enum; payload is raw JSON deserialized into `ControlRequest`
+   - Envelope validation: required fields present, `v == 1`, payload ≤ 1 MiB hard limit; return `ControlResult::Rejected` with detail on failure
+   - Age check: reject requests where `sent_at` skew > 5 minutes (configurable)
+   - Dedupe: call `check_and_insert`; if duplicate return `ControlAck { result: Ok, duplicate: true }` immediately
+   - Live-state lookup: resolve `session_id` + `agent_id` via `SessionRegistry`; compute `live = SessionStatus::Active AND AgentState in {Idle, Busy}`; return `NotLive` if false; return `NotFound` if session unknown
+   - `control.stdin.request`: forward payload to `stdin_queue::enqueue()` for the target session; return `Ok`
+   - `control.interrupt.request`: return `Rejected` with `"interrupt receiver path not yet implemented"`
+   - Emit C.1 log event via `emit_event_best_effort` for every request + ack (level info, action `control_stdin_request` / `control_stdin_ack`)
+
+#### Parallelism Note
+
+C.3 is a single sprint (one SM, one dev agent). The three components are naturally sequential: types → dedupe → handler. Total scope is ~400–600 lines of new code. No parallel track needed.
+
+#### Exit Criteria
+
+- [ ] `ControlRequest`, `ControlAck`, `ControlResult`, `ContentRef` types defined with serde round-trip tests
+- [ ] `DedupeStore` with TTL + capacity eviction; unit tests: insert, duplicate, TTL expiry, capacity overflow
+- [ ] `SocketCommand::Control` handler dispatches `stdin` and `interrupt` actions
+- [ ] Envelope validation rejects missing fields, oversized payload (> 1 MiB), stale `sent_at` (> 5 min skew)
+- [ ] Live-state check: `SessionStatus::Active AND AgentState in {Idle, Busy}` → live; all other combos → `not_live`
+- [ ] `control.stdin.request` forwards payload to `stdin_queue::enqueue()` and returns `Ok`
+- [ ] `control.interrupt.request` returns `Rejected` with implementation-pending detail
+- [ ] Duplicate requests return `ControlAck { result: Ok, duplicate: true }` without re-executing
+- [ ] `emit_event_best_effort` called for every request + ack (C.1 pattern)
+- [ ] `content_ref` path validated: must resolve under `get_home_dir()/.config/atm/share/`, canonicalized, no `..` traversal, no symlink escape; `sha256` verified before use
+- [ ] Integration test (ignored): end-to-end control request over Unix socket with mock session registry
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+## 15. Phase D: TUI Streaming
+
+**Status**: PLANNED (blocked on Phase C — specifically C.3 for D.2)
+**Goal**: Real-time terminal UI for observing and controlling live Codex agent sessions. D.1 delivers a read-only streaming view; D.2 adds interactive controls (stdin injection, interrupt). D.1 and D.2 run **in parallel** — they touch different modules (read path vs. write path).
+
+**Integration branch**: `integrate/phase-D`
+**Design refs**: `docs/tui-mvp-architecture.md`, `docs/tui-control-protocol.md`
+
+### Phase D Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| D.1 | TUI crate + live stream view (read-only) | C.2b | ✅ [#136](https://github.com/randlee/agent-team-mail/pull/136) |
+| D.2 | Interactive controls (stdin inject, interrupt) | C.3 | 🔄 IN PROGRESS |
+| D.3 | Identifier cleanup + user demo | D.1, D.2 | ⏳ PLANNED |
+
+**Execution model**: D.1 and D.2 launch in parallel after Phase C integration merges to develop. D.1 needs only C.2b (session log tail + pub/sub). D.2 needs C.3 (control receiver endpoint).
+
+---
+
+### Sprint D.1 — TUI Crate + Live Stream View
+
+**Branch**: `feature/pD-s1-tui-stream`
+**Crate(s)**: `crates/atm-tui` (new binary crate)
+**Depends on**: C.2b merged (JsonTransport + session log infrastructure)
+
+#### Scope
+
+1. **New `atm-tui` binary crate** — `ratatui`-based terminal UI, single binary `atm-tui`
+2. **Dashboard view** (left panel): team member list with ATM inbox counts sourced from daemon pub/sub (`agent-state` command); mail action via `atm send` semantics (no direct control path in Dashboard)
+3. **Agent Terminal view** (right panel): scrolling JSONL output stream tailed from session log file (`${ATM_HOME}/.config/atm/agent-sessions/{team}/{agent_id}/output.log`); full event column names (no abbreviated headers per `docs/tui-mvp-architecture.md §2.1`)
+4. **Session selector**: navigate between active sessions via daemon `list-agents` socket command
+5. **No interactive input in D.1** — read-only; input field is visible but disabled ("control available in next release")
+6. **C.1 logging**: emit structured events for TUI startup, session connect, stream attach/detach
+
+#### Exit Criteria
+
+- [ ] `atm-tui` binary builds and runs with `--team <name>` flag
+- [ ] Dashboard view lists team members with inbox counts (daemon-sourced, refreshes on pub/sub event)
+- [ ] Agent Terminal view tails session log file in real time (100 ms poll interval)
+- [ ] Session selector navigates between sessions without crashing
+- [ ] Input field visible but disabled with placeholder text
+- [ ] Graceful exit on `q` / `Ctrl-C`
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
 
 ---
 
 ### Sprint D.2 — Interactive Controls (Stdin Inject + Interrupt)
 
 **Branch**: `feature/pD-s2-tui-controls`
-**Crate(s)**: `crates/atm-tui` (extends D.1), `crates/atm-core` (`send_control` in daemon_client)
+**Crate(s)**: `crates/atm-tui` (extend D.1), `crates/atm-daemon` (C.3 receiver already done)
+**Depends on**: D.1 merged + C.3 merged (control receiver endpoint)
 
-#### Deliverables
+#### Scope
 
-1. Agent Terminal input field — enabled when target session is `live` (`SessionStatus::Active` AND `AgentState` in `{Idle, Busy}`)
-2. Stdin injection: on Enter, build `ControlRequest { action: stdin }` with UUID v4 `request_id`, send via Unix socket to daemon, display ack result in status bar
-3. Live-state gate: input field disabled (greyed) when not_live; status bar shows reason (Launching, Killed, Stale, Closed)
-4. Retry on timeout: single retry after 2s ack timeout with same `request_id`; surface `timeout` result if second attempt fails
-5. Interrupt button: Ctrl-I sends `ControlRequest { action: interrupt }`; currently returns Rejected — display detail in status bar (not an error state)
-6. UX boundary: Dashboard = mail-only, Agent Terminal = control-only — no silent fallback between channels
-7. Audit logging: `emit_event_best_effort` for every control send and ack received
-8. `send_control()` public function in `atm-core::daemon_client`
+1. **Agent Terminal input field** — enabled when target session is `live` (`SessionStatus::Active AND AgentState in {Idle, Busy}`)
+2. **Stdin injection path**: on Enter, build `ControlRequest { action: "stdin", payload: text }` with stable `request_id` (UUID v4), send via Unix socket to daemon, display ack result in status bar
+3. **Live-state gate**: input field disabled (greyed out) when `not_live`; status bar shows reason (`Launching`, `Killed`, etc.)
+4. **Retry on timeout**: single retry after 2 s ack timeout; surface `timeout` result to user if second attempt fails
+5. **Interrupt button**: keyboard shortcut (`Ctrl-I`); sends `ControlRequest { action: "interrupt" }`; currently returns `Rejected` with detail — display detail in status bar (not an error state in TUI)
+6. **UX boundary enforcement**: Dashboard remains mail-only (no control path); Agent Terminal remains control-only (no ATM send path); no silent fallback between channels (per `docs/tui-mvp-architecture.md §4`)
+7. **Audit logging**: C.1 `emit_event_best_effort` for every control send and ack received
 
 #### Exit Criteria
 
-- Input field enabled/disabled based on live-state (daemon-sourced; `state in {"idle", "busy"}` = live)
-- Stdin injection sends ControlRequest to daemon and displays ack result in status bar
-- Duplicate detection: `duplicate=true` ack shown as "already delivered" (not error)
-- Interrupt shortcut Ctrl-I sends interrupt request; Rejected result shown with detail in status bar
-- Live-state gate: Launching/Killed/Stale/Closed all shown as not-live with reason
-- Dashboard has no control input (UX boundary enforced)
-- `emit_event_best_effort` called for every control send + ack
-- ControlRequest payload includes `type` field (`control.stdin.request` / `control.interrupt.request`) per `docs/tui-control-protocol.md §3.1/§3.3`
-- `cargo clippy --workspace -- -D warnings` clean; `cargo test --workspace` passes
+- [ ] Input field enabled/disabled based on live-state (daemon-sourced)
+- [ ] Stdin injection sends `control.stdin.request` to daemon and displays ack result
+- [ ] Duplicate request detection: retry uses same `request_id`; `duplicate: true` ack surfaces as "already delivered" in status bar (not an error)
+- [ ] Interrupt shortcut (`Ctrl-I`) sends `control.interrupt.request`; `Rejected` result displayed with detail
+- [ ] Live-state gate: `Launching`/`Killed`/`Stale`/`Closed` all shown as not-live with reason
+- [ ] Dashboard has no control input — mail action calls `atm send` CLI
+- [ ] `emit_event_best_effort` called for every control send + ack
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
 
 ---
 
-### Sprint D.3 — Identifier Cleanup (`thread_id` MCP-internal only)
+### Sprint D.3 — Identifier Cleanup (`thread_id` MCP-internal only) + User Demo
 
 **Branch**: `feature/pD-s3-identifier-cleanup`
-**Crate(s)**: `crates/atm-tui`, `crates/atm-daemon`, `crates/atm-agent-mcp` (mapping boundary only), docs
+**Crate(s)**: `crates/atm-tui`, `crates/atm-daemon`, `crates/atm-agent-mcp` (boundary mapping), docs
+**Depends on**: D.1 merged + D.2 merged
 
-#### Deliverables
+#### Scope
 
-1. Public TUI/control docs enforce `agent_id` as the only public conversation identifier.
-2. Public TUI/control payloads remove `thread_id` fields/examples.
-3. Audit code for `thread_id` references outside MCP crates and either:
-   - rename to backend-neutral `agent_id` when user-facing, or
-   - move behind MCP-internal adapter boundaries.
-4. Specifically review `crates/atm-daemon/src/plugins/worker_adapter/hook_watcher.rs` for non-MCP `thread_id` exposure and align naming or boundary documentation.
-5. Add regression tests/docs proving no non-MCP public API requires `thread_id`.
-6. Run a scripted user demo for TUI MVP flows (dashboard + agent terminal + control path + degraded path).
+1. Enforce `agent_id` as the only public conversation identifier in TUI/control docs and user-facing contracts.
+2. Remove `thread_id` from public TUI/control payload definitions and examples.
+3. Audit for non-MCP `thread_id` usage and either rename to backend-neutral `agent_id` or move behind MCP-internal adapters.
+4. Specifically review `crates/atm-daemon/src/plugins/worker_adapter/hook_watcher.rs` for non-MCP `thread_id` exposure and align naming/boundary docs.
+5. Add regression checks proving non-MCP public APIs do not require `thread_id`.
+6. Run a scripted user demo covering dashboard, agent terminal, control send/ack path, and one degraded scenario.
 
 #### Exit Criteria
 
-- No `thread_id` in TUI/control protocol definitions or examples.
-- No non-MCP public API surface (CLI/TUI/daemon socket contracts) requires `thread_id`.
-- Any remaining `thread_id` usage is MCP-internal and documented as adapter-only.
-- `rg -n \"thread_id|threadId\" docs/tui-*.md crates/atm/src crates/atm-daemon/src` returns only approved MCP-internal references or test fixtures.
-- User demo script is checked in, runnable from clean checkout, and includes one degraded/failure scenario (daemon unavailable or not-live target).
-- Demo artifacts captured (logs and/or screenshots) with team-lead sign-off.
+- [ ] No `thread_id` in `docs/tui-*.md` payload definitions/examples (except explicit MCP-internal notes).
+- [ ] No non-MCP public API surface requires `thread_id`.
+- [ ] Remaining `thread_id` usage is MCP-internal and documented as adapter-only.
+- [ ] `rg -n "thread_id|threadId" docs/tui-*.md crates/atm/src crates/atm-daemon/src` returns only approved exceptions.
+- [ ] User demo script is committed, runnable from clean checkout, and includes one degraded/failure scenario (`daemon unavailable` or `not_live` target).
+- [ ] Demo artifacts captured (logs/screenshots) and team-lead sign-off recorded.
 
 ---
 
-### Phase E (Planned) — TUI Hardening and Production Readiness
+## 16. Phase E (Planned): TUI Hardening and Production Readiness
 
-**Status**: PLANNED  
-**Goal**: Harden the Phase D TUI for reliability, observability, performance, and operator confidence under real workloads.
+**Status**: PLANNED
+**Goal**: Harden Phase D TUI deliverables for reliability, observability, performance, and operator confidence under sustained real-world load.
 
 Planned scope:
 
-1. Reliability hardening (restart/reconnect handling, failure-injection scenarios, queue/backpressure behavior).
+1. Reliability hardening (restart/reconnect handling, failure injection, queue/backpressure behavior).
 2. Performance tuning (render responsiveness under sustained stream load, control-ack visibility latency).
-3. UX/accessibility polish (focus consistency, keyboard ergonomics, high-noise operational workflows).
-4. Operational validation (repeatable demo/playbook, SLO-oriented checks, troubleshooting guidance).
+3. UX/accessibility polish (focus consistency, keyboard ergonomics, high-noise workflow usability).
+4. Operational validation (repeatable runbooks, SLO-oriented checks, troubleshooting guidance).
 
-Phase E gate intent:
+Gate intent:
 
-- D features remain functionally complete; E improves robustness and delivery quality before broader rollout.
+- Phase D provides functional end-to-end behavior.
+- Phase E raises operational quality for broader rollout.
 
-## 16. Future Plugins
+---
+## 17. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
 
@@ -2225,7 +2446,7 @@ Additional plugins planned (each is a self-contained sprint series):
 
 ---
 
-## 17. Sprint Summary
+## 18. Sprint Summary
 
 | Phase | Sprint | Name | Status | PR |
 |-------|--------|------|--------|-----|
@@ -2277,10 +2498,24 @@ Additional plugins planned (each is a self-contained sprint series):
 | **A** | A.1 | Crate scaffold + config | ✅ | [#100](https://github.com/randlee/agent-team-mail/pull/100) |
 | **A** | A.2 | MCP stdio proxy core | ✅ | [#101](https://github.com/randlee/agent-team-mail/pull/101) |
 | **A** | A.3 | Identity binding + context injection | ✅ | [#102](https://github.com/randlee/agent-team-mail/pull/102) |
+| **A** | A.4 | ATM communication tools | ✅ | [#105](https://github.com/randlee/agent-team-mail/pull/105), [#106](https://github.com/randlee/agent-team-mail/pull/106) |
+| **A** | A.5 | Session registry + persistence | ✅ | [#107](https://github.com/randlee/agent-team-mail/pull/107) |
+| **A** | A.6 | Thread lifecycle state machine | ✅ | [#108](https://github.com/randlee/agent-team-mail/pull/108) |
+| **A** | A.7 | Auto mail injection + polling | ✅ | [#109](https://github.com/randlee/agent-team-mail/pull/109) |
+| **A** | A.8 | Shutdown + resume + arch review | ✅ | [#110](https://github.com/randlee/agent-team-mail/pull/110), [#111](https://github.com/randlee/agent-team-mail/pull/111) |
+| **B** | B.1 | Teams daemon session tracking + resume | ✅ | [#119](https://github.com/randlee/agent-team-mail/pull/119) |
+| **B** | B.2 | Unicode-safe message truncation | ✅ | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
+| **B** | B.3 | Teams session stabilization | ✅ | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
+| **C** | C.1 | Unified structured JSONL logging | ✅ | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
+| **C** | C.2a | Transport trait + McpTransport refactor | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
+| **C** | C.2b | JsonTransport + stdin queue + integration tests | 🔄 | — |
+| **C** | C.3 | Control receiver stub (daemon endpoint + dedupe) | ⏳ | — |
+| **D** | D.1 | TUI crate + live stream view (read-only) | ⏳ | — |
+| **D** | D.2 | Interactive controls (stdin inject, interrupt) | ⏳ | — |
 
-**Completed**: 54 sprints across 11 phases (CI green)
-**Current version**: v0.10.0
-**Next**: Phase A sprints A.4–A.8, then integrate/phase-A → develop
+**Completed**: 65 sprints across 13 phases (CI green)
+**Current version**: v0.13.0
+**Next**: C.2b QA → merge → C.3 → integrate/phase-C → develop; then Phase D (D.1 ∥ D.2)
 
 **Sprint PRs (Phase 9)**:
 | Sprint | PR | Description |
@@ -2303,14 +2538,13 @@ Additional plugins planned (each is a self-contained sprint series):
 | Phase 9 | [#75](https://github.com/randlee/agent-team-mail/pull/75) | ✅ Merged |
 | Phase 8 | [#59](https://github.com/randlee/agent-team-mail/pull/59) | ✅ Merged |
 | Phase 10 | [#93](https://github.com/randlee/agent-team-mail/pull/93) | ✅ Merged |
-| Phase A | [#113](https://github.com/randlee/agent-team-mail/pull/113) | ✅ Merged |
-| Phase B | [#123](https://github.com/randlee/agent-team-mail/pull/123) | ✅ Merged |
-| Phase C | [#126](https://github.com/randlee/agent-team-mail/pull/126) | IN PROGRESS |
-| Phase D | TBD | IN PROGRESS |
+| Phase A | [#103](https://github.com/randlee/agent-team-mail/pull/103) | ✅ Merged |
+| Phase B | [#121](https://github.com/randlee/agent-team-mail/pull/121) | ✅ Merged |
+| Phase C | TBD | 🔄 IN PROGRESS |
 
 ---
 
-## 18. Scrum Master Agent Prompt
+## 15. Scrum Master Agent Prompt
 
 The following prompt is used when spawning the scrum master agent for a sprint:
 
@@ -2368,6 +2602,6 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 
 ---
 
-**Document Version**: 0.4
-**Last Updated**: 2026-02-21
+**Document Version**: 0.3
+**Last Updated**: 2026-02-19
 **Maintained By**: Claude (ARCH-ATM)
