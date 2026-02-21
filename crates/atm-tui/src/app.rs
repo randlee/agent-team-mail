@@ -71,7 +71,7 @@ pub struct App {
     ///
     /// Reserved for future use — the D.2 implementation does not yet differentiate
     /// between panel focus and explicit input activation within the Agent Terminal.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "Reserved for D.3 input-activation UX; not yet wired to render")]
     pub control_input_active: bool,
     /// Message shown in the status bar (replaced on the next control result).
     pub status_message: Option<String>,
