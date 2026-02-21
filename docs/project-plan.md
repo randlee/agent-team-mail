@@ -2777,6 +2777,55 @@ This ensures `atm team init` is safe to run even when the user has manually conf
 | Other hook entries present in settings.json | Left untouched — surgical insert/remove only |
 | ATM version too old | Error with minimum version required |
 
+### Design Discussion: Onboarding Warnings and Setup Nudges
+
+Phase F must address the gap between "ATM hooks are installed globally" and "this project hasn't been set up for ATM." The E.3 review exposed that global hooks fire in every Claude Code session — they must be completely inert in non-ATM projects, but they also represent a natural injection point for reminding users to configure ATM when it would be useful.
+
+#### Key Questions to Resolve in F.1
+
+1. **Where should "ATM not configured" warnings appear?**
+   - `SessionStart` hook: currently prints `SESSION_ID=...` and team context when `.atm.toml` is present, prints nothing otherwise. Should it print a one-line nudge like `ATM available but not configured for this project. Run: atm team init <team>` when ATM is installed globally but `.atm.toml` is absent?
+   - Pros: visible on every session start, hard to miss
+   - Cons: noisy for users who intentionally don't want ATM in certain projects
+   - Compromise: only show the nudge if a `.claude/` directory exists in cwd (suggesting it's a Claude Code project that might benefit from ATM)
+
+2. **Opt-out mechanism for nudges**
+   - Users who don't want ATM in a project should be able to silence the nudge permanently
+   - Options:
+     - `atm team init --skip` creates a minimal `.atm.toml` with `disabled = true` (suppresses all nudges)
+     - A global `~/.atm/config.toml` with `suppress_nudges = true` (machine-wide opt-out)
+     - An env var `ATM_QUIET=1` for temporary suppression
+   - Recommendation: support all three, checked in order: env var → project `.atm.toml` `disabled` → global config
+
+3. **What triggers a setup reminder vs silence?**
+
+   | Condition | Behavior |
+   |-----------|----------|
+   | No ATM binary on PATH | Complete silence — hooks exit immediately |
+   | ATM installed, no `.atm.toml`, no `.claude/` dir | Silence — not a Claude project |
+   | ATM installed, no `.atm.toml`, `.claude/` dir exists | Candidate for nudge — Claude project without ATM |
+   | ATM installed, `.atm.toml` with `disabled = true` | Silence — user opted out |
+   | ATM installed, `.atm.toml` present and valid | Full ATM functionality |
+
+4. **`atm team init` as the canonical setup entry point**
+   - The nudge message should always point to `atm team init <team>` as the single command to run
+   - `atm team init` must handle the full onboarding: create `.atm.toml`, install project hooks, set up agent prompts
+   - For first-time users: `atm team init --discover` could list available built-in packages and guide selection
+
+5. **Post-install verification**
+   - After `atm team init`, the next `SessionStart` hook should confirm setup: `ATM configured: team=atm-dev, packages=[rust-sprint]`
+   - `atm team status` could show current project setup health: installed packages, hook integrity (SHA256 check), missing components
+
+6. **Interaction with `atm team uninstall`**
+   - Uninstall should offer to either remove `.atm.toml` entirely (full cleanup) or set `disabled = true` (suppress nudges but keep the marker)
+   - If `.atm.toml` is removed, the nudge returns on next session (by design — it's re-discoverable)
+
+7. **Global hooks safety contract (learned from E.3 review)**
+   - All global hooks MUST check `.atm.toml` as the first operation in `main()`
+   - No file I/O, no directory creation, no socket connections before the guard passes
+   - This invariant must be enforced in F.3's built-in package tests
+   - Consider a shared `atm_guard()` utility function that all hooks import, ensuring consistent guard behavior
+
 ### Phase F Sprint Summary
 
 | Sprint | Name | Depends On | Status |
