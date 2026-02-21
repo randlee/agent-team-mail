@@ -9,9 +9,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 import unittest
 
-# Allow importing session-start.py directly (it has a hyphen in the parent dir
-# but we add the scripts dir to the path to import it as a module by path).
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+# Resolve repo root and hook scripts path:
+# tests/hook-scripts/*.py -> <repo>/.claude/scripts/*.py
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPTS_DIR = _REPO_ROOT / ".claude" / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import importlib.util

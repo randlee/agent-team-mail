@@ -72,3 +72,11 @@ jobs:
 
       - name: Run tests
         run: cargo test --verbose
+
+      - name: Install pytest (hook script tests)
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 -m pip install --upgrade pip pytest
+
+      - name: Run hook script Python tests
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 -m pytest tests/hook-scripts/ -q

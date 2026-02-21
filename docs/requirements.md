@@ -601,6 +601,32 @@ Recommended policy:
 Rationale:
 - Provides low-latency state transitions (`Busy` → `Idle`) without expensive polling.
 
+#### Unified Lifecycle Event Envelope (Claude + MCP + Future Adapters)
+
+Lifecycle tracking must use one daemon command path (`hook-event`) with a single
+extensible payload shape, not separate packet types per integration.
+
+Required baseline fields:
+- `event`: `session_start` | `teammate_idle` | `session_end`
+- `team`
+- `agent` (or canonical `agent_id` where available)
+- `source`: source-kind enum
+
+`source` should be expandable and include at least:
+- `claude_hook` — Claude Code lifecycle hooks
+- `atm_mcp` — lifecycle events emitted by `atm-agent-mcp`
+- `agent_hook` — future external agent hooks/adapters (e.g. Codex/Gemini when supported)
+- `unknown` — reserved fallback
+
+Expected producer coverage:
+- Claude hooks emit `session_start`, `teammate_idle`, `session_end`
+- `atm-agent-mcp` should emit equivalent lifecycle events for MCP-managed agents
+- Future adapters should map provider lifecycle callbacks into the same envelope
+  and daemon command path
+
+AuthZ and validation should be source-aware in one handler, not split across
+multiple transport packet types.
+
 #### `TaskCompleted`
 
 Recommended policy:

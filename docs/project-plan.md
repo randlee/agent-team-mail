@@ -2447,19 +2447,19 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 #### Scope
 
-1. `atm teams resume` accepts `--session-id <id>` flag for explicit override (Option B)
-2. Fallback: read session ID from gate debug log (`/tmp/gate-agent-spawns-debug.jsonl`) when env var is absent/stale
-3. Or: gate hook writes a stable session ID file (`/tmp/atm-session-id`) that `atm` reads reliably (Option A)
-4. Update `CLAUDE.md` initialization process to use the fixed command reliably
+1. `atm teams resume` accepts `--session-id <id>` flag for explicit override
+2. Primary runtime path: `CLAUDE_SESSION_ID` environment variable when present
+3. If no usable session ID is available, fail with a helpful error instead of silently writing a random/stale ID
+4. Update `CLAUDE.md` initialization process to use explicit `--session-id` or `CLAUDE_SESSION_ID`
 
-> *Note: Scope item 2 (reading gate debug log) was superseded by Scope item 3 (`/tmp/atm-session-id` file). Both Options A and B are implemented: the gate hook writes `/tmp/atm-session-id` on every Task tool call (Option A), and `--session-id` provides an explicit override (Option B).*
+> Note: `${TMPDIR}/atm-session-id` written by the gate hook is an audit/debug breadcrumb only and is not part of the production session-resolution contract.
 
 #### Exit Criteria
 
 - [ ] `atm teams resume atm-dev` sets `leadSessionId` to the correct current session ID without manual Python workaround
 - [ ] `atm teams resume atm-dev --session-id <uuid>` explicit flag works and writes that ID to `config.json`
-- [ ] Fallback order verified: `--session-id` flag → `CLAUDE_SESSION_ID` env → `/tmp/atm-session-id` file → error with helpful message
-- [ ] Gate hook writes `/tmp/atm-session-id` on every Task tool call (pass and block paths)
+- [ ] Resolution order verified: `--session-id` flag → `CLAUDE_SESSION_ID` env → helpful error
+- [ ] Gate hook breadcrumb write to `${TMPDIR}/atm-session-id` documented as diagnostics-only (not a resume fallback)
 - [ ] Verification: gate hook allows named teammate spawning immediately after `atm teams resume`
 - [ ] CLAUDE.md initialization process updated (no Python workaround)
 - [ ] `cargo clippy --workspace -- -D warnings` clean
@@ -2523,14 +2523,17 @@ All hook scripts are Python (not bash) for cross-platform compatibility and test
 
 **`.atm.toml` guard** (all three scripts): before sending any daemon socket message, check for `.atm.toml` in `cwd`. If absent, skip the socket call entirely. This prevents daemon state from being polluted by unrelated Claude Code sessions on the same machine.
 
-Socket message types (new `hook_event` variant):
+Socket message payloads (single `hook-event` command path):
 ```json
-{"type": "hook_event", "event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": "init|compact"}
-{"type": "hook_event", "event": "teammate_idle",  "session_id": "...", "agent": "...", "team": "..."}
-{"type": "hook_event", "event": "session_end",    "session_id": "...", "agent": "...", "team": "...", "reason": "..."}
+{"event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": "init|compact"}
+{"event": "teammate_idle", "session_id": "...", "agent": "...", "team": "...", "received_at": "YYYY-MM-DDTHH:MM:SSZ"}
+{"event": "session_end",   "session_id": "...", "agent": "...", "team": "...", "reason": "..."}
 ```
 
-**Unit tests** live alongside each script in `.claude/scripts/tests/`:
+`source` is currently a flat string sent by Claude hook scripts (`init` or `compact` on session start).
+Future lifecycle-source expansion remains planned in Sprint E.7.
+
+**Unit tests** live in `tests/hook-scripts/`:
 - `test_session_start.py` — mock socket, verify message shape, verify `.atm.toml` guard, verify fail-open on socket error
 - `test_session_end.py` — same pattern for session_end
 - `test_teammate_idle_relay.py` — extend existing tests with socket message assertions
@@ -2549,6 +2552,8 @@ Add `SocketCommand::HookEvent` variant. Handler updates session registry and age
 - `events.jsonl` file write is kept as durable audit trail; socket call is additive
 - Socket path lookup: `${ATM_HOME:-$HOME}/.claude/daemon/atm-daemon.sock`
 - Global `~/.claude/settings.json` updated to add `SessionEnd` hook pointing to `session-end.py`
+- Keep one daemon lifecycle handler path (`hook-event`) with source-aware validation;
+  avoid splitting lifecycle transport into multiple packet families
 
 #### Exit Criteria
 
@@ -2556,7 +2561,7 @@ Add `SocketCommand::HookEvent` variant. Handler updates session registry and age
 - [ ] `session-end.py` (new) added to global `~/.claude/settings.json`; sends `hook_event/session_end` **only when `.atm.toml` present in cwd**
 - [ ] `teammate-idle-relay.py` sends `hook_event/teammate_idle` **only when `.atm.toml` present in cwd**
 - [ ] All hooks remain fail-open — exit `0` even if socket call fails or `.atm.toml` is absent
-- [ ] Unit tests in `.claude/scripts/tests/` cover: message shape, `.atm.toml` guard, socket-error fail-open, daemon-not-running fail-open
+- [ ] Unit tests in `tests/hook-scripts/` cover: message shape, `.atm.toml` guard, socket-error fail-open, daemon-not-running fail-open
 - [ ] Daemon handles `SocketCommand::HookEvent`; updates session registry + agent state
 - [ ] `session_start` → `Active`; `teammate_idle` → `Idle`; `session_end` → `Dead`/`Closed`
 - [ ] Integration test: hook event over socket → daemon state query reflects updated state
@@ -2703,7 +2708,13 @@ Additionally, when an external agent reconnects with a new session/agent ID, the
    - `external` — generic external agent (API-based or custom)
    - `human:<username>` — human user (e.g., `human:randlee`). Username is required for human backends to support cross-machine identification when bridge/relay communication is enabled. The `human:` prefix is never the default — it must be explicitly specified. No human plugin exists yet; this reserves the namespace for future chat interfaces.
 
-5. **`atm teams update-member` command**: Allow updating session-id, model, pane-id, backend-type, and active status on an existing member without removing and re-adding.
+5. **MCP auto-add collision guard**: In MCP-managed add/join flows, enforce name/identity safety:
+   - If member `name` already exists with `isActive: true` and a different `agent_id`, reject auto-add/join
+   - If same `agent_id` already exists, treat as idempotent success
+   - If same `name` exists but inactive, require explicit reclaim/update path
+   - Execute checks under lock with atomic config write to avoid race-based duplicate/identity takeover
+
+6. **`atm teams update-member` command**: Allow updating session-id, model, pane-id, backend-type, and active status on an existing member without removing and re-adding.
 
 #### Exit Criteria
 
@@ -2713,10 +2724,62 @@ Additionally, when an external agent reconnects with a new session/agent ID, the
 - [ ] `atm teams add-member --model gpt5.3-codex` validates against registry; `--model foo` rejected; `--model custom:foo` accepted
 - [ ] Model validation only applies to `add-member` / `update-member`; Claude Code-managed member models are never overwritten or validated
 - [ ] Daemon auto-updates session-id when hook event arrives with new ID for known agent
+- [ ] MCP auto-add/join rejects active-name collisions when `agent_id` differs; idempotent on matching `agent_id`
 - [ ] `atm teams update-member <team> <agent> --session-id <new-id>` updates existing member
 - [ ] `atm teams cleanup` uses session-id for liveness checks on external agents
 - [ ] `human:<username>` backend type is never set as default — must be explicit
 - [ ] Integration tests cover: add with session-id, daemon auto-update, update-member, cleanup with external agent, human backend type parsing
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint E.7 — Unified Lifecycle Source Model + MCP Lifecycle Emission
+
+**Branch**: `feature/pE-s7-lifecycle-source-mcp`
+**Crate(s)**: `crates/atm-daemon`, `crates/atm-agent-mcp`, `docs/`
+**Depends on**: E.3 (hook-event bridge), E.6 (external member identity model)
+**Design refs**: `docs/requirements.md` §4.5, `docs/agent-teams-hooks.md`
+
+#### Problem
+
+Lifecycle events currently originate from Claude hooks, but near-term support requires
+the same daemon lifecycle path to handle MCP-managed agents and future adapters
+without packet fragmentation. We need source-aware validation in one handler and
+explicit MCP lifecycle emission coverage.
+
+#### Scope
+
+1. **Source-kind discriminator in lifecycle payloads**:
+   - Introduce expandable `source.kind` enum in `hook-event` payloads:
+     - `claude_hook`
+     - `atm_mcp`
+     - `agent_hook`
+     - `unknown`
+   - Keep one daemon command path (`hook-event`) and one lifecycle handler.
+
+2. **Source-aware daemon auth/validation policy**:
+   - Enforce team/member validation before state mutation for all sources.
+   - Apply stricter Claude-hook expectations where applicable while preserving
+     shared core validation and state transitions.
+
+3. **MCP lifecycle emission** (`atm-agent-mcp`):
+   - Emit `session_start` when MCP-managed agent session is established
+   - Emit `teammate_idle` on idle transitions
+   - Emit `session_end` on close/teardown
+   - Include canonical team/member identity fields required by daemon auth checks.
+
+4. **Future adapter guidance**:
+   - Document hook/adapter wiring pattern for non-Claude agents (e.g. Codex/Gemini)
+     so adding lifecycle callbacks is straightforward when providers expose them.
+
+#### Exit Criteria
+
+- [ ] Lifecycle payload supports expandable `source.kind` with backward-compatible handling
+- [ ] Daemon lifecycle handler performs source-aware validation in one command path
+- [ ] `atm-agent-mcp` emits start/idle/end lifecycle events to daemon
+- [ ] Tests cover: source-kind parsing, source-aware authz, MCP lifecycle emission
+- [ ] Docs updated with adapter wiring pattern for future agent hooks
 - [ ] `cargo clippy --workspace -- -D warnings` clean
 - [ ] `cargo test --workspace` passes
 
@@ -2732,8 +2795,9 @@ Additionally, when an external agent reconnects with a new session/agent ID, the
 | E.4 | TUI reliability hardening (restart, reconnect, failure injection) | E.3 | ✅ MERGED (#158) |
 | E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ DONE (PR pending) |
 | E.6 | External agent member management and model registry | E.3 | ⏳ PLANNED |
+| E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ⏳ PLANNED |
 
-**Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.6 is member management for external agents (Codex/Gemini). E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4. E.6 can run parallel to E.4/E.5.
+**Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.6 is member management for external agents (Codex/Gemini). E.7 extends lifecycle handling to source-aware validation + MCP lifecycle emission. E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4. E.6 can run parallel to E.4/E.5. E.7 starts after E.6 interface contracts settle.
 
 ---
 

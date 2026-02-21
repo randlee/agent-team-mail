@@ -133,12 +133,14 @@ def main() -> int:
         os.environ.get("ATM_IDENTITY"),
     )
 
+    received_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     event = {
         "type": "teammate-idle",
         "agent": agent,
         "team": team,
         "session_id": payload.get("session_id"),
-        "received_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "received_at": received_at,
         "payload": payload,
     }
 
@@ -156,6 +158,7 @@ def main() -> int:
             "session_id": payload.get("session_id"),
             "agent": agent,
             "team": team,
+            "received_at": received_at,
         })
     except Exception:
         pass  # Fail-open
