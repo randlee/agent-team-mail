@@ -5,6 +5,7 @@ members = [
     "crates/atm",
     "crates/atm-daemon",
     "crates/atm-agent-mcp",
+    "crates/atm-tui",
 ]
 exclude = [
     "examples/provider-stub",
