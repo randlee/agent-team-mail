@@ -15,7 +15,7 @@
 //! | `Tab` | Switch panel focus |
 //! | _printable_ (Agent Terminal, live agent) | Append to stdin input |
 //! | `Enter` | Send stdin text to agent |
-//! | `Ctrl-I` | Send interrupt to agent |
+//! | `Ctrl-K` | Send interrupt to agent |
 //! | `Esc` | Clear current input |
 //! | `Backspace` | Delete last character |
 //!
@@ -52,7 +52,7 @@ use tokio::time::interval;
 
 use agent_team_mail_core::{
     control::{ControlAck, ControlAction, ControlRequest, ControlResult, CONTROL_SCHEMA_VERSION},
-    daemon_client::{AgentSummary, query_list_agents, send_control},
+    daemon_client::{AgentSummary, query_list_agents, query_session, send_control},
     event_log::{EventFields, emit_event_best_effort},
     home::get_home_dir,
     logging,
@@ -221,7 +221,8 @@ async fn run_app<B: ratatui::backend::Backend>(
 
         // ── Control action dispatch ───────────────────────────────────────────
         if let Some(pending) = app.pending_control.take() {
-            let result = execute_control(&team, &app.streaming_agent, pending).await;
+            let result =
+                execute_control(&team, app.selected_agent().map(str::to_owned), pending).await;
             app.status_message = Some(result);
         }
 
@@ -311,12 +312,22 @@ fn emit_stream_detach_event(team: &str, agent: &str) {
 /// retried once after a 2-second delay with the same idempotency key.
 async fn execute_control(
     team: &str,
-    streaming_agent: &Option<String>,
+    selected_agent: Option<String>,
     action: PendingControl,
 ) -> String {
-    let Some(agent_id) = streaming_agent else {
+    let Some(agent_id) = selected_agent else {
         return "No agent selected".to_string();
     };
+    let agent_for_lookup = agent_id.clone();
+    let session_info = match tokio::task::spawn_blocking(move || query_session(&agent_for_lookup)).await {
+        Ok(Ok(Some(info))) => info,
+        Ok(Ok(None)) => return "not live: no session".to_string(),
+        Ok(Err(e)) => return format!("error: failed to query session: {e}"),
+        Err(e) => return format!("error: failed to query session: {e}"),
+    };
+    if !session_info.alive {
+        return "not live: session process not alive".to_string();
+    }
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let sent_at = chrono::Utc::now().to_rfc3339();
@@ -342,7 +353,7 @@ async fn execute_control(
         signal,
         sent_at,
         team: team.to_string(),
-        session_id: String::new(), // daemon resolves from agent_id
+        session_id: session_info.session_id,
         agent_id: agent_id.clone(),
         sender: "tui".to_string(),
         action: control_action,
@@ -356,6 +367,7 @@ async fn execute_control(
         action: "control_send",
         team: Some(team.to_string()),
         agent_id: Some(agent_id.clone()),
+        request_id: Some(request.request_id.clone()),
         result: None,
         ..Default::default()
     });
@@ -373,6 +385,7 @@ async fn execute_control(
         action: "control_ack",
         team: Some(team.to_string()),
         agent_id: Some(agent_id.clone()),
+        request_id: Some(request.request_id.clone()),
         result: Some(result_str.clone()),
         ..Default::default()
     });
@@ -487,7 +500,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_control_no_agent_returns_message() {
         // When streaming_agent is None, execute_control returns a "no agent" message.
-        let result = execute_control("atm-dev", &None, PendingControl::Interrupt).await;
+        let result = execute_control("atm-dev", None, PendingControl::Interrupt).await;
         assert_eq!(result, "No agent selected");
     }
 
@@ -497,7 +510,7 @@ mod tests {
         // We just assert it is non-empty and does not panic.
         let result = execute_control(
             "atm-dev",
-            &Some("arch-ctm".to_string()),
+            Some("arch-ctm".to_string()),
             PendingControl::Stdin("hello".to_string()),
         )
         .await;
