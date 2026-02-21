@@ -2469,7 +2469,7 @@ Additional plugins planned (each is a self-contained sprint series):
 | **D** | D.2 | Interactive controls (stdin inject, interrupt) | ⏳ | — |
 
 **Completed**: 65 sprints across 13 phases (CI green)
-**Current version**: v0.12.0
+**Current version**: v0.13.0
 **Next**: C.2b QA → merge → C.3 → integrate/phase-C → develop; then Phase D (D.1 ∥ D.2)
 
 **Sprint PRs (Phase 9)**:
