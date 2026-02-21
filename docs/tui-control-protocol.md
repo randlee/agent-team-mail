@@ -28,6 +28,7 @@ Phase alignment:
 
 - Phase C target is a lightweight receiver contract/stub (`C.3`): endpoint, validation, ack, dedupe skeleton
 - full interactive TUI control flows are Phase D scope
+- provider-native ids (such as Codex `threadId`) are MCP-internal details and must not appear in public TUI/control payloads
 
 ---
 
@@ -49,12 +50,11 @@ Control payload object fields:
 - `request_id` (string): stable idempotency key for the logical send
 - `team` (string): team namespace
 - `session_id` (string): Claude session id
-- `agent_id` (string): worker session id
+- `agent_id` (string): canonical conversation id exposed outside MCP
 - `sent_at` / `acked_at` (RFC 3339 UTC string)
 
 Optional:
 
-- `thread_id` (string): backend-native thread/conversation handle
 - `meta` (object): transport/UI metadata
 
 Versioning rule:
@@ -84,7 +84,6 @@ Required fields:
 
 Optional fields:
 
-- `thread_id`
 - `content_encoding` (default: `utf-8`)
 - `content_preview`
 - `interrupt` (default: `false`)
@@ -133,7 +132,6 @@ Required fields:
 
 Optional fields:
 
-- `thread_id`
 - `meta.retry_count`
 - `meta.ui_source`
 
@@ -187,7 +185,7 @@ Notes:
 Rules:
 
 - retries of a logical send must reuse the same `request_id`
-- receiver deduplicates by `request_id + session_id + agent_id`
+- receiver deduplicates by `team + request_id + session_id + agent_id`
 - duplicate delivery must not re-execute input injection
 - duplicate request returns ack with:
   - `result = "ok"`
@@ -282,7 +280,6 @@ Minimum audit fields for both request and ack events:
   "request_id": "req_01HZY8QJ8R7G6K2YJ7V2M9A1P3",
   "session_id": "claude-session-uuid",
   "agent_id": "codex:abc123",
-  "thread_id": "thread-xyz789",
   "team": "atm-dev",
   "sender": "arch-ctm",
   "sent_at": "2026-02-20T21:15:00Z",
