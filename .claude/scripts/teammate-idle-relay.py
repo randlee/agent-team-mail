@@ -5,6 +5,10 @@ Reads the hook payload from stdin JSON, enriches with ATM identity/team context,
 and appends one JSON line to:
   ${ATM_HOME:-$HOME}/.claude/daemon/hooks/events.jsonl
 
+Also sends a hook_event/teammate_idle message to the ATM daemon socket (when
+.atm.toml exists in the cwd) so daemon state is updated in real-time. The file
+write remains the durable audit trail; the socket send is additive.
+
 The script is fail-open: it never blocks teammate flow.
 Exit codes:
 - 0: always (success or soft failure)
@@ -18,6 +22,34 @@ from pathlib import Path
 from typing import Any
 
 
+# ── Socket helper ─────────────────────────────────────────────────────────────
+
+def send_hook_event(payload: dict[str, Any]) -> None:
+    """Send hook_event to daemon socket. Fail-open: any error is silently swallowed."""
+    import socket as _socket
+    import uuid
+    atm_home = Path(os.environ.get("ATM_HOME", str(Path.home())))
+    sock_path = atm_home / ".claude" / "daemon" / "atm-daemon.sock"
+    if not sock_path.exists():
+        return
+    request = {
+        "version": 1,
+        "request_id": str(uuid.uuid4()),
+        "command": "hook-event",
+        "payload": payload,
+    }
+    msg = (json.dumps(request, separators=(",", ":")) + "\n").encode()
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(str(sock_path))
+            s.sendall(msg)
+            # Drain response (ignore content)
+            s.recv(4096)
+    except Exception:
+        pass  # Fail-open
+
+
 def read_required_team() -> str | None:
     """Read .atm.toml core.default_team from project root."""
     try:
@@ -29,6 +61,23 @@ def read_required_team() -> str | None:
         with toml_path.open("rb") as f:
             config = tomllib.load(f)
         return config.get("core", {}).get("default_team")
+    except Exception:
+        return None
+
+
+def read_atm_toml() -> dict[str, Any] | None:
+    """Read full .atm.toml from current working directory.
+
+    Returns the parsed config dict, or None if not present / unreadable.
+    """
+    try:
+        import tomllib
+
+        toml_path = Path(".atm.toml")
+        if not toml_path.exists():
+            return None
+        with toml_path.open("rb") as f:
+            return tomllib.load(f)
     except Exception:
         return None
 
@@ -94,6 +143,20 @@ def main() -> int:
     except Exception:
         # Fail open: never block teammate progress if relay has an issue.
         pass
+
+    # Socket send — additive real-time update; only when .atm.toml is present.
+    # File write above is the durable audit trail and is unaffected by socket errors.
+    atm_config = read_atm_toml()
+    if atm_config is not None:
+        try:
+            send_hook_event({
+                "event": "teammate_idle",
+                "session_id": payload.get("session_id"),
+                "agent": agent,
+                "team": team,
+            })
+        except Exception:
+            pass  # Fail-open
 
     return 0
 

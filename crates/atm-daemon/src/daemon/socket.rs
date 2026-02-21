@@ -327,6 +327,8 @@ async fn handle_connection(
         handle_launch_command(request_str, &launch_tx).await
     } else if is_control_command(request_str) {
         handle_control_command(request_str, &state_store, &session_registry).await
+    } else if is_hook_event_command(request_str) {
+        handle_hook_event_command(request_str, &state_store, &session_registry).await
     } else {
         match parse_and_dispatch(request_str, &state_store, &pubsub_store, &session_registry) {
             Ok(resp) => resp,
@@ -371,6 +373,129 @@ fn is_launch_command(request_str: &str) -> bool {
 fn is_control_command(request_str: &str) -> bool {
     request_str.contains(r#""command":"control""#)
         || request_str.contains(r#""command": "control""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"hook-event"` command.
+#[cfg(unix)]
+fn is_hook_event_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"hook-event""#)
+        || request_str.contains(r#""command": "hook-event""#)
+}
+
+/// Handle the `"hook-event"` command, updating daemon state in real-time
+/// from Claude Code lifecycle hooks (session_start, teammate_idle, session_end).
+#[cfg(unix)]
+async fn handle_hook_event_command(
+    request_str: &str,
+    state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("bad hook-event: {e}"),
+            )
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            "unsupported version",
+        );
+    }
+
+    let event_type = request
+        .payload
+        .get("event")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let agent = request
+        .payload
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let session_id = request
+        .payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let process_id = request
+        .payload
+        .get("process_id")
+        .and_then(|v| v.as_u64())
+        .map(|p| p as u32);
+
+    if agent.is_empty() {
+        return make_ok_response(
+            &request.request_id,
+            serde_json::json!({"processed": false, "reason": "missing agent"}),
+        );
+    }
+
+    match event_type.as_str() {
+        "session_start" => {
+            if !session_id.is_empty() {
+                let pid = process_id.unwrap_or(0);
+                session_registry
+                    .lock()
+                    .unwrap()
+                    .upsert(&agent, &session_id, pid);
+            }
+            {
+                let mut tracker = state_store.lock().unwrap();
+                if tracker.get_state(&agent).is_none() {
+                    tracker.register_agent(&agent);
+                }
+            }
+            info!("hook_event session_start: agent={agent} session_id={session_id}");
+        }
+        "teammate_idle" => {
+            {
+                let mut tracker = state_store.lock().unwrap();
+                if tracker.get_state(&agent).is_some() {
+                    tracker.set_state(&agent, AgentState::Idle);
+                } else {
+                    tracker.register_agent(&agent);
+                    tracker.set_state(&agent, AgentState::Idle);
+                }
+            }
+            info!("hook_event teammate_idle: agent={agent}");
+        }
+        "session_end" => {
+            {
+                session_registry.lock().unwrap().mark_dead(&agent);
+            }
+            {
+                let mut tracker = state_store.lock().unwrap();
+                if tracker.get_state(&agent).is_some() {
+                    tracker.set_state(&agent, AgentState::Killed);
+                }
+            }
+            info!("hook_event session_end: agent={agent}");
+        }
+        other => {
+            debug!("hook_event unknown event type: {other}");
+            return make_ok_response(
+                &request.request_id,
+                serde_json::json!({"processed": false, "reason": format!("unknown event type: {other}")}),
+            );
+        }
+    }
+
+    make_ok_response(
+        &request.request_id,
+        serde_json::json!({"processed": true, "event": event_type, "agent": agent}),
+    )
 }
 
 /// Handle the `"launch"` command asynchronously by forwarding it through the
@@ -930,6 +1055,12 @@ fn parse_and_dispatch(
             &request.request_id,
             "INTERNAL_ERROR",
             "Control command should have been handled by the async path",
+        ),
+        // "hook-event" is handled asynchronously before parse_and_dispatch is called.
+        "hook-event" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "hook-event command should have been handled by the async path",
         ),
         other => make_error_response(
             &request.request_id,
@@ -2137,6 +2268,434 @@ mod tests {
         let pid_str = std::fs::read_to_string(&pid_path).unwrap();
         let pid: u32 = pid_str.trim().parse().unwrap();
         assert_eq!(pid, std::process::id());
+
+        cancel.cancel();
+    }
+
+    // ── hook-event handler tests ───────────────────────────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_hook_event_command_detection() {
+        assert!(is_hook_event_command(
+            r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{}}"#
+        ));
+        assert!(is_hook_event_command(
+            r#"{"version":1,"request_id":"r1","command": "hook-event","payload":{}}"#
+        ));
+        assert!(!is_hook_event_command(
+            r#"{"version":1,"request_id":"r1","command":"agent-state","payload":{}}"#
+        ));
+        assert!(!is_hook_event_command(
+            r#"{"version":1,"request_id":"r1","command":"launch","payload":{}}"#
+        ));
+        assert!(!is_hook_event_command(
+            r#"{"version":1,"request_id":"r1","command":"control","payload":{}}"#
+        ));
+    }
+
+    #[test]
+    fn test_parse_and_dispatch_hook_event_internal_error() {
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-hook","command":"hook-event","payload":{"event":"session_start","agent":"test-agent","session_id":"s1"}}"#;
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_session_start_updates_registry() {
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","session_id":"sess-abc","process_id":9999}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "session_start");
+        assert_eq!(payload["agent"].as_str().unwrap(), "team-lead");
+
+        // Check session registry updated
+        let reg = sr.lock().unwrap();
+        let record = reg.query("team-lead").unwrap();
+        assert_eq!(record.session_id, "sess-abc");
+        assert_eq!(record.process_id, 9999);
+
+        // Check agent registered in state tracker
+        let tracker = store.lock().unwrap();
+        assert!(tracker.get_state("team-lead").is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_session_start_idempotent_if_already_tracked() {
+        let store = make_store();
+        let sr = make_sr();
+        // Pre-register agent as Idle
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("team-lead");
+            tracker.set_state("team-lead", AgentState::Idle);
+        }
+        let req_json = r#"{"version":1,"request_id":"r2","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","session_id":"sess-xyz","process_id":1234}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        // State should remain Idle (not reset to Launching) — session_start only registers if not already tracked
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_teammate_idle_updates_state() {
+        let store = make_store();
+        let sr = make_sr();
+        // Register agent as Busy first
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Busy);
+        }
+        let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-1","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "teammate_idle");
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_teammate_idle_auto_registers_unknown_agent() {
+        let store = make_store();
+        let sr = make_sr();
+        // Agent not yet registered
+        let req_json = r#"{"version":1,"request_id":"r4","command":"hook-event","payload":{"event":"teammate_idle","agent":"new-agent","session_id":"sess-2","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("new-agent"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_session_end_marks_dead() {
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        {
+            sr.lock().unwrap().upsert("arch-ctm", "sess-end", 1111);
+        }
+        let req_json = r#"{"version":1,"request_id":"r5","command":"hook-event","payload":{"event":"session_end","agent":"arch-ctm","session_id":"sess-end","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "session_end");
+
+        // Session registry should be marked dead
+        let reg = sr.lock().unwrap();
+        let record = reg.query("arch-ctm").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Dead
+        );
+
+        // State tracker should be Killed
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Killed));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_unknown_type_returns_ok_not_processed() {
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r6","command":"hook-event","payload":{"event":"some_future_event","agent":"team-lead","session_id":"s1"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert!(payload["reason"]
+            .as_str()
+            .unwrap()
+            .contains("unknown event type"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_missing_agent_returns_not_processed() {
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r7","command":"hook-event","payload":{"event":"session_start","agent":"","session_id":"sess-1"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "missing agent");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_version_mismatch() {
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":99,"request_id":"r8","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","session_id":"s1"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_socket_server_hook_event_roundtrip() {
+        use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio_util::sync::CancellationToken;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let home_dir = temp_dir.path().to_path_buf();
+        let cancel = CancellationToken::new();
+
+        let state_store = make_store();
+        let session_registry = make_sr();
+
+        let launch_tx = new_launch_sender();
+        let _handle = start_socket_server(
+            home_dir.clone(),
+            state_store.clone(),
+            new_pubsub_store(),
+            launch_tx,
+            session_registry.clone(),
+            cancel.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected socket server handle on unix");
+
+        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+
+        // Send a hook-event/session_start
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let request = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "hook-roundtrip-1".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "team-lead",
+                "session_id": "sess-roundtrip",
+                "process_id": std::process::id(),
+                "team": "atm-dev",
+                "source": "init",
+            }),
+        };
+        let req_line = format!("{}\n", serde_json::to_string(&request).unwrap());
+        let mut reader = BufReader::new(stream);
+        reader
+            .get_mut()
+            .write_all(req_line.as_bytes())
+            .await
+            .unwrap();
+        let mut resp_line = String::new();
+        reader.read_line(&mut resp_line).await.unwrap();
+        let resp: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line.trim()).unwrap();
+        assert!(resp.is_ok(), "session_start hook-event failed: {:?}", resp.error);
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        // Verify session registry updated
+        {
+            let reg = session_registry.lock().unwrap();
+            let record = reg.query("team-lead").unwrap();
+            assert_eq!(record.session_id, "sess-roundtrip");
+        }
+
+        // Send teammate_idle
+        let stream2 = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let request2 = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "hook-roundtrip-2".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "teammate_idle",
+                "agent": "team-lead",
+                "session_id": "sess-roundtrip",
+                "team": "atm-dev",
+            }),
+        };
+        let req_line2 = format!("{}\n", serde_json::to_string(&request2).unwrap());
+        let mut reader2 = BufReader::new(stream2);
+        reader2
+            .get_mut()
+            .write_all(req_line2.as_bytes())
+            .await
+            .unwrap();
+        let mut resp_line2 = String::new();
+        reader2.read_line(&mut resp_line2).await.unwrap();
+        let resp2: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line2.trim()).unwrap();
+        assert!(resp2.is_ok(), "teammate_idle hook-event failed: {:?}", resp2.error);
+
+        // Verify state updated to Idle
+        {
+            let tracker = state_store.lock().unwrap();
+            assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+        }
+
+        cancel.cancel();
+    }
+
+    /// Integration-style test: session_end hook-event over the unix socket marks
+    /// the session Dead and the agent Killed, verified via follow-up queries.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_socket_server_hook_event_session_end_roundtrip() {
+        use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio_util::sync::CancellationToken;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let home_dir = temp_dir.path().to_path_buf();
+        let cancel = CancellationToken::new();
+
+        let state_store = make_store();
+        let session_registry = make_sr();
+
+        // Pre-register the agent as Idle and insert a session record.
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("team-lead");
+            tracker.set_state("team-lead", AgentState::Idle);
+        }
+        {
+            let mut reg = session_registry.lock().unwrap();
+            reg.upsert("team-lead", "sess-end-roundtrip", std::process::id());
+        }
+
+        let launch_tx = new_launch_sender();
+        let _handle = start_socket_server(
+            home_dir.clone(),
+            state_store.clone(),
+            new_pubsub_store(),
+            launch_tx,
+            session_registry.clone(),
+            cancel.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected socket server handle on unix");
+
+        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+
+        // ── Step 1: Send hook-event/session_end ───────────────────────────────
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let request = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "end-roundtrip-1".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_end",
+                "agent": "team-lead",
+                "session_id": "sess-end-roundtrip",
+                "team": "atm-dev",
+                "reason": "session_exit",
+            }),
+        };
+        let req_line = format!("{}\n", serde_json::to_string(&request).unwrap());
+        let mut reader = BufReader::new(stream);
+        reader
+            .get_mut()
+            .write_all(req_line.as_bytes())
+            .await
+            .unwrap();
+        let mut resp_line = String::new();
+        reader.read_line(&mut resp_line).await.unwrap();
+        let resp: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line.trim()).unwrap();
+        assert!(
+            resp.is_ok(),
+            "session_end hook-event failed: {:?}",
+            resp.error
+        );
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "session_end");
+
+        // ── Step 2: Query session-query — expects Dead state ──────────────────
+        let stream2 = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let request2 = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "end-roundtrip-2".to_string(),
+            command: "session-query".to_string(),
+            payload: serde_json::json!({"name": "team-lead"}),
+        };
+        let req_line2 = format!("{}\n", serde_json::to_string(&request2).unwrap());
+        let mut reader2 = BufReader::new(stream2);
+        reader2
+            .get_mut()
+            .write_all(req_line2.as_bytes())
+            .await
+            .unwrap();
+        let mut resp_line2 = String::new();
+        reader2.read_line(&mut resp_line2).await.unwrap();
+        let resp2: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line2.trim()).unwrap();
+        // session-query returns ok with the record, but alive should be false
+        // (PID is from current process, but state is Dead).  We verify liveness
+        // through the in-memory registry directly rather than the alive flag,
+        // because alive checks the OS process table and our PID is real.
+        assert!(resp2.is_ok(), "session-query failed: {:?}", resp2.error);
+        {
+            let reg = session_registry.lock().unwrap();
+            let record = reg.query("team-lead").unwrap();
+            assert_eq!(
+                record.state,
+                crate::daemon::session_registry::SessionState::Dead,
+                "Session registry must reflect Dead state after session_end"
+            );
+        }
+
+        // ── Step 3: Query agent-state — expects Killed ────────────────────────
+        let stream3 = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let request3 = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "end-roundtrip-3".to_string(),
+            command: "agent-state".to_string(),
+            payload: serde_json::json!({"agent": "team-lead", "team": "atm-dev"}),
+        };
+        let req_line3 = format!("{}\n", serde_json::to_string(&request3).unwrap());
+        let mut reader3 = BufReader::new(stream3);
+        reader3
+            .get_mut()
+            .write_all(req_line3.as_bytes())
+            .await
+            .unwrap();
+        let mut resp_line3 = String::new();
+        reader3.read_line(&mut resp_line3).await.unwrap();
+        let resp3: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line3.trim()).unwrap();
+        assert!(resp3.is_ok(), "agent-state failed: {:?}", resp3.error);
+        let payload3 = resp3.payload.unwrap();
+        assert_eq!(
+            payload3["state"].as_str().unwrap(),
+            "killed",
+            "Agent state must be 'killed' after session_end"
+        );
 
         cancel.cancel();
     }
