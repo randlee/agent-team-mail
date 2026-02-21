@@ -105,7 +105,7 @@ jobs:
           key: ${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} --bin atm --bin atm-daemon --bin atm-agent-mcp
+        run: cargo build --release --target ${{ matrix.target }} --bin atm --bin atm-daemon --bin atm-agent-mcp --bin atm-tui
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
@@ -114,7 +114,7 @@ jobs:
           VERSION='${{ needs.gate-and-tag.outputs.release_version }}'
           ARCHIVE="atm_${VERSION}_${{ matrix.target }}.tar.gz"
           cd target/${{ matrix.target }}/release
-          tar czf "../../../${ARCHIVE}" atm atm-daemon atm-agent-mcp
+          tar czf "../../../${ARCHIVE}" atm atm-daemon atm-agent-mcp atm-tui
           cd ../../..
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
@@ -124,7 +124,7 @@ jobs:
         run: |
           $VERSION = '${{ needs.gate-and-tag.outputs.release_version }}'
           $ARCHIVE = "atm_${VERSION}_${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/atm.exe","target/${{ matrix.target }}/release/atm-daemon.exe","target/${{ matrix.target }}/release/atm-agent-mcp.exe" -DestinationPath $ARCHIVE
+          Compress-Archive -Path "target/${{ matrix.target }}/release/atm.exe","target/${{ matrix.target }}/release/atm-daemon.exe","target/${{ matrix.target }}/release/atm-agent-mcp.exe","target/${{ matrix.target }}/release/atm-tui.exe" -DestinationPath $ARCHIVE
           echo "ARCHIVE=$ARCHIVE" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload artifact
@@ -204,3 +204,11 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p atm-agent-mcp
+
+      - name: Wait for crates.io indexing
+        run: sleep 60
+
+      - name: Publish atm-tui
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p atm-tui

@@ -12,7 +12,7 @@ name = "atm-tui"
 path = "src/main.rs"
 
 [dependencies]
-agent-team-mail-core = { path = "../atm-core", version = "=0.13.0" }
+agent-team-mail-core = { path = "../atm-core", version = "=0.14.0" }
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 clap = { version = "4", features = ["derive"] }
