@@ -28,6 +28,7 @@ target
 # Python bytecode/cache
 *.pyc
 __pycache__/
+.pytest_cache/
 
 # Temporary/archived documentation
 temp/

@@ -446,7 +446,7 @@ fn authorize_hook_event(team: &str, agent: &str) -> std::result::Result<HookEven
         return Err("agent not in team".to_string());
     };
 
-    let is_team_lead = member.agent_id == config.lead_agent_id || member.name == "team-lead";
+    let is_team_lead = member.agent_id == config.lead_agent_id;
     Ok(HookEventAuth { is_team_lead })
 }
 

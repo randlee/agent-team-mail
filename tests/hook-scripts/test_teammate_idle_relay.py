@@ -202,6 +202,11 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
         self.assertEqual(request["command"], "hook-event")
         self.assertEqual(request["payload"]["event"], "teammate_idle")
         self.assertEqual(request["payload"]["agent"], "arch-ctm")
+        self.assertIn("received_at", request["payload"])
+        self.assertRegex(
+            request["payload"]["received_at"],
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+        )
 
     def test_socket_error_file_write_still_succeeds(self):
         """Socket error must not prevent the file write from succeeding."""

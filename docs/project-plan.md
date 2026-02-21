@@ -2523,18 +2523,15 @@ All hook scripts are Python (not bash) for cross-platform compatibility and test
 
 **`.atm.toml` guard** (all three scripts): before sending any daemon socket message, check for `.atm.toml` in `cwd`. If absent, skip the socket call entirely. This prevents daemon state from being polluted by unrelated Claude Code sessions on the same machine.
 
-Socket message payloads (single `hook-event` command path; source-aware payload):
+Socket message payloads (single `hook-event` command path):
 ```json
-{"event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": {"kind": "claude_hook", "phase": "init|compact"}}
-{"event": "teammate_idle", "session_id": "...", "agent": "...", "team": "...", "source": {"kind": "claude_hook"}}
-{"event": "session_end",   "session_id": "...", "agent": "...", "team": "...", "reason": "...", "source": {"kind": "claude_hook"}}
+{"event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": "init|compact"}
+{"event": "teammate_idle", "session_id": "...", "agent": "...", "team": "...", "received_at": "YYYY-MM-DDTHH:MM:SSZ"}
+{"event": "session_end",   "session_id": "...", "agent": "...", "team": "...", "reason": "..."}
 ```
 
-`source.kind` is expandable. Baseline values:
-- `claude_hook`
-- `atm_mcp`
-- `agent_hook`
-- `unknown`
+`source` is currently a flat string sent by Claude hook scripts (`init` or `compact` on session start).
+Future lifecycle-source expansion remains planned in Sprint E.7.
 
 **Unit tests** live in `tests/hook-scripts/`:
 - `test_session_start.py` — mock socket, verify message shape, verify `.atm.toml` guard, verify fail-open on socket error
