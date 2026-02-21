@@ -1,7 +1,7 @@
-# Codex TUI MVP Architecture (Phase C / 13)
+# Codex TUI MVP Architecture (Phase D / 15, with Phase E Follow-up)
 
-**Version**: 0.2  
-**Date**: 2026-02-20  
+**Version**: 0.3  
+**Date**: 2026-02-21  
 **Status**: Draft
 
 ---
@@ -17,6 +17,19 @@ Define an MVP TUI for ATM that provides:
   - control input to a live Codex/Gemini worker session
 
 This document is intentionally API-first and avoids introducing parallel transport/state systems.
+
+---
+
+## 1.1 Phase Placement (Normative)
+
+- **Phase D** is the TUI MVP implementation phase:
+  - D.1: dashboard + stream viewer
+  - D.2: interactive control input (stdin + interrupt request path)
+- **Phase E** is recommended for production hardening after D feature-complete:
+  - resiliency, perf tuning, accessibility, and operational polish
+  - stricter delivery SLOs and failure-injection validation
+
+This keeps D focused on shipping usable end-to-end behavior while E handles operational quality and scaling concerns.
 
 ---
 
@@ -195,13 +208,20 @@ File-reference path uses shared local storage and sends `content_ref` metadata i
 Definitions:
 
 - `session_id`: Claude session identifier
-- `agent_id`: ATM worker session identifier (e.g. `codex:...`)
-- `thread_id`: backend-specific conversation handle (e.g. Codex internal thread ID)
+- `agent_id`: canonical conversation/session identifier for ATM and TUI surfaces (backend-agnostic)
+- `thread_id`: [MCP-internal adapter only] backend-specific conversation handle (e.g. Codex internal thread ID) — not required by TUI; injected by MCP adapter layer when available
+
+**Public identifiers for TUI**: `session_id` and `agent_id`. TUI never requires `thread_id`; it is an MCP-adapter concern.
 
 Correlation:
 
 - all control requests require `request_id`
 - retries must reuse the same `request_id` (idempotent)
+
+Backend mapping rule:
+
+- provider-specific ids (for example Codex `threadId`) are MCP-internal details
+- outside MCP, callers use `agent_id` only
 
 ---
 
@@ -213,15 +233,97 @@ Correlation:
 
 ---
 
-## 11. Open Items
+## 11. State Model and Data Ownership
 
-- select canonical control endpoint transport (Unix socket / existing daemon command channel)
-- finalize interrupt confirmation policy (`always`, `never`, `configurable`)
-- define persistent per-user UI preferences file location and schema
+Source of truth by concern:
+
+- team/member/session status: daemon query APIs
+- stream history and MVP live view: session logs
+- control acceptance/rejection and dedupe: daemon control receiver
+- mail delivery and inbox counts: ATM mail commands and mailbox files
+
+No TUI-local inferred state may override daemon state for liveness decisions.
 
 ---
 
-## 12. Implementation Gating and Policy
+## 12. Failure Modes and Degraded Behavior
+
+Required behavior:
+
+- daemon unavailable:
+  - dashboard enters degraded state
+  - no control input allowed
+  - optional replay-only stream from local logs
+- control ack timeout:
+  - one retry using same `request_id`
+  - then surface explicit timeout result in UI
+- stream source interruption:
+  - auto-reconnect to log tail
+  - if unavailable, freeze pane with explicit source/error indicator
+- malformed event row:
+  - drop row, emit structured warning event, continue render loop
+- invalid UTF-8 input:
+  - reject send locally with explicit user-visible error
+
+---
+
+## 13. Security and Policy Baseline
+
+- control actions must remain same-team scoped
+- unknown sender/target/session are deny-by-default at receiver
+- TUI must display receiver denial details without rewriting meaning
+- no silent channel fallback (`control` never auto-converts to `mail`)
+- message content remains excluded from logs by default
+- verbose mode may include truncated/full payloads per existing log policy
+
+---
+
+## 14. Testing and Acceptance Strategy
+
+Minimum test layers:
+
+- unit tests:
+  - keymap/focus routing
+  - live-state gating
+  - request payload construction and retry identity (`request_id` reuse)
+- integration tests:
+  - daemon status polling + render updates
+  - control send/ack path against local daemon socket
+  - replay fallback when live source unavailable
+- E2E manual scripts:
+  - dashboard mail flow
+  - agent terminal stdin flow
+  - interrupt flow with expected unsupported/implemented result
+
+Phase D exit gates:
+
+- no panics in normal startup/shutdown/selection/send flows
+- dashboard and agent terminal boundaries enforced
+- control send path emits sender and ack audit events with correlation ids
+
+Phase E exit gates (recommended):
+
+- stress test: sustained stream + control activity without UI starvation
+- failure-injection scenarios pass (daemon restart, stale sessions, queue backlog)
+- documented SLO targets met (render responsiveness + ack visibility)
+
+---
+
+## 15. Open Items
+
+- finalize interrupt confirmation policy (`always`, `never`, `configurable`)
+- define per-user UI preferences file location and schema
+- decide whether Phase E introduces direct MCP JSONL live stream as default with log-tail fallback
+
+## 15.1 D.2 MVP Scope Decisions (Implementation Notes)
+
+**Control input activation model (D.2 MVP)**: The Agent Terminal control input box uses a **single-state activation model** — panel focus equals input active. When `FocusPanel::AgentTerminal` is focused and the session is live, all printable character input goes directly to the control input field. The `control_input_active` field in `App` is reserved for a future two-state model (e.g. pressing Enter to enter edit mode) and is not wired in D.2. The two-state model is deferred to D.3+.
+
+**Interrupt gating (D.2 MVP)**: Ctrl-I interrupt requests are gated **client-side** on `is_live()`. Interrupt is only sent when the target agent is in `{idle, busy}` state. For non-live agents, the interrupt is silently dropped at the client (no socket send). This is consistent with the live-state contract — non-live sessions cannot receive control input.
+
+---
+
+## 16. Implementation Gating and Policy
 
 Current capability status:
 
@@ -241,3 +343,4 @@ Phase alignment:
 - these docs define a contract baseline for Phase C validation work and Phase D UI implementation
 - recommended Phase C scope is a lightweight `C.3` receiver stub/contract (endpoint, validation, ack, dedupe skeleton)
 - full interactive TUI control UX remains a Phase D deliverable
+- production hardening, latency/robustness SLO enforcement, and operator tooling polish are recommended Phase E scope

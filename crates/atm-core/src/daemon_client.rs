@@ -494,6 +494,63 @@ pub fn query_session(name: &str) -> anyhow::Result<Option<SessionQueryResult>> {
     }
 }
 
+/// Send a control request to the daemon and wait for an acknowledgement.
+///
+/// Sends `command: "control"` with the given [`ControlRequest`] as payload.
+/// Returns the parsed [`ControlAck`] on success, or an error on socket/parse
+/// failure.  A short read timeout is applied by the underlying
+/// [`query_daemon`] call.
+///
+/// # Errors
+///
+/// Returns `Err` when:
+/// - The daemon is not running or the socket cannot be reached (no graceful
+///   `None` here — the caller needs to distinguish errors from timeouts).
+/// - The daemon returns an error status.
+/// - The response payload cannot be parsed as [`ControlAck`].
+pub fn send_control(
+    request: &crate::control::ControlRequest,
+) -> anyhow::Result<crate::control::ControlAck> {
+    let payload = serde_json::to_value(request)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize ControlRequest: {e}"))?;
+
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        // Use an independent socket-level correlation ID; the control payload
+        // carries its own stable idempotency key (`request.request_id`) that
+        // must not change on retries.
+        request_id: format!(
+            "sock-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ),
+        command: "control".to_string(),
+        payload,
+    };
+
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => anyhow::bail!("Daemon not reachable (socket not found or connection refused)"),
+    };
+
+    if !response.is_ok() {
+        let msg = response
+            .error
+            .map(|e| format!("{}: {}", e.code, e.message))
+            .unwrap_or_else(|| "unknown daemon error".to_string());
+        anyhow::bail!("Daemon returned error for control command: {msg}");
+    }
+
+    let payload = response
+        .payload
+        .ok_or_else(|| anyhow::anyhow!("Daemon returned ok status but no payload"))?;
+
+    serde_json::from_value::<crate::control::ControlAck>(payload)
+        .map_err(|e| anyhow::anyhow!("Failed to parse ControlAck from daemon response: {e}"))
+}
+
 /// Generate a compact request identifier (UUID v4 as a short string).
 fn new_request_id() -> String {
     // Use a simple monotonic counter for environments without UUID support.
@@ -852,5 +909,102 @@ mod tests {
         // On Linux and macOS the max PID is 4194304 or similar; i32::MAX exceeds
         // the kernel's PID range and kill() will return ESRCH (no such process).
         assert!(!pid_alive(i32::MAX));
+    }
+
+    #[test]
+    fn test_send_control_no_daemon_returns_err() {
+        // Without a running daemon, send_control must return Err (not None or panic).
+        use crate::control::{ControlAction, ControlRequest, CONTROL_SCHEMA_VERSION};
+
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: "req-test-ctrl".to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
+            sent_at: "2026-02-21T00:00:00Z".to_string(),
+            team: "atm-dev".to_string(),
+            session_id: String::new(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "tui".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("hello".to_string()),
+            content_ref: None,
+        };
+
+        let result = send_control(&req);
+        // With no daemon running the call should fail gracefully (not panic).
+        // We only assert it returns an Err — the exact message is implementation detail.
+        assert!(
+            result.is_err(),
+            "send_control should return Err when daemon is not running"
+        );
+    }
+
+    #[test]
+    fn test_send_control_builds_correct_socket_request() {
+        // Verify the SocketRequest built inside send_control has the right shape
+        // by re-creating it manually and checking serialization.
+        use crate::control::{ControlAction, ControlRequest, CONTROL_SCHEMA_VERSION};
+
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: "req-ctrl-check".to_string(),
+            msg_type: "control.interrupt.request".to_string(),
+            signal: Some("interrupt".to_string()),
+            sent_at: "2026-02-21T00:00:00Z".to_string(),
+            team: "atm-dev".to_string(),
+            session_id: String::new(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "tui".to_string(),
+            action: ControlAction::Interrupt,
+            payload: None,
+            content_ref: None,
+        };
+
+        // The socket-level request_id is an independent correlation ID generated
+        // by send_control (e.g., "sock-<nanos>").  It must NOT be the same as
+        // the control payload's stable idempotency key (`req.request_id`).
+        let control_payload = serde_json::to_value(&req).expect("serialize ControlRequest");
+        let socket_req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            // Distinct from req.request_id — mirrors what send_control generates.
+            request_id: "sock-test-123".to_string(),
+            command: "control".to_string(),
+            payload: control_payload,
+        };
+
+        // Sanity check: outer request_id is the socket-level ID, not the control ID.
+        assert_ne!(
+            socket_req.request_id, req.request_id,
+            "socket-level request_id must differ from control payload request_id"
+        );
+        assert_eq!(socket_req.request_id, "sock-test-123");
+
+        let json = serde_json::to_string(&socket_req).expect("serialize SocketRequest");
+
+        // Outer envelope fields.
+        assert!(json.contains("\"command\":\"control\""), "command field missing");
+
+        // The control payload's request_id must appear inside the serialized
+        // payload body, not as the outer SocketRequest.request_id.
+        assert!(
+            json.contains("\"request_id\":\"req-ctrl-check\""),
+            "control payload request_id must appear inside the payload body"
+        );
+
+        // The outer socket-level request_id is present.
+        assert!(
+            json.contains("\"request_id\":\"sock-test-123\""),
+            "socket-level request_id must appear in the outer envelope"
+        );
+
+        // The type field in the control payload.
+        assert!(
+            json.contains("\"type\":\"control.interrupt.request\""),
+            "msg_type field missing from control payload"
+        );
+
+        // The interrupt signal.
+        assert!(json.contains("\"interrupt\""), "interrupt signal missing");
     }
 }
