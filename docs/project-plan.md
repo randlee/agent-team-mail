@@ -2671,9 +2671,11 @@ Additionally, when an external agent reconnects with a new session/agent ID, the
 
 2. **Daemon auto-update of session-id**: When the daemon receives a hook event (session_start, teammate_idle) from a registered agent whose `session_id` differs from the stored value, automatically update the member record. This eliminates the need for manual session ID management on reconnect.
 
-3. **Model registry with validated identifiers**: Replace free-form `--model` string with a validated set of known model identifiers. Full model names distinguish variants:
+3. **Model registry for non-Claude-Code agents**: The model registry applies ONLY to members added via `atm teams add-member` (external agents). Claude Code-managed teammates set their own model field via the Team API — ATM must not overwrite or validate those values (Claude Code uses inconsistent formats like `sonnet` vs `claude-sonnet-4-6` and that's their concern).
 
-   **Claude models**:
+   For `add-member`, validate `--model` against a registry of known full model identifiers:
+
+   **Claude models** (for non-Claude-Code agents using Claude API directly):
    - `claude-opus-4-6`
    - `claude-sonnet-4-6`
    - `claude-haiku-4-5`
@@ -2688,13 +2690,18 @@ Additionally, when an external agent reconnects with a new session/agent ID, the
    - `gemini-2.5-pro`
    - `gemini-2.5-flash`
 
-   **Meta**:
-   - `unknown` (default, for agents where model is not specified)
+   **Special**:
+   - `unknown` (default for agents where model is not specified)
    - `custom:<identifier>` (escape hatch for unlisted models)
 
-   The registry is a compile-time enum with `Display`/`FromStr` for CLI parsing and serde for config. `--model` validates against the registry and rejects unknown values (unless prefixed with `custom:`).
+   The registry is a compile-time enum with `Display`/`FromStr` for CLI parsing and serde for config. `--model` validates against the registry and rejects unknown values (unless prefixed with `custom:`). The registry is used for display, capability-aware routing, and cost tracking — not for Claude Code interop.
 
-4. **`--backend-type` flag on `add-member`**: Explicitly declare the agent backend (`claude-code`, `codex`, `gemini`, `external`, `human`) so cleanup/liveness logic can apply backend-appropriate health checks.
+4. **`--backend-type` flag on `add-member`**: Explicitly declare the agent backend so cleanup/liveness logic can apply backend-appropriate health checks:
+   - `claude-code` — Claude Code teammate (managed by Team API; ATM should rarely need to add these manually)
+   - `codex` — OpenAI Codex agent
+   - `gemini` — Google Gemini agent
+   - `external` — generic external agent (API-based or custom)
+   - `human:<username>` — human user (e.g., `human:randlee`). Username is required for human backends to support cross-machine identification when bridge/relay communication is enabled. The `human:` prefix is never the default — it must be explicitly specified. No human plugin exists yet; this reserves the namespace for future chat interfaces.
 
 5. **`atm teams update-member` command**: Allow updating session-id, model, pane-id, backend-type, and active status on an existing member without removing and re-adding.
 
@@ -2702,11 +2709,14 @@ Additionally, when an external agent reconnects with a new session/agent ID, the
 
 - [ ] `atm teams add-member --session-id <id>` stores session ID in member record
 - [ ] `atm teams add-member --backend-type codex` stores backend type
+- [ ] `atm teams add-member --backend-type human:randlee` stores human backend with username
 - [ ] `atm teams add-member --model gpt5.3-codex` validates against registry; `--model foo` rejected; `--model custom:foo` accepted
+- [ ] Model validation only applies to `add-member` / `update-member`; Claude Code-managed member models are never overwritten or validated
 - [ ] Daemon auto-updates session-id when hook event arrives with new ID for known agent
 - [ ] `atm teams update-member <team> <agent> --session-id <new-id>` updates existing member
 - [ ] `atm teams cleanup` uses session-id for liveness checks on external agents
-- [ ] Integration tests cover: add with session-id, daemon auto-update, update-member, cleanup with external agent
+- [ ] `human:<username>` backend type is never set as default — must be explicit
+- [ ] Integration tests cover: add with session-id, daemon auto-update, update-member, cleanup with external agent, human backend type parsing
 - [ ] `cargo clippy --workspace -- -D warnings` clean
 - [ ] `cargo test --workspace` passes
 
