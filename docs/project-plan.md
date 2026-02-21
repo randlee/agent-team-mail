@@ -2418,9 +2418,21 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 ## 16. Phase E: ATM Core Bug Fixes (Priority)
 
-**Status**: PLANNED (priority — these block reliable session startup every session)
-**Goal**: Fix two known bugs in ATM core that require manual workarounds every session.
+**Status**: IN PROGRESS
+**Goal**: Fix two known bugs in ATM core that require manual workarounds every session, and wire Claude Code hooks to daemon state.
 **Integration branch**: `integrate/phase-E`
+
+### Phase E Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| E.1 | Fix `atm teams resume` session ID reliability | Phase D | 🔄 IN PROGRESS |
+| E.2 | Fix inbox read marking other agents' messages as read | — | ⏳ PLANNED |
+| E.3 | Hook-to-daemon state bridge | E.1 | ⏳ PLANNED |
+
+**Execution model**: E.1 is priority (unblocks session startup). E.2 and E.3 can run in parallel after E.1 merges.
+
+---
 
 ### Sprint E.1 — Fix `atm teams resume` session ID reliability
 
@@ -2471,6 +2483,61 @@ When team-lead runs `atm read` or `atm inbox`, ATM marks messages as `read: true
 - [ ] `atm read` only modifies calling agent's own inbox
 - [ ] arch-ctm's messages remain `read: false` after team-lead polls
 - [ ] Integration test confirms inbox isolation
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint E.3 — Hook-to-Daemon State Bridge
+
+**Branch**: `feature/pE-s3-hook-daemon-bridge`
+**Crate(s)**: `crates/atm-daemon` (new hook event handler), `.claude/scripts/` (hook updates)
+**Depends on**: E.1 (daemon socket path stabilized)
+**Parallel with**: E.2
+
+#### Problem
+
+The `TeammateIdle` relay (`teammate-idle-relay.py`) writes idle events to a flat file (`~/.claude/daemon/hooks/events.jsonl`) but the daemon never reads it. The daemon's session registry (Phase 10 / C.3) is populated only by explicit socket calls — there is no path from Claude Code hook events to daemon state. As a result:
+
+- `atm teams cleanup` liveness checks fall back to PID polling instead of daemon state
+- `atm teams resume` daemon guard cannot verify existing lead liveness reliably
+- The TUI live-state gate queries daemon state that is never updated from real hook events
+
+#### Solution
+
+Two lightweight components:
+
+**1. Hooks → daemon socket**
+
+Update `teammate-idle-relay.py` and the global `session-start.sh` to send a structured socket message to the running daemon, in addition to (not replacing) the existing file write. Uses the existing `atm-core::daemon_client` socket path. Fail-open: if daemon not running, silently skip and continue.
+
+Socket message types (new `hook_event` variant):
+```json
+{"type": "hook_event", "event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": "init|compact"}
+{"type": "hook_event", "event": "teammate_idle",  "session_id": "...", "agent": "...", "team": "..."}
+```
+
+**2. Daemon hook event handler**
+
+Add `SocketCommand::HookEvent` variant. Handler updates session registry and agent activity state:
+- `session_start` → register/refresh session; set agent state to `Active`
+- `teammate_idle` → set agent state to `Idle` for the named session
+
+#### Scope Notes
+
+- No new daemon persistence — in-memory state only (existing registry)
+- No changes to hook exit behavior — both remain fail-open, always exit `0`
+- `events.jsonl` file write is kept as durable audit trail; socket call is additive
+- Socket path lookup: `${ATM_HOME:-$HOME}/.claude/daemon/atm-daemon.sock`
+
+#### Exit Criteria
+
+- [ ] `teammate-idle-relay.py` sends `hook_event/teammate_idle` to daemon socket when daemon is running
+- [ ] `session-start.sh` sends `hook_event/session_start` to daemon socket when daemon is running
+- [ ] Both hooks remain fail-open — exit `0` even if socket call fails
+- [ ] Daemon handles `SocketCommand::HookEvent`; updates session registry + agent state
+- [ ] `session_start` sets agent state to `Active`; `teammate_idle` sets it to `Idle`
+- [ ] Integration test: hook event over socket → daemon state query reflects updated state
 - [ ] `cargo clippy --workspace -- -D warnings` clean
 - [ ] `cargo test --workspace` passes
 
