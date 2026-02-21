@@ -32,13 +32,14 @@ Exit codes: 0 = Allow, 2 = Block
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 # Orchestrator agents that require full teammate lifecycle
 ORCHESTRATORS = {"scrum-master"}
 
-DEBUG_LOG = Path("/tmp/gate-agent-spawns-debug.jsonl")
-SESSION_ID_FILE = Path("/tmp/atm-session-id")
+DEBUG_LOG = Path(tempfile.gettempdir()) / "gate-agent-spawns-debug.jsonl"
+SESSION_ID_FILE = Path(tempfile.gettempdir()) / "atm-session-id"
 
 
 def get_required_team() -> str | None:

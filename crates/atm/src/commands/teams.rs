@@ -306,8 +306,8 @@ fn resolve_session_id(explicit: Option<&str>) -> Option<String> {
             return Some(trimmed);
         }
     }
-    let session_file = std::path::Path::new("/tmp/atm-session-id");
-    if let Ok(content) = std::fs::read_to_string(session_file) {
+    let session_file_path = std::env::temp_dir().join("atm-session-id");
+    if let Ok(content) = std::fs::read_to_string(&session_file_path) {
         let trimmed = content.trim().to_string();
         if !trimmed.is_empty() {
             return Some(trimmed);
@@ -1035,17 +1035,17 @@ mod tests {
             std::env::remove_var("CLAUDE_SESSION_ID"); // no env var
         }
 
-        // Ensure /tmp/atm-session-id is absent or empty for this test
-        let session_file = std::path::Path::new("/tmp/atm-session-id");
+        // Ensure the session-id file is absent or empty for this test
+        let session_file = std::env::temp_dir().join("atm-session-id");
         let session_file_existed = session_file.exists();
         let session_file_backup: Option<String> = if session_file_existed {
-            std::fs::read_to_string(session_file).ok()
+            std::fs::read_to_string(&session_file).ok()
         } else {
             None
         };
         // Remove the file so the fallback chain has nothing to read
         if session_file_existed {
-            let _ = std::fs::remove_file(session_file);
+            let _ = std::fs::remove_file(&session_file);
         }
 
         let args = ResumeArgs {
@@ -1066,7 +1066,7 @@ mod tests {
 
         // Restore the session file if it was there before
         if let Some(ref content) = session_file_backup {
-            let _ = std::fs::write(session_file, content);
+            let _ = std::fs::write(&session_file, content);
         }
 
         // SAFETY: test-only cleanup
@@ -1501,9 +1501,9 @@ mod tests {
         let team_dir = create_test_team(&temp_dir, "atm-dev");
 
         // Write a test session ID to the file
-        let session_file = std::path::Path::new("/tmp/atm-session-id");
+        let session_file = std::env::temp_dir().join("atm-session-id");
         let file_session_id = "file-session-id-67890";
-        std::fs::write(session_file, file_session_id).unwrap();
+        std::fs::write(&session_file, file_session_id).unwrap();
 
         let original_home = std::env::var("ATM_HOME").ok();
         let original_id = std::env::var("ATM_IDENTITY").ok();
