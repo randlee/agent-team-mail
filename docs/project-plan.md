@@ -2644,17 +2644,86 @@ The TUI MVP is functional but untested under sustained real-world load. Several 
 
 ---
 
+### Sprint E.6 — External Agent Member Management and Model Registry
+
+**Branch**: `feature/pE-s6-external-member-mgmt`
+**Crate(s)**: `crates/atm` (CLI), `crates/atm-core` (schema), `crates/atm-daemon` (auto-update)
+**Depends on**: E.3 (hook-to-daemon bridge provides session tracking infrastructure)
+**Design refs**: `docs/agent-team-api.md`, `docs/requirements.md`
+
+#### Problem
+
+`atm teams add-member` has no `--session-id` flag. External agents (Codex, Gemini) cannot register their agent/session ID at join time, which means:
+
+- `atm teams cleanup` cannot perform liveness checks on external agents
+- Daemon state tracking cannot correlate hook events to external agents
+- Team-lead cannot tail external agent logs without manually looking up the agent ID
+- The `--model` flag accepts arbitrary strings with no validation, making capability-aware routing and cost tracking unreliable
+
+Additionally, when an external agent reconnects with a new session/agent ID, the stale ID in config.json is never updated. The daemon already receives hook events with the current agent ID — it should auto-update the member record.
+
+#### Scope
+
+1. **`--session-id` flag on `add-member`**: Accept the external agent's agent/session ID at registration time. This ID is stored in the member record and used for:
+   - Liveness checks in `atm teams cleanup`
+   - Log tailing (`atm logs <agent>` or similar)
+   - Daemon state correlation
+
+2. **Daemon auto-update of session-id**: When the daemon receives a hook event (session_start, teammate_idle) from a registered agent whose `session_id` differs from the stored value, automatically update the member record. This eliminates the need for manual session ID management on reconnect.
+
+3. **Model registry with validated identifiers**: Replace free-form `--model` string with a validated set of known model identifiers. Full model names distinguish variants:
+
+   **Claude models**:
+   - `claude-opus-4-6`
+   - `claude-sonnet-4-6`
+   - `claude-haiku-4-5`
+
+   **OpenAI/Codex models**:
+   - `gpt5.3-codex`
+   - `gpt5.3-codex-spark`
+   - `o3`
+   - `o4-mini`
+
+   **Google/Gemini models**:
+   - `gemini-2.5-pro`
+   - `gemini-2.5-flash`
+
+   **Meta**:
+   - `unknown` (default, for agents where model is not specified)
+   - `custom:<identifier>` (escape hatch for unlisted models)
+
+   The registry is a compile-time enum with `Display`/`FromStr` for CLI parsing and serde for config. `--model` validates against the registry and rejects unknown values (unless prefixed with `custom:`).
+
+4. **`--backend-type` flag on `add-member`**: Explicitly declare the agent backend (`claude-code`, `codex`, `gemini`, `external`, `human`) so cleanup/liveness logic can apply backend-appropriate health checks.
+
+5. **`atm teams update-member` command**: Allow updating session-id, model, pane-id, backend-type, and active status on an existing member without removing and re-adding.
+
+#### Exit Criteria
+
+- [ ] `atm teams add-member --session-id <id>` stores session ID in member record
+- [ ] `atm teams add-member --backend-type codex` stores backend type
+- [ ] `atm teams add-member --model gpt5.3-codex` validates against registry; `--model foo` rejected; `--model custom:foo` accepted
+- [ ] Daemon auto-updates session-id when hook event arrives with new ID for known agent
+- [ ] `atm teams update-member <team> <agent> --session-id <new-id>` updates existing member
+- [ ] `atm teams cleanup` uses session-id for liveness checks on external agents
+- [ ] Integration tests cover: add with session-id, daemon auto-update, update-member, cleanup with external agent
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
 ### Phase E Sprint Summary
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
 | E.1 | `atm teams resume` session ID reliability | Phase D | ✅ MERGED (#147) |
-| E.2 | Inbox read scoping | E.1 (or parallel) | 🔄 IN PROGRESS |
-| E.3 | Hook-to-daemon state bridge | E.1 (parallel with E.2) | 🔄 IN PROGRESS |
-| E.4 | TUI reliability hardening (restart, reconnect, failure injection) | E.3 | ⏳ PLANNED |
+| E.2 | Inbox read scoping | E.1 (or parallel) | ✅ MERGED (#149) |
+| E.3 | Hook-to-daemon state bridge | E.1 (parallel with E.2) | ✅ MERGED (#152) |
+| E.4 | TUI reliability hardening (restart, reconnect, failure injection) | E.3 | 🔄 IN PROGRESS |
 | E.5 | TUI performance, UX polish, and operational validation | E.4 | ⏳ PLANNED |
+| E.6 | External agent member management and model registry | E.3 | ⏳ PLANNED |
 
-**Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4.
+**Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.6 is member management for external agents (Codex/Gemini). E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4. E.6 can run parallel to E.4/E.5.
 
 ---
 
