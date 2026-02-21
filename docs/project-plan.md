@@ -2558,6 +2558,158 @@ Add `SocketCommand::HookEvent` variant. Handler updates session registry and age
 - [ ] `cargo test --workspace` passes
 
 ---
+
+## 16.5 Phase F: Team Installer (`atm team init`)
+
+**Status**: PLANNED
+**Goal**: Allow a team's full agent configuration — hook scripts, agent prompts, and skills — to be packaged alongside the team definition and installed into `~/.claude/` with a single command.
+**Integration branch**: `integrate/phase-F`
+
+### Motivation
+
+Currently, setting up a new machine or onboarding a new project requires manually:
+1. Copying hook scripts to `~/.claude/scripts/`
+2. Copying agent prompt files to `~/.claude/agents/`
+3. Copying skill definitions to `~/.claude/skills/`
+4. Merging hook entries into `~/.claude/settings.json`
+5. Creating `.atm.toml` in the project root
+
+`atm team init atm-dev` does all of this in one command, reading the team's installer package from a well-known location in the repo.
+
+### Design
+
+#### Team Installer Package
+
+Each team can ship an optional `installer/` directory alongside its definition:
+
+```
+.atm/
+  teams/
+    atm-dev/
+      installer/
+        manifest.toml        ← package metadata + install map
+        scripts/             ← hook scripts (Python, cross-platform)
+          session-start.py
+          session-end.py
+          teammate-idle-relay.py
+          gate-agent-spawns.py
+          tests/             ← unit tests for hook scripts
+        agents/              ← agent prompt files
+          scrum-master.md
+          publisher.md
+        skills/              ← skill definitions
+          phase-orchestration/
+          rust-development/
+        settings-hooks.json  ← hook entries to merge into ~/.claude/settings.json
+```
+
+**`manifest.toml`**:
+```toml
+[package]
+name = "atm-dev"
+version = "0.1.0"
+description = "ATM development team — hooks, agents, and skills for agent-team-mail"
+atm_min_version = "0.15.0"
+
+[install]
+scripts = "installer/scripts/"         # → ~/.claude/scripts/
+agents  = "installer/agents/"          # → ~/.claude/agents/
+skills  = "installer/skills/"          # → ~/.claude/skills/
+hooks   = "installer/settings-hooks.json"  # merged into ~/.claude/settings.json
+```
+
+**`settings-hooks.json`** — only the hooks block, merged non-destructively:
+```json
+{
+  "SessionStart": [{"hooks": [{"type": "command", "command": "python3 ~/.claude/scripts/session-start.py"}]}],
+  "SessionEnd":   [{"hooks": [{"type": "command", "command": "python3 ~/.claude/scripts/session-end.py"}]}]
+}
+```
+
+#### `atm team init <team>` Command
+
+```
+atm team init atm-dev [--from <path>] [--dry-run] [--force]
+```
+
+1. Resolve installer source:
+   - Default: look for `installer/` in cwd's `.atm/teams/<team>/` or `.claude/` project directory
+   - `--from <path>`: explicit path to an installer directory or tarball
+2. Read `manifest.toml` — validate ATM version compatibility
+3. **Dry-run mode** (`--dry-run`): print what would be installed, make no changes
+4. Copy files:
+   - Scripts → `~/.claude/scripts/` (skip if identical; overwrite with `--force`)
+   - Agents → `~/.claude/agents/` (skip if identical; overwrite with `--force`)
+   - Skills → `~/.claude/skills/` (skip if identical; overwrite with `--force`)
+5. Merge hooks into `~/.claude/settings.json` — append new hook entries; never remove existing ones
+6. Write install receipt to `~/.atm/installed/<team>/receipt.toml` (for `atm team uninstall`)
+7. Print summary: files installed, hooks merged, any skips
+
+#### `atm team uninstall <team>`
+
+Reads receipt and removes only files that were installed by this team (leaves files that have been modified post-install). Removes merged hook entries from `~/.claude/settings.json`.
+
+#### Conflict Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| File already exists (identical) | Skip, log "already up to date" |
+| File already exists (different) | Skip with warning, use `--force` to overwrite |
+| Hook entry already in settings | Skip duplicate, keep existing |
+| `manifest.toml` missing | Error: not a valid installer package |
+| ATM version too old | Error with minimum version required |
+
+### Phase F Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| F.1 | Installer package format + `atm team init` | Phase E | ⏳ PLANNED |
+| F.2 | `atm team uninstall` + receipt tracking | F.1 | ⏳ PLANNED |
+
+**Execution model**: F.1 and F.2 are sequential. F.1 is the MVP — `atm team init` alone provides the core value.
+
+---
+
+### Sprint F.1 — Installer Package Format + `atm team init`
+
+**Branch**: `feature/pF-s1-team-init`
+**Crate(s)**: `crates/atm` (new `team init` subcommand), `crates/atm-core` (manifest parsing, file copy, settings merge)
+**Depends on**: Phase E complete
+
+#### Exit Criteria
+
+- [ ] `manifest.toml` schema defined and parsed by `atm-core`
+- [ ] `atm team init <team>` copies scripts, agents, skills to `~/.claude/` subdirs
+- [ ] Hook entries in `settings-hooks.json` merged non-destructively into `~/.claude/settings.json`
+- [ ] `--dry-run` prints planned changes, makes no disk writes
+- [ ] `--force` overwrites differing files
+- [ ] Conflict handling: skip-identical, warn-on-different without `--force`
+- [ ] Install receipt written to `~/.atm/installed/<team>/receipt.toml`
+- [ ] ATM version compatibility check against `manifest.toml` `atm_min_version`
+- [ ] `.atm.toml` created/updated in cwd with `default_team = "<team>"`
+- [ ] Integration test: fresh temp dir → `atm team init` → verify all files copied, settings merged
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint F.2 — `atm team uninstall` + Receipt Tracking
+
+**Branch**: `feature/pF-s2-team-uninstall`
+**Crate(s)**: `crates/atm` (new `team uninstall` subcommand), `crates/atm-core` (receipt read, selective removal)
+**Depends on**: F.1
+
+#### Exit Criteria
+
+- [ ] `atm team uninstall <team>` removes only files listed in receipt that are unmodified since install (SHA256 check)
+- [ ] Modified files skipped with warning: `"<file> has been modified — skipping (use --force to remove anyway)"`
+- [ ] Hook entries removed from `~/.claude/settings.json` (only entries added by this team's install)
+- [ ] Receipt deleted after successful uninstall
+- [ ] `--force` removes all installed files including modified ones
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
 ## 17. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
