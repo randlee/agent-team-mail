@@ -182,7 +182,8 @@ Baseline controls:
 - `f`: filter editor
 - `c`: clear filters
 - `F`: follow mode toggle
-- `Ctrl+C`: interrupt action in Agent Terminal (with optional confirmation)
+- `Ctrl+I`: interrupt action in Agent Terminal (with confirmation policy from `tui.toml`)
+- `q` / `Ctrl+C`: quit (global — always quits, not an interrupt)
 
 Clipboard and text:
 

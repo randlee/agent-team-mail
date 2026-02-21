@@ -215,7 +215,7 @@ fn draw_stream_pane(
         .border_type(if focused { BorderType::Rounded } else { BorderType::Plain })
         .border_style(border_style);
 
-    // Compute visible log lines (last N that fit in viewport).
+    // Compute visible log lines based on scroll offset and viewport height.
     let inner_height = area.height.saturating_sub(2) as usize; // subtract top border + title
 
     // Prepend a freeze indicator line when the stream is frozen.
@@ -228,8 +228,13 @@ fn draw_stream_pane(
         ))
     });
 
-    let start = app.stream_lines.len().saturating_sub(inner_height.max(1));
-    let mut visible: Vec<Line> = app.stream_lines[start..]
+    // When follow mode is on, stream_scroll_offset is updated by append_stream_lines
+    // to be >= stream_lines.len(). The start index is clamped so that exactly
+    // `inner_height` lines (or fewer) are rendered, always pinned to the bottom.
+    // When follow mode is off, the offset is the user's chosen scroll position.
+    let bottom = app.stream_scroll_offset.min(app.stream_lines.len());
+    let start = bottom.saturating_sub(inner_height.max(1));
+    let mut visible: Vec<Line> = app.stream_lines[start..bottom]
         .iter()
         .map(|line| {
             let expanded = expand_keys(line);
@@ -307,7 +312,18 @@ fn draw_control_input(frame: &mut Frame, area: Rect, app: &App, border_style: St
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let text = if let Some(ref msg) = app.status_message {
+    let text = if app.confirm_interrupt_pending {
+        // Interrupt confirmation dialog takes highest priority in the status bar.
+        Line::from(vec![
+            Span::styled(
+                " Send interrupt? ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("[y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("/"),
+            Span::styled("N]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        ])
+    } else if let Some(ref msg) = app.status_message {
         Line::from(vec![
             Span::styled(" ✓ ", Style::default().fg(Color::Green)),
             Span::raw(msg.as_str()),
@@ -321,6 +337,7 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(err.as_str(), Style::default().fg(Color::Yellow)),
         ])
     } else {
+        let follow_label = if app.follow_mode { "follow:ON" } else { "follow:OFF" };
         Line::from(vec![
             Span::styled(" q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::raw(": quit  "),
@@ -332,7 +349,9 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 "Ctrl-I",
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(": interrupt"),
+            Span::raw(": interrupt  "),
+            Span::styled("F", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(format!(": {follow_label}")),
         ])
     };
     frame.render_widget(
