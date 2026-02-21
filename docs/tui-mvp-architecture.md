@@ -209,6 +209,9 @@ Definitions:
 
 - `session_id`: Claude session identifier
 - `agent_id`: canonical conversation/session identifier for ATM and TUI surfaces (backend-agnostic)
+- `thread_id`: [MCP-internal adapter only] backend-specific conversation handle (e.g. Codex internal thread ID) — not required by TUI; injected by MCP adapter layer when available
+
+**Public identifiers for TUI**: `session_id` and `agent_id`. TUI never requires `thread_id`; it is an MCP-adapter concern.
 
 Correlation:
 
