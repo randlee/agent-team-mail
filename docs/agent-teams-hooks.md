@@ -10,17 +10,17 @@ Claude Code hooks are shell/Python scripts that fire at specific lifecycle point
 
 | Hook | Scope | Trigger | Script | Purpose |
 |------|-------|---------|--------|---------|
-| `SessionStart` | Global | Session start, compact, resume | `~/.claude/scripts/session-start.sh` | Announce session ID + ATM team context |
-| `SessionEnd` | Global | Session exits | `~/.claude/scripts/session-end.py` | Notify daemon session is dead *(Sprint E.3)* |
+| `SessionStart` | Global | Session start, compact, resume | `~/.claude/scripts/session-start.py` | Announce session ID + ATM context; emit lifecycle event |
+| `SessionEnd` | Global | Session exits | `~/.claude/scripts/session-end.py` | Emit lifecycle event to mark session dead |
 | `PreToolUse(Task)` | Project | Every `Task` tool call | `.claude/scripts/gate-agent-spawns.py` | Enforce safe agent spawning rules |
-| `TeammateIdle` | Project | Teammate goes idle | `.claude/scripts/teammate-idle-relay.py` | Relay idle events to daemon |
+| `TeammateIdle` | Project | Teammate goes idle | `.claude/scripts/teammate-idle-relay.py` | Relay idle lifecycle event to daemon |
 
 ---
 
 ## 1. Global SessionStart Hook
 
 **Config**: `~/.claude/settings.json`
-**Script**: `~/.claude/scripts/session-start.sh`
+**Script**: `~/.claude/scripts/session-start.py`
 **Fires**: On every interactive session startup, after `/compact`, and on `--continue` resume
 **Scope**: All Claude Code sessions on this machine (global)
 
@@ -43,7 +43,7 @@ Welcome: Read docs/project-plan.md before starting
 
 **Problem**: `atm teams resume` needs the current session ID to update `leadSessionId` in team config. `CLAUDE_SESSION_ID` is set in Claude Code's process environment but is not exported to bash subshells — so the Rust binary called via Bash tool reads an empty or stale value.
 
-**Solution**: The global hook fires before any tool calls and prints the session ID directly into Claude's context window. Claude can then pass it explicitly via `atm teams resume atm-dev --session-id <id>`.
+**Solution**: The global hook fires before any tool calls and prints the session ID directly into Claude's context window. Claude can then pass it explicitly via `atm teams resume atm-dev --session-id <id>` (or set `CLAUDE_SESSION_ID` in-process before invoking ATM).
 
 **Key facts about sessions**:
 - Session ID is **stable across compaction** — `/compact` does NOT change the session ID
@@ -67,7 +67,7 @@ welcome-message = "Read docs/project-plan.md before starting"
 ## 2. Global SessionEnd Hook
 
 **Config**: `~/.claude/settings.json`
-**Script**: `~/.claude/scripts/session-end.py` *(planned — Sprint E.3)*
+**Script**: `~/.claude/scripts/session-end.py`
 **Fires**: When a Claude Code session exits for any reason
 **Scope**: All Claude Code sessions on this machine (global)
 
@@ -100,7 +100,7 @@ This enables:
 - **`atm teams cleanup`**: skip PID polling for recently-exited sessions already marked `Dead`
 - **TUI live-state gate**: agent state transitions to `Closed` on session exit, disabling control input immediately
 
-**`.atm.toml` guard**: Both `session-end.sh` and `session-start.sh` check for `.atm.toml` in `cwd` before contacting the daemon. If `.atm.toml` is absent, the daemon socket call is skipped entirely. This ensures the daemon only receives hook events from ATM project sessions — not from unrelated Claude Code sessions on the same machine.
+**`.atm.toml` guard**: Both `session-end.py` and `session-start.py` check for `.atm.toml` in `cwd` before contacting the daemon. If `.atm.toml` is absent, the daemon socket call is skipped entirely. This ensures the daemon only receives hook events from ATM project sessions — not from unrelated Claude Code sessions on the same machine.
 
 **Fail-open**: The hook always exits `0`. If the daemon isn't running or `.atm.toml` is absent, the socket call is silently skipped.
 
@@ -172,7 +172,10 @@ Got team_name:      "wrong-team"
 
 ### Debug Log
 
-Every hook call (pass or block) is appended to `/tmp/gate-agent-spawns-debug.jsonl`. This log is used by `atm teams resume` as a fallback source for the current session ID (the payload always contains the real `session_id` from Claude Code's tool call JSON, which is correct even when `CLAUDE_SESSION_ID` env var is stale in subshells).
+Every hook call (pass or block) is appended to `${TMPDIR}/gate-agent-spawns-debug.jsonl` (platform temp dir).
+The hook also writes `${TMPDIR}/atm-session-id` as an audit/debug breadcrumb.
+This breadcrumb is **not** the production session resolution path for `atm teams resume`;
+resume should use explicit `--session-id` and/or `CLAUDE_SESSION_ID`.
 
 ### What Is NOT Blocked
 
@@ -212,6 +215,9 @@ The event has the shape:
 Team name is resolved in priority order: payload `team_name` → env `ATM_TEAM` → `.atm.toml` `default_team`.
 Agent name is resolved from: payload `name` → payload `agent` → env `ATM_IDENTITY`.
 
+The relay also sends the same lifecycle signal to the daemon socket (`command: "hook-event"`)
+for low-latency state updates, while keeping `events.jsonl` as a durable audit trail.
+
 ### Why It Exists
 
 The ATM daemon tracks agent activity state (active, idle, killed, etc.) for features like:
@@ -222,6 +228,22 @@ The ATM daemon tracks agent activity state (active, idle, killed, etc.) for feat
 The `TeammateIdle` hook is the signal that a teammate has finished a turn and is waiting. By relaying this event to the daemon's event log, the daemon can update its internal activity model without polling or requiring agents to explicitly call `atm`.
 
 **Fail-open**: The script always exits `0` regardless of errors. A relay failure should never block a teammate from continuing work.
+
+---
+
+## Extensible Lifecycle Sources
+
+Daemon lifecycle handling should remain on one command path (`hook-event`) with a source-kind discriminator
+so Claude hooks, MCP, and future adapters share one state machine.
+
+Recommended `source` kinds:
+- `claude_hook` — this document's hooks
+- `atm_mcp` — lifecycle events emitted by `atm-agent-mcp`
+- `agent_hook` — future provider hooks/adapters (for example Codex/Gemini if/when exposed)
+- `unknown` — default fallback
+
+When non-Claude adapters gain lifecycle callbacks, they should emit `session_start`, `teammate_idle`,
+and `session_end` using the same envelope and daemon command path.
 
 ---
 
@@ -271,7 +293,7 @@ Personal machine settings. Applies to all Claude Code sessions regardless of pro
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/scripts/session-start.sh"
+            "command": "python3 ~/.claude/scripts/session-start.py"
           }
         ]
       }

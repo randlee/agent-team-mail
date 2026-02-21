@@ -99,9 +99,11 @@ def main() -> int:
     team_name = tool_input.get("team_name", "")  # If present, spawns into team
     session_id = data.get("session_id", "")
 
-    # Persist session ID for `atm teams resume` fallback resolution.
-    # Written every time session_id is non-empty so the file stays current
-    # even across context compactions (session ID is stable within a session).
+    # Persist session ID as an audit/debug breadcrumb only.
+    # IMPORTANT: this file is NOT read by `atm teams resume` in the
+    # production path; session resolution uses CLAUDE_SESSION_ID/--session-id.
+    # Written every time session_id is non-empty so local diagnostics can
+    # inspect the latest observed hook payload.
     if session_id:
         try:
             SESSION_ID_FILE.write_text(session_id)
