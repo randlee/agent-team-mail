@@ -665,7 +665,7 @@ fn validate_control_request(control: &ControlRequest) -> Option<String> {
     let inline_len = control
         .payload
         .as_ref()
-        .map(|s| s.as_bytes().len())
+        .map(|s| s.len())
         .unwrap_or(0);
     if inline_len > DEFAULT_MAX_MESSAGE_BYTES {
         return Some(format!(
