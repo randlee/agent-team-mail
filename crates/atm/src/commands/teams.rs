@@ -88,6 +88,12 @@ pub struct ResumeArgs {
     /// SIGTERM the old process before resuming (requires --force)
     #[arg(long, requires = "force")]
     kill: bool,
+
+    /// Explicit session ID override (e.g., from the SessionStart hook output).
+    /// If omitted, the session ID is resolved from CLAUDE_SESSION_ID env var or
+    /// /tmp/atm-session-id (written by the gate hook on every tool call).
+    #[arg(long)]
+    session_id: Option<String>,
 }
 
 /// Remove stale (dead-session) members from a team
@@ -278,6 +284,38 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the current Claude Code session ID using a priority chain:
+///
+/// 1. Explicit value passed via `--session-id` flag
+/// 2. `CLAUDE_SESSION_ID` env var (available when the Rust binary is executed
+///    directly by Claude Code, but **not** exported to bash subshells)
+/// 3. `/tmp/atm-session-id` file written by the gate hook on every `Task` tool
+///    call — this acts as a persistent fallback after the first tool call fires
+///
+/// Returns `None` if no non-empty session ID can be found through any channel.
+fn resolve_session_id(explicit: Option<&str>) -> Option<String> {
+    if let Some(id) = explicit {
+        let trimmed = id.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    if let Ok(id) = std::env::var("CLAUDE_SESSION_ID") {
+        let trimmed = id.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    let session_file = std::path::Path::new("/tmp/atm-session-id");
+    if let Ok(content) = std::fs::read_to_string(session_file) {
+        let trimmed = content.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
 /// Implement `atm teams resume <team> [message]`
 ///
 /// Updates `leadSessionId` in the team's `config.json` so that the current
@@ -327,7 +365,8 @@ fn resume(args: ResumeArgs) -> Result<()> {
         match session_result {
             Ok(Some(ref info)) => {
                 // Daemon responded — check if old session is the same as ours
-                let current_session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+                let current_session_id =
+                    resolve_session_id(args.session_id.as_deref()).unwrap_or_default();
 
                 if info.session_id == current_session_id && !current_session_id.is_empty() {
                     // Re-read config for description
@@ -366,11 +405,17 @@ fn resume(args: ResumeArgs) -> Result<()> {
         }
     }
 
-    // Determine new session ID
-    let new_session_id = std::env::var("CLAUDE_SESSION_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    // Determine new session ID using a priority chain:
+    // 1. --session-id flag  2. CLAUDE_SESSION_ID env  3. /tmp/atm-session-id file
+    let new_session_id = resolve_session_id(args.session_id.as_deref()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not determine current session ID.\n\
+             Try one of:\n\
+             1. Pass --session-id <uuid> explicitly (find it in the SessionStart hook output)\n\
+             2. Make any tool call first (gate hook writes the ID to /tmp/atm-session-id)\n\
+             3. Ensure CLAUDE_SESSION_ID is set in your environment"
+        )
+    })?;
 
     // Atomically write updated config.json
     {
@@ -777,6 +822,7 @@ mod tests {
             message: None,
             force: false,
             kill: false,
+            session_id: None,
         };
 
         // Should return Err with a helpful message so the CLI exits non-zero.
@@ -820,6 +866,7 @@ mod tests {
             message: None,
             force: false,
             kill: false,
+            session_id: None,
         };
 
         let result = resume(args);
@@ -968,6 +1015,78 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn test_resume_no_session_id_returns_helpful_error() {
+        // When no session ID is available from any source (no --session-id flag,
+        // CLAUDE_SESSION_ID env absent/empty, /tmp/atm-session-id absent/empty),
+        // resume() must return an Err with a helpful message.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        create_test_team(&temp_dir, "atm-dev");
+
+        let original_home = std::env::var("ATM_HOME").ok();
+        let original_id = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+            std::env::remove_var("CLAUDE_SESSION_ID"); // no env var
+        }
+
+        // Ensure /tmp/atm-session-id is absent or empty for this test
+        let session_file = std::path::Path::new("/tmp/atm-session-id");
+        let session_file_existed = session_file.exists();
+        let session_file_backup: Option<String> = if session_file_existed {
+            std::fs::read_to_string(session_file).ok()
+        } else {
+            None
+        };
+        // Remove the file so the fallback chain has nothing to read
+        if session_file_existed {
+            let _ = std::fs::remove_file(session_file);
+        }
+
+        let args = ResumeArgs {
+            team: "atm-dev".to_string(),
+            message: None,
+            force: false,
+            kill: false,
+            session_id: None, // no explicit flag
+        };
+
+        let result = resume(args);
+        assert!(result.is_err(), "resume without any session ID source should fail");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Could not determine") || msg.contains("session ID") || msg.contains("session-id"),
+            "error should explain how to fix it: {msg}"
+        );
+
+        // Restore the session file if it was there before
+        if let Some(ref content) = session_file_backup {
+            let _ = std::fs::write(session_file, content);
+        }
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match original_id {
+                Some(v) => std::env::set_var("ATM_IDENTITY", v),
+                None => std::env::remove_var("ATM_IDENTITY"),
+            }
+            match original_session {
+                Some(v) => std::env::set_var("CLAUDE_SESSION_ID", v),
+                None => std::env::remove_var("CLAUDE_SESSION_ID"),
+            }
+        }
+    }
+
+    #[test]
     fn test_write_team_config_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("config.json");
@@ -1068,11 +1187,13 @@ mod tests {
 
         let original_home = std::env::var("ATM_HOME").ok();
         let original_id = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
 
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
+            std::env::set_var("CLAUDE_SESSION_ID", "test-force-session-id");
         }
 
         let args = ResumeArgs {
@@ -1080,6 +1201,7 @@ mod tests {
             message: None,
             force: true,  // --force bypasses alive-session check
             kill: false,
+            session_id: None,
         };
 
         let result = resume(args);
@@ -1094,6 +1216,10 @@ mod tests {
             match original_id {
                 Some(v) => std::env::set_var("ATM_IDENTITY", v),
                 None => std::env::remove_var("ATM_IDENTITY"),
+            }
+            match original_session {
+                Some(v) => std::env::set_var("CLAUDE_SESSION_ID", v),
+                None => std::env::remove_var("CLAUDE_SESSION_ID"),
             }
         }
     }
@@ -1201,11 +1327,13 @@ mod tests {
 
         let original_home = std::env::var("ATM_HOME").ok();
         let original_id = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
 
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
+            std::env::set_var("CLAUDE_SESSION_ID", "test-inactive-session-id");
         }
 
         let args = ResumeArgs {
@@ -1213,6 +1341,7 @@ mod tests {
             message: None,
             force: false,
             kill: false,
+            session_id: None,
         };
 
         let result = resume(args);
@@ -1250,6 +1379,10 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_IDENTITY", v),
                 None => std::env::remove_var("ATM_IDENTITY"),
             }
+            match original_session {
+                Some(v) => std::env::set_var("CLAUDE_SESSION_ID", v),
+                None => std::env::remove_var("CLAUDE_SESSION_ID"),
+            }
         }
     }
 
@@ -1265,11 +1398,13 @@ mod tests {
 
         let original_home = std::env::var("ATM_HOME").ok();
         let original_id = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
 
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
+            std::env::set_var("CLAUDE_SESSION_ID", "test-identity-session-id");
         }
 
         let args = ResumeArgs {
@@ -1277,6 +1412,7 @@ mod tests {
             message: None,
             force: false,
             kill: false,
+            session_id: None,
         };
 
         // Should succeed with team-lead identity
@@ -1292,6 +1428,124 @@ mod tests {
             match original_id {
                 Some(v) => std::env::set_var("ATM_IDENTITY", v),
                 None => std::env::remove_var("ATM_IDENTITY"),
+            }
+            match original_session {
+                Some(v) => std::env::set_var("CLAUDE_SESSION_ID", v),
+                None => std::env::remove_var("CLAUDE_SESSION_ID"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_resume_explicit_session_id() {
+        // When --session-id is passed, resume uses that ID directly without
+        // reading env or file.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let original_home = std::env::var("ATM_HOME").ok();
+        let original_id = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+            std::env::remove_var("CLAUDE_SESSION_ID"); // ensure env var is absent
+        }
+
+        let explicit_id = "explicit-test-session-id-12345";
+        let args = ResumeArgs {
+            team: "atm-dev".to_string(),
+            message: None,
+            force: false,
+            kill: false,
+            session_id: Some(explicit_id.to_string()),
+        };
+
+        let result = resume(args);
+        assert!(result.is_ok(), "resume with explicit session_id should succeed: {result:?}");
+
+        // Verify the config was updated with the explicit session ID
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(config.lead_session_id, explicit_id);
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match original_id {
+                Some(v) => std::env::set_var("ATM_IDENTITY", v),
+                None => std::env::remove_var("ATM_IDENTITY"),
+            }
+            match original_session {
+                Some(v) => std::env::set_var("CLAUDE_SESSION_ID", v),
+                None => std::env::remove_var("CLAUDE_SESSION_ID"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_resume_session_id_from_file_fallback() {
+        // When CLAUDE_SESSION_ID env var is absent but /tmp/atm-session-id exists,
+        // resume should use the file's content.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        // Write a test session ID to the file
+        let session_file = std::path::Path::new("/tmp/atm-session-id");
+        let file_session_id = "file-session-id-67890";
+        std::fs::write(session_file, file_session_id).unwrap();
+
+        let original_home = std::env::var("ATM_HOME").ok();
+        let original_id = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+            std::env::remove_var("CLAUDE_SESSION_ID"); // ensure env var is absent
+        }
+
+        let args = ResumeArgs {
+            team: "atm-dev".to_string(),
+            message: None,
+            force: false,
+            kill: false,
+            session_id: None, // no explicit flag
+        };
+
+        let result = resume(args);
+        assert!(result.is_ok(), "resume with file fallback should succeed: {result:?}");
+
+        // Verify the config was updated with the file's session ID
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(config.lead_session_id, file_session_id);
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match original_id {
+                Some(v) => std::env::set_var("ATM_IDENTITY", v),
+                None => std::env::remove_var("ATM_IDENTITY"),
+            }
+            match original_session {
+                Some(v) => std::env::set_var("CLAUDE_SESSION_ID", v),
+                None => std::env::remove_var("CLAUDE_SESSION_ID"),
             }
         }
     }

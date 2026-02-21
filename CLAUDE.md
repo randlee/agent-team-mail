@@ -46,7 +46,7 @@
 - Agent team execution: Scrum Master → Dev(s) + QA(s), Opus Architect on escalation
 - All work on dedicated worktrees via `sc-git-worktree`
 
-**Current Status**: Pre-development — requirements and plan under review
+**Current Status**: Phase E (ATM Core Bug Fixes) — Sprint E.1 in progress
 
 ---
 
@@ -193,6 +193,9 @@ tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --te
 ## Initialization Process
 1. Run: `atm teams resume <team>` where `<team>` is the `default_team` value from `.atm.toml` (e.g. `atm teams resume $(grep default_team .atm.toml | cut -d'"' -f2)`).
    Follow the output to call TeamCreate if needed.
+   If the session ID cannot be resolved automatically (first session of the day before any tool call has fired the gate hook), pass it explicitly:
+   `atm teams resume $(grep default_team .atm.toml | cut -d'"' -f2) --session-id <uuid>`
+   (The UUID appears in the SessionStart hook output at the top of the context.)
 2. Run: `atm teams cleanup <team>` (same team name as above).
    Removes stale members and their inboxes.
 3. Read project plan (`docs/project-plan.md`)
