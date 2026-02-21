@@ -1,15 +1,70 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.13.1 or v0.13.1)"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  gate-and-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_version: ${{ steps.meta.outputs.release_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Normalize version input
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw='${{ github.event.inputs.version }}'
+          tag="$raw"
+          [[ "$tag" == v* ]] || tag="v${tag}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: '$raw' (expected X.Y.Z or vX.Y.Z)" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run release gate
+        run: scripts/release_gate.sh
+
+      - name: Ensure tag does not already exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='${{ steps.meta.outputs.release_tag }}'
+          if git show-ref --tags --verify --quiet "refs/tags/${tag}"; then
+            echo "Tag already exists locally: ${tag}" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag already exists on origin: ${tag}" >&2
+            exit 1
+          fi
+
+      - name: Create and push release tag from origin/main
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='${{ steps.meta.outputs.release_tag }}'
+          git tag "$tag" origin/main
+          git push origin "$tag"
+
   build:
+    needs: gate-and-tag
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +84,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate-and-tag.outputs.release_tag }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -54,7 +111,7 @@ jobs:
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION='${{ needs.gate-and-tag.outputs.release_version }}'
           ARCHIVE="atm_${VERSION}_${{ matrix.target }}.tar.gz"
           cd target/${{ matrix.target }}/release
           tar czf "../../../${ARCHIVE}" atm atm-daemon atm-agent-mcp
@@ -65,7 +122,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $VERSION = "$env:GITHUB_REF_NAME" -replace '^v', ''
+          $VERSION = '${{ needs.gate-and-tag.outputs.release_version }}'
           $ARCHIVE = "atm_${VERSION}_${{ matrix.target }}.zip"
           Compress-Archive -Path "target/${{ matrix.target }}/release/atm.exe","target/${{ matrix.target }}/release/atm-daemon.exe","target/${{ matrix.target }}/release/atm-agent-mcp.exe" -DestinationPath $ARCHIVE
           echo "ARCHIVE=$ARCHIVE" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -77,10 +134,12 @@ jobs:
           path: ${{ env.ARCHIVE }}
 
   release:
-    needs: build
+    needs: [gate-and-tag, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate-and-tag.outputs.release_tag }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -100,16 +159,19 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.gate-and-tag.outputs.release_tag }}
           generate_release_notes: true
           files: |
             release/*
 
   publish-crates:
-    needs: release
+    needs: [gate-and-tag, release]
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate-and-tag.outputs.release_tag }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

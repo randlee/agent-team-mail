@@ -2324,9 +2324,9 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| D.1 | TUI crate + live stream view (read-only) | C.2b | ⏳ PLANNED |
-| D.2 | Interactive controls (stdin inject, interrupt) | C.3 | ⏳ PLANNED |
-| D.3 | Identifier cleanup + user demo | D.1 + D.2 (independent) | ⏳ PLANNED |
+| D.1 | TUI crate + live stream view (read-only) | C.2b | ✅ [#136](https://github.com/randlee/agent-team-mail/pull/136) |
+| D.2 | Interactive controls (stdin inject, interrupt) | C.3 | 🔄 IN PROGRESS |
+| D.3 | Identifier cleanup + user demo | D.1 + D.2 (independent) | 🔄 IN PROGRESS |
 
 **Execution model**: D.1 and D.2 launch in parallel after Phase C integration merges to develop. D.1 needs only C.2b (session log tail + pub/sub). D.2 needs C.3 (control receiver endpoint).
 
@@ -2475,7 +2475,6 @@ When team-lead runs `atm read` or `atm inbox`, ATM marks messages as `read: true
 - [ ] `cargo test --workspace` passes
 
 ---
-
 ## 17. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
@@ -2488,7 +2487,7 @@ Additional plugins planned (each is a self-contained sprint series):
 
 ---
 
-## 17. Sprint Summary
+## 18. Sprint Summary
 
 | Phase | Sprint | Name | Status | PR |
 |-------|--------|------|--------|-----|
