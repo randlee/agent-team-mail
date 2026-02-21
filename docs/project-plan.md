@@ -2562,115 +2562,135 @@ Add `SocketCommand::HookEvent` variant. Handler updates session registry and age
 ## 16.5 Phase F: Team Installer (`atm team init`)
 
 **Status**: PLANNED
-**Goal**: Allow a team's full agent configuration — hook scripts, agent prompts, and skills — to be packaged alongside the team definition and installed into `~/.claude/` with a single command.
+**Goal**: Allow orchestration packages — hook scripts, agent prompts, and skills — to be installed into `~/.claude/` with a single command, with clean separation between machine-global hooks and project-scoped orchestration.
 **Integration branch**: `integrate/phase-F`
 
 ### Motivation
 
-Currently, setting up a new machine or onboarding a new project requires manually:
-1. Copying hook scripts to `~/.claude/scripts/`
-2. Copying agent prompt files to `~/.claude/agents/`
-3. Copying skill definitions to `~/.claude/skills/`
-4. Merging hook entries into `~/.claude/settings.json`
-5. Creating `.atm.toml` in the project root
+Currently, setting up a new machine or onboarding a new project requires manually copying scripts, agents, and skills and hand-editing `settings.json`. `atm team init atm-dev` does all of this in one command. Multiple named orchestration packages can be composed per-project (e.g., `rust-sprint`, `docs-review`, `generic-dev`).
 
-`atm team init atm-dev` does all of this in one command, reading the team's installer package from a well-known location in the repo.
+### Two Install Scopes
 
-### Design
+#### 1. Global (machine-level) — install once
 
-#### Team Installer Package
+Hook scripts and their `~/.claude/settings.json` entries that apply across **all** Claude Code sessions on the machine:
 
-Each team can ship an optional `installer/` directory alongside its definition:
+- `session-start.py` → `~/.claude/scripts/`
+- `session-end.py` → `~/.claude/scripts/`
+- Hook entries for `SessionStart` and `SessionEnd` → `~/.claude/settings.json` (**global**)
+
+These are installed **once** per machine. `atm team init` skips them if already present (checks script SHA256 + settings entry). `--force` to update.
+
+#### 2. Project/orchestration (project-level) — per repo or per workflow
+
+Orchestration packages install into the **project's** `.claude/` directory:
+
+- Hook scripts (gate, TeammateIdle relay) → `.claude/scripts/`
+- Hook entries → `.claude/settings.json` (**project-level**, committed to repo)
+- Agent prompts → `.claude/agents/`
+- Skills → `.claude/skills/`
+
+Multiple named orchestration packages can be installed in the same project. Each is self-contained. Examples:
+- **`rust-sprint`** — scrum-master, rust-developer, rust-qa-agent, gate hook, phase-orchestration skill
+- **`docs-review`** — docs-agent, review-agent, lighter gate config
+- **`generic-dev`** — general-purpose scrum-master, minimal hooks
+
+### Package Format
+
+Packages live in `.claude/packages/<name>/` within the repo:
 
 ```
-.atm/
-  teams/
-    atm-dev/
-      installer/
-        manifest.toml        ← package metadata + install map
-        scripts/             ← hook scripts (Python, cross-platform)
-          session-start.py
-          session-end.py
-          teammate-idle-relay.py
-          gate-agent-spawns.py
-          tests/             ← unit tests for hook scripts
-        agents/              ← agent prompt files
-          scrum-master.md
-          publisher.md
-        skills/              ← skill definitions
-          phase-orchestration/
-          rust-development/
-        settings-hooks.json  ← hook entries to merge into ~/.claude/settings.json
+.claude/
+  packages/
+    rust-sprint/
+      manifest.toml          ← metadata + install map
+      scripts/               ← project-level hook scripts (Python)
+        gate-agent-spawns.py
+        teammate-idle-relay.py
+        tests/
+      agents/
+        scrum-master.md
+        rust-developer.md
+        rust-qa-agent.md
+      skills/
+        phase-orchestration/
+        rust-development/
+      project-hooks.json     ← hook entries for .claude/settings.json
+    global/
+      manifest.toml          ← scope = "global"
+      scripts/
+        session-start.py
+        session-end.py
+        tests/
+      global-hooks.json      ← hook entries for ~/.claude/settings.json
 ```
 
 **`manifest.toml`**:
 ```toml
 [package]
-name = "atm-dev"
+name = "rust-sprint"
 version = "0.1.0"
-description = "ATM development team — hooks, agents, and skills for agent-team-mail"
+description = "Rust sprint orchestration — scrum-master, dev, QA, gate hook"
 atm_min_version = "0.15.0"
+scope = "project"           # "project" | "global"
 
 [install]
-scripts = "installer/scripts/"         # → ~/.claude/scripts/
-agents  = "installer/agents/"          # → ~/.claude/agents/
-skills  = "installer/skills/"          # → ~/.claude/skills/
-hooks   = "installer/settings-hooks.json"  # merged into ~/.claude/settings.json
+scripts = "scripts/"        # → .claude/scripts/ (project) or ~/.claude/scripts/ (global)
+agents  = "agents/"         # → .claude/agents/
+skills  = "skills/"         # → .claude/skills/
+hooks   = "project-hooks.json"  # → merged into .claude/settings.json
 ```
 
-**`settings-hooks.json`** — only the hooks block, merged non-destructively:
-```json
-{
-  "SessionStart": [{"hooks": [{"type": "command", "command": "python3 ~/.claude/scripts/session-start.py"}]}],
-  "SessionEnd":   [{"hooks": [{"type": "command", "command": "python3 ~/.claude/scripts/session-end.py"}]}]
-}
-```
-
-#### `atm team init <team>` Command
+### `atm team init` Command
 
 ```
-atm team init atm-dev [--from <path>] [--dry-run] [--force]
+atm team init <team> [--package <name>] [--dry-run] [--force]
 ```
 
-1. Resolve installer source:
-   - Default: look for `installer/` in cwd's `.atm/teams/<team>/` or `.claude/` project directory
-   - `--from <path>`: explicit path to an installer directory or tarball
-2. Read `manifest.toml` — validate ATM version compatibility
-3. **Dry-run mode** (`--dry-run`): print what would be installed, make no changes
-4. Copy files:
-   - Scripts → `~/.claude/scripts/` (skip if identical; overwrite with `--force`)
-   - Agents → `~/.claude/agents/` (skip if identical; overwrite with `--force`)
-   - Skills → `~/.claude/skills/` (skip if identical; overwrite with `--force`)
-5. Merge hooks into `~/.claude/settings.json` — append new hook entries; never remove existing ones
-6. Write install receipt to `~/.atm/installed/<team>/receipt.toml` (for `atm team uninstall`)
-7. Print summary: files installed, hooks merged, any skips
+1. Read team definition from `.atm/teams/<team>/` (or cwd `.atm.toml`)
+2. Install **global package** first (scope=global), if not already installed
+3. Install **orchestration package(s)** into project `.claude/` (scope=project)
+   - Default: install all packages listed in team definition
+   - `--package <name>`: install only the named package
+4. Write receipt to `~/.atm/installed/<team>/receipt.toml` (global) and `.atm/installed/<package>.toml` (project)
+5. Print summary per scope: global (skipped/installed), project (files copied, hooks merged)
 
-#### `atm team uninstall <team>`
+### `settings.json` Surgery — Insert/Remove Only
 
-Reads receipt and removes only files that were installed by this team (leaves files that have been modified post-install). Removes merged hook entries from `~/.claude/settings.json`.
+`atm team init` and `atm team uninstall` perform **surgical edits** to `settings.json` — they never rewrite the file wholesale:
 
-#### Conflict Handling
+- **Install**: read existing JSON, append new hook entries under the appropriate event key, write back. Existing entries from other tools, plugins, or manual configuration are preserved untouched.
+- **Uninstall**: read existing JSON, remove only the exact hook entries that were added by this package (matched by command string from receipt), write back. No other entries are touched.
+- **Duplicate detection**: before inserting, check if the exact command string is already present under the event key. If so, skip — idempotent.
+- **JSON formatting**: preserve existing indentation/style where possible; fall back to 2-space indent if file must be reformatted.
+- **Atomic write**: write to a temp file, then rename — never leave `settings.json` in a partial state.
+
+This ensures `atm team init` is safe to run even when the user has manually configured other hooks, plugins (e.g., LSP, nuget-publishing), or project-specific settings.
+
+### Conflict Handling
 
 | Scenario | Behavior |
 |----------|----------|
-| File already exists (identical) | Skip, log "already up to date" |
-| File already exists (different) | Skip with warning, use `--force` to overwrite |
-| Hook entry already in settings | Skip duplicate, keep existing |
-| `manifest.toml` missing | Error: not a valid installer package |
+| Global script already installed (identical) | Skip — "already up to date" |
+| Global script already installed (different) | Skip with warning — use `--force` to update |
+| Project file already exists | Overwrite (project files are owned by the package) |
+| Hook entry already present (exact command match) | Skip duplicate — idempotent |
+| Other hook entries present in settings.json | Left untouched — surgical insert/remove only |
 | ATM version too old | Error with minimum version required |
 
 ### Phase F Sprint Summary
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| F.1 | Installer package format + `atm team init` | Phase E | ⏳ PLANNED |
+| F.1 | Package format + `atm team init` (global + project scopes) | Phase E | ⏳ PLANNED |
 | F.2 | `atm team uninstall` + receipt tracking | F.1 | ⏳ PLANNED |
+| F.3 | Ship built-in packages: `global`, `rust-sprint`, `generic-dev` | F.1 | ⏳ PLANNED |
 
-**Execution model**: F.1 and F.2 are sequential. F.1 is the MVP — `atm team init` alone provides the core value.
+**Execution model**: F.1 is the MVP. F.2 and F.3 can run in parallel after F.1 merges.
 
 ---
 
-### Sprint F.1 — Installer Package Format + `atm team init`
+### Sprint F.1 — Package Format + `atm team init`
 
 **Branch**: `feature/pF-s1-team-init`
 **Crate(s)**: `crates/atm` (new `team init` subcommand), `crates/atm-core` (manifest parsing, file copy, settings merge)
@@ -2686,8 +2706,14 @@ Reads receipt and removes only files that were installed by this team (leaves fi
 - [ ] Conflict handling: skip-identical, warn-on-different without `--force`
 - [ ] Install receipt written to `~/.atm/installed/<team>/receipt.toml`
 - [ ] ATM version compatibility check against `manifest.toml` `atm_min_version`
+- [ ] Global scope: installs to `~/.claude/scripts/`, merges into `~/.claude/settings.json`; skips if already present (SHA256 match)
+- [ ] Project scope: installs to `.claude/scripts/`, `.claude/agents/`, `.claude/skills/`, merges into `.claude/settings.json`
+- [ ] `--dry-run` prints planned changes per scope, makes no disk writes
+- [ ] `--force` overwrites differing global files
+- [ ] `--package <name>` installs only the named package
+- [ ] Global receipt written to `~/.atm/installed/<team>/receipt.toml`; project receipt to `.atm/installed/<package>.toml`
 - [ ] `.atm.toml` created/updated in cwd with `default_team = "<team>"`
-- [ ] Integration test: fresh temp dir → `atm team init` → verify all files copied, settings merged
+- [ ] Integration test: fresh temp dir → `atm team init` → verify global + project files installed, both settings.json updated
 - [ ] `cargo clippy --workspace -- -D warnings` clean
 - [ ] `cargo test --workspace` passes
 
@@ -2701,11 +2727,46 @@ Reads receipt and removes only files that were installed by this team (leaves fi
 
 #### Exit Criteria
 
-- [ ] `atm team uninstall <team>` removes only files listed in receipt that are unmodified since install (SHA256 check)
-- [ ] Modified files skipped with warning: `"<file> has been modified — skipping (use --force to remove anyway)"`
-- [ ] Hook entries removed from `~/.claude/settings.json` (only entries added by this team's install)
+- [ ] `atm team uninstall <team>` removes only receipt-tracked files unmodified since install (SHA256 check)
+- [ ] Global files: skip with warning if modified; remove from `~/.claude/settings.json` hook entries
+- [ ] Project files: removed unconditionally (project owns them)
 - [ ] Receipt deleted after successful uninstall
-- [ ] `--force` removes all installed files including modified ones
+- [ ] `--force` removes all installed files including modified globals
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint F.3 — Built-in Packages: `global`, `rust-sprint`, `generic-dev`
+
+**Branch**: `feature/pF-s3-builtin-packages`
+**Crate(s)**: `.claude/packages/` (package directories), `crates/atm` (bundle packages into binary or reference repo path)
+**Depends on**: F.1 (parallel with F.2)
+
+#### Packages
+
+**`global`** (scope: global) — machine-level hooks, installed once:
+- `session-start.py`, `session-end.py` with unit tests
+- `SessionStart` + `SessionEnd` entries for `~/.claude/settings.json`
+
+**`rust-sprint`** (scope: project) — full Rust sprint orchestration:
+- `gate-agent-spawns.py`, `teammate-idle-relay.py` with unit tests
+- Agent prompts: `scrum-master.md`, `rust-developer.md`, `rust-qa-agent.md`, `atm-qa-agent.md`
+- Skills: `phase-orchestration/`, `rust-development/`
+- `PreToolUse` + `TeammateIdle` entries for `.claude/settings.json`
+
+**`generic-dev`** (scope: project) — lighter orchestration for non-Rust projects:
+- Same hooks as `rust-sprint`
+- Agent prompts: `scrum-master.md`, `general-purpose` dev, `general-purpose` QA
+- Skills: `phase-orchestration/` only
+
+#### Exit Criteria
+
+- [ ] All three packages ship as directories under `.claude/packages/` in the repo
+- [ ] `atm team init atm-dev` installs `global` + `rust-sprint` by default (per team definition)
+- [ ] Each package's hook scripts have passing unit tests in `tests/`
+- [ ] `atm team init --package global` installs only the global package
+- [ ] `atm team init --package rust-sprint` installs only the rust-sprint project package
 - [ ] `cargo clippy --workspace -- -D warnings` clean
 - [ ] `cargo test --workspace` passes
 
