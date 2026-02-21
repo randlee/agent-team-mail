@@ -602,6 +602,7 @@ fn emit_control_ack_event(control: &ControlRequest, ack: &ControlAck) {
         request_id: Some(control.request_id.clone()),
         target: Some(control_action_name(&control.action).to_string()),
         result: Some(format!("{:?}", ack.result).to_ascii_lowercase()),
+        message_text: Some(format!("duplicate={}", ack.duplicate)),
         ..Default::default()
     });
 }
@@ -662,11 +663,7 @@ fn validate_control_request(control: &ControlRequest) -> Option<String> {
         return Some(format!("sent_at skew exceeds {max_skew_secs}s"));
     }
 
-    let inline_len = control
-        .payload
-        .as_ref()
-        .map(|s| s.len())
-        .unwrap_or(0);
+    let inline_len = control.payload.as_ref().map(|s| s.len()).unwrap_or(0);
     if inline_len > DEFAULT_MAX_MESSAGE_BYTES {
         return Some(format!(
             "inline payload exceeds {} bytes",
@@ -680,6 +677,12 @@ fn validate_control_request(control: &ControlRequest) -> Option<String> {
 fn read_content_ref_text(content_ref: &ContentRef) -> Result<String, String> {
     let home = agent_team_mail_core::home::get_home_dir().map_err(|e| e.to_string())?;
     let allowed = home.join(".config/atm/share");
+    std::fs::create_dir_all(&allowed).map_err(|e| {
+        format!(
+            "failed to prepare allowed content_ref base {}: {e}",
+            allowed.display()
+        )
+    })?;
     let canonical_allowed = std::fs::canonicalize(&allowed).map_err(|e| {
         format!(
             "failed to resolve allowed content_ref base {}: {e}",
@@ -749,6 +752,34 @@ async fn process_control_request(
         return ack;
     }
 
+    let inline_len = control.payload.as_ref().map(|s| s.len()).unwrap_or(0);
+    if inline_len > 64 * 1024 {
+        emit_event_best_effort(EventFields {
+            level: "warn",
+            source: "atm-daemon",
+            action: "control_payload_soft_limit_exceeded",
+            team: Some(control.team.clone()),
+            session_id: Some(control.session_id.clone()),
+            agent_id: Some(control.agent_id.clone()),
+            request_id: Some(control.request_id.clone()),
+            count: Some(inline_len as u64),
+            error: Some("payload exceeds 64KiB soft limit".to_string()),
+            ..Default::default()
+        });
+    }
+
+    if matches!(control.action, ControlAction::Interrupt) {
+        let ack = control_ack(
+            &control.request_id,
+            ControlResult::Rejected,
+            false,
+            Some("interrupt receiver path not yet implemented".to_string()),
+        );
+        emit_control_ack_event(&control, &ack);
+        return ack;
+    }
+
+    // Only accepted actions consume dedupe slots.
     let key = DedupeKey::new(
         &control.team,
         &control.session_id,
@@ -780,12 +811,7 @@ async fn process_control_request(
     }
 
     let ack = match control.action {
-        ControlAction::Interrupt => control_ack(
-            &control.request_id,
-            ControlResult::Rejected,
-            false,
-            Some("interrupt receiver path not yet implemented".to_string()),
-        ),
+        ControlAction::Interrupt => unreachable!("interrupt handled before dedupe"),
         ControlAction::Stdin => {
             let content = if let Some(payload) = control.payload.clone() {
                 payload
@@ -1559,6 +1585,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_control_stdin_enqueues_payload() {
         use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
 
         let tmp = tempfile::TempDir::new().unwrap();
         // SAFETY: serialized test; env var restored by process teardown.
@@ -1579,7 +1606,7 @@ mod tests {
 
         let req = ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
-            request_id: "ctrl-stdin-1".to_string(),
+            request_id: Uuid::new_v4().to_string(),
             sent_at: chrono::Utc::now().to_rfc3339(),
             team: "atm-dev".to_string(),
             session_id: "sess-1".to_string(),
@@ -1611,6 +1638,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_control_duplicate_does_not_reenqueue() {
         use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
 
         let tmp = tempfile::TempDir::new().unwrap();
         // SAFETY: serialized test; env var restored by process teardown.
@@ -1628,10 +1656,10 @@ mod tests {
                 .unwrap()
                 .upsert("arch-ctm", "sess-dup", std::process::id());
         }
-        let request_id = "ctrl-dup-1";
+        let request_id = Uuid::new_v4().to_string();
         let mk_req = || ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
-            request_id: request_id.to_string(),
+            request_id: request_id.clone(),
             sent_at: chrono::Utc::now().to_rfc3339(),
             team: "atm-dev".to_string(),
             session_id: "sess-dup".to_string(),
@@ -1669,6 +1697,7 @@ mod tests {
     #[tokio::test]
     async fn test_control_interrupt_returns_rejected() {
         use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
 
         let state_store = make_store();
         {
@@ -1684,7 +1713,7 @@ mod tests {
         }
         let req = ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
-            request_id: "ctrl-int-1".to_string(),
+            request_id: Uuid::new_v4().to_string(),
             sent_at: chrono::Utc::now().to_rfc3339(),
             team: "atm-dev".to_string(),
             session_id: "sess-int".to_string(),
@@ -1708,8 +1737,56 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn test_control_interrupt_retry_is_not_marked_duplicate() {
+        use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
+
+        let state_store = make_store();
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert("arch-ctm", "sess-int-retry", std::process::id());
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let mk_req = || ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: request_id.clone(),
+            sent_at: chrono::Utc::now().to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-int-retry".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Interrupt,
+            payload: None,
+            content_ref: None,
+        };
+
+        let ack1 = process_control_request(mk_req(), &state_store, &sr).await;
+        let ack2 = process_control_request(mk_req(), &state_store, &sr).await;
+        assert_eq!(
+            ack1.result,
+            agent_team_mail_core::control::ControlResult::Rejected
+        );
+        assert_eq!(
+            ack2.result,
+            agent_team_mail_core::control::ControlResult::Rejected
+        );
+        assert!(!ack1.duplicate);
+        assert!(!ack2.duplicate);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn test_control_stale_sent_at_rejected() {
         use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
 
         let state_store = make_store();
         {
@@ -1727,7 +1804,7 @@ mod tests {
         let old = chrono::Utc::now() - chrono::Duration::minutes(10);
         let req = ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
-            request_id: "ctrl-stale-1".to_string(),
+            request_id: Uuid::new_v4().to_string(),
             sent_at: old.to_rfc3339(),
             team: "atm-dev".to_string(),
             session_id: "sess-stale".to_string(),
@@ -2013,7 +2090,7 @@ mod tests {
         assert!(resp.is_ok(), "Expected ok response, got: {:?}", resp.error);
         let payload = resp.payload.unwrap();
         assert_eq!(payload["result"].as_str().unwrap(), "ok");
-        assert_eq!(payload["duplicate"].as_bool().unwrap(), false);
+        assert!(!payload["duplicate"].as_bool().unwrap());
 
         cancel.cancel();
     }

@@ -3,7 +3,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+/// Default max in-memory dedupe keys when `ATM_DEDUP_CAPACITY` is unset.
 const DEFAULT_CAPACITY: usize = 1000;
+/// Default dedupe retention window in seconds when `ATM_DEDUP_TTL_SECS` is unset.
 const DEFAULT_TTL_SECS: u64 = 600;
 
 /// Composite idempotency key for control requests.
@@ -79,6 +81,11 @@ impl DedupeStore {
         false
     }
 
+    /// Purge expired keys based on the configured TTL.
+    pub fn cleanup_expired(&mut self) {
+        self.purge_expired(Instant::now());
+    }
+
     #[cfg(test)]
     fn check_and_insert_at(&mut self, key: DedupeKey, now: Instant) -> bool {
         self.purge_expired(now);
@@ -149,5 +156,32 @@ mod tests {
         assert!(!d.check_and_insert(key(2)));
         assert!(!d.check_and_insert(key(3))); // evicts key(1)
         assert!(!d.check_and_insert(key(1))); // no longer duplicate
+    }
+
+    #[test]
+    fn dedupe_key_isolated_by_team() {
+        let mut d = DedupeStore::with_config(4, Duration::from_secs(600));
+        let k1 = DedupeKey::new("atm-dev", "sess-1", "arch-ctm", "req-iso");
+        let k2 = DedupeKey::new("other-team", "sess-1", "arch-ctm", "req-iso");
+        assert!(!d.check_and_insert(k1));
+        assert!(!d.check_and_insert(k2));
+    }
+
+    #[test]
+    fn dedupe_key_isolated_by_session_id() {
+        let mut d = DedupeStore::with_config(4, Duration::from_secs(600));
+        let k1 = DedupeKey::new("atm-dev", "sess-1", "arch-ctm", "req-iso");
+        let k2 = DedupeKey::new("atm-dev", "sess-2", "arch-ctm", "req-iso");
+        assert!(!d.check_and_insert(k1));
+        assert!(!d.check_and_insert(k2));
+    }
+
+    #[test]
+    fn dedupe_key_isolated_by_agent_id() {
+        let mut d = DedupeStore::with_config(4, Duration::from_secs(600));
+        let k1 = DedupeKey::new("atm-dev", "sess-1", "arch-ctm", "req-iso");
+        let k2 = DedupeKey::new("atm-dev", "sess-1", "sm-b-1", "req-iso");
+        assert!(!d.check_and_insert(k1));
+        assert!(!d.check_and_insert(k2));
     }
 }
