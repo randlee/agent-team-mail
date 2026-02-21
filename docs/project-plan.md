@@ -2507,36 +2507,52 @@ The `TeammateIdle` relay (`teammate-idle-relay.py`) writes idle events to a flat
 
 Two lightweight components:
 
-**1. Hooks → daemon socket**
+**1. Hook scripts (Python, cross-platform, with unit tests)**
 
-Update `teammate-idle-relay.py` and the global `session-start.sh` to send a structured socket message to the running daemon, in addition to (not replacing) the existing file write. Uses the existing `atm-core::daemon_client` socket path. Fail-open: if daemon not running, silently skip and continue.
+All hook scripts are Python (not bash) for cross-platform compatibility and testability. Three scripts send `hook_event` socket messages to the daemon:
+
+- `session-start.py` — replaces `session-start.sh`; handles `SessionStart`
+- `session-end.py` — new; handles `SessionEnd`
+- `teammate-idle-relay.py` — extended to also send socket message
+
+**`.atm.toml` guard** (all three scripts): before sending any daemon socket message, check for `.atm.toml` in `cwd`. If absent, skip the socket call entirely. This prevents daemon state from being polluted by unrelated Claude Code sessions on the same machine.
 
 Socket message types (new `hook_event` variant):
 ```json
 {"type": "hook_event", "event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": "init|compact"}
 {"type": "hook_event", "event": "teammate_idle",  "session_id": "...", "agent": "...", "team": "..."}
+{"type": "hook_event", "event": "session_end",    "session_id": "...", "agent": "...", "team": "...", "reason": "..."}
 ```
+
+**Unit tests** live alongside each script in `.claude/scripts/tests/`:
+- `test_session_start.py` — mock socket, verify message shape, verify `.atm.toml` guard, verify fail-open on socket error
+- `test_session_end.py` — same pattern for session_end
+- `test_teammate_idle_relay.py` — extend existing tests with socket message assertions
 
 **2. Daemon hook event handler**
 
 Add `SocketCommand::HookEvent` variant. Handler updates session registry and agent activity state:
 - `session_start` → register/refresh session; set agent state to `Active`
 - `teammate_idle` → set agent state to `Idle` for the named session
+- `session_end` → mark session as `Dead`; update agent state to `Closed`
 
 #### Scope Notes
 
 - No new daemon persistence — in-memory state only (existing registry)
-- No changes to hook exit behavior — both remain fail-open, always exit `0`
+- All hooks remain fail-open, always exit `0`
 - `events.jsonl` file write is kept as durable audit trail; socket call is additive
 - Socket path lookup: `${ATM_HOME:-$HOME}/.claude/daemon/atm-daemon.sock`
+- Global `~/.claude/settings.json` updated to add `SessionEnd` hook pointing to `session-end.py`
 
 #### Exit Criteria
 
-- [ ] `teammate-idle-relay.py` sends `hook_event/teammate_idle` to daemon socket when daemon is running
-- [ ] `session-start.sh` sends `hook_event/session_start` to daemon socket when daemon is running
-- [ ] Both hooks remain fail-open — exit `0` even if socket call fails
+- [ ] `session-start.py` replaces `session-start.sh`; sends `hook_event/session_start` **only when `.atm.toml` present in cwd**
+- [ ] `session-end.py` (new) added to global `~/.claude/settings.json`; sends `hook_event/session_end` **only when `.atm.toml` present in cwd**
+- [ ] `teammate-idle-relay.py` sends `hook_event/teammate_idle` **only when `.atm.toml` present in cwd**
+- [ ] All hooks remain fail-open — exit `0` even if socket call fails or `.atm.toml` is absent
+- [ ] Unit tests in `.claude/scripts/tests/` cover: message shape, `.atm.toml` guard, socket-error fail-open, daemon-not-running fail-open
 - [ ] Daemon handles `SocketCommand::HookEvent`; updates session registry + agent state
-- [ ] `session_start` sets agent state to `Active`; `teammate_idle` sets it to `Idle`
+- [ ] `session_start` → `Active`; `teammate_idle` → `Idle`; `session_end` → `Dead`/`Closed`
 - [ ] Integration test: hook event over socket → daemon state query reflects updated state
 - [ ] `cargo clippy --workspace -- -D warnings` clean
 - [ ] `cargo test --workspace` passes

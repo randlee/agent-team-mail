@@ -11,6 +11,7 @@ Claude Code hooks are shell/Python scripts that fire at specific lifecycle point
 | Hook | Scope | Trigger | Script | Purpose |
 |------|-------|---------|--------|---------|
 | `SessionStart` | Global | Session start, compact, resume | `~/.claude/scripts/session-start.sh` | Announce session ID + ATM team context |
+| `SessionEnd` | Global | Session exits | `~/.claude/scripts/session-end.py` | Notify daemon session is dead *(Sprint E.3)* |
 | `PreToolUse(Task)` | Project | Every `Task` tool call | `.claude/scripts/gate-agent-spawns.py` | Enforce safe agent spawning rules |
 | `TeammateIdle` | Project | Teammate goes idle | `.claude/scripts/teammate-idle-relay.py` | Relay idle events to daemon |
 
@@ -63,7 +64,51 @@ welcome-message = "Read docs/project-plan.md before starting"
 
 ---
 
-## 2. Agent Spawn Gate (`PreToolUse`)
+## 2. Global SessionEnd Hook
+
+**Config**: `~/.claude/settings.json`
+**Script**: `~/.claude/scripts/session-end.py` *(planned — Sprint E.3)*
+**Fires**: When a Claude Code session exits for any reason
+**Scope**: All Claude Code sessions on this machine (global)
+
+### What It Does
+
+Reads the `SessionEnd` payload from stdin and notifies the ATM daemon that the session is ending:
+
+1. Sends a `hook_event/session_end` message to the daemon Unix socket (if daemon is running)
+2. Daemon marks the session as `Dead` in its session registry — enabling reliable liveness detection without PID polling
+
+Example payload received:
+```json
+{
+  "session_id": "23551503-3d66-475c-acf2-dfa34f9d68b5",
+  "hook_event_name": "SessionEnd",
+  "reason": "other",
+  "transcript_path": "/Users/.../.claude/projects/.../transcript.jsonl",
+  "cwd": "/Users/randlee/Documents/github/agent-team-mail"
+}
+```
+
+The `reason` field can be `"clear"`, `"logout"`, `"prompt_input_exit"`, `"bypass_permissions_disabled"`, or `"other"`.
+
+### Why It Exists
+
+Without `SessionEnd`, the daemon must detect dead sessions by polling PIDs — which has a window where a crashed session looks alive. With `SessionEnd`, the daemon gets a clean notification and can immediately mark the session dead.
+
+This enables:
+- **`atm teams resume`** daemon guard: if previous team-lead's session is `Dead`, resume proceeds without `--force`
+- **`atm teams cleanup`**: skip PID polling for recently-exited sessions already marked `Dead`
+- **TUI live-state gate**: agent state transitions to `Closed` on session exit, disabling control input immediately
+
+**`.atm.toml` guard**: Both `session-end.sh` and `session-start.sh` check for `.atm.toml` in `cwd` before contacting the daemon. If `.atm.toml` is absent, the daemon socket call is skipped entirely. This ensures the daemon only receives hook events from ATM project sessions — not from unrelated Claude Code sessions on the same machine.
+
+**Fail-open**: The hook always exits `0`. If the daemon isn't running or `.atm.toml` is absent, the socket call is silently skipped.
+
+**Note**: `SessionEnd` cannot block session termination — it is for cleanup/notification only.
+
+---
+
+## 3. Agent Spawn Gate (`PreToolUse`)
 
 **Config**: `.claude/settings.json` (project-level, committed to repo)
 **Script**: `.claude/scripts/gate-agent-spawns.py`
@@ -137,7 +182,7 @@ Every hook call (pass or block) is appended to `/tmp/gate-agent-spawns-debug.jso
 
 ---
 
-## 3. TeammateIdle Relay
+## 4. TeammateIdle Relay
 
 **Config**: `.claude/settings.json` (project-level)
 **Script**: `.claude/scripts/teammate-idle-relay.py`
@@ -230,6 +275,16 @@ Personal machine settings. Applies to all Claude Code sessions regardless of pro
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/scripts/session-end.py"
+          }
+        ]
+      }
     ]
   }
 }
@@ -245,6 +300,8 @@ Each hook receives a JSON payload on stdin. Key fields:
 |-------|-----------|-------------|
 | `session_id` | All hooks | UUID of the calling Claude Code session |
 | `source` | `SessionStart` | `"init"` (fresh start), `"compact"` (post-compaction), `"resume"` (--continue) |
+| `reason` | `SessionEnd` | `"clear"`, `"logout"`, `"prompt_input_exit"`, `"bypass_permissions_disabled"`, `"other"` |
+| `transcript_path` | `SessionEnd` | Path to the session transcript JSONL file |
 | `tool_name` | `PreToolUse` | Name of the tool being called (e.g., `"Task"`) |
 | `tool_input` | `PreToolUse` | The tool's input parameters as a JSON object |
 | `tool_input.subagent_type` | `PreToolUse(Task)` | Agent type being spawned |
@@ -252,6 +309,18 @@ Each hook receives a JSON payload on stdin. Key fields:
 | `tool_input.team_name` | `PreToolUse(Task)` | Team to join (if present, adds to team) |
 | `name` | `TeammateIdle` | Name of the idle teammate |
 | `team_name` | `TeammateIdle` | Team the teammate belongs to |
+
+---
+
+## Hook Implementation Standards
+
+All hook scripts follow these conventions:
+
+- **Python only** — no bash scripts. Python is cross-platform (macOS, Linux, Windows) and testable with standard `unittest` / `pytest`.
+- **Fail-open always** — every script exits `0` regardless of errors. Hooks must never block Claude Code operation.
+- **`.atm.toml` guard** — scripts that contact the daemon MUST check for `.atm.toml` in `cwd` before any socket call. If absent, skip silently. This scopes daemon communication to ATM project sessions only.
+- **Unit tests** — each hook script has a corresponding test file in `.claude/scripts/tests/`. Tests cover: correct message shape, `.atm.toml` guard behavior, socket-error fail-open, daemon-not-running fail-open.
+- **No side effects on missing deps** — if `jq`, a socket, or a file path is unavailable, the script degrades gracefully with no output.
 
 ---
 
