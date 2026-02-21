@@ -22,7 +22,7 @@
 //! | _printable char_ | Append to control input |
 //! | `Enter` | Submit stdin text (non-empty) |
 //! | `Backspace` | Delete last character |
-//! | `Ctrl-I` | Send interrupt |
+//! | `Ctrl-K` | Send interrupt |
 //! | `Esc` | Clear control input |
 //!
 //! Dashboard panel ignores character input — it is mail-only.
@@ -72,10 +72,13 @@ fn handle_agent_terminal_key(
     modifiers: &KeyModifiers,
     app: &mut App,
 ) -> bool {
-    // Ctrl-I sends interrupt only when agent is live.
-    // When not live, the interrupt is dropped client-side to avoid
-    // sending to a session that cannot receive input.
-    if matches!(code, KeyCode::Char('i')) && modifiers.contains(KeyModifiers::CONTROL) {
+    // Ctrl-K sends interrupt (preferred to avoid Ctrl-I/Tab collision).
+    // Ctrl-I is accepted as a legacy fallback when distinguishable.
+    // When not live, the interrupt is dropped client-side to avoid sending
+    // to a session that cannot receive input.
+    if (matches!(code, KeyCode::Char('k')) || matches!(code, KeyCode::Char('i')))
+        && modifiers.contains(KeyModifiers::CONTROL)
+    {
         if app.is_live() {
             app.pending_control = Some(PendingControl::Interrupt);
         }
@@ -288,11 +291,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ctrl_i_sets_pending_interrupt() {
+    fn test_ctrl_k_sets_pending_interrupt() {
         let mut app = app_with_members();
         app.focus = FocusPanel::AgentTerminal;
         app.selected_index = 1; // "b" is "busy"
-        handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
+        handle_event(&key_event(KeyCode::Char('k'), KeyModifiers::CONTROL), &mut app);
         assert!(
             matches!(app.pending_control, Some(PendingControl::Interrupt)),
             "Expected Interrupt pending"
@@ -300,12 +303,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ctrl_i_not_sent_when_not_live() {
+    fn test_ctrl_k_not_sent_when_not_live() {
         let mut app = app_with_members();
         app.focus = FocusPanel::AgentTerminal;
         app.members[0].state = "killed".to_string();
         app.selected_index = 0;
-        handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
+        handle_event(&key_event(KeyCode::Char('k'), KeyModifiers::CONTROL), &mut app);
         assert!(app.pending_control.is_none(), "Interrupt should not be set for non-live agent");
     }
 

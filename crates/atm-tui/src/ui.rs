@@ -14,7 +14,7 @@
 //! │                    ├─────────────────────────────────────────────┤
 //! │                    │ Type to send stdin...  (or [disabled])      │ input
 //! ├────────────────────┴─────────────────────────────────────────────┤
-//! │ q: quit  ↑↓: select  Tab: panel  Ctrl-I: interrupt              │ status
+//! │ q: quit  ↑↓: select  Tab: panel  Ctrl-K: interrupt              │ status
 //! └──────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -252,7 +252,7 @@ fn draw_control_input(frame: &mut Frame, area: Rect, app: &App, border_style: St
     if app.is_live() {
         let content = if app.control_input.is_empty() {
             Line::from(Span::styled(
-                "Type to send stdin... (Enter: send  Ctrl-I: interrupt  Esc: clear)",
+                "Type to send stdin... (Enter: send  Ctrl-K: interrupt  Esc: clear)",
                 Style::default().fg(Color::DarkGray),
             ))
         } else {
@@ -295,7 +295,7 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("Tab", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::raw(": panel  "),
             Span::styled(
-                "Ctrl-I",
+                "Ctrl-K",
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ),
             Span::raw(": interrupt"),
