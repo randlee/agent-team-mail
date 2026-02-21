@@ -2536,7 +2536,7 @@ Socket message payloads (single `hook-event` command path; source-aware payload)
 - `agent_hook`
 - `unknown`
 
-**Unit tests** live alongside each script in `.claude/scripts/tests/`:
+**Unit tests** live in `tests/hook-scripts/`:
 - `test_session_start.py` — mock socket, verify message shape, verify `.atm.toml` guard, verify fail-open on socket error
 - `test_session_end.py` — same pattern for session_end
 - `test_teammate_idle_relay.py` — extend existing tests with socket message assertions
@@ -2564,7 +2564,7 @@ Add `SocketCommand::HookEvent` variant. Handler updates session registry and age
 - [ ] `session-end.py` (new) added to global `~/.claude/settings.json`; sends `hook_event/session_end` **only when `.atm.toml` present in cwd**
 - [ ] `teammate-idle-relay.py` sends `hook_event/teammate_idle` **only when `.atm.toml` present in cwd**
 - [ ] All hooks remain fail-open — exit `0` even if socket call fails or `.atm.toml` is absent
-- [ ] Unit tests in `.claude/scripts/tests/` cover: message shape, `.atm.toml` guard, socket-error fail-open, daemon-not-running fail-open
+- [ ] Unit tests in `tests/hook-scripts/` cover: message shape, `.atm.toml` guard, socket-error fail-open, daemon-not-running fail-open
 - [ ] Daemon handles `SocketCommand::HookEvent`; updates session registry + agent state
 - [ ] `session_start` → `Active`; `teammate_idle` → `Idle`; `session_end` → `Dead`/`Closed`
 - [ ] Integration test: hook event over socket → daemon state query reflects updated state

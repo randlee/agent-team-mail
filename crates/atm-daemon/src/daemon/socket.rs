@@ -26,6 +26,7 @@ use agent_team_mail_core::control::{
 };
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::schema::TeamConfig;
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -411,6 +412,44 @@ fn is_hook_event_command(request_str: &str) -> bool {
         || request_str.contains(r#""command": "hook-event""#)
 }
 
+#[cfg(unix)]
+struct HookEventAuth {
+    is_team_lead: bool,
+}
+
+/// Resolve and authorize hook-event sender identity against team config.
+#[cfg(unix)]
+fn authorize_hook_event(team: &str, agent: &str) -> std::result::Result<HookEventAuth, String> {
+    let home_dir = if let Ok(path) = std::env::var("ATM_HOME") {
+        PathBuf::from(path)
+    } else if let Ok(path) = std::env::var("HOME") {
+        PathBuf::from(path)
+    } else if let Ok(path) = std::env::var("USERPROFILE") {
+        PathBuf::from(path)
+    } else {
+        return Err("missing ATM_HOME/HOME".to_string());
+    };
+
+    let config_path = home_dir.join(".claude/teams").join(team).join("config.json");
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|_| format!("team config not found: {}", config_path.display()))?;
+    let config: TeamConfig = serde_json::from_str(&content)
+        .map_err(|e| format!("invalid team config: {e}"))?;
+
+    // Support either canonical agent_id or bare name.
+    let expected_agent_id = format!("{agent}@{team}");
+    let Some(member) = config
+        .members
+        .iter()
+        .find(|m| m.name == agent || m.agent_id == expected_agent_id)
+    else {
+        return Err("agent not in team".to_string());
+    };
+
+    let is_team_lead = member.agent_id == config.lead_agent_id || member.name == "team-lead";
+    Ok(HookEventAuth { is_team_lead })
+}
+
 /// Handle the `"hook-event"` command, updating daemon state in real-time
 /// from Claude Code lifecycle hooks (session_start, teammate_idle, session_end).
 #[cfg(unix)]
@@ -458,6 +497,12 @@ async fn handle_hook_event_command(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let team = request
+        .payload
+        .get("team")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let process_id = request
         .payload
         .get("process_id")
@@ -470,9 +515,31 @@ async fn handle_hook_event_command(
             serde_json::json!({"processed": false, "reason": "missing agent"}),
         );
     }
+    if team.is_empty() {
+        return make_ok_response(
+            &request.request_id,
+            serde_json::json!({"processed": false, "reason": "missing team"}),
+        );
+    }
+
+    let auth = match authorize_hook_event(&team, &agent) {
+        Ok(auth) => auth,
+        Err(reason) => {
+            return make_ok_response(
+                &request.request_id,
+                serde_json::json!({"processed": false, "reason": reason}),
+            )
+        }
+    };
 
     match event_type.as_str() {
         "session_start" => {
+            if !auth.is_team_lead {
+                return make_ok_response(
+                    &request.request_id,
+                    serde_json::json!({"processed": false, "reason": "only team-lead may send session_start"}),
+                );
+            }
             if session_id.is_empty() {
                 return make_ok_response(
                     &request.request_id,
@@ -505,6 +572,12 @@ async fn handle_hook_event_command(
             info!("hook_event teammate_idle: agent={agent}");
         }
         "session_end" => {
+            if !auth.is_team_lead {
+                return make_ok_response(
+                    &request.request_id,
+                    serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
+                );
+            }
             {
                 session_registry.lock().unwrap().mark_dead(&agent);
             }
@@ -1420,6 +1493,8 @@ mod tests {
     use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
     use std::time::Duration;
+    use serial_test::serial;
+    use tempfile::TempDir;
 
     fn make_store() -> SharedStateStore {
         std::sync::Arc::new(std::sync::Mutex::new(AgentStateTracker::new()))
@@ -1452,6 +1527,86 @@ mod tests {
             request_id: "req-test".to_string(),
             command: command.to_string(),
             payload,
+        }
+    }
+
+    #[cfg(unix)]
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    #[cfg(unix)]
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: test-only env mutation, guarded by #[serial] on callers.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: test-only env mutation, guarded by #[serial] on callers.
+            unsafe {
+                match &self.previous {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    struct HookAuthFixture {
+        _temp: TempDir,
+        _atm_home_guard: EnvGuard,
+    }
+
+    #[cfg(unix)]
+    fn write_hook_auth_team_config(home_dir: &std::path::Path, team: &str, lead: &str, members: &[&str]) {
+        let team_dir = home_dir.join(".claude/teams").join(team);
+        std::fs::create_dir_all(&team_dir).unwrap();
+        let mut member_values = Vec::new();
+        for m in members {
+            member_values.push(serde_json::json!({
+                "agentId": format!("{m}@{team}"),
+                "name": m,
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1739284800000u64,
+                "cwd": home_dir.to_string_lossy().to_string(),
+                "subscriptions": []
+            }));
+        }
+        let config = serde_json::json!({
+            "name": team,
+            "description": "test team",
+            "createdAt": 1739284800000u64,
+            "leadAgentId": format!("{lead}@{team}"),
+            "leadSessionId": "test-lead-session",
+            "members": member_values,
+        });
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn setup_hook_auth_fixture(team: &str, lead: &str, members: &[&str]) -> HookAuthFixture {
+        let temp = TempDir::new().unwrap();
+        let atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), team, lead, members);
+
+        HookAuthFixture {
+            _temp: temp,
+            _atm_home_guard: atm_home_guard,
         }
     }
 
@@ -2377,10 +2532,12 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn test_hook_event_session_start_updates_registry() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
         let store = make_store();
         let sr = make_sr();
-        let req_json = r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","session_id":"sess-abc","process_id":9999}}"#;
+        let req_json = r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-abc","process_id":9999}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -2401,7 +2558,9 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn test_hook_event_session_start_idempotent_if_already_tracked() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
         let store = make_store();
         let sr = make_sr();
         // Pre-register agent as Idle
@@ -2410,7 +2569,7 @@ mod tests {
             tracker.register_agent("team-lead");
             tracker.set_state("team-lead", AgentState::Idle);
         }
-        let req_json = r#"{"version":1,"request_id":"r2","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","session_id":"sess-xyz","process_id":1234}}"#;
+        let req_json = r#"{"version":1,"request_id":"r2","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-xyz","process_id":1234}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         // State should remain Idle (not reset to Launching) — session_start only registers if not already tracked
@@ -2420,7 +2579,9 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn test_hook_event_teammate_idle_updates_state() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
         // Register agent as Busy first
@@ -2442,34 +2603,39 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_hook_event_teammate_idle_auto_registers_unknown_agent() {
+    #[serial]
+    async fn test_hook_event_teammate_idle_rejects_unknown_agent() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
         let store = make_store();
         let sr = make_sr();
-        // Agent not yet registered
+        // Agent exists in payload but is not a member of the team config.
         let req_json = r#"{"version":1,"request_id":"r4","command":"hook-event","payload":{"event":"teammate_idle","agent":"new-agent","session_id":"sess-2","team":"atm-dev"}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
-        assert!(payload["processed"].as_bool().unwrap());
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
 
         let tracker = store.lock().unwrap();
-        assert_eq!(tracker.get_state("new-agent"), Some(AgentState::Idle));
+        assert!(tracker.get_state("new-agent").is_none());
     }
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn test_hook_event_session_end_marks_dead() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
         {
             let mut tracker = store.lock().unwrap();
-            tracker.register_agent("arch-ctm");
-            tracker.set_state("arch-ctm", AgentState::Idle);
+            tracker.register_agent("team-lead");
+            tracker.set_state("team-lead", AgentState::Idle);
         }
         {
-            sr.lock().unwrap().upsert("arch-ctm", "sess-end", 1111);
+            sr.lock().unwrap().upsert("team-lead", "sess-end", 1111);
         }
-        let req_json = r#"{"version":1,"request_id":"r5","command":"hook-event","payload":{"event":"session_end","agent":"arch-ctm","session_id":"sess-end","team":"atm-dev"}}"#;
+        let req_json = r#"{"version":1,"request_id":"r5","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-end","team":"atm-dev"}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -2478,7 +2644,7 @@ mod tests {
 
         // Session registry should be marked dead
         let reg = sr.lock().unwrap();
-        let record = reg.query("arch-ctm").unwrap();
+        let record = reg.query("team-lead").unwrap();
         assert_eq!(
             record.state,
             crate::daemon::session_registry::SessionState::Dead
@@ -2486,15 +2652,17 @@ mod tests {
 
         // State tracker should be Killed
         let tracker = store.lock().unwrap();
-        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Killed));
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Killed));
     }
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn test_hook_event_unknown_type_returns_ok_not_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
         let store = make_store();
         let sr = make_sr();
-        let req_json = r#"{"version":1,"request_id":"r6","command":"hook-event","payload":{"event":"some_future_event","agent":"team-lead","session_id":"s1"}}"#;
+        let req_json = r#"{"version":1,"request_id":"r6","command":"hook-event","payload":{"event":"some_future_event","agent":"team-lead","team":"atm-dev","session_id":"s1"}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -2507,10 +2675,12 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn test_hook_event_missing_agent_returns_not_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
         let store = make_store();
         let sr = make_sr();
-        let req_json = r#"{"version":1,"request_id":"r7","command":"hook-event","payload":{"event":"session_start","agent":"","session_id":"sess-1"}}"#;
+        let req_json = r#"{"version":1,"request_id":"r7","command":"hook-event","payload":{"event":"session_start","agent":"","team":"atm-dev","session_id":"sess-1"}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -2523,7 +2693,7 @@ mod tests {
     async fn test_hook_event_version_mismatch() {
         let store = make_store();
         let sr = make_sr();
-        let req_json = r#"{"version":99,"request_id":"r8","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","session_id":"s1"}}"#;
+        let req_json = r#"{"version":99,"request_id":"r8","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"s1"}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
@@ -2531,6 +2701,40 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
+    async fn test_hook_event_missing_team_returns_not_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-missing-team","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","session_id":"s1"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "missing team");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_non_lead_session_start_rejected() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-non-lead-start","command":"hook-event","payload":{"event":"session_start","agent":"arch-ctm","team":"atm-dev","session_id":"sess-x"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert!(payload["reason"]
+            .as_str()
+            .unwrap()
+            .contains("only team-lead"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
     async fn test_socket_server_hook_event_roundtrip() {
         use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -2538,6 +2742,8 @@ mod tests {
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
+        let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
+        write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
 
         let state_store = make_store();
@@ -2636,6 +2842,7 @@ mod tests {
     /// the session Dead and the agent Killed, verified via follow-up queries.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn test_socket_server_hook_event_session_end_roundtrip() {
         use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -2643,6 +2850,8 @@ mod tests {
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
+        let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
+        write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
 
         let state_store = make_store();
@@ -2880,7 +3089,9 @@ mod tests {
     /// agent state tracker.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn test_hook_event_session_start_empty_session_id_returns_not_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
         let state_store = make_store();
         let sr = make_sr();
 
@@ -2891,6 +3102,7 @@ mod tests {
             payload: serde_json::json!({
                 "event": "session_start",
                 "agent": "team-lead",
+                "team": "atm-dev",
                 "session_id": "",
                 "process_id": 12345_u32,
             }),
@@ -2930,7 +3142,9 @@ mod tests {
     /// session_id is absent, even if the agent field is present.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn test_hook_event_session_start_no_agent_registration_without_session_id() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let state_store = make_store();
         let sr = make_sr();
 
@@ -2941,6 +3155,7 @@ mod tests {
             payload: serde_json::json!({
                 "event": "session_start",
                 "agent": "arch-ctm",
+                "team": "atm-dev",
                 "session_id": "",
             }),
         };

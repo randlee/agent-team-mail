@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import unittest
 
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPTS_DIR = _REPO_ROOT / ".claude" / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import importlib.util

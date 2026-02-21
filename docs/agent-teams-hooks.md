@@ -341,7 +341,7 @@ All hook scripts follow these conventions:
 - **Python only** — no bash scripts. Python is cross-platform (macOS, Linux, Windows) and testable with standard `unittest` / `pytest`.
 - **Fail-open always** — every script exits `0` regardless of errors. Hooks must never block Claude Code operation.
 - **`.atm.toml` guard** — scripts that contact the daemon MUST check for `.atm.toml` in `cwd` before any socket call. If absent, skip silently. This scopes daemon communication to ATM project sessions only.
-- **Unit tests** — each hook script has a corresponding test file in `.claude/scripts/tests/`. Tests cover: correct message shape, `.atm.toml` guard behavior, socket-error fail-open, daemon-not-running fail-open.
+- **Unit tests** — each hook script has a corresponding test file in `tests/hook-scripts/`. Tests cover: correct message shape, `.atm.toml` guard behavior, socket-error fail-open, daemon-not-running fail-open.
 - **No side effects on missing deps** — if `jq`, a socket, or a file path is unavailable, the script degrades gracefully with no output.
 
 ---
