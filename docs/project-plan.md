@@ -2093,11 +2093,12 @@ Add to **Initialization Process** section:
 
 | Sprint | Name | Status | PR |
 |--------|------|--------|-----|
-| C.1 | Unified logging infrastructure | IN PROGRESS | — |
-| C.2a | Transport trait + McpTransport refactor | PR OPEN | — |
-| C.2b | JsonTransport + stdin queue + integration tests | PLANNED (blocked on C.2a QA) | — |
+| C.1 | Unified logging infrastructure | ✅ | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
+| C.2a | Transport trait + McpTransport refactor | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
+| C.2b | JsonTransport + stdin queue + integration tests | 🔄 IN PROGRESS | — |
+| C.3 | Control receiver stub (daemon endpoint + dedupe) | ⏳ PLANNED | — |
 
-**Execution model**: C.2b scrum-master launches as soon as C.2a QA approves — does not wait for C.2a CI/merge. C.2b branches off C.2a feature branch.
+**Execution model**: C.2b scrum-master launches as soon as C.2a QA approves — does not wait for C.2a CI/merge. C.2b branches off C.2a feature branch. C.3 starts after C.2b merges to `integrate/phase-C`.
 
 ---
 
@@ -2248,21 +2249,143 @@ pub trait CodexTransport: Send {
 
 ---
 
+### Sprint C.3 — Control Receiver Stub (Daemon Endpoint + Validation + Dedupe)
+
+**Branch**: `feature/pC-s3-control-receiver`
+**Worktree**: `../agent-team-mail-worktrees/feature/pC-s3-control-receiver`
+**Crate(s)**: `crates/atm-daemon` (socket handler, dedup module), `crates/atm-core` (control message types)
+**Depends on**: C.2b merged to `integrate/phase-C`
+**Design refs**: `docs/tui-mvp-architecture.md`, `docs/tui-control-protocol.md`
+
+#### Problem
+
+The TUI control protocol (`docs/tui-control-protocol.md`) defines `control.stdin.request` and `control.interrupt.request` message contracts, but the daemon Unix socket server has no handler for either. Phase D (TUI) cannot build interactive controls without a real receiver endpoint to target. Building the receiver in Phase C de-risks protocol drift and lets Phase D UI work build on proven contract behavior.
+
+#### Solution
+
+Three self-contained components (can be developed with one dev agent in sequence):
+
+1. **Control message types** (`crates/atm-core/src/control.rs` or `crates/atm-daemon/src/control.rs`):
+   - `ControlRequest` struct: `v`, `request_id`, `sent_at`, `team`, `session_id`, `agent_id`, `sender`, `action` (`stdin` | `interrupt`), `payload: Option<String>`, `content_ref: Option<ContentRef>`
+   - `ControlAck` struct: `request_id`, `result: ControlResult`, `duplicate: bool`, `detail: Option<String>`, `ack_at`
+   - `ControlResult` enum: `Ok`, `NotLive`, `NotFound`, `Busy`, `Timeout`, `Rejected`, `InternalError`
+   - `ContentRef` struct: `path`, `size_bytes`, `sha256`, `mime`, `expires_at: Option<DateTime>`
+   - Full serde round-trip with snake_case field names
+
+2. **Dedupe store** (`crates/atm-daemon/src/dedup.rs`):
+   - Key: `(team, session_id, agent_id, request_id)` as a composite `DedupeKey` newtype
+   - Bounded `HashMap<DedupeKey, Instant>` — capacity 1 000 entries (configurable via `ATM_DEDUP_CAPACITY`)
+   - TTL: 10 minutes (configurable via `ATM_DEDUP_TTL_SECS`)
+   - `check_and_insert(&mut self, key: DedupeKey) -> bool` — returns `true` if duplicate (key already present and not expired); inserts with current timestamp on non-duplicate
+   - Eviction: on capacity overflow, evict oldest entry (LRU approximation via insertion order)
+   - **Not** async — plain `Mutex<DedupeStore>` in daemon shared state
+
+3. **Daemon socket control handler** (extend `crates/atm-daemon/src/daemon/socket.rs`):
+   - New `SocketCommand::Control` variant in the existing command enum; payload is raw JSON deserialized into `ControlRequest`
+   - Envelope validation: required fields present, `v == 1`, payload ≤ 1 MiB hard limit; return `ControlResult::Rejected` with detail on failure
+   - Age check: reject requests where `sent_at` skew > 5 minutes (configurable)
+   - Dedupe: call `check_and_insert`; if duplicate return `ControlAck { result: Ok, duplicate: true }` immediately
+   - Live-state lookup: resolve `session_id` + `agent_id` via `SessionRegistry`; compute `live = SessionStatus::Active AND AgentState in {Idle, Busy}`; return `NotLive` if false; return `NotFound` if session unknown
+   - `control.stdin.request`: forward payload to `stdin_queue::enqueue()` for the target session; return `Ok`
+   - `control.interrupt.request`: return `Rejected` with `"interrupt receiver path not yet implemented"`
+   - Emit C.1 log event via `emit_event_best_effort` for every request + ack (level info, action `control_stdin_request` / `control_stdin_ack`)
+
+#### Parallelism Note
+
+C.3 is a single sprint (one SM, one dev agent). The three components are naturally sequential: types → dedupe → handler. Total scope is ~400–600 lines of new code. No parallel track needed.
+
+#### Exit Criteria
+
+- [ ] `ControlRequest`, `ControlAck`, `ControlResult`, `ContentRef` types defined with serde round-trip tests
+- [ ] `DedupeStore` with TTL + capacity eviction; unit tests: insert, duplicate, TTL expiry, capacity overflow
+- [ ] `SocketCommand::Control` handler dispatches `stdin` and `interrupt` actions
+- [ ] Envelope validation rejects missing fields, oversized payload (> 1 MiB), stale `sent_at` (> 5 min skew)
+- [ ] Live-state check: `SessionStatus::Active AND AgentState in {Idle, Busy}` → live; all other combos → `not_live`
+- [ ] `control.stdin.request` forwards payload to `stdin_queue::enqueue()` and returns `Ok`
+- [ ] `control.interrupt.request` returns `Rejected` with implementation-pending detail
+- [ ] Duplicate requests return `ControlAck { result: Ok, duplicate: true }` without re-executing
+- [ ] `emit_event_best_effort` called for every request + ack (C.1 pattern)
+- [ ] `content_ref` path validated: must resolve under `get_home_dir()/.config/atm/share/`, canonicalized, no `..` traversal, no symlink escape; `sha256` verified before use
+- [ ] Integration test (ignored): end-to-end control request over Unix socket with mock session registry
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
 ## 15. Phase D: TUI Streaming
 
-**Status**: PLANNED (blocked on Phase C)
-**Goal**: Real-time streaming of Codex agent output to a terminal UI. Fan out the `codex exec --json` JSONL stream to a TUI sink via the Phase 10 pub/sub event bus. Allows human observers to watch agent sessions live without polling.
+**Status**: PLANNED (blocked on Phase C — specifically C.3 for D.2)
+**Goal**: Real-time terminal UI for observing and controlling live Codex agent sessions. D.1 delivers a read-only streaming view; D.2 adds interactive controls (stdin injection, interrupt). D.1 and D.2 run **in parallel** — they touch different modules (read path vs. write path).
 
 **Integration branch**: `integrate/phase-D`
+**Design refs**: `docs/tui-mvp-architecture.md`, `docs/tui-control-protocol.md`
 
 ### Phase D Sprint Summary
 
-| Sprint | Name | Status |
-|--------|------|--------|
-| D.1 | TUI sink + pub/sub fanout | PLANNED |
-| D.2 | Interactive controls (pause, inject, filter) | PLANNED |
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| D.1 | TUI crate + live stream view (read-only) | C.2b | ⏳ PLANNED |
+| D.2 | Interactive controls (stdin inject, interrupt) | C.3 | ⏳ PLANNED |
 
-*Details to be planned when Phase C is complete.*
+**Execution model**: D.1 and D.2 launch in parallel after Phase C integration merges to develop. D.1 needs only C.2b (session log tail + pub/sub). D.2 needs C.3 (control receiver endpoint).
+
+---
+
+### Sprint D.1 — TUI Crate + Live Stream View
+
+**Branch**: `feature/pD-s1-tui-stream`
+**Crate(s)**: `crates/atm-tui` (new binary crate)
+**Depends on**: C.2b merged (JsonTransport + session log infrastructure)
+
+#### Scope
+
+1. **New `atm-tui` binary crate** — `ratatui`-based terminal UI, single binary `atm-tui`
+2. **Dashboard view** (left panel): team member list with ATM inbox counts sourced from daemon pub/sub (`agent-state` command); mail action via `atm send` semantics (no direct control path in Dashboard)
+3. **Agent Terminal view** (right panel): scrolling JSONL output stream tailed from session log file (`${ATM_HOME}/.config/atm/agent-sessions/{team}/{agent_id}/output.log`); full event column names (no abbreviated headers per `docs/tui-mvp-architecture.md §2.1`)
+4. **Session selector**: navigate between active sessions via daemon `list-agents` socket command
+5. **No interactive input in D.1** — read-only; input field is visible but disabled ("control available in next release")
+6. **C.1 logging**: emit structured events for TUI startup, session connect, stream attach/detach
+
+#### Exit Criteria
+
+- [ ] `atm-tui` binary builds and runs with `--team <name>` flag
+- [ ] Dashboard view lists team members with inbox counts (daemon-sourced, refreshes on pub/sub event)
+- [ ] Agent Terminal view tails session log file in real time (100 ms poll interval)
+- [ ] Session selector navigates between sessions without crashing
+- [ ] Input field visible but disabled with placeholder text
+- [ ] Graceful exit on `q` / `Ctrl-C`
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint D.2 — Interactive Controls (Stdin Inject + Interrupt)
+
+**Branch**: `feature/pD-s2-tui-controls`
+**Crate(s)**: `crates/atm-tui` (extend D.1), `crates/atm-daemon` (C.3 receiver already done)
+**Depends on**: D.1 merged + C.3 merged (control receiver endpoint)
+
+#### Scope
+
+1. **Agent Terminal input field** — enabled when target session is `live` (`SessionStatus::Active AND AgentState in {Idle, Busy}`)
+2. **Stdin injection path**: on Enter, build `ControlRequest { action: "stdin", payload: text }` with stable `request_id` (UUID v4), send via Unix socket to daemon, display ack result in status bar
+3. **Live-state gate**: input field disabled (greyed out) when `not_live`; status bar shows reason (`Launching`, `Killed`, etc.)
+4. **Retry on timeout**: single retry after 2 s ack timeout; surface `timeout` result to user if second attempt fails
+5. **Interrupt button**: keyboard shortcut (`Ctrl-I`); sends `ControlRequest { action: "interrupt" }`; currently returns `Rejected` with detail — display detail in status bar (not an error state in TUI)
+6. **UX boundary enforcement**: Dashboard remains mail-only (no control path); Agent Terminal remains control-only (no ATM send path); no silent fallback between channels (per `docs/tui-mvp-architecture.md §4`)
+7. **Audit logging**: C.1 `emit_event_best_effort` for every control send and ack received
+
+#### Exit Criteria
+
+- [ ] Input field enabled/disabled based on live-state (daemon-sourced)
+- [ ] Stdin injection sends `control.stdin.request` to daemon and displays ack result
+- [ ] Duplicate request detection: retry uses same `request_id`; `duplicate: true` ack surfaces as "already delivered" in status bar (not an error)
+- [ ] Interrupt shortcut (`Ctrl-I`) sends `control.interrupt.request`; `Rejected` result displayed with detail
+- [ ] Live-state gate: `Launching`/`Killed`/`Stale`/`Closed` all shown as not-live with reason
+- [ ] Dashboard has no control input — mail action calls `atm send` CLI
+- [ ] `emit_event_best_effort` called for every control send + ack
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
 
 ---
 
@@ -2338,13 +2461,16 @@ Additional plugins planned (each is a self-contained sprint series):
 | **B** | B.1 | Teams daemon session tracking + resume | ✅ | [#119](https://github.com/randlee/agent-team-mail/pull/119) |
 | **B** | B.2 | Unicode-safe message truncation | ✅ | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
 | **B** | B.3 | Teams session stabilization | ✅ | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
-| **C** | C.1 | Unified structured JSONL logging | ✅ | [#125](https://github.com/randlee/agent-team-mail/pull/125) |
-| **C** | C.2a | Transport trait + McpTransport refactor | 🔄 | — |
-| **C** | C.2b | JsonTransport + stdin queue + integration tests | ⏳ | — |
+| **C** | C.1 | Unified structured JSONL logging | ✅ | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
+| **C** | C.2a | Transport trait + McpTransport refactor | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
+| **C** | C.2b | JsonTransport + stdin queue + integration tests | 🔄 | — |
+| **C** | C.3 | Control receiver stub (daemon endpoint + dedupe) | ⏳ | — |
+| **D** | D.1 | TUI crate + live stream view (read-only) | ⏳ | — |
+| **D** | D.2 | Interactive controls (stdin inject, interrupt) | ⏳ | — |
 
-**Completed**: 63 sprints across 13 phases (CI green)
+**Completed**: 65 sprints across 13 phases (CI green)
 **Current version**: v0.12.0
-**Next**: C.2a PR review + merge, then C.2b
+**Next**: C.2b QA → merge → C.3 → integrate/phase-C → develop; then Phase D (D.1 ∥ D.2)
 
 **Sprint PRs (Phase 9)**:
 | Sprint | PR | Description |
