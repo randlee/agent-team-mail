@@ -195,13 +195,17 @@ File-reference path uses shared local storage and sends `content_ref` metadata i
 Definitions:
 
 - `session_id`: Claude session identifier
-- `agent_id`: ATM worker session identifier (e.g. `codex:...`)
-- `thread_id`: backend-specific conversation handle (e.g. Codex internal thread ID)
+- `agent_id`: canonical conversation/session identifier for ATM and TUI surfaces (backend-agnostic)
 
 Correlation:
 
 - all control requests require `request_id`
 - retries must reuse the same `request_id` (idempotent)
+
+Backend mapping rule:
+
+- provider-specific ids (for example Codex `threadId`) are MCP-internal details
+- outside MCP, callers use `agent_id` only
 
 ---
 
