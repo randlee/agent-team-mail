@@ -21,10 +21,21 @@
 //! The socket server is only compiled and active on Unix platforms.
 //! On non-Unix platforms the module exposes stub functions that do nothing.
 
+use agent_team_mail_core::control::{
+    CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,
+};
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use tracing::{debug, error, info, warn};
+
+use crate::daemon::dedup::{DedupeKey, DedupeStore};
+use crate::daemon::session_registry::SharedSessionRegistry;
+use crate::plugins::worker_adapter::AgentState;
 
 // ── Public API (cross-platform stubs) ────────────────────────────────────────
 
@@ -41,24 +52,32 @@ use tracing::{debug, error, info, warn};
 ///   Pass [`new_launch_sender()`] (with an empty inner `Option`) when the
 ///   worker adapter is disabled; the socket server will return a
 ///   `LAUNCH_UNAVAILABLE` error for any `"launch"` requests.
+/// * `session_registry` - Shared session registry for `session-query` requests
 /// * `cancel` - Cancellation token; server stops accepting when cancelled
 ///
 /// # Platform Behaviour
 ///
 /// On non-Unix platforms this function returns `Ok(None)` immediately.
-#[allow(unused_variables)]
 pub async fn start_socket_server(
     home_dir: PathBuf,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
+    session_registry: SharedSessionRegistry,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
     {
-        start_unix_socket_server(home_dir, state_store, pubsub_store, launch_tx, cancel)
-            .await
-            .map(Some)
+        start_unix_socket_server(
+            home_dir,
+            state_store,
+            pubsub_store,
+            launch_tx,
+            session_registry,
+            cancel,
+        )
+        .await
+        .map(Some)
     }
 
     #[cfg(not(unix))]
@@ -87,7 +106,10 @@ impl Drop for SocketServerHandle {
 fn cleanup_socket_files(socket_path: &PathBuf, pid_path: &PathBuf) {
     if socket_path.exists() {
         if let Err(e) = std::fs::remove_file(socket_path) {
-            warn!("Failed to remove socket file {}: {e}", socket_path.display());
+            warn!(
+                "Failed to remove socket file {}: {e}",
+                socket_path.display()
+            );
         } else {
             debug!("Removed socket file {}", socket_path.display());
         }
@@ -129,6 +151,11 @@ pub fn new_pubsub_store() -> SharedPubSubStore {
     std::sync::Arc::new(std::sync::Mutex::new(PubSub::new()))
 }
 
+fn control_dedupe_store() -> &'static std::sync::Mutex<DedupeStore> {
+    static STORE: OnceLock<std::sync::Mutex<DedupeStore>> = OnceLock::new();
+    STORE.get_or_init(|| std::sync::Mutex::new(DedupeStore::from_env()))
+}
+
 // ── Launch channel types ──────────────────────────────────────────────────────
 
 /// A request to launch a new agent, sent from the socket handler to the
@@ -165,6 +192,7 @@ async fn start_unix_socket_server(
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
+    session_registry: SharedSessionRegistry,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -178,10 +206,7 @@ async fn start_unix_socket_server(
 
     // Remove stale socket file if present (daemon may have crashed previously)
     if socket_path.exists() {
-        warn!(
-            "Removing stale socket file: {}",
-            socket_path.display()
-        );
+        warn!("Removing stale socket file: {}", socket_path.display());
         std::fs::remove_file(&socket_path)?;
     }
 
@@ -203,6 +228,7 @@ async fn start_unix_socket_server(
             state_store,
             pubsub_store,
             launch_tx,
+            session_registry,
             cancel,
             &accept_socket_path,
             &accept_pid_path,
@@ -217,11 +243,16 @@ async fn start_unix_socket_server(
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "accept loop requires shared daemon resources and paths passed from startup"
+)]
 async fn run_accept_loop(
     listener: tokio::net::UnixListener,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
+    session_registry: SharedSessionRegistry,
     cancel: tokio_util::sync::CancellationToken,
     socket_path: &std::path::Path,
     _pid_path: &std::path::Path,
@@ -240,8 +271,9 @@ async fn run_accept_loop(
                         let store = state_store.clone();
                         let ps = pubsub_store.clone();
                         let tx = launch_tx.clone();
+                        let sr = session_registry.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, store, ps, tx).await {
+                            if let Err(e) = handle_connection(stream, store, ps, tx, sr).await {
                                 error!("Socket connection handler error: {e}");
                             }
                         });
@@ -265,6 +297,7 @@ async fn handle_connection(
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
+    session_registry: SharedSessionRegistry,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -292,8 +325,10 @@ async fn handle_connection(
     // use async channel communication with the WorkerAdapterPlugin.
     let response = if is_launch_command(request_str) {
         handle_launch_command(request_str, &launch_tx).await
+    } else if is_control_command(request_str) {
+        handle_control_command(request_str, &state_store, &session_registry).await
     } else {
-        match parse_and_dispatch(request_str, &state_store, &pubsub_store) {
+        match parse_and_dispatch(request_str, &state_store, &pubsub_store, &session_registry) {
             Ok(resp) => resp,
             Err(e) => {
                 error!("Failed to dispatch socket request: {e}");
@@ -315,7 +350,10 @@ async fn handle_connection(
     stream.write_all(response_json.as_bytes()).await?;
     stream.flush().await?;
 
-    debug!("Socket response sent for request_id={}", response.request_id);
+    debug!(
+        "Socket response sent for request_id={}",
+        response.request_id
+    );
     Ok(())
 }
 
@@ -325,8 +363,14 @@ async fn handle_connection(
 fn is_launch_command(request_str: &str) -> bool {
     // Fast path: only parse the "command" field.  A full parse happens inside
     // handle_launch_command.
-    request_str.contains(r#""command":"launch""#)
-        || request_str.contains(r#""command": "launch""#)
+    request_str.contains(r#""command":"launch""#) || request_str.contains(r#""command": "launch""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"control"` command.
+#[cfg(unix)]
+fn is_control_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"control""#)
+        || request_str.contains(r#""command": "control""#)
 }
 
 /// Handle the `"launch"` command asynchronously by forwarding it through the
@@ -335,11 +379,8 @@ fn is_launch_command(request_str: &str) -> bool {
 /// Times out after 35 seconds so a stalled plugin does not block the
 /// connection indefinitely.
 #[cfg(unix)]
-async fn handle_launch_command(
-    request_str: &str,
-    launch_tx: &LaunchSender,
-) -> SocketResponse {
-    use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
+async fn handle_launch_command(request_str: &str, launch_tx: &LaunchSender) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
 
     // Parse the full request envelope
     let request: SocketRequest = match serde_json::from_str(request_str) {
@@ -440,11 +481,7 @@ async fn handle_launch_command(
                 serde_json::to_value(&result).unwrap_or_default(),
             )
         }
-        Ok(Ok(Err(err_msg))) => make_error_response(
-            &request.request_id,
-            "LAUNCH_FAILED",
-            &err_msg,
-        ),
+        Ok(Ok(Err(err_msg))) => make_error_response(&request.request_id, "LAUNCH_FAILED", &err_msg),
         Ok(Err(_)) => make_error_response(
             &request.request_id,
             "LAUNCH_FAILED",
@@ -458,6 +495,380 @@ async fn handle_launch_command(
     }
 }
 
+/// Handle the `"control"` command asynchronously.
+#[cfg(unix)]
+async fn handle_control_command(
+    request_str: &str,
+    state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse control request: {e}"),
+            );
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let control: ControlRequest = match serde_json::from_value(request.payload.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INVALID_PAYLOAD",
+                &format!("Failed to parse control payload: {e}"),
+            );
+        }
+    };
+
+    let ack = process_control_request(control, state_store, session_registry).await;
+    make_ok_response(
+        &request.request_id,
+        serde_json::to_value(ack).unwrap_or_else(|_| serde_json::json!({})),
+    )
+}
+
+#[cfg(unix)]
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+#[cfg(unix)]
+fn control_ack(
+    request_id: &str,
+    result: ControlResult,
+    duplicate: bool,
+    detail: Option<String>,
+) -> ControlAck {
+    ControlAck {
+        request_id: request_id.to_string(),
+        result,
+        duplicate,
+        detail,
+        acked_at: now_rfc3339(),
+    }
+}
+
+#[cfg(unix)]
+fn control_action_name(action: &ControlAction) -> &'static str {
+    match action {
+        ControlAction::Stdin => "control_stdin",
+        ControlAction::Interrupt => "control_interrupt",
+    }
+}
+
+#[cfg(unix)]
+fn emit_control_request_event(control: &ControlRequest) {
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm-daemon",
+        action: "control_request",
+        team: Some(control.team.clone()),
+        session_id: Some(control.session_id.clone()),
+        agent_id: Some(control.agent_id.clone()),
+        agent_name: Some(control.sender.clone()),
+        request_id: Some(control.request_id.clone()),
+        target: Some(control_action_name(&control.action).to_string()),
+        ..Default::default()
+    });
+}
+
+#[cfg(unix)]
+fn emit_control_ack_event(control: &ControlRequest, ack: &ControlAck) {
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm-daemon",
+        action: "control_ack",
+        team: Some(control.team.clone()),
+        session_id: Some(control.session_id.clone()),
+        agent_id: Some(control.agent_id.clone()),
+        agent_name: Some(control.sender.clone()),
+        request_id: Some(control.request_id.clone()),
+        target: Some(control_action_name(&control.action).to_string()),
+        result: Some(format!("{:?}", ack.result).to_ascii_lowercase()),
+        message_text: Some(format!("duplicate={}", ack.duplicate)),
+        ..Default::default()
+    });
+}
+
+#[cfg(unix)]
+fn control_request_is_live(
+    control: &ControlRequest,
+    state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
+) -> ControlResult {
+    let registry = session_registry.lock().unwrap();
+    let Some(record) = registry.query(&control.agent_id) else {
+        return ControlResult::NotFound;
+    };
+    if record.session_id != control.session_id {
+        return ControlResult::NotFound;
+    }
+    if record.state != crate::daemon::session_registry::SessionState::Active
+        || !record.is_process_alive()
+    {
+        return ControlResult::NotLive;
+    }
+
+    let tracker = state_store.lock().unwrap();
+    match tracker.get_state(&control.agent_id) {
+        Some(AgentState::Idle) | Some(AgentState::Busy) => ControlResult::Ok,
+        Some(AgentState::Launching) | Some(AgentState::Killed) | None => ControlResult::NotLive,
+    }
+}
+
+#[cfg(unix)]
+fn validate_control_request(control: &ControlRequest) -> Option<String> {
+    if control.v != CONTROL_SCHEMA_VERSION {
+        return Some(format!(
+            "unsupported control schema version {}; expected {}",
+            control.v, CONTROL_SCHEMA_VERSION
+        ));
+    }
+    if control.request_id.trim().is_empty()
+        || control.team.trim().is_empty()
+        || control.session_id.trim().is_empty()
+        || control.agent_id.trim().is_empty()
+        || control.sender.trim().is_empty()
+    {
+        return Some("missing required control fields".to_string());
+    }
+    let parsed = match chrono::DateTime::parse_from_rfc3339(&control.sent_at) {
+        Ok(t) => t,
+        Err(_) => return Some("sent_at must be RFC3339".to_string()),
+    };
+    let max_skew_secs = std::env::var("ATM_CONTROL_MAX_SKEW_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(300);
+    let skew = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc)).num_seconds();
+    if skew.unsigned_abs() > max_skew_secs as u64 {
+        return Some(format!("sent_at skew exceeds {max_skew_secs}s"));
+    }
+
+    let inline_len = control.payload.as_ref().map(|s| s.len()).unwrap_or(0);
+    if inline_len > DEFAULT_MAX_MESSAGE_BYTES {
+        return Some(format!(
+            "inline payload exceeds {} bytes",
+            DEFAULT_MAX_MESSAGE_BYTES
+        ));
+    }
+    None
+}
+
+#[cfg(unix)]
+fn read_content_ref_text(content_ref: &ContentRef) -> Result<String, String> {
+    let home = agent_team_mail_core::home::get_home_dir().map_err(|e| e.to_string())?;
+    let allowed = home.join(".config/atm/share");
+    std::fs::create_dir_all(&allowed).map_err(|e| {
+        format!(
+            "failed to prepare allowed content_ref base {}: {e}",
+            allowed.display()
+        )
+    })?;
+    let canonical_allowed = std::fs::canonicalize(&allowed).map_err(|e| {
+        format!(
+            "failed to resolve allowed content_ref base {}: {e}",
+            allowed.display()
+        )
+    })?;
+    let canonical_path = std::fs::canonicalize(&content_ref.path)
+        .map_err(|e| format!("content_ref path not readable: {e}"))?;
+    if !canonical_path.starts_with(&canonical_allowed) {
+        return Err("content_ref path escapes allowed base".to_string());
+    }
+
+    if let Some(ref expires_at) = content_ref.expires_at {
+        let exp = chrono::DateTime::parse_from_rfc3339(expires_at)
+            .map_err(|_| "content_ref expires_at must be RFC3339".to_string())?;
+        if chrono::Utc::now() > exp.with_timezone(&chrono::Utc) {
+            return Err("content_ref has expired".to_string());
+        }
+    }
+
+    let bytes = std::fs::read(&canonical_path).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 != content_ref.size_bytes {
+        return Err("content_ref size mismatch".to_string());
+    }
+    let digest = Sha256::digest(&bytes);
+    let actual_sha = format!("{digest:x}");
+    if !actual_sha.eq_ignore_ascii_case(&content_ref.sha256) {
+        return Err("content_ref sha256 mismatch".to_string());
+    }
+    String::from_utf8(bytes).map_err(|_| "content_ref is not valid UTF-8 text".to_string())
+}
+
+#[cfg(unix)]
+async fn enqueue_stdin_message(team: &str, agent_id: &str, content: &str) -> Result<(), String> {
+    let home = agent_team_mail_core::home::get_home_dir().map_err(|e| e.to_string())?;
+    let dir = home
+        .join(".config/atm/agent-sessions")
+        .join(team)
+        .join(agent_id)
+        .join("stdin_queue");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("failed to create stdin_queue dir: {e}"))?;
+    let path = dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+    tokio::fs::write(path, content.as_bytes())
+        .await
+        .map_err(|e| format!("failed to write stdin_queue file: {e}"))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn process_control_request(
+    control: ControlRequest,
+    state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
+) -> ControlAck {
+    emit_control_request_event(&control);
+
+    if let Some(err) = validate_control_request(&control) {
+        let ack = control_ack(
+            &control.request_id,
+            ControlResult::Rejected,
+            false,
+            Some(err),
+        );
+        emit_control_ack_event(&control, &ack);
+        return ack;
+    }
+
+    let inline_len = control.payload.as_ref().map(|s| s.len()).unwrap_or(0);
+    if inline_len > 64 * 1024 {
+        emit_event_best_effort(EventFields {
+            level: "warn",
+            source: "atm-daemon",
+            action: "control_payload_soft_limit_exceeded",
+            team: Some(control.team.clone()),
+            session_id: Some(control.session_id.clone()),
+            agent_id: Some(control.agent_id.clone()),
+            request_id: Some(control.request_id.clone()),
+            count: Some(inline_len as u64),
+            error: Some("payload exceeds 64KiB soft limit".to_string()),
+            ..Default::default()
+        });
+    }
+
+    if matches!(control.action, ControlAction::Interrupt) {
+        let ack = control_ack(
+            &control.request_id,
+            ControlResult::Rejected,
+            false,
+            Some("interrupt receiver path not yet implemented".to_string()),
+        );
+        emit_control_ack_event(&control, &ack);
+        return ack;
+    }
+
+    // Only accepted actions consume dedupe slots.
+    let key = DedupeKey::new(
+        &control.team,
+        &control.session_id,
+        &control.agent_id,
+        &control.request_id,
+    );
+    let is_duplicate = control_dedupe_store().lock().unwrap().check_and_insert(key);
+    if is_duplicate {
+        let ack = control_ack(
+            &control.request_id,
+            ControlResult::Ok,
+            true,
+            Some("duplicate request_id".to_string()),
+        );
+        emit_control_ack_event(&control, &ack);
+        return ack;
+    }
+
+    let live = control_request_is_live(&control, state_store, session_registry);
+    if live != ControlResult::Ok {
+        let ack = control_ack(
+            &control.request_id,
+            live,
+            false,
+            Some("target session is not live".to_string()),
+        );
+        emit_control_ack_event(&control, &ack);
+        return ack;
+    }
+
+    let ack = match control.action {
+        ControlAction::Interrupt => unreachable!("interrupt handled before dedupe"),
+        ControlAction::Stdin => {
+            let content = if let Some(payload) = control.payload.clone() {
+                payload
+            } else if let Some(ref cref) = control.content_ref {
+                match read_content_ref_text(cref) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let ack = control_ack(
+                            &control.request_id,
+                            ControlResult::Rejected,
+                            false,
+                            Some(e),
+                        );
+                        emit_control_ack_event(&control, &ack);
+                        return ack;
+                    }
+                }
+            } else {
+                let ack = control_ack(
+                    &control.request_id,
+                    ControlResult::Rejected,
+                    false,
+                    Some("stdin control requires payload or content_ref".to_string()),
+                );
+                emit_control_ack_event(&control, &ack);
+                return ack;
+            };
+
+            if content.trim().is_empty() {
+                control_ack(
+                    &control.request_id,
+                    ControlResult::Rejected,
+                    false,
+                    Some("stdin payload cannot be empty".to_string()),
+                )
+            } else {
+                match enqueue_stdin_message(&control.team, &control.agent_id, &content).await {
+                    Ok(()) => control_ack(
+                        &control.request_id,
+                        ControlResult::Ok,
+                        false,
+                        Some("queued for next idle drain".to_string()),
+                    ),
+                    Err(e) => control_ack(
+                        &control.request_id,
+                        ControlResult::InternalError,
+                        false,
+                        Some(format!("enqueue failed: {e}")),
+                    ),
+                }
+            }
+        }
+    };
+    emit_control_ack_event(&control, &ack);
+    ack
+}
+
 /// Parse a raw JSON request line and dispatch to the appropriate synchronous handler.
 ///
 /// Note: the `"launch"` command is handled asynchronously before this function
@@ -466,8 +877,9 @@ fn parse_and_dispatch(
     request_str: &str,
     state_store: &SharedStateStore,
     pubsub_store: &SharedPubSubStore,
+    session_registry: &SharedSessionRegistry,
 ) -> Result<SocketResponse> {
-    use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
 
     // Parse request envelope
     let request: SocketRequest = match serde_json::from_str(request_str) {
@@ -505,12 +917,19 @@ fn parse_and_dispatch(
         "agent-pane" => handle_agent_pane(&request, state_store),
         "subscribe" => handle_subscribe(&request, pubsub_store),
         "unsubscribe" => handle_unsubscribe(&request, pubsub_store),
+        "session-query" => handle_session_query(&request, session_registry),
         // "launch" is handled asynchronously before parse_and_dispatch is called.
         // If it somehow reaches here, return a clear internal error.
         "launch" => make_error_response(
             &request.request_id,
             "INTERNAL_ERROR",
             "Launch command should have been handled by the async path",
+        ),
+        // "control" is handled asynchronously before parse_and_dispatch is called.
+        "control" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "Control command should have been handled by the async path",
         ),
         other => make_error_response(
             &request.request_id,
@@ -520,6 +939,48 @@ fn parse_and_dispatch(
     };
 
     Ok(response)
+}
+
+/// Handle the `session-query` command.
+///
+/// Payload: `{"name": "<agent-name>"}`
+/// Response (found, alive):   `{"session_id": "...", "process_id": 12345, "alive": true}`
+/// Response (found, dead):    `{"session_id": "...", "process_id": 12345, "alive": false}`
+/// Response (not found):      error with code `AGENT_NOT_FOUND`
+fn handle_session_query(
+    request: &agent_team_mail_core::daemon_client::SocketRequest,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    let name = match request.payload.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'name'",
+            );
+        }
+    };
+
+    let registry = session_registry.lock().unwrap();
+    match registry.query(&name) {
+        Some(record) => {
+            let alive = record.is_process_alive();
+            make_ok_response(
+                &request.request_id,
+                serde_json::json!({
+                    "session_id": record.session_id,
+                    "process_id": record.process_id,
+                    "alive": alive,
+                }),
+            )
+        }
+        None => make_error_response(
+            &request.request_id,
+            "AGENT_NOT_FOUND",
+            &format!("No session record for agent '{name}'"),
+        ),
+    }
 }
 
 /// Handle the `agent-state` command.
@@ -642,11 +1103,7 @@ fn handle_subscribe(
     request: &agent_team_mail_core::daemon_client::SocketRequest,
     pubsub_store: &SharedPubSubStore,
 ) -> SocketResponse {
-    let subscriber = match request
-        .payload
-        .get("subscriber")
-        .and_then(|v| v.as_str())
-    {
+    let subscriber = match request.payload.get("subscriber").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => {
             return make_error_response(
@@ -693,11 +1150,7 @@ fn handle_subscribe(
                 }),
             )
         }
-        Err(e) => make_error_response(
-            &request.request_id,
-            "CAP_EXCEEDED",
-            &e.to_string(),
-        ),
+        Err(e) => make_error_response(&request.request_id, "CAP_EXCEEDED", &e.to_string()),
     }
 }
 
@@ -709,11 +1162,7 @@ fn handle_unsubscribe(
     request: &agent_team_mail_core::daemon_client::SocketRequest,
     pubsub_store: &SharedPubSubStore,
 ) -> SocketResponse {
-    let subscriber = match request
-        .payload
-        .get("subscriber")
-        .and_then(|v| v.as_str())
-    {
+    let subscriber = match request.payload.get("subscriber").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => {
             return make_error_response(
@@ -735,7 +1184,10 @@ fn handle_unsubscribe(
         }
     };
 
-    pubsub_store.lock().unwrap().unsubscribe(&subscriber, &agent);
+    pubsub_store
+        .lock()
+        .unwrap()
+        .unsubscribe(&subscriber, &agent);
     debug!("Removed subscription: {subscriber} → {agent}");
 
     make_ok_response(
@@ -750,7 +1202,7 @@ fn handle_unsubscribe(
 
 // ── Response helpers ──────────────────────────────────────────────────────────
 
-use agent_team_mail_core::daemon_client::{SocketError, SocketResponse, PROTOCOL_VERSION};
+use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketError, SocketResponse};
 
 fn make_ok_response(request_id: &str, payload: serde_json::Value) -> SocketResponse {
     SocketResponse {
@@ -789,8 +1241,10 @@ fn format_elapsed_as_iso8601(elapsed: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::session_registry::new_session_registry;
     use crate::plugins::worker_adapter::AgentStateTracker;
-    use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
+    use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
 
     fn make_store() -> SharedStateStore {
         std::sync::Arc::new(std::sync::Mutex::new(AgentStateTracker::new()))
@@ -798,6 +1252,10 @@ mod tests {
 
     fn make_ps() -> SharedPubSubStore {
         new_pubsub_store()
+    }
+
+    fn make_sr() -> SharedSessionRegistry {
+        new_session_registry()
     }
 
     fn make_request(command: &str, payload: serde_json::Value) -> SocketRequest {
@@ -812,7 +1270,10 @@ mod tests {
     #[test]
     fn test_agent_state_not_found() {
         let store = make_store();
-        let req = make_request("agent-state", serde_json::json!({"agent": "ghost", "team": "t"}));
+        let req = make_request(
+            "agent-state",
+            serde_json::json!({"agent": "ghost", "team": "t"}),
+        );
         let resp = handle_agent_state(&req, &store);
         assert_eq!(resp.status, "error");
         let err = resp.error.unwrap();
@@ -876,8 +1337,9 @@ mod tests {
         // because the async path should have handled it, but the payload may be inspected.
         let store = make_store();
         let ps = make_ps();
+        let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r1","command":"launch","payload":{"agent":"","team":"atm-dev","command":"codex","timeout_secs":30,"env_vars":{}}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
         // In parse_and_dispatch the "launch" arm returns INTERNAL_ERROR
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
@@ -901,11 +1363,26 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_is_control_command_detection() {
+        assert!(is_control_command(
+            r#"{"version":1,"request_id":"r1","command":"control","payload":{}}"#
+        ));
+        assert!(is_control_command(
+            r#"{"version":1,"request_id":"r1","command": "control","payload":{}}"#
+        ));
+        assert!(!is_control_command(
+            r#"{"version":1,"request_id":"r1","command":"agent-state","payload":{}}"#
+        ));
+    }
+
+    #[test]
     fn test_parse_and_dispatch_unknown_command() {
         let store = make_store();
         let ps = make_ps();
+        let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r1","command":"bogus","payload":{}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "UNKNOWN_COMMAND");
     }
@@ -914,7 +1391,8 @@ mod tests {
     fn test_parse_and_dispatch_malformed_json() {
         let store = make_store();
         let ps = make_ps();
-        let resp = parse_and_dispatch("not-json{{", &store, &ps).unwrap();
+        let sr = make_sr();
+        let resp = parse_and_dispatch("not-json{{", &store, &ps, &sr).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INVALID_REQUEST");
     }
@@ -923,8 +1401,9 @@ mod tests {
     fn test_parse_and_dispatch_version_mismatch() {
         let store = make_store();
         let ps = make_ps();
+        let sr = make_sr();
         let req_json = r#"{"version":99,"request_id":"r1","command":"agent-state","payload":{}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
     }
@@ -954,11 +1433,7 @@ mod tests {
         {
             let mut tracker = store.lock().unwrap();
             tracker.register_agent("arch-ctm");
-            tracker.set_pane_info(
-                "arch-ctm",
-                "%42",
-                std::path::Path::new("/tmp/arch-ctm.log"),
-            );
+            tracker.set_pane_info("arch-ctm", "%42", std::path::Path::new("/tmp/arch-ctm.log"));
         }
 
         let req = make_request("agent-pane", serde_json::json!({"agent": "arch-ctm"}));
@@ -1070,7 +1545,10 @@ mod tests {
     #[test]
     fn test_handle_unsubscribe_missing_fields() {
         let ps = make_ps();
-        let req = make_request("unsubscribe", serde_json::json!({"subscriber": "team-lead"}));
+        let req = make_request(
+            "unsubscribe",
+            serde_json::json!({"subscriber": "team-lead"}),
+        );
         let resp = handle_unsubscribe(&req, &ps);
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
@@ -1102,12 +1580,253 @@ mod tests {
         assert_eq!(resp2.error.unwrap().code, "CAP_EXCEEDED");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_control_stdin_enqueues_payload() {
+        use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: serialized test; env var restored by process teardown.
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+        let state_store = make_store();
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert("arch-ctm", "sess-1", std::process::id());
+        }
+
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: Uuid::new_v4().to_string(),
+            sent_at: chrono::Utc::now().to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-1".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("hello from control".to_string()),
+            content_ref: None,
+        };
+
+        let ack = process_control_request(req, &state_store, &sr).await;
+        assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
+        assert!(!ack.duplicate);
+
+        let qdir = agent_team_mail_core::home::get_home_dir()
+            .unwrap()
+            .join(".config/atm/agent-sessions/atm-dev/arch-ctm/stdin_queue");
+        assert!(qdir.exists());
+        let mut rd = tokio::fs::read_dir(qdir).await.unwrap();
+        let mut files = 0usize;
+        while let Ok(Some(_)) = rd.next_entry().await {
+            files += 1;
+        }
+        assert_eq!(files, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_control_duplicate_does_not_reenqueue() {
+        use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: serialized test; env var restored by process teardown.
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+        let state_store = make_store();
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Busy);
+        }
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert("arch-ctm", "sess-dup", std::process::id());
+        }
+        let request_id = Uuid::new_v4().to_string();
+        let mk_req = || ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: request_id.clone(),
+            sent_at: chrono::Utc::now().to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-dup".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("payload".to_string()),
+            content_ref: None,
+        };
+
+        let ack1 = process_control_request(mk_req(), &state_store, &sr).await;
+        let ack2 = process_control_request(mk_req(), &state_store, &sr).await;
+        assert_eq!(
+            ack1.result,
+            agent_team_mail_core::control::ControlResult::Ok
+        );
+        assert_eq!(
+            ack2.result,
+            agent_team_mail_core::control::ControlResult::Ok
+        );
+        assert!(ack2.duplicate);
+
+        let qdir = agent_team_mail_core::home::get_home_dir()
+            .unwrap()
+            .join(".config/atm/agent-sessions/atm-dev/arch-ctm/stdin_queue");
+        let mut rd = tokio::fs::read_dir(qdir).await.unwrap();
+        let mut files = 0usize;
+        while let Ok(Some(_)) = rd.next_entry().await {
+            files += 1;
+        }
+        assert_eq!(files, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_control_interrupt_returns_rejected() {
+        use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
+
+        let state_store = make_store();
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert("arch-ctm", "sess-int", std::process::id());
+        }
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: Uuid::new_v4().to_string(),
+            sent_at: chrono::Utc::now().to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-int".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Interrupt,
+            payload: None,
+            content_ref: None,
+        };
+        let ack = process_control_request(req, &state_store, &sr).await;
+        assert_eq!(
+            ack.result,
+            agent_team_mail_core::control::ControlResult::Rejected
+        );
+        assert!(
+            ack.detail
+                .unwrap_or_default()
+                .contains("not yet implemented")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_control_interrupt_retry_is_not_marked_duplicate() {
+        use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
+
+        let state_store = make_store();
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert("arch-ctm", "sess-int-retry", std::process::id());
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let mk_req = || ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: request_id.clone(),
+            sent_at: chrono::Utc::now().to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-int-retry".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Interrupt,
+            payload: None,
+            content_ref: None,
+        };
+
+        let ack1 = process_control_request(mk_req(), &state_store, &sr).await;
+        let ack2 = process_control_request(mk_req(), &state_store, &sr).await;
+        assert_eq!(
+            ack1.result,
+            agent_team_mail_core::control::ControlResult::Rejected
+        );
+        assert_eq!(
+            ack2.result,
+            agent_team_mail_core::control::ControlResult::Rejected
+        );
+        assert!(!ack1.duplicate);
+        assert!(!ack2.duplicate);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_control_stale_sent_at_rejected() {
+        use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
+
+        let state_store = make_store();
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert("arch-ctm", "sess-stale", std::process::id());
+        }
+
+        let old = chrono::Utc::now() - chrono::Duration::minutes(10);
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: Uuid::new_v4().to_string(),
+            sent_at: old.to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-stale".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("payload".to_string()),
+            content_ref: None,
+        };
+        let ack = process_control_request(req, &state_store, &sr).await;
+        assert_eq!(
+            ack.result,
+            agent_team_mail_core::control::ControlResult::Rejected
+        );
+    }
+
     /// Integration-style test: start server, connect, exchange request/response.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_socket_server_agent_state_roundtrip() {
-        use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
         use crate::plugins::worker_adapter::AgentState;
+        use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio_util::sync::CancellationToken;
 
@@ -1125,10 +1844,17 @@ mod tests {
 
         // Start the socket server
         let launch_tx = new_launch_sender();
-        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
-            .await
-            .unwrap()
-            .expect("Expected socket server handle on unix");
+        let _handle = start_socket_server(
+            home_dir.clone(),
+            state_store,
+            new_pubsub_store(),
+            launch_tx,
+            make_sr(),
+            cancel.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected socket server handle on unix");
 
         // Connect and send a request
         let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
@@ -1165,8 +1891,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_socket_server_list_agents_roundtrip() {
-        use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
         use crate::plugins::worker_adapter::AgentState;
+        use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio_util::sync::CancellationToken;
 
@@ -1183,10 +1909,17 @@ mod tests {
         }
 
         let launch_tx = new_launch_sender();
-        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
-            .await
-            .unwrap()
-            .expect("Expected socket server handle on unix");
+        let _handle = start_socket_server(
+            home_dir.clone(),
+            state_store,
+            new_pubsub_store(),
+            launch_tx,
+            make_sr(),
+            cancel.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected socket server handle on unix");
 
         let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
@@ -1200,7 +1933,11 @@ mod tests {
         let req_line = format!("{}\n", serde_json::to_string(&request).unwrap());
 
         let mut reader = BufReader::new(stream);
-        reader.get_mut().write_all(req_line.as_bytes()).await.unwrap();
+        reader
+            .get_mut()
+            .write_all(req_line.as_bytes())
+            .await
+            .unwrap();
 
         let mut resp_line = String::new();
         reader.read_line(&mut resp_line).await.unwrap();
@@ -1219,7 +1956,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_socket_server_subscribe_roundtrip() {
-        use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
+        use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio_util::sync::CancellationToken;
 
@@ -1233,6 +1970,7 @@ mod tests {
             make_store(),
             new_pubsub_store(),
             launch_tx,
+            make_sr(),
             cancel.clone(),
         )
         .await
@@ -1256,7 +1994,11 @@ mod tests {
         let req_line = format!("{}\n", serde_json::to_string(&request).unwrap());
 
         let mut reader = BufReader::new(stream);
-        reader.get_mut().write_all(req_line.as_bytes()).await.unwrap();
+        reader
+            .get_mut()
+            .write_all(req_line.as_bytes())
+            .await
+            .unwrap();
 
         let mut resp_line = String::new();
         reader.read_line(&mut resp_line).await.unwrap();
@@ -1267,6 +2009,88 @@ mod tests {
         assert!(resp.is_ok(), "Expected ok, got: {:?}", resp.error);
         let payload = resp.payload.unwrap();
         assert!(payload["subscribed"].as_bool().unwrap());
+
+        cancel.cancel();
+    }
+
+    /// Integration-style control test over unix socket.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "integration coverage for control receiver over unix socket"]
+    #[serial_test::serial]
+    async fn test_socket_server_control_stdin_roundtrip() {
+        use crate::plugins::worker_adapter::AgentState;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio_util::sync::CancellationToken;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let home_dir = temp_dir.path().to_path_buf();
+        // SAFETY: serialized test; env var scoped by process.
+        unsafe { std::env::set_var("ATM_HOME", &home_dir) };
+        let cancel = CancellationToken::new();
+
+        let state_store = make_store();
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert("arch-ctm", "sess-intg-1", std::process::id());
+        }
+
+        let launch_tx = new_launch_sender();
+        let _handle = start_socket_server(
+            home_dir.clone(),
+            state_store,
+            new_pubsub_store(),
+            launch_tx,
+            sr,
+            cancel.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected socket server handle on unix");
+
+        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+
+        let control_payload = serde_json::json!({
+            "v": 1,
+            "request_id": "ctrl-intg-1",
+            "sent_at": chrono::Utc::now().to_rfc3339(),
+            "team": "atm-dev",
+            "session_id": "sess-intg-1",
+            "agent_id": "arch-ctm",
+            "sender": "team-lead",
+            "action": "stdin",
+            "payload": "integration payload"
+        });
+        let request = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "sock-ctrl-1".to_string(),
+            command: "control".to_string(),
+            payload: control_payload,
+        };
+        let req_line = format!("{}\n", serde_json::to_string(&request).unwrap());
+        let mut reader = BufReader::new(stream);
+        reader
+            .get_mut()
+            .write_all(req_line.as_bytes())
+            .await
+            .unwrap();
+
+        let mut resp_line = String::new();
+        reader.read_line(&mut resp_line).await.unwrap();
+        let resp: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line.trim()).unwrap();
+        assert!(resp.is_ok(), "Expected ok response, got: {:?}", resp.error);
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["result"].as_str().unwrap(), "ok");
+        assert!(!payload["duplicate"].as_bool().unwrap());
 
         cancel.cancel();
     }
@@ -1282,13 +2106,23 @@ mod tests {
         let state_store = make_store();
 
         let launch_tx = new_launch_sender();
-        let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
-            .await
-            .unwrap()
-            .expect("Expected socket server handle on unix");
+        let _handle = start_socket_server(
+            home_dir.clone(),
+            state_store,
+            new_pubsub_store(),
+            launch_tx,
+            make_sr(),
+            cancel.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected socket server handle on unix");
 
         let pid_path = home_dir.join(".claude/daemon/atm-daemon.pid");
-        assert!(pid_path.exists(), "PID file should exist after server start");
+        assert!(
+            pid_path.exists(),
+            "PID file should exist after server start"
+        );
 
         let pid_str = std::fs::read_to_string(&pid_path).unwrap();
         let pid: u32 = pid_str.trim().parse().unwrap();
@@ -1311,16 +2145,86 @@ mod tests {
 
         {
             let launch_tx = new_launch_sender();
-            let _handle = start_socket_server(home_dir.clone(), state_store, new_pubsub_store(), launch_tx, cancel.clone())
-                .await
-                .unwrap()
-                .expect("Expected handle");
+            let _handle = start_socket_server(
+                home_dir.clone(),
+                state_store,
+                new_pubsub_store(),
+                launch_tx,
+                make_sr(),
+                cancel.clone(),
+            )
+            .await
+            .unwrap()
+            .expect("Expected handle");
 
-            assert!(socket_path.exists(), "Socket should exist while handle is alive");
+            assert!(
+                socket_path.exists(),
+                "Socket should exist while handle is alive"
+            );
         }
         // Handle dropped — socket should be gone
-        assert!(!socket_path.exists(), "Socket should be removed after handle drop");
+        assert!(
+            !socket_path.exists(),
+            "Socket should be removed after handle drop"
+        );
 
         cancel.cancel();
+    }
+
+    // ── session-query handler tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_session_query_missing_name_field() {
+        let sr = make_sr();
+        let req = make_request("session-query", serde_json::json!({}));
+        let resp = handle_session_query(&req, &sr);
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
+    }
+
+    #[test]
+    fn test_session_query_agent_not_found() {
+        let sr = make_sr();
+        let req = make_request("session-query", serde_json::json!({"name": "ghost"}));
+        let resp = handle_session_query(&req, &sr);
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "AGENT_NOT_FOUND");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_session_query_agent_alive() {
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert("team-lead", "sess-abc123", std::process::id());
+        }
+        let req = make_request("session-query", serde_json::json!({"name": "team-lead"}));
+        let resp = handle_session_query(&req, &sr);
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["session_id"].as_str().unwrap(), "sess-abc123");
+        assert_eq!(
+            payload["process_id"].as_u64().unwrap(),
+            std::process::id() as u64
+        );
+        assert!(payload["alive"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_session_query_agent_dead_pid() {
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            // i32::MAX is an impossibly large PID; always dead
+            reg.upsert("stale-agent", "sess-deadbeef", i32::MAX as u32);
+        }
+        let req = make_request("session-query", serde_json::json!({"name": "stale-agent"}));
+        let resp = handle_session_query(&req, &sr);
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["session_id"].as_str().unwrap(), "sess-deadbeef");
+        // alive is false because the PID doesn't exist (non-unix: always false)
+        assert!(!payload["alive"].as_bool().unwrap());
     }
 }

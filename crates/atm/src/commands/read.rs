@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Utc};
 use clap::{ArgAction, Args};
@@ -128,18 +129,22 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         None
     };
 
-    // Filter by read status (unless --all or since-last-seen)
-    if !args.all && !use_since_last_seen {
-        filtered_messages.retain(|m| !m.read);
-    }
-
-    // Filter by last-seen timestamp
-    if let Some(last_seen_dt) = last_seen {
-        filtered_messages.retain(|m| {
-            DateTime::parse_from_rfc3339(&m.timestamp)
-                .map(|dt| dt > last_seen_dt)
-                .unwrap_or(false)
-        });
+    // Visibility filter:
+    // - Default mode: unread only
+    // - Since-last-seen mode: unread OR newer-than-last-seen
+    if !args.all {
+        if use_since_last_seen {
+            if let Some(last_seen_dt) = last_seen {
+                filtered_messages.retain(|m| {
+                    !m.read
+                        || DateTime::parse_from_rfc3339(&m.timestamp)
+                            .map(|dt| dt > last_seen_dt)
+                            .unwrap_or(false)
+                });
+            }
+        } else {
+            filtered_messages.retain(|m| !m.read);
+        }
     }
 
     // Filter by sender
@@ -194,16 +199,19 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                 let mut new_filtered = new_messages.clone();
 
                 // Re-apply the same filters
-                if !args.all && !use_since_last_seen {
-                    new_filtered.retain(|m| !m.read);
-                }
-
-                if let Some(last_seen_dt) = last_seen {
-                    new_filtered.retain(|m| {
-                        DateTime::parse_from_rfc3339(&m.timestamp)
-                            .map(|dt| dt > last_seen_dt)
-                            .unwrap_or(false)
-                    });
+                if !args.all {
+                    if use_since_last_seen {
+                        if let Some(last_seen_dt) = last_seen {
+                            new_filtered.retain(|m| {
+                                !m.read
+                                    || DateTime::parse_from_rfc3339(&m.timestamp)
+                                        .map(|dt| dt > last_seen_dt)
+                                        .unwrap_or(false)
+                            });
+                        }
+                    } else {
+                        new_filtered.retain(|m| !m.read);
+                    }
                 }
 
                 if let Some(ref from_name) = args.from {
@@ -244,12 +252,24 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                 } else {
                     println!("Timeout: No new messages for {agent_name}@{team_name}");
                 }
+                emit_event_best_effort(EventFields {
+                    level: "info",
+                    source: "atm",
+                    action: "read_timeout",
+                    team: Some(team_name.clone()),
+                    session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+                    agent_id: Some(agent_name.clone()),
+                    agent_name: Some(agent_name.clone()),
+                    result: Some("timeout".to_string()),
+                    ..Default::default()
+                });
                 std::process::exit(1);
             }
         }
     }
 
     // Mark messages as read (unless --no-mark specified)
+    let mut marked_count: u64 = 0;
     if !args.no_mark && !filtered_messages.is_empty() {
         // Find message IDs that need to be marked
         let filtered_ids: Vec<String> = filtered_messages
@@ -277,6 +297,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
 
                     if should_mark {
                         msg.read = true;
+                        marked_count += 1;
                     }
                 }
             })?;
@@ -293,6 +314,33 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         let mut state = load_seen_state().unwrap_or_default();
         update_last_seen(&mut state, &team_name, &agent_name, &latest.to_rfc3339());
         let _ = save_seen_state(&state);
+    }
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "read",
+        team: Some(team_name.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: Some(agent_name.clone()),
+        agent_name: Some(agent_name.clone()),
+        result: Some("ok".to_string()),
+        count: Some(filtered_messages.len() as u64),
+        ..Default::default()
+    });
+    if marked_count > 0 {
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm",
+            action: "read_mark",
+            team: Some(team_name.clone()),
+            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            agent_id: Some(agent_name.clone()),
+            agent_name: Some(agent_name.clone()),
+            result: Some("ok".to_string()),
+            count: Some(marked_count),
+            ..Default::default()
+        });
     }
 
     // Output results

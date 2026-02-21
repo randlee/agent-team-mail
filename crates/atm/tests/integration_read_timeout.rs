@@ -184,3 +184,53 @@ fn test_read_timeout_with_existing_messages() {
         .stdout(predicate::str::contains("Existing message"))
         .stdout(predicate::str::contains("From: bob"));
 }
+
+#[test]
+fn test_read_timeout_shows_older_unread_even_when_last_seen_is_newer() {
+    let (temp_dir, team_dir) = setup_team();
+
+    // Start with empty inbox so read enters wait path.
+    let inbox_path = team_dir.join("inboxes/alice.json");
+    fs::write(&inbox_path, "[]").unwrap();
+
+    // Seed last-seen after incoming message timestamp.
+    let state_path = temp_dir.path().join("state.json");
+    let state = serde_json::json!({
+        "last_seen": {
+            "test-team": {
+                "alice": "2026-02-16T12:00:00Z"
+            }
+        }
+    });
+    fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    // Write an unread message whose timestamp is older than last_seen.
+    let inbox_path_clone = inbox_path.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(500));
+        let messages = serde_json::json!([
+            {
+                "from": "bob",
+                "text": "Older unread while waiting",
+                "timestamp": "2026-02-16T00:00:00Z",
+                "read": false,
+                "summary": "Older unread while waiting",
+                "messageId": "msg-timeout-old-unread"
+            }
+        ]);
+        fs::write(&inbox_path_clone, serde_json::to_string(&messages).unwrap()).unwrap();
+    });
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "alice")
+        .arg("read")
+        .arg("--timeout")
+        .arg("5");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Older unread while waiting"))
+        .stdout(predicate::str::contains("From: bob"));
+}

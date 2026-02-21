@@ -23,7 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
-tracing = "0.1"
+tracing.workspace = true
 tracing-subscriber = "0.3"
 clap = { version = "4", features = ["derive"] }
 notify = "7"
@@ -35,6 +35,7 @@ libloading = "0.8"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 globset = "0.4"
+sha2 = "0.10"
 # SSH/SFTP support (optional, behind feature flag)
 ssh2 = { version = "0.9", optional = true }
 

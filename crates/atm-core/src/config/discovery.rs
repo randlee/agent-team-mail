@@ -4,6 +4,7 @@ use super::types::{Config, OutputFormat};
 use crate::schema::SettingsJson;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use tracing::warn;
 
 /// Configuration error
 #[derive(Debug, Error)]
@@ -61,7 +62,7 @@ pub fn resolve_config(
         if let Ok(file_config) = load_config_file(&global_config_path) {
             merge_config(&mut config, file_config);
         } else {
-            eprintln!("Warning: Failed to parse global config at {global_config_path:?}");
+            warn!("Failed to parse global config at {global_config_path:?}");
         }
     }
 
@@ -70,7 +71,7 @@ pub fn resolve_config(
         if let Ok(file_config) = load_config_file(&repo_config) {
             merge_config(&mut config, file_config);
         } else {
-            eprintln!("Warning: Failed to parse repo config at {repo_config:?}");
+            warn!("Failed to parse repo config at {repo_config:?}");
         }
     }
 
@@ -267,12 +268,12 @@ fn try_load_settings(path: &Path) -> Option<SettingsJson> {
         Ok(contents) => match serde_json::from_str(&contents) {
             Ok(settings) => Some(settings),
             Err(e) => {
-                eprintln!("Warning: Failed to parse settings at {path:?}: {e}");
+                warn!("Failed to parse settings at {path:?}: {e}");
                 None
             }
         },
         Err(e) => {
-            eprintln!("Warning: Failed to read settings at {path:?}: {e}");
+            warn!("Failed to read settings at {path:?}: {e}");
             None
         }
     }

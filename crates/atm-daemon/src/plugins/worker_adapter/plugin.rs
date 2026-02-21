@@ -11,6 +11,7 @@ use super::nudge::NudgeEngine;
 use super::pubsub::PubSub;
 use super::router::{ConcurrencyPolicy, MessageRouter};
 use super::trait_def::{WorkerAdapter, WorkerHandle};
+use crate::daemon::session_registry::SharedSessionRegistry;
 use crate::daemon::socket::{LaunchRequest};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
@@ -62,6 +63,11 @@ pub struct WorkerAdapterPlugin {
     /// Set via [`set_launch_receiver`] before `run()` is called.  When `None`,
     /// remote launch requests are silently ignored.
     launch_rx: Option<tokio::sync::mpsc::Receiver<LaunchRequest>>,
+    /// Shared session registry for `session-start`/`session-end` hook events.
+    ///
+    /// Set via [`set_session_registry`] before `run()` is called.  When `None`,
+    /// the hook watcher tracks only agent-turn-complete events.
+    session_registry: Option<SharedSessionRegistry>,
 }
 
 impl WorkerAdapterPlugin {
@@ -100,6 +106,7 @@ impl WorkerAdapterPlugin {
             last_notified_states: HashMap::new(),
             ctx: None,
             launch_rx: None,
+            session_registry: None,
         }
     }
 
@@ -111,6 +118,16 @@ impl WorkerAdapterPlugin {
     /// [`start_socket_server`](crate::daemon::socket::start_socket_server).
     pub fn set_launch_receiver(&mut self, rx: tokio::sync::mpsc::Receiver<LaunchRequest>) {
         self.launch_rx = Some(rx);
+    }
+
+    /// Connect the plugin to the shared session registry.
+    ///
+    /// Must be called before [`Plugin::run`] to enable `session-start` and
+    /// `session-end` hook events to populate the registry.  Pass the same
+    /// `Arc` that is given to the socket server so that session-query requests
+    /// reflect live data.
+    pub fn set_session_registry(&mut self, registry: SharedSessionRegistry) {
+        self.session_registry = Some(registry);
     }
 
     /// Return a clone of the shared agent state store.
@@ -134,15 +151,22 @@ impl WorkerAdapterPlugin {
     }
 
     /// Get worker status for all configured agents
-    #[allow(dead_code)]
     pub fn get_worker_states(&self) -> HashMap<String, WorkerState> {
         self.lifecycle.get_all_states()
     }
 
     /// Get turn-level agent states
-    #[allow(dead_code)]
     pub fn get_agent_states(&self) -> HashMap<String, AgentState> {
         self.agent_state.lock().unwrap().all_states()
+    }
+
+    /// Replace the log tailer used for response capture.
+    ///
+    /// Intended for tests that need a short timeout to avoid waiting the full
+    /// 60-second default when no real worker output is available.  Harmless to
+    /// call in production code, but has no practical benefit there.
+    pub fn set_log_tailer(&mut self, tailer: LogTailer) {
+        self.log_tailer = tailer;
     }
 
     /// Build the path to the hook events file.
@@ -299,7 +323,6 @@ impl WorkerAdapterPlugin {
     ///
     /// * `message` - Inbox message to format
     /// * `config_key` - Config key for the agent
-    #[allow(dead_code)]
     fn format_message(&self, message: &InboxMessage, config_key: &str) -> String {
         let template = self
             .config
@@ -320,7 +343,6 @@ impl WorkerAdapterPlugin {
     ///
     /// * `config_key` - Config key for the agent
     /// * `message` - Inbox message to process
-    #[allow(dead_code)]
     async fn process_message(
         &mut self,
         config_key: &str,
@@ -485,7 +507,6 @@ impl WorkerAdapterPlugin {
     /// # Arguments
     ///
     /// * `config_key` - Config key for the agent
-    #[allow(dead_code)]
     async fn spawn_worker(&mut self, config_key: &str) -> Result<(), PluginError> {
         let backend = self.backend.as_mut().ok_or_else(|| PluginError::Runtime {
             message: "Worker backend not initialized".to_string(),
@@ -952,7 +973,15 @@ impl Plugin for WorkerAdapterPlugin {
                     warn!("Could not create hook events directory {}: {e}", parent.display());
                 }
             }
-            let watcher = HookWatcher::new(events_path, Arc::clone(&self.agent_state));
+            let watcher = if let Some(ref registry) = self.session_registry {
+                HookWatcher::new_with_session_registry(
+                    events_path,
+                    Arc::clone(&self.agent_state),
+                    Arc::clone(registry),
+                )
+            } else {
+                HookWatcher::new(events_path, Arc::clone(&self.agent_state))
+            };
             let watcher_cancel = cancel.clone();
             tokio::spawn(async move {
                 watcher.run(watcher_cancel).await;

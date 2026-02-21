@@ -26,6 +26,7 @@ use crate::schema::InboxMessage;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// Metadata for a spooled message awaiting delivery
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,7 +182,7 @@ fn spool_drain_with_base(inbox_base: &Path, base_dir: Option<&Path>) -> Result<S
                 }
                 Err(e) => {
                     // Log error but continue processing other messages
-                    eprintln!("Warning: Failed to process {path:?}: {e}");
+                    warn!("Failed to process {path:?}: {e}");
                 }
             }
         }

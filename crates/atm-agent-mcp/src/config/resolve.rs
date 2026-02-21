@@ -332,6 +332,7 @@ sandbox = "network-disabled"
             base_prompt_file: None,
             extra_instructions_file: None,
             roles: std::collections::HashMap::new(),
+            transport: None,
         };
 
         let json = serde_json::to_string_pretty(&original).unwrap();

@@ -130,6 +130,17 @@ pub struct AgentMcpConfig {
     /// Named role presets indexed by role name
     #[serde(default)]
     pub roles: HashMap<String, RolePreset>,
+
+    /// Transport implementation to use for the Codex child process.
+    ///
+    /// Supported values:
+    /// - `"mcp"` (default) — spawns `codex mcp-server` (MCP stdio protocol)
+    /// - `"json"` — spawns `codex exec --json` (JSONL event stream protocol)
+    /// - `"mock"` — in-memory test double (no child process; for testing only)
+    ///
+    /// An absent or unrecognised value falls back to `"mcp"`.
+    #[serde(default)]
+    pub transport: Option<String>,
 }
 
 fn default_codex_bin() -> String {
@@ -185,6 +196,7 @@ impl Default for AgentMcpConfig {
             base_prompt_file: None,
             extra_instructions_file: None,
             roles: HashMap::new(),
+            transport: None,
         }
     }
 }

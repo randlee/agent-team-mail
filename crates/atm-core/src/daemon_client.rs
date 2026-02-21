@@ -224,7 +224,6 @@ pub fn daemon_pid_path() -> anyhow::Result<PathBuf> {
 /// verifying the process is alive.
 ///
 /// Returns `false` on any error (missing file, invalid PID, dead process, etc.).
-#[allow(unused_variables)]
 pub fn daemon_is_running() -> bool {
     #[cfg(unix)]
     {
@@ -256,7 +255,6 @@ pub fn daemon_is_running() -> bool {
 /// # Platform Behaviour
 ///
 /// On non-Unix platforms this function always returns `Ok(None)`.
-#[allow(unused_variables)]
 pub fn query_daemon(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
     #[cfg(unix)]
     {
@@ -438,6 +436,60 @@ pub fn query_agent_pane(agent: &str) -> anyhow::Result<Option<AgentPaneInfo>> {
 
     match serde_json::from_value::<AgentPaneInfo>(payload) {
         Ok(info) => Ok(Some(info)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Session information returned by the `session-query` socket command.
+///
+/// Describes the Claude Code session and OS process currently registered for an
+/// agent in the [`SessionRegistry`](crate) and whether the process is alive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionQueryResult {
+    /// Claude Code session UUID.
+    pub session_id: String,
+    /// OS process ID of the agent process.
+    pub process_id: u32,
+    /// Whether the OS process is currently running.
+    pub alive: bool,
+}
+
+/// Query the daemon for the session record of a named agent.
+///
+/// Returns:
+/// - `Ok(Some(result))` when the agent is registered in the session registry.
+/// - `Ok(None)` when the daemon is not running, the agent is not registered,
+///   or the platform does not support Unix sockets.
+/// - `Err` only for unexpected I/O errors *after* a connection is established.
+///
+/// # Arguments
+///
+/// * `name` - Agent name to look up (e.g., `"team-lead"`)
+pub fn query_session(name: &str) -> anyhow::Result<Option<SessionQueryResult>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "session-query".to_string(),
+        payload: serde_json::json!({ "name": name }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    if !response.is_ok() {
+        // Daemon returned error (agent not found) — treat as no session info
+        return Ok(None);
+    }
+
+    let payload = match response.payload {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    match serde_json::from_value::<SessionQueryResult>(payload) {
+        Ok(result) => Ok(Some(result)),
         Err(_) => Ok(None),
     }
 }
@@ -720,6 +772,37 @@ mod tests {
         let decoded: LaunchResult = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded.warning.as_deref(), Some("Readiness timeout reached"));
+    }
+
+    #[test]
+    fn test_session_query_result_serialization() {
+        let result = SessionQueryResult {
+            session_id: "abc123".to_string(),
+            process_id: 12345,
+            alive: true,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: SessionQueryResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.session_id, "abc123");
+        assert_eq!(decoded.process_id, 12345);
+        assert!(decoded.alive);
+    }
+
+    #[test]
+    fn test_session_query_result_dead() {
+        let json = r#"{"session_id":"xyz789","process_id":99,"alive":false}"#;
+        let result: SessionQueryResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.session_id, "xyz789");
+        assert_eq!(result.process_id, 99);
+        assert!(!result.alive);
+    }
+
+    #[test]
+    fn test_query_session_no_daemon_returns_none() {
+        // Graceful fallback: no daemon → Ok(None)
+        let result = query_session("team-lead");
+        assert!(result.is_ok());
+        // None unless daemon happens to be running
     }
 
     #[test]

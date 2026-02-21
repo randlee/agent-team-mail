@@ -18,5 +18,10 @@ pub mod lock;
 pub mod mail_inject;
 pub mod proxy;
 pub mod session;
+pub mod stdin_queue;
 pub mod summary;
 pub mod tools;
+pub mod transport;
+
+#[doc(inline)]
+pub use transport::{MockTransport, MockTransportHandle, RawChildIo};
