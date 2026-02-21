@@ -32,11 +32,14 @@ pub const COLUMN_MAP: &[(&str, &str)] = &[
 ///
 /// # Examples
 ///
-/// ```ignore
-/// // Illustrative only — atm-tui is a binary crate; doc tests are not supported.
-/// let line = r#"{"ts":"2026-02-20T00:00:00Z","lv":"info"}"#;
+/// ```
+/// use atm_tui::agent_terminal::expand_keys;
+///
+/// let line = r#"{"ts":"2026-01-01","lv":"info","act":"send"}"#;
 /// let expanded = expand_keys(line);
 /// assert!(expanded.contains("Timestamp"));
+/// assert!(expanded.contains("Level"));
+/// assert!(expanded.contains("Action"));
 /// ```
 pub fn expand_keys(line: &str) -> String {
     let trimmed = line.trim();

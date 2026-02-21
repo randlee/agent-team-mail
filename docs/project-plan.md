@@ -2324,8 +2324,8 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| D.1 | TUI crate + live stream view (read-only) | C.2b | ⏳ PLANNED |
-| D.2 | Interactive controls (stdin inject, interrupt) | C.3 | ⏳ PLANNED |
+| D.1 | TUI crate + live stream view (read-only) | C.2b | ✅ [#136](https://github.com/randlee/agent-team-mail/pull/136) |
+| D.2 | Interactive controls (stdin inject, interrupt) | C.3 | 🔄 IN PROGRESS |
 | D.3 | Identifier cleanup + user demo | D.1, D.2 | ⏳ PLANNED |
 
 **Execution model**: D.1 and D.2 launch in parallel after Phase C integration merges to develop. D.1 needs only C.2b (session log tail + pub/sub). D.2 needs C.3 (control receiver endpoint).

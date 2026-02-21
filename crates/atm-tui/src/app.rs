@@ -28,6 +28,18 @@ pub enum FocusPanel {
     AgentTerminal,
 }
 
+/// A pending control action to dispatch on the next main-loop iteration.
+///
+/// Set by the event handler; consumed and cleared by the control dispatch block
+/// in `run_app`.
+#[derive(Debug, Clone)]
+pub enum PendingControl {
+    /// Inject text into the selected agent's stdin.
+    Stdin(String),
+    /// Send an interrupt signal to the selected agent.
+    Interrupt,
+}
+
 /// Top-level application state.
 ///
 /// Owned by the main event loop. The UI renders this state; the refresh ticker
@@ -53,6 +65,18 @@ pub struct App {
     pub focus: FocusPanel,
     /// Name of the agent whose session is currently being streamed.
     pub streaming_agent: Option<String>,
+    /// Current text in the Agent Terminal control input field.
+    pub control_input: String,
+    /// Whether the control input field currently has focus for text entry.
+    ///
+    /// Reserved for future use — the D.2 implementation does not yet differentiate
+    /// between panel focus and explicit input activation within the Agent Terminal.
+    #[expect(dead_code, reason = "Reserved for D.3 input-activation UX; not yet wired to render")]
+    pub control_input_active: bool,
+    /// Message shown in the status bar (replaced on the next control result).
+    pub status_message: Option<String>,
+    /// Pending control action to execute on the next loop iteration.
+    pub pending_control: Option<PendingControl>,
 }
 
 impl App {
@@ -69,6 +93,10 @@ impl App {
             should_quit: false,
             focus: FocusPanel::default(),
             streaming_agent: None,
+            control_input: String::new(),
+            control_input_active: false,
+            status_message: None,
+            pending_control: None,
         }
     }
 
@@ -122,6 +150,35 @@ impl App {
         self.stream_pos = 0;
         self.session_log_path = None;
     }
+
+    /// Returns `true` if the selected agent is "live" (control input is available).
+    ///
+    /// Live states are `"idle"` and `"busy"`. All other states — including
+    /// `"launching"`, `"killed"`, `"stale"`, `"closed"`, and any unknown value
+    /// — are considered not-live.
+    pub fn is_live(&self) -> bool {
+        self.members
+            .get(self.selected_index)
+            .map(|m| matches!(m.state.as_str(), "idle" | "busy"))
+            .unwrap_or(false)
+    }
+
+    /// Returns a human-readable reason why control input is not available, or
+    /// `None` if the agent is live.
+    pub fn not_live_reason(&self) -> Option<&'static str> {
+        match self
+            .members
+            .get(self.selected_index)
+            .map(|m| m.state.as_str())
+        {
+            Some("launching") => Some("Launching"),
+            Some("killed") => Some("Killed"),
+            Some("stale") => Some("Stale"),
+            Some("closed") => Some("Closed"),
+            Some("idle") | Some("busy") => None,
+            _ => Some("Not live"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -172,5 +229,89 @@ mod tests {
         assert_eq!(app.focus, FocusPanel::AgentTerminal);
         app.cycle_focus();
         assert_eq!(app.focus, FocusPanel::Dashboard);
+    }
+
+    #[test]
+    fn test_is_live_idle() {
+        let mut app = App::new("test".to_string());
+        app.members =
+            vec![MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 }];
+        assert!(app.is_live());
+    }
+
+    #[test]
+    fn test_is_live_busy() {
+        let mut app = App::new("test".to_string());
+        app.members =
+            vec![MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 }];
+        assert!(app.is_live());
+    }
+
+    #[test]
+    fn test_not_live_launching() {
+        let mut app = App::new("test".to_string());
+        app.members =
+            vec![MemberRow { agent: "a".into(), state: "launching".into(), inbox_count: 0 }];
+        assert!(!app.is_live());
+        assert_eq!(app.not_live_reason(), Some("Launching"));
+    }
+
+    #[test]
+    fn test_not_live_killed() {
+        let mut app = App::new("test".to_string());
+        app.members =
+            vec![MemberRow { agent: "a".into(), state: "killed".into(), inbox_count: 0 }];
+        assert!(!app.is_live());
+        assert_eq!(app.not_live_reason(), Some("Killed"));
+    }
+
+    #[test]
+    fn test_not_live_stale() {
+        let mut app = App::new("test".to_string());
+        app.members =
+            vec![MemberRow { agent: "a".into(), state: "stale".into(), inbox_count: 0 }];
+        assert!(!app.is_live());
+        assert_eq!(app.not_live_reason(), Some("Stale"));
+    }
+
+    #[test]
+    fn test_not_live_closed() {
+        let mut app = App::new("test".to_string());
+        app.members =
+            vec![MemberRow { agent: "a".into(), state: "closed".into(), inbox_count: 0 }];
+        assert!(!app.is_live());
+        assert_eq!(app.not_live_reason(), Some("Closed"));
+    }
+
+    #[test]
+    fn test_not_live_no_members() {
+        let app = App::new("test".to_string());
+        assert!(!app.is_live());
+        assert_eq!(app.not_live_reason(), Some("Not live"));
+    }
+
+    #[test]
+    fn test_not_live_unknown_state() {
+        let mut app = App::new("test".to_string());
+        app.members =
+            vec![MemberRow { agent: "a".into(), state: "unknown-state".into(), inbox_count: 0 }];
+        assert!(!app.is_live());
+        assert_eq!(app.not_live_reason(), Some("Not live"));
+    }
+
+    #[test]
+    fn test_live_reason_is_none_for_idle() {
+        let mut app = App::new("test".to_string());
+        app.members =
+            vec![MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 }];
+        assert_eq!(app.not_live_reason(), None);
+    }
+
+    #[test]
+    fn test_live_reason_is_none_for_busy() {
+        let mut app = App::new("test".to_string());
+        app.members =
+            vec![MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 }];
+        assert_eq!(app.not_live_reason(), None);
     }
 }

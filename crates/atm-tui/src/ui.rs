@@ -12,9 +12,9 @@
 //! │ arch-ctm idle   3  │ {"Timestamp":"...","Level":"info",...}      │
 //! │ ...                │ ...                                         │
 //! │                    ├─────────────────────────────────────────────┤
-//! │                    │ [disabled] control available in next release│ input
+//! │                    │ Type to send stdin...  (or [disabled])      │ input
 //! ├────────────────────┴─────────────────────────────────────────────┤
-//! │ q: quit  ↑↓: select agent  Tab: switch panel                    │ status
+//! │ q: quit  ↑↓: select  Tab: panel  Ctrl-I: interrupt              │ status
 //! └──────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -45,7 +45,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, outer[0], app);
     draw_body(frame, outer[1], app);
-    draw_status_bar(frame, outer[2]);
+    draw_status_bar(frame, outer[2], app);
 }
 
 // ── Header ────────────────────────────────────────────────────────────────────
@@ -166,14 +166,14 @@ fn draw_agent_terminal(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(Color::DarkGray)
     };
 
-    // Split right panel: stream area + disabled input bar
+    // Split right panel: stream area + control input bar
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(3)])
         .split(area);
 
     draw_stream_pane(frame, rows[0], app, border_style, focused);
-    draw_disabled_input(frame, rows[1], border_style);
+    draw_control_input(frame, rows[1], app, border_style);
 }
 
 fn draw_stream_pane(
@@ -239,38 +239,68 @@ fn draw_stream_pane(
     }
 }
 
-fn draw_disabled_input(frame: &mut Frame, area: Rect, border_style: Style) {
+/// Render the Agent Terminal control input field.
+///
+/// Shows an active text cursor and hint when the selected agent is live;
+/// shows a disabled placeholder with reason otherwise.
+fn draw_control_input(frame: &mut Frame, area: Rect, app: &App, border_style: Style) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(border_style);
 
-    let placeholder = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "[disabled] ",
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        ),
-        Span::styled(
-            "control available in next release",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]))
-    .block(block);
-
-    frame.render_widget(placeholder, area);
+    if app.is_live() {
+        let content = if app.control_input.is_empty() {
+            Line::from(Span::styled(
+                "Type to send stdin... (Enter: send  Ctrl-I: interrupt  Esc: clear)",
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else {
+            Line::from(vec![
+                Span::raw(app.control_input.as_str()),
+                Span::styled("█", Style::default().fg(Color::Cyan)),
+            ])
+        };
+        frame.render_widget(Paragraph::new(content).block(block), area);
+    } else {
+        let reason = app.not_live_reason().unwrap_or("Not live");
+        let content = Line::from(vec![
+            Span::styled(
+                "[disabled] ",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            ),
+            Span::styled(
+                format!("control input not available: {reason}"),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(content).block(block), area);
+    }
 }
 
 // ── Status bar ────────────────────────────────────────────────────────────────
 
-fn draw_status_bar(frame: &mut Frame, area: Rect) {
-    let text = Line::from(vec![
-        Span::styled(" q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(": quit  "),
-        Span::styled("↑↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(": select agent  "),
-        Span::styled("Tab", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(": switch panel "),
-    ]);
+fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
+    let text = if let Some(ref msg) = app.status_message {
+        Line::from(vec![
+            Span::styled(" ✓ ", Style::default().fg(Color::Green)),
+            Span::raw(msg.as_str()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(": quit  "),
+            Span::styled("↑↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(": select  "),
+            Span::styled("Tab", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(": panel  "),
+            Span::styled(
+                "Ctrl-I",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(": interrupt"),
+        ])
+    };
     frame.render_widget(
         Paragraph::new(text).style(Style::default().bg(Color::DarkGray)),
         area,

@@ -13,6 +13,11 @@
 //! | `q` / `Ctrl-C` | Quit |
 //! | `↑` / `↓` | Select agent |
 //! | `Tab` | Switch panel focus |
+//! | _printable_ (Agent Terminal, live agent) | Append to stdin input |
+//! | `Enter` | Send stdin text to agent |
+//! | `Ctrl-I` | Send interrupt to agent |
+//! | `Esc` | Clear current input |
+//! | `Backspace` | Delete last character |
 //!
 //! # Architecture
 //!
@@ -20,7 +25,8 @@
 //! 1. Refreshes the agent list and inbox counts from the daemon / filesystem
 //!    (rate-limited to once every 2 s to avoid socket spam).
 //! 2. Appends new bytes from the selected agent's session log (full 100 ms rate).
-//! 3. Redraws the terminal frame.
+//! 3. Dispatches any pending control action (stdin inject / interrupt).
+//! 4. Redraws the terminal frame.
 //!
 //! All input events are handled between ticks with a non-blocking poll.
 
@@ -45,17 +51,15 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::time::interval;
 
 use agent_team_mail_core::{
-    daemon_client::{AgentSummary, query_list_agents},
+    control::{ControlAck, ControlAction, ControlRequest, ControlResult, CONTROL_SCHEMA_VERSION},
+    daemon_client::{AgentSummary, query_list_agents, send_control},
     event_log::{EventFields, emit_event_best_effort},
     home::get_home_dir,
     logging,
 };
 
-use app::{App, MemberRow};
+use app::{App, MemberRow, PendingControl};
 use dashboard::{get_inbox_count, session_log_path};
-
-/// TUI refresh poll interval (100 ms — see docs/tui-mvp-architecture.md §5).
-const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -133,7 +137,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     let home: PathBuf = get_home_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Resolve home for inbox reads (used in the loop closure below)
-    let mut tick = interval(TICK_INTERVAL);
+    let mut tick = interval(Duration::from_millis(100));
 
     loop {
         // ── Draw ──────────────────────────────────────────────────────────────
@@ -215,6 +219,12 @@ async fn run_app<B: ratatui::backend::Backend>(
             }
         }
 
+        // ── Control action dispatch ───────────────────────────────────────────
+        if let Some(pending) = app.pending_control.take() {
+            let result = execute_control(&team, &app.streaming_agent, pending).await;
+            app.status_message = Some(result);
+        }
+
         // ── Tick ──────────────────────────────────────────────────────────────
         tick.tick().await;
     }
@@ -290,4 +300,207 @@ fn emit_stream_detach_event(team: &str, agent: &str) {
         agent_id: Some(agent.to_string()),
         ..Default::default()
     });
+}
+
+// ── Control dispatch ──────────────────────────────────────────────────────────
+
+/// Build and dispatch a control request, returning a human-readable result string.
+///
+/// If no agent is selected, returns an error message without touching the
+/// daemon.  On a first-attempt [`ControlResult::Timeout`] the request is
+/// retried once after a 2-second delay with the same idempotency key.
+async fn execute_control(
+    team: &str,
+    streaming_agent: &Option<String>,
+    action: PendingControl,
+) -> String {
+    let Some(agent_id) = streaming_agent else {
+        return "No agent selected".to_string();
+    };
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let sent_at = chrono::Utc::now().to_rfc3339();
+
+    let (control_action, payload) = match &action {
+        PendingControl::Stdin(text) => (ControlAction::Stdin, Some(text.clone())),
+        PendingControl::Interrupt => (ControlAction::Interrupt, None),
+    };
+
+    let msg_type = match &control_action {
+        ControlAction::Stdin => "control.stdin.request".to_string(),
+        ControlAction::Interrupt => "control.interrupt.request".to_string(),
+    };
+    let signal = match &control_action {
+        ControlAction::Interrupt => Some("interrupt".to_string()),
+        ControlAction::Stdin => None,
+    };
+
+    let request = ControlRequest {
+        v: CONTROL_SCHEMA_VERSION,
+        request_id,
+        msg_type,
+        signal,
+        sent_at,
+        team: team.to_string(),
+        session_id: String::new(), // daemon resolves from agent_id
+        agent_id: agent_id.clone(),
+        sender: "tui".to_string(),
+        action: control_action,
+        payload,
+        content_ref: None,
+    };
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm-tui",
+        action: "control_send",
+        team: Some(team.to_string()),
+        agent_id: Some(agent_id.clone()),
+        result: None,
+        ..Default::default()
+    });
+
+    let ack = send_with_retry(&request).await;
+
+    let result_str = match &ack {
+        Ok(a) => format_ack_result(a),
+        Err(e) => format!("error: {e}"),
+    };
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm-tui",
+        action: "control_ack",
+        team: Some(team.to_string()),
+        agent_id: Some(agent_id.clone()),
+        result: Some(result_str.clone()),
+        ..Default::default()
+    });
+
+    result_str
+}
+
+/// Send a control request to the daemon, retrying once on [`ControlResult::Timeout`].
+///
+/// Uses [`tokio::task::spawn_blocking`] because [`send_control`] performs
+/// blocking Unix socket I/O.
+async fn send_with_retry(request: &ControlRequest) -> anyhow::Result<ControlAck> {
+    let req1 = request.clone();
+    let result = tokio::task::spawn_blocking(move || send_control(&req1)).await??;
+
+    if result.result == ControlResult::Timeout {
+        // Single retry after 2 s with the same idempotency key.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let req2 = request.clone();
+        return tokio::task::spawn_blocking(move || send_control(&req2)).await?;
+    }
+
+    Ok(result)
+}
+
+/// Format a [`ControlAck`] result as a short human-readable string for the status bar.
+fn format_ack_result(ack: &ControlAck) -> String {
+    match ack.result {
+        ControlResult::Ok if ack.duplicate => "already delivered".to_string(),
+        ControlResult::Ok => "ok".to_string(),
+        ControlResult::NotLive => "not live".to_string(),
+        ControlResult::NotFound => "not found".to_string(),
+        ControlResult::Busy => "busy".to_string(),
+        ControlResult::Timeout => "timeout".to_string(),
+        ControlResult::Rejected => {
+            let detail = ack.detail.as_deref().unwrap_or("no detail");
+            format!("rejected: {detail}")
+        }
+        ControlResult::InternalError => "internal error".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_team_mail_core::control::{ControlAck, ControlResult};
+
+    fn make_ack(result: ControlResult, duplicate: bool, detail: Option<&str>) -> ControlAck {
+        ControlAck {
+            request_id: "req-1".to_string(),
+            result,
+            duplicate,
+            detail: detail.map(str::to_string),
+            acked_at: "2026-02-21T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_format_ack_ok() {
+        let ack = make_ack(ControlResult::Ok, false, None);
+        assert_eq!(format_ack_result(&ack), "ok");
+    }
+
+    #[test]
+    fn test_format_ack_duplicate() {
+        let ack = make_ack(ControlResult::Ok, true, None);
+        assert_eq!(format_ack_result(&ack), "already delivered");
+    }
+
+    #[test]
+    fn test_format_ack_not_live() {
+        let ack = make_ack(ControlResult::NotLive, false, None);
+        assert_eq!(format_ack_result(&ack), "not live");
+    }
+
+    #[test]
+    fn test_format_ack_not_found() {
+        let ack = make_ack(ControlResult::NotFound, false, None);
+        assert_eq!(format_ack_result(&ack), "not found");
+    }
+
+    #[test]
+    fn test_format_ack_busy() {
+        let ack = make_ack(ControlResult::Busy, false, None);
+        assert_eq!(format_ack_result(&ack), "busy");
+    }
+
+    #[test]
+    fn test_format_ack_timeout() {
+        let ack = make_ack(ControlResult::Timeout, false, None);
+        assert_eq!(format_ack_result(&ack), "timeout");
+    }
+
+    #[test]
+    fn test_format_ack_rejected_with_detail() {
+        let ack = make_ack(ControlResult::Rejected, false, Some("rate limited"));
+        assert_eq!(format_ack_result(&ack), "rejected: rate limited");
+    }
+
+    #[test]
+    fn test_format_ack_rejected_without_detail() {
+        let ack = make_ack(ControlResult::Rejected, false, None);
+        assert_eq!(format_ack_result(&ack), "rejected: no detail");
+    }
+
+    #[test]
+    fn test_format_ack_internal_error() {
+        let ack = make_ack(ControlResult::InternalError, false, None);
+        assert_eq!(format_ack_result(&ack), "internal error");
+    }
+
+    #[tokio::test]
+    async fn test_execute_control_no_agent_returns_message() {
+        // When streaming_agent is None, execute_control returns a "no agent" message.
+        let result = execute_control("atm-dev", &None, PendingControl::Interrupt).await;
+        assert_eq!(result, "No agent selected");
+    }
+
+    #[tokio::test]
+    async fn test_execute_control_no_daemon_returns_error_string() {
+        // With a selected agent but no daemon, the result is an error string.
+        // We just assert it is non-empty and does not panic.
+        let result = execute_control(
+            "atm-dev",
+            &Some("arch-ctm".to_string()),
+            PendingControl::Stdin("hello".to_string()),
+        )
+        .await;
+        assert!(!result.is_empty(), "result should be non-empty on daemon error");
+    }
 }

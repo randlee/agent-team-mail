@@ -63,16 +63,20 @@ pub fn session_log_path(team: &str, agent: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::fs;
+    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    /// Helper: set ATM_HOME to the temp dir path (used instead of `serial_test`
-    /// because the tests use different temp dirs and do not conflict).
+    /// Serialises tests that mutate `ATM_HOME` to prevent races when the full
+    /// workspace test suite runs crate tests in parallel.
+    static ATM_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Helper: acquire the serialisation lock, set ATM_HOME to the temp dir path,
+    /// run the closure, then restore.
     fn with_tmp_home<F: FnOnce(&Path)>(f: F) {
+        let _guard = ATM_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().expect("tmp dir");
-        // SAFETY: test-only env mutation; tests run in isolation within a
-        // single-threaded test process for this module.
+        // SAFETY: env mutation serialised by ATM_HOME_LOCK.
         unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
         f(tmp.path());
         unsafe { std::env::remove_var("ATM_HOME") };
@@ -81,7 +85,6 @@ mod tests {
     // ── test_session_log_path ────────────────────────────────────────────────
 
     #[test]
-    #[serial]
     fn test_session_log_path() {
         with_tmp_home(|home| {
             let path = session_log_path("atm-dev", "arch-ctm");
@@ -97,7 +100,6 @@ mod tests {
     // ── test_inbox_count_empty ───────────────────────────────────────────────
 
     #[test]
-    #[serial]
     fn test_inbox_count_empty() {
         with_tmp_home(|home| {
             // Inbox file does not exist yet.
@@ -117,7 +119,6 @@ mod tests {
     // ── test_inbox_count_with_messages ──────────────────────────────────────
 
     #[test]
-    #[serial]
     fn test_inbox_count_with_messages() {
         with_tmp_home(|home| {
             let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");

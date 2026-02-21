@@ -1,12 +1,12 @@
-# TUI Control Protocol (Phase C / 13)
+# TUI Control Protocol (Phase C Receiver Baseline + Phase D TUI Contract)
 
-**Version**: 0.1  
-**Date**: 2026-02-20  
+**Version**: 0.2  
+**Date**: 2026-02-21  
 **Status**: Draft
 
 ---
 
-## 1. Scope
+## 1. Scope and Compatibility Model
 
 Defines message contracts for TUI control actions:
 
@@ -30,9 +30,19 @@ Phase alignment:
 - full interactive TUI control flows are Phase D scope
 - provider-native ids (such as Codex `threadId`) are MCP-internal details and must not appear in public TUI/control payloads
 
+Compatibility note (important):
+
+- the **receiver baseline implemented in C.3** accepts `command = "control"` payloads with:
+  - `v`, `request_id`, `team`, `session_id`, `agent_id`, `sender`, `sent_at`
+  - `action` (`stdin` or `interrupt`)
+  - `payload` or `content_ref`
+- the `type = "control.*"` contracts in this document remain the canonical UI/control contract model
+- sender/receiver adapters may map between `type` form and current receiver `action` form until a single canonical wire shape is finalized
+- provider-native ids (such as Codex `threadId`) are MCP-internal and MUST NOT appear in public TUI/control payloads
+
 ---
 
-## 2. Envelope
+## 2. Envelope and Transport
 
 Control messages are carried as payloads inside the existing daemon socket envelope.
 
@@ -61,6 +71,11 @@ Versioning rule:
 
 - `version` applies to daemon socket framing
 - `v` applies only to control payload schema
+
+Transport rule:
+
+- TUI must use daemon socket `command = "control"` for control actions
+- ATM mailbox commands are out of scope for this protocol and must not be used as control fallback
 
 ---
 
@@ -206,6 +221,11 @@ Default retry policy:
 - retries configurable
 - recommended default: `1` retry with short backoff
 
+Interrupt special case:
+
+- unsupported interrupt paths must reject before dedupe slot consumption
+- repeated unsupported interrupt requests with same `request_id` should not be marked duplicate unless actual execution semantics change
+
 ---
 
 ## 6. Size Limits and File-Reference Fallback
@@ -266,6 +286,12 @@ Minimum audit fields for both request and ack events:
 - `sender` (if available)
 - `result`
 - `duplicate`
+
+Operational logging note:
+
+- compact event-log keys on disk are expected; UI should expand to full labels
+- by default, message text is omitted
+- verbose logging modes may include truncated/full payload text
 
 ---
 
@@ -366,6 +392,7 @@ Minimum audit fields for both request and ack events:
 - explicit `retry_of` chain metadata for observability
 - signed control messages for cross-host relays
 - streaming partial-ack protocol for very large reference payload workflows
+- canonical convergence of `type` and `action` payload forms
 
 ---
 
@@ -382,3 +409,21 @@ Replay safety:
 
 - requests older than a configurable max age should be rejected
 - `sent_at` skew tolerance should be validated (recommended: bounded clock-skew window)
+
+---
+
+## 11. MVP vs Hardening Boundary (D vs E)
+
+Phase D (MVP required):
+
+- schema validation
+- live-state gating
+- bounded retry with stable idempotency key
+- ack surface and audit visibility
+
+Recommended Phase E hardening:
+
+- restart-safe dedupe store (durable instead of memory-only)
+- explicit sender authorization policy hooks (role-based controls)
+- richer timeout/backoff policy by action type
+- failure-injection tests for daemon restart, queue backlog, and stale control refs

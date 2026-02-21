@@ -1607,6 +1607,8 @@ mod tests {
         let req = ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
             request_id: Uuid::new_v4().to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
             sent_at: chrono::Utc::now().to_rfc3339(),
             team: "atm-dev".to_string(),
             session_id: "sess-1".to_string(),
@@ -1621,8 +1623,8 @@ mod tests {
         assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
         assert!(!ack.duplicate);
 
-        let qdir = agent_team_mail_core::home::get_home_dir()
-            .unwrap()
+        let qdir = tmp
+            .path()
             .join(".config/atm/agent-sessions/atm-dev/arch-ctm/stdin_queue");
         assert!(qdir.exists());
         let mut rd = tokio::fs::read_dir(qdir).await.unwrap();
@@ -1660,6 +1662,8 @@ mod tests {
         let mk_req = || ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
             request_id: request_id.clone(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
             sent_at: chrono::Utc::now().to_rfc3339(),
             team: "atm-dev".to_string(),
             session_id: "sess-dup".to_string(),
@@ -1682,8 +1686,8 @@ mod tests {
         );
         assert!(ack2.duplicate);
 
-        let qdir = agent_team_mail_core::home::get_home_dir()
-            .unwrap()
+        let qdir = tmp
+            .path()
             .join(".config/atm/agent-sessions/atm-dev/arch-ctm/stdin_queue");
         let mut rd = tokio::fs::read_dir(qdir).await.unwrap();
         let mut files = 0usize;
@@ -1714,6 +1718,8 @@ mod tests {
         let req = ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
             request_id: Uuid::new_v4().to_string(),
+            msg_type: "control.interrupt.request".to_string(),
+            signal: Some("interrupt".to_string()),
             sent_at: chrono::Utc::now().to_rfc3339(),
             team: "atm-dev".to_string(),
             session_id: "sess-int".to_string(),
@@ -1758,6 +1764,8 @@ mod tests {
         let mk_req = || ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
             request_id: request_id.clone(),
+            msg_type: "control.interrupt.request".to_string(),
+            signal: Some("interrupt".to_string()),
             sent_at: chrono::Utc::now().to_rfc3339(),
             team: "atm-dev".to_string(),
             session_id: "sess-int-retry".to_string(),
@@ -1805,6 +1813,8 @@ mod tests {
         let req = ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
             request_id: Uuid::new_v4().to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
             sent_at: old.to_rfc3339(),
             team: "atm-dev".to_string(),
             session_id: "sess-stale".to_string(),
