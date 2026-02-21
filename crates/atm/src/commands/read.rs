@@ -268,9 +268,14 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         }
     }
 
+    // Determine the calling identity so we never touch another agent's read flags.
+    let calling_identity = config.core.identity.clone();
+
     // Mark messages as read (unless --no-mark specified)
+    // Only mark when the caller is reading their own inbox — peeking at another
+    // agent's inbox must never alter that agent's read state.
     let mut marked_count: u64 = 0;
-    if !args.no_mark && !filtered_messages.is_empty() {
+    if !args.no_mark && !filtered_messages.is_empty() && agent_name == calling_identity {
         // Find message IDs that need to be marked
         let filtered_ids: Vec<String> = filtered_messages
             .iter()
