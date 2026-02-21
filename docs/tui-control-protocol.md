@@ -54,7 +54,7 @@ Control payload object fields:
 
 Optional:
 
-- `thread_id` (string): backend-native thread/conversation handle
+- `thread_id` (string): [MCP-internal adapter only] backend-native thread/conversation handle — not part of the public TUI control API; set only by MCP adapter layer
 - `meta` (object): transport/UI metadata
 
 Versioning rule:
@@ -84,7 +84,7 @@ Required fields:
 
 Optional fields:
 
-- `thread_id`
+- `thread_id` [MCP-internal adapter only]
 - `content_encoding` (default: `utf-8`)
 - `content_preview`
 - `interrupt` (default: `false`)
@@ -133,7 +133,7 @@ Required fields:
 
 Optional fields:
 
-- `thread_id`
+- `thread_id` [MCP-internal adapter only]
 - `meta.retry_count`
 - `meta.ui_source`
 
@@ -282,7 +282,6 @@ Minimum audit fields for both request and ack events:
   "request_id": "req_01HZY8QJ8R7G6K2YJ7V2M9A1P3",
   "session_id": "claude-session-uuid",
   "agent_id": "codex:abc123",
-  "thread_id": "thread-xyz789",
   "team": "atm-dev",
   "sender": "arch-ctm",
   "sent_at": "2026-02-20T21:15:00Z",

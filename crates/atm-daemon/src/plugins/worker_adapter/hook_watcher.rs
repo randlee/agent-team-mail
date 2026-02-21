@@ -54,7 +54,12 @@ pub struct HookEvent {
     pub agent: Option<String>,
     /// ATM team name (e.g., `"atm-dev"`).
     pub team: Option<String>,
-    /// Codex thread ID.
+    /// Codex internal thread/conversation handle.
+    ///
+    /// **MCP-internal adapter field only.** This field parses the `thread-id` key
+    /// from Codex hook relay events (`events.jsonl`). It is NOT part of the public
+    /// ATM TUI or control protocol API — it is an adapter concern for the MCP layer.
+    /// The public TUI control API uses `session_id` + `agent_id` for routing.
     pub thread_id: Option<String>,
     /// Codex turn ID.
     pub turn_id: Option<String>,

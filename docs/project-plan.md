@@ -2326,6 +2326,7 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 |--------|------|------------|--------|
 | D.1 | TUI crate + live stream view (read-only) | C.2b | ⏳ PLANNED |
 | D.2 | Interactive controls (stdin inject, interrupt) | C.3 | ⏳ PLANNED |
+| D.3 | Identifier cleanup + user demo | D.1 + D.2 (independent) | ⏳ PLANNED |
 
 **Execution model**: D.1 and D.2 launch in parallel after Phase C integration merges to develop. D.1 needs only C.2b (session log tail + pub/sub). D.2 needs C.3 (control receiver endpoint).
 
@@ -2389,7 +2390,93 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 ---
 
-## 16. Future Plugins
+### Sprint D.3 — Identifier Cleanup + User Demo
+
+**Branch**: `feature/pD-s3-identifier-cleanup`
+**Crate(s)**: `docs/`, `crates/atm-daemon/` (doc comment only), `demos/`
+**Depends on**: D.1 + D.2 (can run independently of D.1/D.2 — docs-only + demo script)
+
+**Deliverables**:
+
+1. **Enforce `agent_id` as the only public TUI identifier** — mark `thread_id` as MCP-internal in `docs/tui-control-protocol.md` and `docs/tui-mvp-architecture.md`; remove `thread_id` from public example payloads
+2. **Audit `hook_watcher.rs`** — confirm `HookEvent.thread_id` is Codex-adapter-only; add doc comment clarifying it is not exposed in the public API
+3. **Regression check** — `rg "thread_id|threadId" docs/tui-*.md crates/atm/src crates/atm-daemon/src` must return only approved MCP-internal exceptions (documented in `docs/thread-id-audit.md`)
+4. **User demo script** — `demos/tui-demo.sh` committed and runnable from clean checkout; covers dashboard, agent terminal, control send/ack, and one degraded scenario (daemon unavailable or `not_live` target)
+5. **Demo artifacts** — `demos/README.md` with sign-off notes
+
+**Acceptance Criteria**:
+- [ ] No `thread_id` in `docs/tui-*.md` payload definitions/examples outside of explicit MCP-internal notes
+- [ ] `hook_watcher.rs` `thread_id` field has doc comment explicitly marking it adapter-only
+- [ ] `docs/thread-id-audit.md` lists all approved exceptions with rationale
+- [ ] `rg` audit command documented and expected output shown in `docs/thread-id-audit.md`
+- [ ] `demos/tui-demo.sh` committed and runnable; includes one degraded scenario
+- [ ] `demos/README.md` with team-lead sign-off
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+## 16. Phase E: ATM Core Bug Fixes (Priority)
+
+**Status**: PLANNED (priority — these block reliable session startup every session)
+**Goal**: Fix two known bugs in ATM core that require manual workarounds every session.
+**Integration branch**: `integrate/phase-E`
+
+### Sprint E.1 — Fix `atm teams resume` session ID reliability
+
+**Branch**: `feature/pE-s1-resume-session-id`
+**GitHub Issue**: #141
+**Crate(s)**: `crates/atm` (CLI), `crates/atm-core`
+**Depends on**: Phase D complete
+
+#### Problem
+
+`atm teams resume <team>` reads `CLAUDE_SESSION_ID` from the process environment to update `leadSessionId` in `config.json`. However, `CLAUDE_SESSION_ID` is not reliably exported to bash subshells — the Rust binary reads a stale or empty value, setting the wrong session ID. The gate hook (`gate-agent-spawns.py`) gets the real session ID from Claude Code's tool call JSON, causing a mismatch that blocks named teammate spawning.
+
+#### Scope
+
+1. `atm teams resume` accepts `--session-id <id>` flag for explicit override
+2. Fallback: read session ID from gate debug log (`/tmp/gate-agent-spawns-debug.jsonl`) when env var is absent/stale
+3. Or: gate hook writes a stable session ID file (`/tmp/atm-session-id`) that `atm` reads reliably
+4. Update `CLAUDE.md` initialization process to use the fixed command reliably
+
+#### Exit Criteria
+
+- [ ] `atm teams resume atm-dev` sets `leadSessionId` to the correct current session ID without manual Python workaround
+- [ ] Verification: gate hook allows named teammate spawning immediately after `atm teams resume`
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint E.2 — Fix inbox read marking other agents' messages as read
+
+**Branch**: `feature/pE-s2-inbox-read-scoping`
+**GitHub Issue**: #142
+**Crate(s)**: `crates/atm` (CLI), `crates/atm-core`
+**Depends on**: E.1 (or parallel)
+
+#### Problem
+
+When team-lead runs `atm read` or `atm inbox`, ATM marks messages as `read: true` in **all agents' inboxes**, not just the calling agent's inbox. This causes arch-ctm to silently miss messages that were marked read by team-lead's polling before arch-ctm saw them.
+
+#### Scope
+
+1. `atm read` / `atm inbox` only marks messages read in the **calling agent's** inbox
+2. Never touch other agents' inbox `read` flags during polling
+3. Add test: team-lead `atm read` does not modify arch-ctm's inbox read status
+
+#### Exit Criteria
+
+- [ ] `atm read` only modifies calling agent's own inbox
+- [ ] arch-ctm's messages remain `read: false` after team-lead polls
+- [ ] Integration test confirms inbox isolation
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+## 17. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
 
@@ -2467,6 +2554,7 @@ Additional plugins planned (each is a self-contained sprint series):
 | **C** | C.3 | Control receiver stub (daemon endpoint + dedupe) | ⏳ | — |
 | **D** | D.1 | TUI crate + live stream view (read-only) | ⏳ | — |
 | **D** | D.2 | Interactive controls (stdin inject, interrupt) | ⏳ | — |
+| **D** | D.3 | Identifier cleanup + user demo | ⏳ | — |
 
 **Completed**: 65 sprints across 13 phases (CI green)
 **Current version**: v0.13.0
