@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+description = "Terminal UI for agent-team-mail: live streaming dashboard for AI agent teams"
 
 [[bin]]
 name = "atm-tui"
