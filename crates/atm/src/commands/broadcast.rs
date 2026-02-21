@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use chrono::Utc;
@@ -175,6 +176,21 @@ pub fn execute(args: BroadcastArgs) -> Result<()> {
         .iter()
         .filter(|s| s.outcome.is_err())
         .count();
+    emit_event_best_effort(EventFields {
+        level: if failed_count > 0 { "warn" } else { "info" },
+        source: "atm",
+        action: "broadcast",
+        team: Some(team_name.to_string()),
+        agent_id: Some(config.core.identity.clone()),
+        count: Some(target_agents.len() as u64),
+        result: Some(if failed_count > 0 {
+            format!("partial_failure:{failed_count}")
+        } else {
+            "ok".to_string()
+        }),
+        ..Default::default()
+    });
+
     if failed_count > 0 {
         anyhow::bail!("Broadcast completed with {failed_count} failed deliveries");
     }

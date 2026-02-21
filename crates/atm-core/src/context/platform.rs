@@ -1,6 +1,7 @@
 //! Platform detection
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// Operating system platform
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,7 +23,7 @@ impl Platform {
             "windows" => Platform::Windows,
             os => {
                 // Default to Linux for unknown Unix-like systems
-                eprintln!("Warning: Unknown OS '{os}', defaulting to Linux");
+                warn!("Unknown OS '{os}', defaulting to Linux");
                 Platform::Linux
             }
         }

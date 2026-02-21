@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use agent_team_mail_core::config::{resolve_alias, resolve_config, Config, ConfigOverrides};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{inbox_append, WriteOutcome};
 use agent_team_mail_core::io::lock::acquire_lock;
@@ -11,6 +12,7 @@ use clap::Args;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use agent_team_mail_core::text::{truncate_chars_slice, validate_message_text, DEFAULT_MAX_MESSAGE_BYTES};
@@ -63,6 +65,7 @@ pub struct SendArgs {
 
 /// Execute the send command
 pub fn execute(args: SendArgs) -> Result<()> {
+    debug!("send command start");
     // Resolve configuration
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -183,6 +186,19 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     // Dry run output
     if args.dry_run {
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm",
+            action: "send_dry_run",
+            team: Some(team_name.clone()),
+            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            agent_id: Some(config.core.identity.clone()),
+            agent_name: Some(config.core.identity.clone()),
+            target: Some(agent_name.clone()),
+            result: Some("ok".to_string()),
+            message_text: Some(final_message_text.clone()),
+            ..Default::default()
+        });
         if args.json {
             let output = serde_json::json!({
                 "action": "send",
@@ -212,6 +228,32 @@ pub fn execute(args: SendArgs) -> Result<()> {
     }
 
     let outcome = inbox_append(&inbox_path, &inbox_message, &team_name, &agent_name)?;
+    let (result_text, conflict_count): (&str, Option<u64>) = match &outcome {
+        WriteOutcome::Success => ("success", None),
+        WriteOutcome::ConflictResolved { merged_messages } => {
+            ("conflict_resolved", Some(*merged_messages as u64))
+        }
+        WriteOutcome::Queued { .. } => ("queued", None),
+    };
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "send",
+        team: Some(team_name.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: Some(config.core.identity.clone()),
+        agent_name: Some(config.core.identity.clone()),
+        target: Some(agent_name.clone()),
+        result: Some(result_text.to_string()),
+        message_id: inbox_message.message_id.clone(),
+        count: conflict_count,
+        message_text: Some(final_message_text.clone()),
+        ..Default::default()
+    });
+    info!(
+        "send outcome: team={} agent={} result={}",
+        team_name, agent_name, result_text
+    );
 
     // Auto-subscribe the sender to the target agent's idle event (upsert — refreshes TTL
     // if a subscription already exists). This is best-effort: errors are silently ignored

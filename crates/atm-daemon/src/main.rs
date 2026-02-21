@@ -1,6 +1,8 @@
 //! ATM Daemon - Background service for agent team mail plugins
 
 use anyhow::{Context, Result};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::logging;
 use agent_team_mail_daemon::daemon;
 use agent_team_mail_daemon::daemon::{new_launch_sender, new_pubsub_store, new_session_registry, new_state_store, StatusWriter};
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
@@ -38,17 +40,12 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Initialize logging
-    let log_level = if args.verbose {
-        tracing::Level::DEBUG
-    } else {
-        tracing::Level::INFO
-    };
-
-    tracing_subscriber::fmt()
-        .with_max_level(log_level)
-        .with_target(false)
-        .init();
+    // Initialize shared logging. --verbose maps to ATM_LOG=debug.
+    if args.verbose {
+        // SAFETY: process-local env mutation during startup before worker tasks spawn.
+        unsafe { std::env::set_var("ATM_LOG", "debug") };
+    }
+    logging::init();
 
     info!("ATM Daemon starting...");
 
@@ -72,6 +69,17 @@ async fn main() -> Result<()> {
 
     let config = agent_team_mail_core::config::resolve_config(&config_overrides, &current_dir, &home_dir)
         .context("Failed to resolve configuration")?;
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm-daemon",
+        action: "daemon_start",
+        team: Some(config.core.default_team.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: std::env::var("ATM_IDENTITY").ok(),
+        agent_name: std::env::var("ATM_IDENTITY").ok(),
+        result: Some("starting".to_string()),
+        ..Default::default()
+    });
 
     if let Some(config_path) = args.config {
         info!("Loaded config from: {}", config_path.display());
@@ -230,7 +238,7 @@ async fn main() -> Result<()> {
     });
 
     // Run the daemon event loop
-    daemon::run(
+    let run_result = daemon::run(
         &mut registry,
         &plugin_ctx,
         cancel_token,
@@ -240,8 +248,33 @@ async fn main() -> Result<()> {
         launch_tx,
         session_registry,
     )
-    .await
-    .context("Daemon event loop failed")?;
+    .await;
+    match &run_result {
+        Ok(_) => emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm-daemon",
+            action: "daemon_stop",
+            team: Some(plugin_ctx.config.core.default_team.clone()),
+            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            agent_id: std::env::var("ATM_IDENTITY").ok(),
+            agent_name: std::env::var("ATM_IDENTITY").ok(),
+            result: Some("ok".to_string()),
+            ..Default::default()
+        }),
+        Err(e) => emit_event_best_effort(EventFields {
+            level: "error",
+            source: "atm-daemon",
+            action: "daemon_stop",
+            team: Some(plugin_ctx.config.core.default_team.clone()),
+            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            agent_id: std::env::var("ATM_IDENTITY").ok(),
+            agent_name: std::env::var("ATM_IDENTITY").ok(),
+            result: Some("error".to_string()),
+            error: Some(e.to_string()),
+            ..Default::default()
+        }),
+    }
+    run_result.context("Daemon event loop failed")?;
 
     info!("ATM Daemon shutdown complete");
     Ok(())

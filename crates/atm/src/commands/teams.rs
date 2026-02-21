@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::io::lock::acquire_lock;
@@ -14,6 +15,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::io::Write;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::util::settings::get_home_dir;
@@ -161,7 +163,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
             }
             Err(e) => {
                 let path_display = path.display();
-                eprintln!("Warning: Failed to read config for {path_display}: {e}");
+                warn!("Failed to read config for {path_display}: {e}");
             }
         }
     }
@@ -356,10 +358,10 @@ fn resume(args: ResumeArgs) -> Result<()> {
             }
             Ok(None) => {
                 // Daemon not running or agent not found — proceed
-                eprintln!("Warning: daemon not running, assuming old session is dead");
+                warn!("daemon not running, assuming old session is dead");
             }
             Err(_) => {
-                eprintln!("Warning: daemon not running, assuming old session is dead");
+                warn!("daemon not running, assuming old session is dead");
             }
         }
     }
@@ -424,7 +426,7 @@ fn resume(args: ResumeArgs) -> Result<()> {
                 notified += 1;
             }
             Err(e) => {
-                eprintln!("Warning: Failed to notify {}: {e}", member.name);
+                warn!("Failed to notify {}: {e}", member.name);
             }
         }
     }
@@ -458,7 +460,7 @@ fn kill_process(pid: u32) {
 
     #[cfg(not(unix))]
     {
-        eprintln!("Warning: --kill is not supported on this platform; skipping SIGTERM");
+        warn!("--kill is not supported on this platform; skipping SIGTERM");
     }
 }
 
@@ -533,7 +535,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 if args.force {
                     true
                 } else {
-                    eprintln!(
+                    warn!(
                         "Warning: daemon unreachable, skipping {} — use --force to override",
                         member.name
                     );
@@ -544,7 +546,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             Err(e) => {
                 // Unexpected I/O error after connection was established — cannot
                 // determine liveness; skip the member to avoid unsafe removal.
-                eprintln!(
+                warn!(
                     "Warning: daemon query error for {}, skipping: {e}",
                     member.name
                 );
@@ -558,7 +560,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             let inbox_path = inboxes_dir.join(format!("{}.json", member.name));
             if inbox_path.exists() {
                 if let Err(e) = fs::remove_file(&inbox_path) {
-                    eprintln!("Warning: Failed to remove inbox for {}: {e}", member.name);
+                    warn!("Failed to remove inbox for {}: {e}", member.name);
                 }
             }
             removed_names.push(member.name.clone());
@@ -597,12 +599,41 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     // Return an error if any members were skipped due to an unreachable daemon,
     // so the caller knows the cleanup was incomplete.
     if !skipped_names.is_empty() {
+        emit_event_best_effort(EventFields {
+            level: "warn",
+            source: "atm",
+            action: "teams_cleanup",
+            team: Some(args.team.clone()),
+            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            agent_id: std::env::var("ATM_IDENTITY").ok(),
+            agent_name: std::env::var("ATM_IDENTITY").ok(),
+            result: Some("incomplete".to_string()),
+            count: Some(removed_names.len() as u64),
+            error: Some(format!(
+                "skipped={} daemon_unreachable",
+                skipped_names.len()
+            )),
+            ..Default::default()
+        });
         return Err(anyhow::anyhow!(
             "Cleanup incomplete: {} member(s) skipped because daemon liveness could not be determined. \
              Start the daemon or use --force to remove without confirmation.",
             skipped_names.len()
         ));
     }
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "teams_cleanup",
+        team: Some(args.team.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: std::env::var("ATM_IDENTITY").ok(),
+        agent_name: std::env::var("ATM_IDENTITY").ok(),
+        result: Some("ok".to_string()),
+        count: Some(removed_names.len() as u64),
+        ..Default::default()
+    });
 
     Ok(())
 }

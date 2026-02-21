@@ -3,6 +3,7 @@
 use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedPubSubStore, SharedSessionRegistry, SharedStateStore};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -177,6 +178,13 @@ pub async fn run(
                     break;
                 }
                 Some(event) = event_rx.recv() => {
+                    let dispatch_span = tracing::info_span!(
+                        "daemon_dispatch",
+                        team = %event.team,
+                        agent = %event.agent,
+                        path = %event.path.display()
+                    );
+                    let _span_guard = dispatch_span.enter();
                     debug!("Dispatching event: team={}, agent={}, kind={:?}",
                            event.team, event.agent, event.kind);
 
@@ -206,6 +214,19 @@ pub async fn run(
                     }
 
                     for mut inbox_msg in inbox_msgs {
+                        emit_event_best_effort(EventFields {
+                            level: "info",
+                            source: "atm-daemon",
+                            action: "dispatch_message",
+                            team: Some(event.team.clone()),
+                            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+                            agent_id: Some(event.agent.clone()),
+                            agent_name: Some(event.agent.clone()),
+                            message_id: inbox_msg.message_id.clone(),
+                            result: Some("received".to_string()),
+                            ..Default::default()
+                        });
+
                         // Attach routing metadata for plugins
                         inbox_msg
                             .unknown_fields
@@ -231,6 +252,20 @@ pub async fn run(
                                 let mut plugin = plugin_arc.lock().await;
                                 debug!("Dispatching to plugin: {}", metadata.name);
                                 if let Err(e) = plugin.handle_message(&inbox_msg).await {
+                                    emit_event_best_effort(EventFields {
+                                        level: "error",
+                                        source: "atm-daemon",
+                                        action: "dispatch_plugin_error",
+                                        team: Some(event.team.clone()),
+                                        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+                                        agent_id: Some(event.agent.clone()),
+                                        agent_name: Some(event.agent.clone()),
+                                        message_id: inbox_msg.message_id.clone(),
+                                        target: Some(metadata.name.to_string()),
+                                        result: Some("error".to_string()),
+                                        error: Some(e.to_string()),
+                                        ..Default::default()
+                                    });
                                     error!("Plugin {} handle_message error: {}", metadata.name, e);
                                 }
                             }
