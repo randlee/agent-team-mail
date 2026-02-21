@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod context;
+pub mod control;
 pub mod daemon_client;
 pub mod event_log;
 pub mod home;

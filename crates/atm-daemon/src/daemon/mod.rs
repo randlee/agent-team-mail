@@ -1,3 +1,4 @@
+pub mod dedup;
 pub mod event_loop;
 pub mod session_registry;
 pub mod shutdown;
@@ -8,14 +9,14 @@ pub mod watcher;
 
 pub use event_loop::run;
 pub use session_registry::{
-    is_pid_alive, new_session_registry, SessionRecord, SessionRegistry, SessionState,
-    SharedSessionRegistry,
+    SessionRecord, SessionRegistry, SessionState, SharedSessionRegistry, is_pid_alive,
+    new_session_registry,
 };
 pub use shutdown::graceful_shutdown;
-pub use spool_task::spool_drain_loop;
 pub use socket::{
-    new_launch_sender, new_pubsub_store, new_state_store, start_socket_server, LaunchRequest,
-    LaunchSender, SharedPubSubStore, SharedStateStore, SocketServerHandle,
+    LaunchRequest, LaunchSender, SharedPubSubStore, SharedStateStore, SocketServerHandle,
+    new_launch_sender, new_pubsub_store, new_state_store, start_socket_server,
 };
+pub use spool_task::spool_drain_loop;
 pub use status::{DaemonStatus, PluginStatus, PluginStatusKind, StatusWriter};
-pub use watcher::{watch_inboxes, InboxEvent, InboxEventKind};
+pub use watcher::{InboxEvent, InboxEventKind, watch_inboxes};
