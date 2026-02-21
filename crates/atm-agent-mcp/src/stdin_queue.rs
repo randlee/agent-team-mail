@@ -1,18 +1,40 @@
 //! Stdin queue for non-destructive ATM message injection into a running Codex session.
 //!
-//! Messages are written as `{uuid}.json` files and atomically claimed by rename to
-//! `{uuid}.claimed` before being written to the Codex process stdin.  This prevents
-//! double-delivery when multiple writers race to inject.
+//! Messages are written as `{uuid}.json` files and atomically claimed via a
+//! `{uuid}.lock` sentinel file before being written to the Codex process stdin.
+//! This prevents double-delivery when multiple drainers race to inject the same
+//! message concurrently.
 //!
-//! Queue directory: `{ATM_HOME}/.config/atm/agent-sessions/{team}/{agent_id}/stdin_queue/`
-//! (uses [`agent_team_mail_core::home::get_home_dir`] for `ATM_HOME` -- cross-platform,
+//! ## Claim protocol
+//!
+//! To claim `{uuid}.json`:
+//! 1. Atomically create `{uuid}.lock` with `create_new(true)` — maps to `O_EXCL`
+//!    on POSIX and `CREATE_NEW` on Windows, both of which are atomic kernel ops.
+//! 2. If creation fails (file already exists) → skip; another drainer owns it.
+//! 3. If creation succeeds → read `{uuid}.json`, write to stdin, delete
+//!    `{uuid}.json`, delete `{uuid}.lock`.
+//! 4. On write failure → delete `{uuid}.lock` only; leave `{uuid}.json` for retry.
+//!
+//! This replaces the earlier `rename`-based approach which is not atomic under
+//! concurrent `spawn_blocking` on Windows (`MoveFileEx` without
+//! `MOVEFILE_REPLACE_EXISTING` still races when both threads attempt the same
+//! source path).
+//!
+//! ## Queue directory
+//!
+//! `{ATM_HOME}/.config/atm/agent-sessions/{team}/{agent_id}/stdin_queue/`
+//! (uses [`agent_team_mail_core::home::get_home_dir`] for `ATM_HOME` — cross-platform,
 //! no raw `HOME`/`USERPROFILE`).
 //!
-//! Drain is triggered either:
-//! - When an `idle` JSONL event is detected on the codex stdout stream, OR
-//! - When a 30-second timeout fires without a prior drain
+//! ## Drain triggers
 //!
-//! TTL cleanup: entries older than 10 minutes are deleted (unclaimed or claimed) on drain.
+//! Drain is triggered either:
+//! - When an `idle` JSONL event is detected on the Codex stdout stream, or
+//! - When a 30-second timeout fires without a prior drain.
+//!
+//! ## TTL cleanup
+//!
+//! Entries (`.json` and `.lock`) older than 10 minutes are deleted on drain.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,14 +86,16 @@ pub async fn enqueue(team: &str, agent_id: &str, content: &str) -> anyhow::Resul
 
 /// Drain all unclaimed `*.json` files from the queue.
 ///
-/// For each file:
-/// 1. Atomically rename `{uuid}.json` -> `{uuid}.claimed` (skip if rename fails --
-///    another process claimed it first)
-/// 2. Read the claimed file content
-/// 3. Write content + `\n` to the provided stdin writer
-/// 4. Delete the claimed file after successful write
+/// For each `{uuid}.json` file:
+/// 1. Attempt to atomically create `{uuid}.lock` with `create_new(true)`.  If
+///    the lock file already exists, another drainer owns this entry — skip it.
+/// 2. Read `{uuid}.json`.
+/// 3. Write content + `\n` to the provided stdin writer.
+/// 4. On success: delete `{uuid}.json` then `{uuid}.lock`.
+/// 5. On write failure: delete `{uuid}.lock` only; leave `{uuid}.json` so the
+///    next drain cycle can retry.
 ///
-/// Also deletes any files (claimed or unclaimed) older than `ttl`.
+/// Also deletes any files (`.json` or `.lock`) older than `ttl`.
 ///
 /// Returns the number of messages drained.
 ///
@@ -112,25 +136,64 @@ pub async fn drain(
     }
 
     for path in json_files {
-        // Construct the .claimed path
-        let claimed_path = path.with_extension("claimed");
+        let lock_path = path.with_extension("lock");
 
-        // Atomic claim via rename -- if this fails, another process claimed it
-        if tokio::fs::rename(&path, &claimed_path).await.is_err() {
-            continue;
+        // Atomically claim this entry by creating the lock file with O_CREAT|O_EXCL
+        // (create_new(true)). On both POSIX and Windows this is a single atomic
+        // kernel operation — exactly one concurrent caller will succeed.
+        let claim_result = tokio::task::spawn_blocking({
+            let lock_path = lock_path.clone();
+            move || {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&lock_path)
+            }
+        })
+        .await;
+
+        match claim_result {
+            Ok(Ok(_file)) => {
+                // Lock acquired — _file is intentionally dropped here; the lock is
+                // the file's *existence*, not a held descriptor.
+            }
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Another drainer holds the lock for this entry.
+                continue;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    path = %lock_path.display(),
+                    error = %e,
+                    "unexpected error creating stdin queue lock file; skipping"
+                );
+                continue;
+            }
+            Err(join_err) => {
+                tracing::warn!(
+                    path = %lock_path.display(),
+                    error = %join_err,
+                    "spawn_blocking panicked creating stdin queue lock; skipping"
+                );
+                continue;
+            }
         }
 
-        // Read the claimed file content
-        let content = match tokio::fs::read_to_string(&claimed_path).await {
+        // Lock is ours.  Read the source file.
+        let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("failed to read claimed stdin queue file: {e}");
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to read stdin queue file; releasing lock"
+                );
+                let _ = tokio::fs::remove_file(&lock_path).await;
                 continue;
             }
         };
 
-        // Write content to stdin; restore .claimed -> .json on write failure to
-        // prevent message loss (the next drain will retry delivery).
+        // Write content to stdin.
         let write_result = {
             let mut guard = stdin.lock().await;
             crate::framing::write_newline_delimited(&mut **guard, content.trim()).await
@@ -138,26 +201,19 @@ pub async fn drain(
 
         match write_result {
             Ok(()) => {
-                // Success: delete the claimed file.
-                let _ = tokio::fs::remove_file(&claimed_path).await;
+                // Success: remove the source file then the lock.
+                let _ = tokio::fs::remove_file(&path).await;
+                let _ = tokio::fs::remove_file(&lock_path).await;
                 drained += 1;
             }
             Err(e) => {
-                // Restore: rename .claimed back to .json so it can be retried.
+                // Write failed: release the lock only, leave {uuid}.json for retry.
                 tracing::warn!(
-                    path = %claimed_path.display(),
+                    path = %path.display(),
                     error = %e,
-                    "stdin queue write failed; restoring message to queue"
+                    "stdin queue write failed; releasing lock for retry"
                 );
-                if let Err(rename_err) =
-                    tokio::fs::rename(&claimed_path, &path).await
-                {
-                    tracing::error!(
-                        path = %claimed_path.display(),
-                        error = %rename_err,
-                        "failed to restore claimed message to queue; message may be lost"
-                    );
-                }
+                let _ = tokio::fs::remove_file(&lock_path).await;
             }
         }
     }
@@ -175,6 +231,10 @@ pub async fn drain(
 }
 
 /// Delete all entries in the queue older than `ttl`.
+///
+/// Removes files with `.json` or `.lock` extensions whose modification time
+/// predates `now - ttl`.  Stale `.lock` files indicate a drainer that crashed
+/// after acquiring the lock but before completing delivery.
 async fn cleanup_ttl(dir: &Path, ttl: Duration) -> anyhow::Result<usize> {
     let cutoff = SystemTime::now()
         .checked_sub(ttl)
@@ -189,7 +249,7 @@ async fn cleanup_ttl(dir: &Path, ttl: Duration) -> anyhow::Result<usize> {
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str());
-        if ext != Some("json") && ext != Some("claimed") {
+        if ext != Some("json") && ext != Some("lock") {
             continue;
         }
 
@@ -343,14 +403,6 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    // On Windows, tokio::fs::rename (MoveFileEx) is not atomic under concurrent
-    // spawn_blocking calls in the same process, causing both drainers to "win"
-    // the rename race.  The real fix (create_new lock-file protocol) is tracked
-    // separately; skip on Windows until then.
-    #[cfg_attr(
-        windows,
-        ignore = "MoveFileEx rename not atomic under tokio::join! on Windows; fix tracked in follow-up"
-    )]
     #[tokio::test]
     #[serial_test::serial]
     async fn concurrent_drain_no_double_delivery() {
@@ -419,5 +471,22 @@ mod tests {
         // We simulate "old" by using a TTL of 0 seconds
         let removed = cleanup_ttl(&dir, Duration::from_secs(0)).await.unwrap();
         assert_eq!(removed, 1, "file should be removed with 0-second TTL");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ttl_cleanup_removes_stale_lock_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (team, agent_id) = setup_env(&tmp);
+
+        let dir = queue_dir(&team, &agent_id).unwrap();
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        // Simulate a stale lock file left by a crashed drainer
+        let lock_path = dir.join("00000000-0000-0000-0000-000000000001.lock");
+        std::fs::write(&lock_path, b"").unwrap();
+
+        let removed = cleanup_ttl(&dir, Duration::from_secs(0)).await.unwrap();
+        assert_eq!(removed, 1, "stale lock file should be removed with 0-second TTL");
     }
 }
