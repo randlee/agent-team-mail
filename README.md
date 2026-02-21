@@ -45,7 +45,10 @@ cargo install agent-team-mail
 cargo install agent-team-mail-daemon
 
 # Install the MCP proxy (optional)
-cargo install atm-agent-mcp
+cargo install agent-team-mail-mcp
+
+# Install the TUI dashboard (optional)
+cargo install agent-team-mail-tui
 ```
 
 ### Build from Source
