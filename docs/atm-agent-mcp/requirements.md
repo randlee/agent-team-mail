@@ -611,7 +611,8 @@ Notes:
 >
 > For other downstream modes, see:
 > - `docs/codex-json-schema.md` (`cli-json`)
-> - `docs/atm-agent-mcp/codex-execution-modes.md` (`app-server` overview and protocol pointers)
+> - `docs/atm-agent-mcp/codex-execution-modes.md` (`app-server` overview and mode selection)
+> - `docs/atm-agent-mcp/app-server-protocol-reference.md` (`app-server` protocol contracts and implementation notes)
 
 ### A.1 Server Startup
 

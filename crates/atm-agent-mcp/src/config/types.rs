@@ -135,7 +135,7 @@ pub struct AgentMcpConfig {
     ///
     /// Supported values:
     /// - `"mcp"` (default) — spawns `codex mcp-server` (MCP stdio protocol)
-    /// - `"json"` — spawns `codex exec --json` (JSONL event stream protocol)
+    /// - `"cli-json"` — spawns `codex exec --json` (JSONL event stream protocol)
     /// - `"mock"` — in-memory test double (no child process; for testing only)
     ///
     /// An absent or unrecognised value falls back to `"mcp"`.

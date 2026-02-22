@@ -3104,6 +3104,183 @@ Phase F must address the gap between "ATM hooks are installed globally" and "thi
 - [ ] `cargo test --workspace` passes
 
 ---
+## 16.6 Phase G: Codex Multi-Transport Runtime Hardening
+
+**Status**: PLANNED (next phase after E/F stabilization)
+
+**Goal**: Stabilize and productionize all three `atm-agent-mcp` downstream execution modes:
+
+- `mcp` (`codex mcp-server`)
+- `cli-json` (`codex exec --json`)
+- `app-server` (`codex app-server`)
+
+with one lifecycle model, one mail-injection model, and one TUI streaming/control surface.
+
+Design references:
+
+- `docs/atm-agent-mcp/requirements.md`
+- `docs/atm-agent-mcp/codex-mcp-crate-design.md`
+- `docs/atm-agent-mcp/codex-execution-modes.md`
+- `docs/atm-agent-mcp/app-server-protocol-reference.md`
+- `docs/codex-json-schema.md`
+- `docs/tui-control-protocol.md`
+
+### Phase G Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| G.1 | Transport naming and config cleanup (`json` -> `cli-json`) | Phase E | 🔄 IN PROGRESS |
+| G.2 | App-server protocol reference and conformance test matrix | G.1 | 🔄 IN PROGRESS |
+| G.3 | App-server transport adapter (`CodexTransport` impl) | G.1, G.2 | ⏳ PLANNED |
+| G.4 | Unified turn control (`start` / `steer` / `interrupt`) across all transports | G.3 | ⏳ PLANNED |
+| G.5 | Approval/elicitation bridging parity for app-server | G.3 | ⏳ PLANNED |
+| G.6 | Mail injection parity (`mcp`, `cli-json`, `app-server`) + queue semantics | G.4 | ⏳ PLANNED |
+| G.7 | TUI streaming normalization + UDP/pubsub fanout for all transports | G.4, G.6 | ⏳ PLANNED |
+| G.8 | Cross-platform reliability + soak testing (Linux/macOS/Windows) | G.5, G.6, G.7 | ⏳ PLANNED |
+| G.9 | Docs finalization, migration notes, and release gate | G.8 | ⏳ PLANNED |
+
+**Execution model**: G.1/G.2 document and naming hardening can run first. G.3 enables implementation. G.4-G.6 establish behavior parity. G.7-G.8 harden observability/runtime reliability. G.9 is release readiness.
+
+---
+
+### Sprint G.1 — Transport Naming and Config Cleanup (`json` -> `cli-json`)
+
+**Branch**: `feature/pG-s1-cli-json-rename`
+**Crate(s)**: `crates/atm-agent-mcp`, docs updates
+**Depends on**: Phase E
+
+#### Exit Criteria
+
+- [ ] `transport = "json"` removed from code and docs as active value
+- [ ] `transport = "cli-json"` is the canonical non-MCP streaming mode name
+- [ ] Tests updated to use `cli-json`
+- [ ] Config/help text reflects `mcp | cli-json | app-server`
+- [ ] `cargo test -p agent-team-mail-mcp` passes
+
+---
+
+### Sprint G.2 — App-Server Protocol Reference + Conformance Matrix
+
+**Branch**: `feature/pG-s2-app-server-protocol-docs`
+**Crate(s)**: docs only
+**Depends on**: G.1
+
+#### Exit Criteria
+
+- [ ] Protocol reference derived from Codex source captured in-repo
+- [ ] Method matrix includes `thread/start|resume|fork|list|read`, `turn/start|steer|interrupt`, `command/exec`
+- [ ] Notification matrix includes turn/item lifecycle and delta streams
+- [ ] `turn/steer` preconditions and error handling documented
+- [ ] Backpressure/channel-capacity notes included for implementation guidance
+
+---
+
+### Sprint G.3 — App-Server Transport Adapter
+
+**Branch**: `feature/pG-s3-app-server-transport`
+**Crate(s)**: `crates/atm-agent-mcp`
+**Depends on**: G.1, G.2
+
+#### Exit Criteria
+
+- [ ] `AppServerTransport` implements `CodexTransport` abstraction
+- [ ] Stdio JSONL framing handles request/response/notification safely
+- [ ] Thread/turn IDs mapped into existing session registry model
+- [ ] Unknown notifications are non-fatal and logged with schema version context
+- [ ] Integration tests validate startup, turn creation, and graceful shutdown
+
+---
+
+### Sprint G.4 — Unified Turn Control Across Transports
+
+**Branch**: `feature/pG-s4-unified-turn-control`
+**Crate(s)**: `crates/atm-agent-mcp`, `crates/atm-daemon` (if control plumbing needed)
+**Depends on**: G.3
+
+#### Exit Criteria
+
+- [ ] Common control API for `start_turn`, `steer_turn`, `interrupt_turn`
+- [ ] Active `turn_id` tracking is consistent across `mcp`, `cli-json`, and `app-server`
+- [ ] `turn/steer` stale-turn handling covered by tests
+- [ ] Queue ordering rules (Claude > auto-mail) enforced transport-independently
+
+---
+
+### Sprint G.5 — Approval/Elicitation Bridging Parity (App-Server)
+
+**Branch**: `feature/pG-s5-approval-bridge`
+**Crate(s)**: `crates/atm-agent-mcp`
+**Depends on**: G.3
+
+#### Exit Criteria
+
+- [ ] Approval request events from app-server bridge to MCP-facing flow
+- [ ] Approve/reject path parity with existing MCP transport behavior
+- [ ] Timeout/cancellation semantics consistent across transports
+- [ ] Security review confirms no unsafe default escalation in approvals
+
+---
+
+### Sprint G.6 — Mail Injection Parity + Queue Semantics
+
+**Branch**: `feature/pG-s6-mail-injection-parity`
+**Crate(s)**: `crates/atm-agent-mcp`, `crates/atm-core` (if envelope updates needed)
+**Depends on**: G.4
+
+#### Exit Criteria
+
+- [ ] Shared mail envelope and ack semantics (`mark-read` only after request accepted)
+- [ ] Idle and post-turn injection behavior consistent for all three transports
+- [ ] Replay-safe delivery (`message_id` based dedup expectations) preserved
+- [ ] Burst tests verify bounded queue behavior and no starvation
+
+---
+
+### Sprint G.7 — TUI Streaming Normalization + UDP/PubSub Fanout
+
+**Branch**: `feature/pG-s7-tui-stream-normalization`
+**Crate(s)**: `crates/atm-daemon`, `crates/atm-tui`, `crates/atm-agent-mcp`
+**Depends on**: G.4, G.6
+
+#### Exit Criteria
+
+- [ ] Transport-specific event payloads normalized to one daemon stream contract
+- [ ] High-rate deltas fan out via daemon pubsub/UDP path without dropping required terminal events
+- [ ] TUI displays consistent item/turn state regardless of source transport
+- [ ] Control protocol compatibility (`control.stdin.request`, `control.interrupt.request`) preserved
+
+---
+
+### Sprint G.8 — Cross-Platform Reliability + Soak Testing
+
+**Branch**: `feature/pG-s8-cross-platform-soak`
+**Crate(s)**: test suites + CI workflows
+**Depends on**: G.5, G.6, G.7
+
+#### Exit Criteria
+
+- [ ] Linux/macOS/Windows CI coverage for all three transports
+- [ ] Windows path/process tests follow `docs/cross-platform-guidelines.md`
+- [ ] Soak tests exercise long-running sessions, repeated steer/interrupt, and reconnect paths
+- [ ] Failure-injection tests cover child crash, pipe break, overload, and timeout handling
+
+---
+
+### Sprint G.9 — Docs Finalization + Release Gate
+
+**Branch**: `feature/pG-s9-release-gate`
+**Crate(s)**: docs + release scripts/checklists
+**Depends on**: G.8
+
+#### Exit Criteria
+
+- [ ] User docs explain transport selection/tradeoffs for Codex and future non-Codex agents
+- [ ] Migration notes included for existing `mcp` and `cli-json` users
+- [ ] Release checklist includes protocol drift check against upstream Codex app-server source
+- [ ] Final integration PR targets `develop` with green CI and QA sign-off
+
+---
+
 ## 17. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):

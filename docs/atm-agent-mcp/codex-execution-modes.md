@@ -10,6 +10,7 @@ ATM mapping note:
 Related docs:
 - `docs/atm-agent-mcp/requirements.md`
 - `docs/atm-agent-mcp/codex-mcp-crate-design.md`
+- `docs/atm-agent-mcp/app-server-protocol-reference.md`
 - `docs/codex-json-schema.md`
 
 ---
