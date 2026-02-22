@@ -2220,6 +2220,12 @@ Session ending. Write a concise summary of:\n\
     ) -> anyhow::Result<()> {
         let raw = self.transport.spawn().await?;
 
+        // Wire the upstream write channel into the transport for approval-gate
+        // bridging (G.5). This is a no-op for McpTransport and JsonCodecTransport;
+        // AppServerTransport uses it to forward item/enteredReviewMode notifications
+        // upstream as elicitation/create requests.
+        self.transport.set_approval_upstream_tx(upstream_tx.clone());
+
         tracing::debug!(
             is_idle = self.transport.is_idle(),
             "child spawned via transport"

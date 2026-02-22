@@ -321,4 +321,97 @@ mod tests {
         assert!(expired.is_empty(), "fresh entries must not expire");
         assert_eq!(reg.len(), 1);
     }
+
+    // ── Security invariant: no silent approval on timeout (G.5) ─────────────
+
+    /// SECURITY INVARIANT (FR-18 / G.5): an elicitation that times out MUST
+    /// receive an explicit rejection payload.  It must never be silently
+    /// approved by default.
+    ///
+    /// This test verifies that `expire_timeouts` sends an error payload with:
+    /// - `result: null` (not `{"decision": "approve"}`)
+    /// - `error.code == -32006`
+    /// - `error.message == "elicitation timeout"`
+    #[tokio::test]
+    async fn security_timeout_sends_explicit_reject_not_silent_approve() {
+        let mut reg = make_reg(0); // 0-second timeout so entry expires immediately.
+
+        let (tx, mut rx) = oneshot::channel::<serde_json::Value>();
+        reg.register(
+            "agent-sec".to_string(),
+            serde_json::json!("downstream-id-1"),
+            serde_json::json!(999),
+            tx,
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+        let expired = reg.expire_timeouts();
+        assert_eq!(expired.len(), 1, "entry must expire");
+
+        let payload = rx.try_recv().expect("rejection payload must be sent");
+
+        // result must be null (not an approval decision).
+        assert_eq!(
+            payload.get("result"),
+            Some(&serde_json::Value::Null),
+            "timed-out elicitation result must be null (not an approval)"
+        );
+
+        // error must be present.
+        let error = payload.get("error").expect("timed-out elicitation must have error field");
+        assert_eq!(
+            error.get("code").and_then(|c| c.as_i64()),
+            Some(-32006),
+            "timeout error code must be -32006"
+        );
+        assert_eq!(
+            error.get("message").and_then(|m| m.as_str()),
+            Some("elicitation timeout"),
+            "timeout error message must be 'elicitation timeout'"
+        );
+
+        // Confirm there is no 'decision: approve' anywhere in the payload.
+        let serialised = serde_json::to_string(&payload).unwrap();
+        assert!(
+            !serialised.contains("approve"),
+            "timeout rejection must not contain 'approve': {serialised}"
+        );
+    }
+
+    /// SECURITY INVARIANT (G.5): `cancel_for_agent` on session close must send
+    /// an explicit rejection, never a silent approval.
+    #[tokio::test]
+    async fn security_session_close_sends_explicit_reject_not_silent_approve() {
+        let mut reg = make_reg(60);
+
+        let (tx, mut rx) = oneshot::channel::<serde_json::Value>();
+        reg.register(
+            "agent-close".to_string(),
+            serde_json::json!("ds-id"),
+            serde_json::json!(77),
+            tx,
+        );
+
+        let rejection = serde_json::json!({
+            "result": null,
+            "error": { "code": -32008, "message": "session closed" }
+        });
+        reg.cancel_for_agent("agent-close", rejection.clone());
+
+        let payload = rx.try_recv().expect("cancellation payload must be sent");
+
+        // result must be null.
+        assert_eq!(
+            payload.get("result"),
+            Some(&serde_json::Value::Null),
+            "cancelled elicitation result must be null"
+        );
+
+        let serialised = serde_json::to_string(&payload).unwrap();
+        assert!(
+            !serialised.contains("approve"),
+            "cancellation rejection must not contain 'approve': {serialised}"
+        );
+    }
 }

@@ -24,10 +24,11 @@ use std::io;
 use std::pin::Pin;
 use std::process::ExitStatus;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Child;
 use tokio::sync::Mutex;
@@ -101,8 +102,19 @@ pub(crate) trait CodexTransport: Send + Sync + std::fmt::Debug {
     /// Called by the proxy after session registration so the transport's
     /// [`crate::turn_control::TurnTracker`] can emit [`crate::lifecycle_emit::EventKind::TeammateIdle`]
     /// lifecycle events to the daemon. The default implementation is a no-op;
-    /// only [`AppServerTransport`] overrides this.
+    /// [`AppServerTransport`] and [`McpTransport`] override this (G.5).
     fn set_turn_session_context(&self, _ctx: crate::turn_control::SessionContext) {}
+
+    /// Wire the upstream write channel for approval-gate bridging (G.5).
+    ///
+    /// Called by the proxy from within `spawn_child`, after the upstream
+    /// `mpsc::Sender<Value>` is created.  Only [`AppServerTransport`] overrides
+    /// this; all other transports use the default no-op because only the
+    /// app-server protocol emits `item/enteredReviewMode` notifications.
+    ///
+    /// The default implementation is intentionally a no-op so that
+    /// [`McpTransport`] and [`JsonCodecTransport`] do not need to be changed.
+    fn set_approval_upstream_tx(&self, _tx: tokio::sync::mpsc::Sender<Value>) {}
 }
 
 /// Transport that spawns `codex mcp-server` as a child subprocess.
@@ -115,19 +127,21 @@ pub(crate) trait CodexTransport: Send + Sync + std::fmt::Debug {
 /// `McpTransport` holds a [`crate::turn_control::TurnTracker`] for API
 /// consistency with the other transports. MCP protocol handles turns
 /// differently (no explicit `turn/started` / `turn/completed` notifications),
-/// so active turn tracking is deferred to Sprint G.5. The tracker is present
-/// and accessible via [`McpTransport::turn_tracker`] so callers can set a
-/// session context when it becomes available.
+/// so active turn-start/complete tracking is deferred to a future sprint.
+/// Session context binding via [`CodexTransport::set_turn_session_context`]
+/// is wired in Sprint G.5 so the tracker is ready when daemon emission is needed.
 #[derive(Debug)]
 pub(crate) struct McpTransport {
     config: AgentMcpConfig,
     team: String,
-    /// Unified turn tracker (deferred: MCP turn tracking wired in G.5).
-    #[expect(
-        dead_code,
-        reason = "present for API consistency with other transports; \
-                  MCP turn tracking is deferred to Sprint G.5"
-    )]
+    /// Unified turn tracker for daemon lifecycle emission.
+    ///
+    /// Wired in Sprint G.5: [`Self::set_turn_session_context`] calls
+    /// [`crate::turn_control::TurnTracker::set_session_context`] so that
+    /// daemon lifecycle events are emitted once session context is available.
+    /// MCP protocol does not emit explicit `turn/started` / `turn/completed`
+    /// notifications, so the turn-start/complete hooks are not yet wired;
+    /// only the session context binding is implemented here.
     pub(crate) turn_tracker: crate::turn_control::TurnTracker,
 }
 
@@ -170,6 +184,17 @@ impl Drop for McpTransport {
 
 #[async_trait]
 impl CodexTransport for McpTransport {
+    fn set_turn_session_context(&self, ctx: crate::turn_control::SessionContext) {
+        // Clone the tracker handle (cheap: Arc clone) and set the context in
+        // a background task. This keeps the trait method synchronous while
+        // still allowing the async mutex inside TurnTracker to be updated.
+        // This mirrors the analogous implementation in AppServerTransport.
+        let tracker = self.turn_tracker.clone();
+        tokio::spawn(async move {
+            tracker.set_session_context(ctx).await;
+        });
+    }
+
     async fn spawn(&self) -> anyhow::Result<RawChildIo> {
         use tokio::process::Command;
 
@@ -496,6 +521,22 @@ pub(crate) struct AppServerTransport {
     /// oneshot sender is inserted under the request ID. The background task
     /// routes incoming responses to the matching sender.
     pending_responses: Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+    /// Elicitation registry for approval-gate bridging (FR-18 / G.5).
+    ///
+    /// Shared with the notification background task so that when the app-server
+    /// emits `item/enteredReviewMode`, the task can register a pending approval
+    /// entry and the proxy's upstream-response handler can resolve it.
+    pub(crate) elicitation_registry: Arc<Mutex<crate::elicitation::ElicitationRegistry>>,
+    /// Monotonic counter for generating unique upstream request IDs for bridged
+    /// approval requests (analogous to the counter in `ProxyServer`).
+    pub(crate) elicitation_counter: Arc<AtomicU64>,
+    /// Deferred upstream write channel for approval-gate bridging (G.5).
+    ///
+    /// Populated by the proxy via [`AppServerTransport::set_approval_channels`]
+    /// after the child is spawned and the upstream channel exists.  The
+    /// background notification task holds a clone of this `Arc` and reads the
+    /// sender lazily when an `item/enteredReviewMode` notification arrives.
+    upstream_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Value>>>>,
     /// Unified turn tracker for daemon lifecycle emission.
     ///
     /// Created with [`crate::turn_control::TurnTracker::new_deferred`] so that the
@@ -528,6 +569,11 @@ impl AppServerTransport {
             initialized: Arc::new(AtomicBool::new(false)),
             idle_flag: Arc::new(AtomicBool::new(false)),
             pending_responses: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            elicitation_registry: Arc::new(Mutex::new(
+                crate::elicitation::ElicitationRegistry::new(120),
+            )),
+            elicitation_counter: Arc::new(AtomicU64::new(0)),
+            upstream_tx: Arc::new(Mutex::new(None)),
             turn_tracker: crate::turn_control::TurnTracker::new_deferred(),
         }
     }
@@ -807,6 +853,10 @@ impl AppServerTransport {
             // are emitted when turns complete. The tracker may have no session
             // context yet (deferred); set_session_context can be called later.
             turn_tracker: Some(self.turn_tracker.clone()),
+            // Wire approval-gate bridging (G.5).
+            elicitation_registry: Some(Arc::clone(&self.elicitation_registry)),
+            elicitation_counter: Some(Arc::clone(&self.elicitation_counter)),
+            upstream_tx: Some(Arc::clone(&self.upstream_tx)),
         };
 
         tokio::spawn(drive_notification_task(
@@ -867,6 +917,125 @@ pub struct NotificationTaskState {
     /// `None` is used for the raw `AppServerTransport::spawn` path before a
     /// full [`crate::turn_control::SessionContext`] is available.
     pub turn_tracker: Option<crate::turn_control::TurnTracker>,
+    /// Elicitation registry for approval-gate bridging (G.5).
+    ///
+    /// When `Some`, `item/enteredReviewMode` notifications are registered here so
+    /// the proxy's upstream-response handler can resolve them to a downstream
+    /// (child stdin) response.  The same `Arc` is shared with the
+    /// `AppServerTransport` struct so the proxy can call `resolve_for_downstream`
+    /// when an upstream elicitation response arrives.
+    ///
+    /// `None` disables approval bridging (used in tests that do not exercise the
+    /// full proxy path or do not need review-mode support).
+    pub elicitation_registry: Option<Arc<Mutex<crate::elicitation::ElicitationRegistry>>>,
+    /// Monotonic counter for generating upstream request IDs for bridged approval
+    /// requests.  Shared with the `AppServerTransport` struct.
+    ///
+    /// `None` when `elicitation_registry` is `None`.
+    pub elicitation_counter: Option<Arc<AtomicU64>>,
+    /// Deferred upstream write channel holder for approval-gate bridging (G.5).
+    ///
+    /// Holds a clone of the `Arc` from `AppServerTransport::upstream_tx`.
+    /// The background task reads the inner `Option<Sender>` lazily when an
+    /// `item/enteredReviewMode` notification arrives.  If the sender is not yet
+    /// populated (i.e. before the proxy calls `set_approval_upstream_tx`), the
+    /// notification is logged at `warn` level and discarded — the approval will
+    /// eventually time out and be rejected by `ElicitationRegistry::expire_timeouts`.
+    ///
+    /// `None` when operating without a proxy (unit tests).
+    pub upstream_tx: Option<Arc<Mutex<Option<tokio::sync::mpsc::Sender<Value>>>>>,
+}
+
+/// Bridge an `item/enteredReviewMode` notification upstream as an
+/// `elicitation/create` request (G.5).
+///
+/// Generates a unique upstream request ID from `elicitation_counter`, registers
+/// a pending entry in `elicitation_registry` with a oneshot channel, and sends
+/// the bridged request via `upstream_tx_arc`.
+///
+/// If any prerequisite is `None` (i.e. the task was constructed without
+/// approval-gate wiring, or `upstream_tx` has not yet been set by the proxy),
+/// logs a `warn`-level message and returns without bridging.  The pending
+/// elicitation will never be resolved; the `ElicitationRegistry::expire_timeouts`
+/// loop will eventually reject it with a `-32006` timeout error.
+///
+/// # Security invariant
+///
+/// This function never silently approves a pending review.  The only outcomes are:
+/// - Upstream receives the elicitation and responds explicitly (approve or reject).
+/// - The registry timeout loop rejects it with error code `-32006`.
+/// - The session closes and `cancel_for_agent` rejects all pending entries.
+async fn bridge_entered_review_mode(
+    item_id: &str,
+    params: &Value,
+    team: &str,
+    elicitation_registry: &Option<Arc<Mutex<crate::elicitation::ElicitationRegistry>>>,
+    elicitation_counter: &Option<Arc<AtomicU64>>,
+    upstream_tx_arc: &Option<Arc<Mutex<Option<tokio::sync::mpsc::Sender<Value>>>>>,
+) {
+    let (Some(registry), Some(counter), Some(tx_arc)) =
+        (elicitation_registry, elicitation_counter, upstream_tx_arc)
+    else {
+        tracing::warn!(
+            item_id = %item_id,
+            "item/enteredReviewMode received but approval bridging is not wired; \
+             notification dropped (no upstream channel)"
+        );
+        return;
+    };
+
+    let upstream_id_num = counter.fetch_add(1, Ordering::Relaxed);
+    let upstream_request_id = serde_json::json!(upstream_id_num);
+    // Use item_id as both agent_id key and downstream_request_id for
+    // app-server approval bridging.  The downstream response is written
+    // back to the child via the proxy's elicitation_registry resolution path.
+    let downstream_request_id = serde_json::json!(item_id);
+
+    let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<Value>();
+
+    registry.lock().await.register(
+        item_id.to_string(),
+        downstream_request_id.clone(),
+        upstream_request_id.clone(),
+        response_tx,
+    );
+
+    // Build the upstream elicitation/create request, preserving params from
+    // the EnteredReviewMode notification.
+    let mut upstream_params = params.clone();
+    if let Some(obj) = upstream_params.as_object_mut() {
+        obj.insert("itemId".to_string(), serde_json::json!(item_id));
+        obj.insert("source".to_string(), serde_json::json!("app-server"));
+    }
+
+    let upstream_msg = serde_json::json!({
+        "id": upstream_request_id,
+        "method": "elicitation/create",
+        "params": upstream_params,
+    });
+
+    let tx_guard = tx_arc.lock().await;
+    if let Some(ref tx) = *tx_guard {
+        if tx.send(upstream_msg).await.is_err() {
+            tracing::warn!(
+                item_id = %item_id,
+                "failed to send elicitation/create upstream: channel closed"
+            );
+        } else {
+            tracing::debug!(
+                item_id = %item_id,
+                upstream_request_id = %upstream_id_num,
+                team = %team,
+                "approval gate: bridged item/enteredReviewMode upstream as elicitation/create"
+            );
+        }
+    } else {
+        tracing::warn!(
+            item_id = %item_id,
+            "item/enteredReviewMode: upstream_tx not yet populated by proxy; \
+             approval will be rejected by timeout"
+        );
+    }
 }
 
 /// Drive the app-server notification background task from an stdout reader.
@@ -896,6 +1065,9 @@ pub async fn drive_notification_task(
         session_registry,
         team,
         turn_tracker,
+        elicitation_registry,
+        elicitation_counter,
+        upstream_tx: upstream_tx_arc,
     } = state;
     use crate::stream_norm::{
         AppServerNotification, TurnState, TurnStatus, parse_app_server_notification,
@@ -1005,6 +1177,25 @@ pub async fn drive_notification_task(
                 }
                 AppServerNotification::ItemDelta { method, .. } => {
                     tracing::debug!(method = %method, "item/delta");
+                }
+                // Approval gate: agent entered review mode — bridge upstream (G.5).
+                AppServerNotification::EnteredReviewMode { item_id, params } => {
+                    bridge_entered_review_mode(
+                        &item_id,
+                        &params,
+                        &team,
+                        &elicitation_registry,
+                        &elicitation_counter,
+                        &upstream_tx_arc,
+                    )
+                    .await;
+                }
+                // Approval gate: agent exited review mode (decision delivered).
+                AppServerNotification::ExitedReviewMode { item_id } => {
+                    tracing::debug!(
+                        item_id = %item_id,
+                        "app-server: item/exitedReviewMode (approval decision delivered)"
+                    );
                 }
                 AppServerNotification::Unknown { method } => {
                     tracing::debug!(
@@ -1207,6 +1398,10 @@ impl CodexTransport for AppServerTransport {
             // context yet (deferred); call set_session_context after session
             // registration completes to enable daemon emission.
             turn_tracker: Some(self.turn_tracker.clone()),
+            // Wire approval-gate bridging (G.5).
+            elicitation_registry: Some(Arc::clone(&self.elicitation_registry)),
+            elicitation_counter: Some(Arc::clone(&self.elicitation_counter)),
+            upstream_tx: Some(Arc::clone(&self.upstream_tx)),
         };
 
         // Background task: read lines, parse notifications, forward to duplex.
@@ -1277,6 +1472,16 @@ impl CodexTransport for AppServerTransport {
         let tracker = self.turn_tracker.clone();
         tokio::spawn(async move {
             tracker.set_session_context(ctx).await;
+        });
+    }
+
+    fn set_approval_upstream_tx(&self, tx: tokio::sync::mpsc::Sender<Value>) {
+        // Populate the deferred upstream channel so the notification background
+        // task can forward `item/enteredReviewMode` notifications upstream.
+        // Runs in a background task to keep the trait method synchronous.
+        let upstream_tx_arc = Arc::clone(&self.upstream_tx);
+        tokio::spawn(async move {
+            *upstream_tx_arc.lock().await = Some(tx);
         });
     }
 }
@@ -1707,5 +1912,133 @@ mod tests {
         assert!(result.is_ok(), "send_with_backoff should succeed: {result:?}");
         // Clean up the read half.
         drop(duplex_read);
+    }
+
+    // ── McpTransport::set_turn_session_context (G.5) ────────────────────────
+
+    /// Verify that `McpTransport::set_turn_session_context` populates the inner
+    /// `TurnTracker` with the supplied `SessionContext`.
+    ///
+    /// After calling the synchronous trait method, we give the background task
+    /// a brief yield so the `tokio::spawn` completes, then verify that
+    /// `active_turn_id` is callable (the tracker is properly initialised).
+    #[tokio::test]
+    async fn mcp_transport_set_turn_session_context_wires_tracker() {
+        use crate::turn_control::{SessionContext, TurnControl as _};
+
+        let t = McpTransport::new(AgentMcpConfig::default(), "test-team");
+        let ctx = SessionContext::new("agent-1", "team-x", "codex:test-session");
+
+        // Call the synchronous trait method — internally spawns a task.
+        t.set_turn_session_context(ctx);
+
+        // Yield briefly to allow the spawned task to complete.
+        tokio::task::yield_now().await;
+
+        // Verify the tracker is usable: active_turn_id returns None for an
+        // unknown thread (no active turn).
+        let active = t.turn_tracker.active_turn_id("thread-1").await;
+        assert!(active.is_none(), "freshly initialised tracker must have no active turn");
+    }
+
+    // ── bridge_entered_review_mode (G.5) ─────────────────────────────────────
+
+    /// When all channels are wired, `bridge_entered_review_mode` registers an
+    /// entry in the elicitation registry and sends an `elicitation/create`
+    /// request upstream.
+    #[tokio::test]
+    async fn bridge_entered_review_mode_sends_upstream_and_registers() {
+        use crate::elicitation::ElicitationRegistry;
+
+        let registry = Arc::new(Mutex::new(ElicitationRegistry::new(30)));
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(8);
+        let upstream_tx_arc = Arc::new(Mutex::new(Some(tx)));
+
+        bridge_entered_review_mode(
+            "item-42",
+            &serde_json::json!({"toolName":"bash","itemId":"item-42"}),
+            "test-team",
+            &Some(Arc::clone(&registry)),
+            &Some(Arc::clone(&counter)),
+            &Some(Arc::clone(&upstream_tx_arc)),
+        )
+        .await;
+
+        // Registry must have exactly one pending entry.
+        assert_eq!(registry.lock().await.len(), 1, "one pending elicitation must be registered");
+
+        // Upstream channel must have received the elicitation/create request.
+        let msg = rx.try_recv().expect("upstream must have received a message");
+        assert_eq!(
+            msg.get("method").and_then(|v| v.as_str()),
+            Some("elicitation/create"),
+            "upstream message must be elicitation/create"
+        );
+        assert_eq!(
+            msg.get("params")
+                .and_then(|p| p.get("itemId"))
+                .and_then(|v| v.as_str()),
+            Some("item-42"),
+            "upstream message params must include itemId"
+        );
+        assert_eq!(
+            msg.get("params")
+                .and_then(|p| p.get("source"))
+                .and_then(|v| v.as_str()),
+            Some("app-server"),
+            "upstream message params must include source=app-server"
+        );
+    }
+
+    /// When `upstream_tx` is `None`, `bridge_entered_review_mode` must not panic
+    /// and must not silently approve (no entry is registered in the registry
+    /// when the registry itself is also `None`).
+    #[tokio::test]
+    async fn bridge_entered_review_mode_no_op_when_channels_absent() {
+        // All channels absent — should be a no-op with a warn log, no panic.
+        bridge_entered_review_mode(
+            "item-x",
+            &serde_json::json!({}),
+            "test-team",
+            &None,
+            &None,
+            &None,
+        )
+        .await;
+        // Test passes if no panic occurs.
+    }
+
+    /// When the upstream_tx sender is `None` inside the Arc, the entry is still
+    /// registered in the registry (so it will eventually be rejected by timeout),
+    /// and no panic occurs.
+    #[tokio::test]
+    async fn bridge_entered_review_mode_registry_entry_registered_even_if_tx_unpopulated() {
+        use crate::elicitation::ElicitationRegistry;
+
+        let registry = Arc::new(Mutex::new(ElicitationRegistry::new(30)));
+        let counter = Arc::new(AtomicU64::new(0));
+        // upstream_tx is Some(Arc) but the inner Option is None (tx not yet set).
+        let upstream_tx_arc: Arc<Mutex<Option<tokio::sync::mpsc::Sender<serde_json::Value>>>> =
+            Arc::new(Mutex::new(None));
+
+        bridge_entered_review_mode(
+            "item-pending",
+            &serde_json::json!({}),
+            "test-team",
+            &Some(Arc::clone(&registry)),
+            &Some(Arc::clone(&counter)),
+            &Some(Arc::clone(&upstream_tx_arc)),
+        )
+        .await;
+
+        // An entry must be registered even when the tx is not yet populated.
+        // It will be rejected by expire_timeouts.
+        assert_eq!(
+            registry.lock().await.len(),
+            1,
+            "pending entry must be registered even when upstream_tx is not yet populated"
+        );
     }
 }

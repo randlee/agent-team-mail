@@ -85,6 +85,23 @@ pub enum AppServerNotification {
     ItemCompleted { item_id: String },
     /// A streaming delta for a content item (`item/delta`).
     ItemDelta { method: String, params: Value },
+    /// The agent has entered review mode, requesting approval (`item/enteredReviewMode`).
+    ///
+    /// Emitted by the app-server when the agent is waiting for the user to
+    /// approve or reject a tool call.  `item_id` is the correlation key for
+    /// the corresponding [`AppServerNotification::ExitedReviewMode`] event.
+    /// `params` contains the full notification params (tool call details, etc.)
+    /// and is forwarded upstream in the bridged `elicitation/create` request.
+    ///
+    /// Sprint G.5: bridged upstream via [`crate::elicitation::ElicitationRegistry`]
+    /// so that the upstream client (Claude) can approve or reject the call.
+    EnteredReviewMode { item_id: String, params: Value },
+    /// The agent has exited review mode (`item/exitedReviewMode`).
+    ///
+    /// Emitted after an approval decision has been delivered to the agent
+    /// (either approve or reject).  `item_id` correlates with the preceding
+    /// [`AppServerNotification::EnteredReviewMode`] event.
+    ExitedReviewMode { item_id: String },
     /// An unrecognised notification method.  Non-fatal; callers should
     /// log at `debug` level and continue processing.
     Unknown { method: String },
@@ -164,6 +181,31 @@ pub fn parse_app_server_notification(line: &str) -> Option<AppServerNotification
                 .unwrap_or("")
                 .to_string();
             AppServerNotification::ItemCompleted { item_id }
+        }
+        // Approval gate notifications (app-server protocol Section 6:
+        // `EnteredReviewMode` and `ExitedReviewMode` ThreadItem variants).
+        // These are matched before the ItemDelta catch-all so they are never
+        // misrouted as delta events.
+        "item/enteredReviewMode" => {
+            let item_id = params
+                .get("itemId")
+                .or_else(|| params.get("item_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            AppServerNotification::EnteredReviewMode {
+                item_id,
+                params: params.clone(),
+            }
+        }
+        "item/exitedReviewMode" => {
+            let item_id = params
+                .get("itemId")
+                .or_else(|| params.get("item_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            AppServerNotification::ExitedReviewMode { item_id }
         }
         // Delta method patterns from app-server protocol reference Section 5.
         // The protocol uses specific compound method names rather than a single
@@ -350,6 +392,91 @@ mod tests {
                     if method == "item/commandExecution/outputDelta"
             ),
             "expected ItemDelta with method item/commandExecution/outputDelta, got: {n:?}"
+        );
+    }
+
+    // ── EnteredReviewMode / ExitedReviewMode (G.5) ──────────────────────────
+
+    #[test]
+    fn parse_entered_review_mode_camel_case_item_id() {
+        let line = r#"{"method":"item/enteredReviewMode","params":{"itemId":"item-1","toolName":"bash"}}"#;
+        let n = parse_app_server_notification(line)
+            .expect("item/enteredReviewMode should parse");
+        assert!(
+            matches!(
+                &n,
+                AppServerNotification::EnteredReviewMode { item_id, params }
+                    if item_id == "item-1"
+                    && params.get("toolName").and_then(|v| v.as_str()) == Some("bash")
+            ),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_entered_review_mode_snake_case_item_id_fallback() {
+        let line = r#"{"method":"item/enteredReviewMode","params":{"item_id":"item-2"}}"#;
+        let n = parse_app_server_notification(line)
+            .expect("item/enteredReviewMode with snake_case item_id should parse");
+        assert!(
+            matches!(
+                &n,
+                AppServerNotification::EnteredReviewMode { item_id, .. }
+                    if item_id == "item-2"
+            ),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_entered_review_mode_missing_item_id_defaults_empty() {
+        let line = r#"{"method":"item/enteredReviewMode","params":{}}"#;
+        let n = parse_app_server_notification(line)
+            .expect("item/enteredReviewMode with no itemId should parse");
+        assert!(
+            matches!(
+                &n,
+                AppServerNotification::EnteredReviewMode { item_id, .. }
+                    if item_id.is_empty()
+            ),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_exited_review_mode() {
+        let line = r#"{"method":"item/exitedReviewMode","params":{"itemId":"item-1"}}"#;
+        let n = parse_app_server_notification(line)
+            .expect("item/exitedReviewMode should parse");
+        assert!(
+            matches!(
+                &n,
+                AppServerNotification::ExitedReviewMode { item_id }
+                    if item_id == "item-1"
+            ),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_entered_review_mode_not_classified_as_item_delta() {
+        // Ensure the dedicated match arm fires before the ItemDelta catch-all.
+        let line = r#"{"method":"item/enteredReviewMode","params":{"itemId":"x"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            !matches!(n, AppServerNotification::ItemDelta { .. }),
+            "item/enteredReviewMode must not be classified as ItemDelta"
+        );
+    }
+
+    #[test]
+    fn parse_exited_review_mode_not_classified_as_item_delta() {
+        // Ensure the dedicated match arm fires before the ItemDelta catch-all.
+        let line = r#"{"method":"item/exitedReviewMode","params":{"itemId":"x"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            !matches!(n, AppServerNotification::ItemDelta { .. }),
+            "item/exitedReviewMode must not be classified as ItemDelta"
         );
     }
 
