@@ -3129,21 +3129,21 @@ Design references:
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| G.1 | Transport naming and config cleanup (`json` -> `cli-json`) | Phase E | 🔄 IN PROGRESS |
-| G.2 | App-server protocol reference and conformance test matrix | G.1 | 🔄 IN PROGRESS |
+| G.1 | Mode baseline docs + naming cleanup (`json` -> `cli-json`) | Phase E | 🔄 IN PROGRESS (mostly complete in branch) |
+| G.2 | CLI-JSON streaming verification + idle detection hardening | G.1 | ⏳ PLANNED |
 | G.3 | App-server transport adapter (`CodexTransport` impl) | G.1, G.2 | ⏳ PLANNED |
-| G.4 | Unified turn control (`start` / `steer` / `interrupt`) across all transports | G.3 | ⏳ PLANNED |
-| G.5 | Approval/elicitation bridging parity for app-server | G.3 | ⏳ PLANNED |
+| G.4 | Unified turn control + daemon turn-state reporting across all transports | G.3 | ⏳ PLANNED |
+| G.5 | Approval/elicitation bridging parity for app-server | G.4 | ⏳ PLANNED |
 | G.6 | Mail injection parity (`mcp`, `cli-json`, `app-server`) + queue semantics | G.4 | ⏳ PLANNED |
-| G.7 | TUI streaming normalization + UDP/pubsub fanout for all transports | G.4, G.6 | ⏳ PLANNED |
+| G.7 | TUI streaming normalization + daemon pubsub/UDP fanout architecture | G.4, G.6 | ⏳ PLANNED |
 | G.8 | Cross-platform reliability + soak testing (Linux/macOS/Windows) | G.5, G.6, G.7 | ⏳ PLANNED |
 | G.9 | Docs finalization, migration notes, and release gate | G.8 | ⏳ PLANNED |
 
-**Execution model**: G.1/G.2 document and naming hardening can run first. G.3 enables implementation. G.4-G.6 establish behavior parity. G.7-G.8 harden observability/runtime reliability. G.9 is release readiness.
+**Execution model**: G.1 is largely complete in current docs branch. G.2 is a dedicated validation sprint for existing `cli-json` behavior before adding more transport complexity. G.3 enables app-server runtime. G.4 sets cross-transport control and daemon state contracts. G.5 and G.6 run in parallel after G.4. G.7-G.8 harden observability/runtime reliability. G.9 is release readiness.
 
 ---
 
-### Sprint G.1 — Transport Naming and Config Cleanup (`json` -> `cli-json`)
+### Sprint G.1 — Mode Baseline Docs + Naming Cleanup (`json` -> `cli-json`)
 
 **Branch**: `feature/pG-s1-cli-json-rename`
 **Crate(s)**: `crates/atm-agent-mcp`, docs updates
@@ -3155,23 +3155,24 @@ Design references:
 - [ ] `transport = "cli-json"` is the canonical non-MCP streaming mode name
 - [ ] Tests updated to use `cli-json`
 - [ ] Config/help text reflects `mcp | cli-json | app-server`
+- [ ] App-server protocol reference doc exists and is linked from mode docs/requirements
 - [ ] `cargo test -p agent-team-mail-mcp` passes
 
 ---
 
-### Sprint G.2 — App-Server Protocol Reference + Conformance Matrix
+### Sprint G.2 — CLI-JSON Streaming Verification + Idle Detection Hardening
 
-**Branch**: `feature/pG-s2-app-server-protocol-docs`
-**Crate(s)**: docs only
+**Branch**: `feature/pG-s2-cli-json-verification`
+**Crate(s)**: `crates/atm-agent-mcp`, docs
 **Depends on**: G.1
 
 #### Exit Criteria
 
-- [ ] Protocol reference derived from Codex source captured in-repo
-- [ ] Method matrix includes `thread/start|resume|fork|list|read`, `turn/start|steer|interrupt`, `command/exec`
-- [ ] Notification matrix includes turn/item lifecycle and delta streams
-- [ ] `turn/steer` preconditions and error handling documented
-- [ ] Backpressure/channel-capacity notes included for implementation guidance
+- [ ] Validate `cli-json` parser against current Codex event stream samples (real run fixtures)
+- [ ] Verify idle detection behavior against actual Codex transitions; document fallback behavior
+- [ ] Verify mail injection timing/ordering under long-running turns and repeated idle windows
+- [ ] Add regression tests for event ordering and no-double-delivery under concurrent queue drains
+- [ ] Update `docs/codex-json-schema.md` with any discovered event-shape drift and compatibility handling
 
 ---
 
@@ -3186,21 +3187,23 @@ Design references:
 - [ ] `AppServerTransport` implements `CodexTransport` abstraction
 - [ ] Stdio JSONL framing handles request/response/notification safely
 - [ ] Thread/turn IDs mapped into existing session registry model
+- [ ] `thread/fork` supported and covered by integration tests (forked thread identity/session semantics documented)
 - [ ] Unknown notifications are non-fatal and logged with schema version context
 - [ ] Integration tests validate startup, turn creation, and graceful shutdown
 
 ---
 
-### Sprint G.4 — Unified Turn Control Across Transports
+### Sprint G.4 — Unified Turn Control + Daemon Turn-State Reporting Across Transports
 
 **Branch**: `feature/pG-s4-unified-turn-control`
-**Crate(s)**: `crates/atm-agent-mcp`, `crates/atm-daemon` (if control plumbing needed)
+**Crate(s)**: `crates/atm-agent-mcp`, `crates/atm-daemon`
 **Depends on**: G.3
 
 #### Exit Criteria
 
 - [ ] Common control API for `start_turn`, `steer_turn`, `interrupt_turn`
 - [ ] Active `turn_id` tracking is consistent across `mcp`, `cli-json`, and `app-server`
+- [ ] Turn state (`busy`/`idle`/terminal) is emitted to daemon for all modes via one normalized event path
 - [ ] `turn/steer` stale-turn handling covered by tests
 - [ ] Queue ordering rules (Claude > auto-mail) enforced transport-independently
 
@@ -3210,7 +3213,7 @@ Design references:
 
 **Branch**: `feature/pG-s5-approval-bridge`
 **Crate(s)**: `crates/atm-agent-mcp`
-**Depends on**: G.3
+**Depends on**: G.4
 
 #### Exit Criteria
 
@@ -3245,6 +3248,7 @@ Design references:
 #### Exit Criteria
 
 - [ ] Transport-specific event payloads normalized to one daemon stream contract
+- [ ] Architecture is explicit: `atm-agent-mcp` emits events to daemon; daemon remains the single fanout hub to TUI (pubsub + UDP if enabled); no direct `atm-agent-mcp -> atm-tui` channel
 - [ ] High-rate deltas fan out via daemon pubsub/UDP path without dropping required terminal events
 - [ ] TUI displays consistent item/turn state regardless of source transport
 - [ ] Control protocol compatibility (`control.stdin.request`, `control.interrupt.request`) preserved
