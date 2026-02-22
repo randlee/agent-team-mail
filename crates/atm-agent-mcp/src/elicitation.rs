@@ -123,6 +123,12 @@ impl ElicitationRegistry {
     ///
     /// Returns `Some(rewritten_response)` when a pending elicitation was
     /// found, otherwise `None`.
+    ///
+    /// Note on delivery mechanism: This method fires `response_tx.send()` for callers
+    /// that consume the oneshot (e.g. `bridge_entered_review_mode` in transport.rs).
+    /// For the MCP proxy path, the receiver is intentionally dropped — delivery there
+    /// happens via the returned `Option<Value>` which the caller writes directly to
+    /// child stdin. The silent `let _ = send(...)` failure is by design.
     pub fn resolve_for_downstream(
         &mut self,
         upstream_request_id: &serde_json::Value,

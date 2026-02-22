@@ -842,6 +842,10 @@ impl AppServerTransport {
         // ── Set up shared state and the duplex stream ───────────────────────
         let (duplex_write, duplex_read) = tokio::io::duplex(65_536);
 
+        // Create shared_stdin before the task state so the notification task
+        // can hold a clone for delivering approval responses to child stdin.
+        let shared_stdin = Arc::new(Mutex::new(child_stdin));
+
         let task_state = NotificationTaskState {
             turn_state: Arc::clone(&self.turn_state),
             idle_flag: Arc::clone(&self.idle_flag),
@@ -857,6 +861,9 @@ impl AppServerTransport {
             elicitation_registry: Some(Arc::clone(&self.elicitation_registry)),
             elicitation_counter: Some(Arc::clone(&self.elicitation_counter)),
             upstream_tx: Some(Arc::clone(&self.upstream_tx)),
+            // Share child stdin so the notification task can deliver approval
+            // decisions back to the child process.
+            child_stdin: Some(Arc::clone(&shared_stdin)),
         };
 
         tokio::spawn(drive_notification_task(
@@ -864,8 +871,6 @@ impl AppServerTransport {
             duplex_write,
             task_state,
         ));
-
-        let shared_stdin = Arc::new(Mutex::new(child_stdin));
 
         Ok(RawChildIo {
             stdin: shared_stdin,
@@ -944,6 +949,16 @@ pub struct NotificationTaskState {
     ///
     /// `None` when operating without a proxy (unit tests).
     pub upstream_tx: Option<Arc<Mutex<Option<tokio::sync::mpsc::Sender<Value>>>>>,
+    /// Shared stdin writer for the app-server child process (G.5).
+    ///
+    /// When `Some`, the background task uses this to deliver approval decisions
+    /// received via the elicitation registry back to the child process stdin.
+    /// The `Arc<Mutex<...>>` is shared between the task (which awaits responses)
+    /// and the `RawChildIo` returned to the proxy (which also writes via stdin).
+    ///
+    /// `None` when operating without a real child process (unit tests that do
+    /// not exercise the full approval round-trip).
+    pub child_stdin: Option<Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>>>,
 }
 
 /// Bridge an `item/enteredReviewMode` notification upstream as an
@@ -972,6 +987,7 @@ async fn bridge_entered_review_mode(
     elicitation_registry: &Option<Arc<Mutex<crate::elicitation::ElicitationRegistry>>>,
     elicitation_counter: &Option<Arc<AtomicU64>>,
     upstream_tx_arc: &Option<Arc<Mutex<Option<tokio::sync::mpsc::Sender<Value>>>>>,
+    child_stdin: &Option<Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>>>,
 ) {
     let (Some(registry), Some(counter), Some(tx_arc)) =
         (elicitation_registry, elicitation_counter, upstream_tx_arc)
@@ -988,10 +1004,10 @@ async fn bridge_entered_review_mode(
     let upstream_request_id = serde_json::json!(upstream_id_num);
     // Use item_id as both agent_id key and downstream_request_id for
     // app-server approval bridging.  The downstream response is written
-    // back to the child via the proxy's elicitation_registry resolution path.
+    // back to the child via the spawned delivery task below.
     let downstream_request_id = serde_json::json!(item_id);
 
-    let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<Value>();
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel::<Value>();
 
     registry.lock().await.register(
         item_id.to_string(),
@@ -999,6 +1015,71 @@ async fn bridge_entered_review_mode(
         upstream_request_id.clone(),
         response_tx,
     );
+
+    // Spawn a task that waits for the upstream approval decision and delivers
+    // it to the app-server child's stdin.  This is the only code path that
+    // writes the final approval/rejection JSON-RPC response back to the child;
+    // the elicitation registry's expire_timeouts() and cancel_for_agent() paths
+    // resolve the oneshot (sending here), but do NOT write to child stdin
+    // directly — that responsibility belongs to this delivery task.
+    //
+    // When child_stdin is None (unit tests without a real child), the response
+    // is received but discarded; the security invariant (no silent approval) is
+    // still upheld because the registry always sends an explicit reject payload.
+    if let Some(stdin_arc) = child_stdin.clone() {
+        let item_id_owned = item_id.to_string();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            // The registry's default timeout is 30 seconds.  Mirror that here
+            // so the delivery task does not outlive the registry entry.
+            const DELIVERY_TIMEOUT: std::time::Duration =
+                std::time::Duration::from_secs(35);
+            match tokio::time::timeout(DELIVERY_TIMEOUT, response_rx).await {
+                Ok(Ok(response)) => {
+                    let line = match serde_json::to_string(&response) {
+                        Ok(s) => format!("{s}\n"),
+                        Err(e) => {
+                            tracing::warn!(
+                                item_id = %item_id_owned,
+                                "failed to serialize elicitation response for child: {e}"
+                            );
+                            return;
+                        }
+                    };
+                    let mut guard = stdin_arc.lock().await;
+                    if let Err(e) = guard.write_all(line.as_bytes()).await {
+                        tracing::warn!(
+                            item_id = %item_id_owned,
+                            "failed to deliver elicitation response to child stdin: {e}"
+                        );
+                    } else {
+                        tracing::debug!(
+                            item_id = %item_id_owned,
+                            "approval decision delivered to child stdin"
+                        );
+                    }
+                }
+                Ok(Err(_)) => {
+                    // Sender dropped without sending — the registry was
+                    // cancelled or dropped.  Nothing to deliver.
+                    tracing::debug!(
+                        item_id = %item_id_owned,
+                        "elicitation response_tx dropped before delivery"
+                    );
+                }
+                Err(_) => {
+                    // Delivery timeout — the registry's expire_timeouts() loop
+                    // should have already sent a rejection via response_tx.
+                    // This branch is a safety net in case the registry loop
+                    // is slower than expected.
+                    tracing::debug!(
+                        item_id = %item_id_owned,
+                        "elicitation delivery task timed out (registry should have rejected)"
+                    );
+                }
+            }
+        });
+    }
 
     // Build the upstream elicitation/create request, preserving params from
     // the EnteredReviewMode notification.
@@ -1068,6 +1149,7 @@ pub async fn drive_notification_task(
         elicitation_registry,
         elicitation_counter,
         upstream_tx: upstream_tx_arc,
+        child_stdin,
     } = state;
     use crate::stream_norm::{
         AppServerNotification, TurnState, TurnStatus, parse_app_server_notification,
@@ -1187,6 +1269,7 @@ pub async fn drive_notification_task(
                         &elicitation_registry,
                         &elicitation_counter,
                         &upstream_tx_arc,
+                        &child_stdin,
                     )
                     .await;
                 }
@@ -1386,6 +1469,13 @@ impl CodexTransport for AppServerTransport {
         // background reader task gets a Box<dyn AsyncRead>.
         let (duplex_write, duplex_read) = tokio::io::duplex(65_536);
 
+        // Create shared_stdin before the task state so the notification task
+        // can hold a clone for delivering approval responses to child stdin.
+        let exit_status: Arc<Mutex<Option<ExitStatus>>> = Arc::new(Mutex::new(None));
+        let shared_stdin = Arc::new(Mutex::new(
+            Box::new(child_stdin) as Box<dyn AsyncWrite + Send + Unpin>
+        ));
+
         let task_state = NotificationTaskState {
             turn_state: Arc::clone(&self.turn_state),
             idle_flag: Arc::clone(&self.idle_flag),
@@ -1402,6 +1492,9 @@ impl CodexTransport for AppServerTransport {
             elicitation_registry: Some(Arc::clone(&self.elicitation_registry)),
             elicitation_counter: Some(Arc::clone(&self.elicitation_counter)),
             upstream_tx: Some(Arc::clone(&self.upstream_tx)),
+            // Share child stdin so the notification task can deliver approval
+            // decisions back to the child process.
+            child_stdin: Some(Arc::clone(&shared_stdin)),
         };
 
         // Background task: read lines, parse notifications, forward to duplex.
@@ -1409,11 +1502,6 @@ impl CodexTransport for AppServerTransport {
             reader.into_inner(),
             duplex_write,
             task_state,
-        ));
-
-        let exit_status: Arc<Mutex<Option<ExitStatus>>> = Arc::new(Mutex::new(None));
-        let shared_stdin = Arc::new(Mutex::new(
-            Box::new(child_stdin) as Box<dyn AsyncWrite + Send + Unpin>
         ));
         let process: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
 
@@ -1963,6 +2051,7 @@ mod tests {
             &Some(Arc::clone(&registry)),
             &Some(Arc::clone(&counter)),
             &Some(Arc::clone(&upstream_tx_arc)),
+            &None,
         )
         .await;
 
@@ -2005,6 +2094,7 @@ mod tests {
             &None,
             &None,
             &None,
+            &None,
         )
         .await;
         // Test passes if no panic occurs.
@@ -2030,6 +2120,7 @@ mod tests {
             &Some(Arc::clone(&registry)),
             &Some(Arc::clone(&counter)),
             &Some(Arc::clone(&upstream_tx_arc)),
+            &None,
         )
         .await;
 

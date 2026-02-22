@@ -528,6 +528,10 @@ async fn test_app_server_background_task_turn_lifecycle() {
     let pending_responses = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let session_registry = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
+    // elicitation_registry/counter/upstream_tx/child_stdin are all None here:
+    // these unit tests exercise turn-tracking and notification-routing only.
+    // Approval bridging is tested via the dedicated unit tests in transport.rs
+    // (bridge_entered_review_mode_* and security_* tests).
     let state = NotificationTaskState {
         turn_state: Arc::clone(&turn_state),
         idle_flag: Arc::clone(&idle_flag),
@@ -539,6 +543,7 @@ async fn test_app_server_background_task_turn_lifecycle() {
         elicitation_registry: None,
         elicitation_counter: None,
         upstream_tx: None,
+        child_stdin: None,
     };
 
     tokio::task::spawn(drive_notification_task(
@@ -851,6 +856,10 @@ async fn test_response_correlation_via_background_task() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     pending_responses.lock().await.insert(42, tx);
 
+    // elicitation_registry/counter/upstream_tx/child_stdin are all None here:
+    // these unit tests exercise turn-tracking and notification-routing only.
+    // Approval bridging is tested via the dedicated unit tests in transport.rs
+    // (bridge_entered_review_mode_* and security_* tests).
     let state = NotificationTaskState {
         turn_state: Arc::clone(&turn_state),
         idle_flag: Arc::clone(&idle_flag),
@@ -862,6 +871,7 @@ async fn test_response_correlation_via_background_task() {
         elicitation_registry: None,
         elicitation_counter: None,
         upstream_tx: None,
+        child_stdin: None,
     };
 
     tokio::task::spawn(drive_notification_task(
