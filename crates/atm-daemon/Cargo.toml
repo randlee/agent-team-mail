@@ -29,7 +29,7 @@ clap = { version = "4", features = ["derive"] }
 notify = "7"
 dirs = "5"
 hostname = "0.4"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
 libloading = "0.8"
 async-trait = "0.1"

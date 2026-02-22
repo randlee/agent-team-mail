@@ -1,5 +1,5 @@
 [package]
-name = "atm-agent-mcp"
+name = "agent-team-mail-mcp"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,6 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 description = "MCP proxy for managing Codex agent sessions with ATM team integration"
 default-run = "atm-agent-mcp"
+
+[lib]
+name = "atm_agent_mcp"
 
 [[bin]]
 name = "atm-agent-mcp"

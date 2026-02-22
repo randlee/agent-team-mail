@@ -2418,9 +2418,27 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 ## 16. Phase E: ATM Core Bug Fixes (Priority)
 
-**Status**: PLANNED (priority — these block reliable session startup every session)
-**Goal**: Fix two known bugs in ATM core that require manual workarounds every session.
+**Status**: COMPLETE
+**Goal**: Fix two known bugs in ATM core that require manual workarounds every session, and wire Claude Code hooks to daemon state.
 **Integration branch**: `integrate/phase-E`
+
+### Phase E Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| E.1 | Fix `atm teams resume` session ID reliability | Phase D | ✅ MERGED (#147) |
+| E.2 | Fix inbox read marking other agents' messages as read | — | ✅ MERGED (#149) |
+| E.3 | Hook-to-daemon state bridge | E.1 | ✅ MERGED (#152) |
+| E.4 | TUI reliability hardening | E.3 | ✅ MERGED (#158) |
+| E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ MERGED (#161) |
+| E.6 | External agent member management and model registry | E.3 | ✅ MERGED (#164) |
+| E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ✅ MERGED (#165) |
+| E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ MERGED (#162) |
+| — | Daemon hook-event auth validation | E.3 | ✅ MERGED (#163) |
+
+**Execution model**: E.1 is priority (unblocks session startup). E.2 and E.3 can run in parallel after E.1 merges. E.4–E.5 are TUI hardening. E.6–E.7 are external agent support. E.8 is identity/backup infrastructure.
+
+---
 
 ### Sprint E.1 — Fix `atm teams resume` session ID reliability
 
@@ -2436,14 +2454,20 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 #### Scope
 
 1. `atm teams resume` accepts `--session-id <id>` flag for explicit override
-2. Fallback: read session ID from gate debug log (`/tmp/gate-agent-spawns-debug.jsonl`) when env var is absent/stale
-3. Or: gate hook writes a stable session ID file (`/tmp/atm-session-id`) that `atm` reads reliably
-4. Update `CLAUDE.md` initialization process to use the fixed command reliably
+2. Primary runtime path: `CLAUDE_SESSION_ID` environment variable when present
+3. If no usable session ID is available, fail with a helpful error instead of silently writing a random/stale ID
+4. Update `CLAUDE.md` initialization process to use explicit `--session-id` or `CLAUDE_SESSION_ID`
+
+> Note: `${TMPDIR}/atm-session-id` written by the gate hook is an audit/debug breadcrumb only and is not part of the production session-resolution contract.
 
 #### Exit Criteria
 
 - [ ] `atm teams resume atm-dev` sets `leadSessionId` to the correct current session ID without manual Python workaround
+- [ ] `atm teams resume atm-dev --session-id <uuid>` explicit flag works and writes that ID to `config.json`
+- [ ] Resolution order verified: `--session-id` flag → `CLAUDE_SESSION_ID` env → helpful error
+- [ ] Gate hook breadcrumb write to `${TMPDIR}/atm-session-id` documented as diagnostics-only (not a resume fallback)
 - [ ] Verification: gate hook allows named teammate spawning immediately after `atm teams resume`
+- [ ] CLAUDE.md initialization process updated (no Python workaround)
 - [ ] `cargo clippy --workspace -- -D warnings` clean
 - [ ] `cargo test --workspace` passes
 
@@ -2471,6 +2495,609 @@ When team-lead runs `atm read` or `atm inbox`, ATM marks messages as `read: true
 - [ ] `atm read` only modifies calling agent's own inbox
 - [ ] arch-ctm's messages remain `read: false` after team-lead polls
 - [ ] Integration test confirms inbox isolation
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint E.3 — Hook-to-Daemon State Bridge
+
+**Branch**: `feature/pE-s3-hook-daemon-bridge`
+**Crate(s)**: `crates/atm-daemon` (new hook event handler), `.claude/scripts/` (hook updates)
+**Depends on**: E.1 (daemon socket path stabilized)
+**Parallel with**: E.2
+
+#### Problem
+
+The `TeammateIdle` relay (`teammate-idle-relay.py`) writes idle events to a flat file (`~/.claude/daemon/hooks/events.jsonl`) but the daemon never reads it. The daemon's session registry (Phase 10 / C.3) is populated only by explicit socket calls — there is no path from Claude Code hook events to daemon state. As a result:
+
+- `atm teams cleanup` liveness checks fall back to PID polling instead of daemon state
+- `atm teams resume` daemon guard cannot verify existing lead liveness reliably
+- The TUI live-state gate queries daemon state that is never updated from real hook events
+
+#### Solution
+
+Two lightweight components:
+
+**1. Hook scripts (Python, cross-platform, with unit tests)**
+
+All hook scripts are Python (not bash) for cross-platform compatibility and testability. Three scripts send `hook_event` socket messages to the daemon:
+
+- `session-start.py` — replaces `session-start.sh`; handles `SessionStart`
+- `session-end.py` — new; handles `SessionEnd`
+- `teammate-idle-relay.py` — extended to also send socket message
+
+**`.atm.toml` guard** (all three scripts): before sending any daemon socket message, check for `.atm.toml` in `cwd`. If absent, skip the socket call entirely. This prevents daemon state from being polluted by unrelated Claude Code sessions on the same machine.
+
+Socket message payloads (single `hook-event` command path):
+```json
+{"event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": {"kind": "claude_hook"}}
+{"event": "teammate_idle", "session_id": "...", "agent": "...", "team": "...", "received_at": "YYYY-MM-DDTHH:MM:SSZ"}
+{"event": "session_end",   "session_id": "...", "agent": "...", "team": "...", "reason": "..."}
+```
+
+`source` shape was initially described in E.3 as a flat string (`"init"` / `"compact"`).
+Sprint E.7 supersedes that format: lifecycle source is now an object discriminator
+(`source.kind`) for unified, extensible validation (`claude_hook` / `atm_mcp` /
+`agent_hook` / `unknown`). Legacy flat-string payloads degrade to `unknown`.
+
+**Unit tests** live in `tests/hook-scripts/`:
+- `test_session_start.py` — mock socket, verify message shape, verify `.atm.toml` guard, verify fail-open on socket error
+- `test_session_end.py` — same pattern for session_end
+- `test_teammate_idle_relay.py` — extend existing tests with socket message assertions
+
+**2. Daemon hook event handler**
+
+Add `SocketCommand::HookEvent` variant. Handler updates session registry and agent activity state:
+- `session_start` → register/refresh session; set agent state to `Active`
+- `teammate_idle` → set agent state to `Idle` for the named session
+- `session_end` → mark session as `Dead`; update agent state to `Closed`
+
+#### Scope Notes
+
+- No new daemon persistence — in-memory state only (existing registry)
+- All hooks remain fail-open, always exit `0`
+- `events.jsonl` file write is kept as durable audit trail; socket call is additive
+- Socket path lookup: `${ATM_HOME:-$HOME}/.claude/daemon/atm-daemon.sock`
+- Global `~/.claude/settings.json` updated to add `SessionEnd` hook pointing to `session-end.py`
+- Keep one daemon lifecycle handler path (`hook-event`) with source-aware validation;
+  avoid splitting lifecycle transport into multiple packet families
+- SessionRegistry is currently keyed by bare agent name (not `(team, name)`);
+  this is a known limitation and a TODO for future multi-team daemon support
+
+#### Exit Criteria
+
+- [ ] `session-start.py` replaces `session-start.sh`; sends `hook_event/session_start` **only when `.atm.toml` present in cwd**
+- [ ] `session-end.py` (new) added to global `~/.claude/settings.json`; sends `hook_event/session_end` **only when `.atm.toml` present in cwd**
+- [ ] `teammate-idle-relay.py` sends `hook_event/teammate_idle` **only when `.atm.toml` present in cwd**
+- [ ] All hooks remain fail-open — exit `0` even if socket call fails or `.atm.toml` is absent
+- [ ] Unit tests in `tests/hook-scripts/` cover: message shape, `.atm.toml` guard, socket-error fail-open, daemon-not-running fail-open
+- [ ] Daemon handles `SocketCommand::HookEvent`; updates session registry + agent state
+- [ ] `session_start` → `Active`; `teammate_idle` → `Idle`; `session_end` → `Dead`/`Closed`
+- [ ] Integration test: hook event over socket → daemon state query reflects updated state
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint E.4 — TUI Reliability Hardening (Restart, Reconnect, Failure Injection)
+
+**Branch**: `feature/pE-s4-tui-reliability`
+**Crate(s)**: `crates/atm-tui`, `crates/atm-daemon` (dedupe store, socket handler)
+**Depends on**: E.3 (hook-to-daemon bridge provides live state updates)
+**Design refs**: `docs/tui-mvp-architecture.md` §12, §14; `docs/tui-control-protocol.md` §5, §11
+
+#### Problem
+
+Phase D shipped a functional TUI MVP with in-memory dedupe, basic retry, and log-tail streaming. Several reliability gaps remain from the MVP vs Hardening boundary defined in the TUI design docs:
+
+- Dedupe store is memory-only — duplicates possible after daemon restart
+- No failure-injection tests for daemon restart, stale sessions, or queue backlog
+- Stream source interruption auto-reconnect is untested under sustained load
+- Control ack timeout behavior and backpressure are not validated end-to-end
+
+#### Scope
+
+1. **Restart-safe dedupe store**: replace in-memory dedupe with a durable store (file-backed or SQLite) that survives daemon restart. Bounded TTL window (10 min recommended) with atomic lookup/insert.
+2. **Failure-injection test suite**: automated tests covering:
+   - Daemon restart mid-stream (TUI reconnects, no lost events)
+   - Stale session cleanup (TUI detects and displays degraded state)
+   - Queue backlog under sustained control input (no UI starvation)
+   - Socket unavailable → graceful degradation → reconnect on availability
+3. **Stream reconnect hardening**: verify auto-reconnect to log tail after source interruption; add explicit source/error indicator on freeze.
+4. **`sent_at` skew validation**: reject control requests older than configurable max age; bounded clock-skew tolerance window.
+
+#### Exit Criteria
+
+- [ ] Dedupe store survives daemon restart — integration test: send request, restart daemon, retry same `request_id`, get `duplicate: true`
+- [ ] Failure-injection tests pass: daemon restart, stale session, queue backlog, socket unavailable
+- [ ] Stream auto-reconnect verified under sustained load (no silent data loss)
+- [ ] `sent_at` skew rejection implemented and tested
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint E.5 — TUI Performance, UX Polish, and Operational Validation
+
+**Branch**: `feature/pE-s5-tui-polish`
+**Crate(s)**: `crates/atm-tui`, docs
+**Depends on**: E.4 (reliability hardening provides stable base for perf testing)
+**Design refs**: `docs/tui-mvp-architecture.md` §7, §14, §15
+
+#### Problem
+
+The TUI MVP is functional but untested under sustained real-world load. Several UX and operational items were deferred from Phase D:
+
+- No performance validation under sustained stream + control activity
+- Interrupt confirmation policy not finalized (`always`/`never`/`configurable`)
+- No per-user UI preferences file
+- No documented SLO targets for render responsiveness or ack visibility latency
+- No operational runbooks or troubleshooting guidance for TUI operators
+
+#### Scope
+
+1. **Performance validation**: stress test with sustained stream output + concurrent control activity. Measure and document render responsiveness and control-ack visibility latency. Define SLO targets.
+2. **Interrupt confirmation policy**: implement configurable policy (`always`, `never`, `confirm`) for Ctrl+C interrupt in Agent Terminal. Default: `confirm`.
+3. **Per-user UI preferences**: define file location (`~/.config/atm/tui.toml` or similar) and schema for:
+   - Interrupt confirmation policy
+   - Follow-mode default
+   - Color theme (if applicable)
+   - Default filters for event log
+4. **Richer timeout/backoff policy**: configurable per-action-type timeout and backoff (stdin vs interrupt may have different latency tolerance).
+5. **Operational documentation**: troubleshooting guide covering common failure modes, daemon connectivity issues, and TUI recovery steps.
+
+#### Exit Criteria
+
+- [x] Stress test passes: 10k-line append bounded to 1000 in <200ms; stream truncation/recovery paths validated (SLO: render tick ≤100ms, ack visibility ≤3s documented in tui-troubleshooting.md)
+- [x] Interrupt confirmation policy is configurable via preferences file (`InterruptPolicy::Always|Never|Confirm`)
+- [x] Per-user preferences file (`tui.toml`) schema defined, parsed, and applied on TUI startup (`~/.config/atm/tui.toml`, ATM_HOME-aware)
+- [x] Per-action-type timeout/backoff configurable (`stdin_timeout_secs`, `interrupt_timeout_secs`)
+- [x] Operational troubleshooting guide created (`docs/tui-troubleshooting.md`, 8 sections)
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo test --workspace` passes (1433 tests, 0 failures)
+
+---
+
+### Sprint E.6 — External Agent Member Management and Model Registry
+
+**Branch**: `feature/pE-s6-external-member-mgmt`
+**Crate(s)**: `crates/atm` (CLI), `crates/atm-core` (schema), `crates/atm-daemon` (auto-update)
+**Depends on**: E.3 (hook-to-daemon bridge provides session tracking infrastructure)
+**Design refs**: `docs/agent-team-api.md`, `docs/requirements.md`
+
+#### Problem
+
+`atm teams add-member` has no `--session-id` flag. External agents (Codex, Gemini) cannot register their agent/session ID at join time, which means:
+
+- `atm teams cleanup` cannot perform liveness checks on external agents
+- Daemon state tracking cannot correlate hook events to external agents
+- Team-lead cannot tail external agent logs without manually looking up the agent ID
+- The `--model` flag accepts arbitrary strings with no validation, making capability-aware routing and cost tracking unreliable
+
+Additionally, when an external agent reconnects with a new session/agent ID, the stale ID in config.json is never updated. The daemon already receives hook events with the current agent ID — it should auto-update the member record.
+
+#### Scope
+
+1. **`--session-id` flag on `add-member`**: Accept the external agent's agent/session ID at registration time. This ID is stored in the member record and used for:
+   - Liveness checks in `atm teams cleanup`
+   - Log tailing (`atm logs <agent>` or similar)
+   - Daemon state correlation
+
+2. **Daemon auto-update of session-id**: When the daemon receives a hook event (session_start, teammate_idle) from a registered agent whose `session_id` differs from the stored value, automatically update the member record. This eliminates the need for manual session ID management on reconnect.
+
+3. **Model registry for non-Claude-Code agents**: The model registry applies ONLY to members added via `atm teams add-member` (external agents). Claude Code-managed teammates set their own model field via the Team API — ATM must not overwrite or validate those values (Claude Code uses inconsistent formats like `sonnet` vs `claude-sonnet-4-6` and that's their concern).
+
+   For `add-member`, validate `--model` against a registry of known full model identifiers:
+
+   **Claude models** (for non-Claude-Code agents using Claude API directly):
+   - `claude-opus-4-6`
+   - `claude-sonnet-4-6`
+   - `claude-haiku-4-5`
+
+   **OpenAI/Codex models**:
+   - `gpt5.3-codex`
+   - `gpt5.3-codex-spark`
+   - `o3`
+   - `o4-mini`
+
+   **Google/Gemini models**:
+   - `gemini-2.5-pro`
+   - `gemini-2.5-flash`
+
+   **Special**:
+   - `unknown` (default for agents where model is not specified)
+   - `custom:<identifier>` (escape hatch for unlisted models)
+
+   The registry is a compile-time enum with `Display`/`FromStr` for CLI parsing and serde for config. `--model` validates against the registry and rejects unknown values (unless prefixed with `custom:`). The registry is used for display, capability-aware routing, and cost tracking — not for Claude Code interop.
+
+4. **`--backend-type` flag on `add-member`**: Explicitly declare the agent backend so cleanup/liveness logic can apply backend-appropriate health checks:
+   - `claude-code` — Claude Code teammate (managed by Team API; ATM should rarely need to add these manually)
+   - `codex` — OpenAI Codex agent
+   - `gemini` — Google Gemini agent
+   - `external` — generic external agent (API-based or custom)
+   - `human:<username>` — human user (e.g., `human:randlee`). Username is required for human backends to support cross-machine identification when bridge/relay communication is enabled. The `human:` prefix is never the default — it must be explicitly specified. No human plugin exists yet; this reserves the namespace for future chat interfaces.
+
+5. **MCP auto-add collision guard**: In MCP-managed add/join flows, enforce name/identity safety:
+   - If member `name` already exists with `isActive: true` and a different `agent_id`, reject auto-add/join
+   - If same `agent_id` already exists, treat as idempotent success
+   - If same `name` exists but inactive, require explicit reclaim/update path
+   - Execute checks under lock with atomic config write to avoid race-based duplicate/identity takeover
+
+6. **`atm teams update-member` command**: Allow updating session-id, model, pane-id, backend-type, and active status on an existing member without removing and re-adding.
+
+#### Exit Criteria
+
+- [x] `atm teams add-member --session-id <id>` stores session ID in member record
+- [x] `atm teams add-member --backend-type codex` stores backend type
+- [x] `atm teams add-member --backend-type human:randlee` stores human backend with username
+- [x] `atm teams add-member --model gpt5.3-codex` validates against registry; `--model foo` rejected; `--model custom:foo` accepted
+- [x] Model validation only applies to `add-member` / `update-member`; Claude Code-managed member models are never overwritten or validated
+- [x] Daemon auto-updates session-id when hook event arrives with new ID for known agent
+- [x] MCP auto-add/join rejects active-name collisions when `agent_id` differs; idempotent on matching `agent_id`
+- [x] `atm teams update-member <team> <agent> --session-id <new-id>` updates existing member
+- [x] `atm teams cleanup` uses session-id for liveness checks on external agents (conservative: unknown = keep)
+- [x] `human:<username>` backend type is never set as default — must be explicit
+- [x] Integration tests cover: add with session-id, daemon auto-update, update-member, cleanup with external agent, human backend type parsing
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo test --workspace` passes (1511 tests)
+
+---
+
+### Sprint E.7 — Unified Lifecycle Source Model + MCP Lifecycle Emission
+
+**Branch**: `feature/pE-s7-lifecycle-source-mcp`
+**Crate(s)**: `crates/atm-daemon`, `crates/atm-agent-mcp`, `docs/`
+**Depends on**: E.3 (hook-event bridge), E.6 (external member identity model)
+**Design refs**: `docs/requirements.md` §4.5, `docs/agent-teams-hooks.md`
+
+#### Problem
+
+Lifecycle events currently originate from Claude hooks, but near-term support requires
+the same daemon lifecycle path to handle MCP-managed agents and future adapters
+without packet fragmentation. We need source-aware validation in one handler and
+explicit MCP lifecycle emission coverage.
+
+#### Scope
+
+1. **Source-kind discriminator in lifecycle payloads**:
+   - Introduce expandable `source.kind` enum in `hook-event` payloads:
+     - `claude_hook`
+     - `atm_mcp`
+     - `agent_hook`
+     - `unknown`
+   - Keep one daemon command path (`hook-event`) and one lifecycle handler.
+
+2. **Source-aware daemon auth/validation policy**:
+   - Enforce team/member validation before state mutation for all sources.
+   - Apply stricter Claude-hook expectations where applicable while preserving
+     shared core validation and state transitions.
+
+3. **MCP lifecycle emission** (`atm-agent-mcp`):
+   - Emit `session_start` when MCP-managed agent session is established
+   - Emit `teammate_idle` on idle transitions
+   - Emit `session_end` on close/teardown
+   - Include canonical team/member identity fields required by daemon auth checks.
+
+4. **Future adapter guidance**:
+   - Document hook/adapter wiring pattern for non-Claude agents (e.g. Codex/Gemini)
+     so adding lifecycle callbacks is straightforward when providers expose them.
+
+#### Exit Criteria
+
+- [x] Lifecycle payload supports expandable `source.kind` with backward-compatible handling
+- [x] Daemon lifecycle handler performs source-aware validation in one command path
+- [x] `atm-agent-mcp` emits start/idle/end lifecycle events to daemon
+- [x] Tests cover: source-kind parsing, source-aware authz, MCP lifecycle emission
+- [x] Docs updated with adapter wiring pattern for future agent hooks
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo test --workspace` passes
+
+---
+
+### Sprint E.8 — ATM Identity Role Mapping + Team Backup/Restore
+
+**Branch**: `feature/pE-s8-identity-backup`
+**Crates**: `atm-core`, `atm`
+**Depends on**: E.1 (resume command)
+
+#### Scope
+
+1. **[roles] table in .atm.toml** — Maps role names to mailbox identities. Resolution order: roles → aliases → literal fallback.
+2. **Fix send/read alias inconsistency** — `atm read <agent>` now applies the same roles/alias resolution pipeline as `atm send` (own-inbox read with no `<agent>` still uses caller identity directly).
+3. **`atm teams backup <team>`** — Snapshot config.json + all inbox files + task files to `~/.claude/teams/.backups/<team>/<timestamp>/`. Auto-prunes to last 5 backups. Print backup path.
+4. **`atm teams restore <team>`** — Smart restore from latest backup (or `--from <path>`). Skips team-lead entry, restores non-leader members + inboxes + tasks. Never overwrites `leadSessionId`. Supports `--dry-run` and `--skip-tasks` flags.
+5. **Auto-backup on resume** — `atm teams resume` automatically creates a backup before making any state changes (non-fatal).
+
+#### Exit Criteria
+
+- [x] `[roles]` table parsed from .atm.toml and applied in send/read resolution
+- [x] send and read both use same alias/role resolution pipeline
+- [x] `atm teams backup <team>` creates timestamped backup with config + inboxes + tasks
+- [x] `atm teams restore <team>` restores non-leader members + inboxes + tasks from backup
+- [x] `--dry-run` flag shows what would be restored without making changes
+- [x] `--skip-tasks` flag allows skipping task restoration
+- [x] Auto-backup on resume (non-fatal, auto-prune to last 5)
+- [x] Integration tests for role mapping, backup/restore round-trip
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo test --workspace` passes
+
+---
+
+### Phase E Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| E.1 | `atm teams resume` session ID reliability | Phase D | ✅ MERGED (#147) |
+| E.2 | Inbox read scoping | E.1 (or parallel) | ✅ MERGED (#149) |
+| E.3 | Hook-to-daemon state bridge | E.1 (parallel with E.2) | ✅ MERGED (#152) |
+| E.4 | TUI reliability hardening (restart, reconnect, failure injection) | E.3 | ✅ MERGED (#158) |
+| E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ MERGED (#161) |
+| E.6 | External agent member management and model registry | E.3 | ✅ MERGED (#164) |
+| E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ✅ MERGED (#165) |
+| E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ MERGED (#162) |
+
+**Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.6 is member management for external agents (Codex/Gemini). E.7 extends lifecycle handling to source-aware validation + MCP lifecycle emission. E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4. E.6 can run parallel to E.4/E.5. E.7 starts after E.6 interface contracts settle.
+
+---
+
+## 16.5 Phase F: Team Installer (`atm team init`)
+
+**Status**: PLANNED
+**Goal**: Allow orchestration packages — hook scripts, agent prompts, and skills — to be installed into `~/.claude/` with a single command, with clean separation between machine-global hooks and project-scoped orchestration.
+**Integration branch**: `integrate/phase-F`
+
+### Motivation
+
+Currently, setting up a new machine or onboarding a new project requires manually copying scripts, agents, and skills and hand-editing `settings.json`. `atm team init atm-dev` does all of this in one command. Multiple named orchestration packages can be composed per-project (e.g., `rust-sprint`, `docs-review`, `generic-dev`).
+
+### Two Install Scopes
+
+#### 1. Global (machine-level) — install once
+
+Hook scripts and their `~/.claude/settings.json` entries that apply across **all** Claude Code sessions on the machine:
+
+- `session-start.py` → `~/.claude/scripts/`
+- `session-end.py` → `~/.claude/scripts/`
+- Hook entries for `SessionStart` and `SessionEnd` → `~/.claude/settings.json` (**global**)
+
+These are installed **once** per machine. `atm team init` skips them if already present (checks script SHA256 + settings entry). `--force` to update.
+
+#### 2. Project/orchestration (project-level) — per repo or per workflow
+
+Orchestration packages install into the **project's** `.claude/` directory:
+
+- Hook scripts (gate, TeammateIdle relay) → `.claude/scripts/`
+- Hook entries → `.claude/settings.json` (**project-level**, committed to repo)
+- Agent prompts → `.claude/agents/`
+- Skills → `.claude/skills/`
+
+Multiple named orchestration packages can be installed in the same project. Each is self-contained. Examples:
+- **`rust-sprint`** — scrum-master, rust-developer, rust-qa-agent, gate hook, phase-orchestration skill
+- **`docs-review`** — docs-agent, review-agent, lighter gate config
+- **`generic-dev`** — general-purpose scrum-master, minimal hooks
+
+### Package Format
+
+Packages live in `.claude/packages/<name>/` within the repo:
+
+```
+.claude/
+  packages/
+    rust-sprint/
+      manifest.toml          ← metadata + install map
+      scripts/               ← project-level hook scripts (Python)
+        gate-agent-spawns.py
+        teammate-idle-relay.py
+        tests/
+      agents/
+        scrum-master.md
+        rust-developer.md
+        rust-qa-agent.md
+      skills/
+        phase-orchestration/
+        rust-development/
+      project-hooks.json     ← hook entries for .claude/settings.json
+    global/
+      manifest.toml          ← scope = "global"
+      scripts/
+        session-start.py
+        session-end.py
+        tests/
+      global-hooks.json      ← hook entries for ~/.claude/settings.json
+```
+
+**`manifest.toml`**:
+```toml
+[package]
+name = "rust-sprint"
+version = "0.1.0"
+description = "Rust sprint orchestration — scrum-master, dev, QA, gate hook"
+atm_min_version = "0.15.0"
+scope = "project"           # "project" | "global"
+
+[install]
+scripts = "scripts/"        # → .claude/scripts/ (project) or ~/.claude/scripts/ (global)
+agents  = "agents/"         # → .claude/agents/
+skills  = "skills/"         # → .claude/skills/
+hooks   = "project-hooks.json"  # → merged into .claude/settings.json
+```
+
+### `atm team init` Command
+
+```
+atm team init <team> [--package <name>] [--dry-run] [--force]
+```
+
+1. Read team definition from `.atm/teams/<team>/` (or cwd `.atm.toml`)
+2. Install **global package** first (scope=global), if not already installed
+3. Install **orchestration package(s)** into project `.claude/` (scope=project)
+   - Default: install all packages listed in team definition
+   - `--package <name>`: install only the named package
+4. Write receipt to `~/.atm/installed/<team>/receipt.toml` (global) and `.atm/installed/<package>.toml` (project)
+5. Print summary per scope: global (skipped/installed), project (files copied, hooks merged)
+
+### `settings.json` Surgery — Insert/Remove Only
+
+`atm team init` and `atm team uninstall` perform **surgical edits** to `settings.json` — they never rewrite the file wholesale:
+
+- **Install**: read existing JSON, append new hook entries under the appropriate event key, write back. Existing entries from other tools, plugins, or manual configuration are preserved untouched.
+- **Uninstall**: read existing JSON, remove only the exact hook entries that were added by this package (matched by command string from receipt), write back. No other entries are touched.
+- **Duplicate detection**: before inserting, check if the exact command string is already present under the event key. If so, skip — idempotent.
+- **JSON formatting**: preserve existing indentation/style where possible; fall back to 2-space indent if file must be reformatted.
+- **Atomic write**: write to a temp file, then rename — never leave `settings.json` in a partial state.
+
+This ensures `atm team init` is safe to run even when the user has manually configured other hooks, plugins (e.g., LSP, nuget-publishing), or project-specific settings.
+
+### Conflict Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Global script already installed (identical) | Skip — "already up to date" |
+| Global script already installed (different) | Skip with warning — use `--force` to update |
+| Project file already exists | Overwrite (project files are owned by the package) |
+| Hook entry already present (exact command match) | Skip duplicate — idempotent |
+| Other hook entries present in settings.json | Left untouched — surgical insert/remove only |
+| ATM version too old | Error with minimum version required |
+
+### Design Discussion: Onboarding Warnings and Setup Nudges
+
+Phase F must address the gap between "ATM hooks are installed globally" and "this project hasn't been set up for ATM." The E.3 review exposed that global hooks fire in every Claude Code session — they must be completely inert in non-ATM projects, but they also represent a natural injection point for reminding users to configure ATM when it would be useful.
+
+#### Key Questions to Resolve in F.1
+
+1. **Where should "ATM not configured" warnings appear?**
+   - `SessionStart` hook: currently prints `SESSION_ID=...` and team context when `.atm.toml` is present, prints nothing otherwise. Should it print a one-line nudge like `ATM available but not configured for this project. Run: atm team init <team>` when ATM is installed globally but `.atm.toml` is absent?
+   - Pros: visible on every session start, hard to miss
+   - Cons: noisy for users who intentionally don't want ATM in certain projects
+   - Compromise: only show the nudge if a `.claude/` directory exists in cwd (suggesting it's a Claude Code project that might benefit from ATM)
+
+2. **Opt-out mechanism for nudges**
+   - Users who don't want ATM in a project should be able to silence the nudge permanently
+   - Options:
+     - `atm team init --skip` creates a minimal `.atm.toml` with `disabled = true` (suppresses all nudges)
+     - A global `~/.atm/config.toml` with `suppress_nudges = true` (machine-wide opt-out)
+     - An env var `ATM_QUIET=1` for temporary suppression
+   - Recommendation: support all three, checked in order: env var → project `.atm.toml` `disabled` → global config
+
+3. **What triggers a setup reminder vs silence?**
+
+   | Condition | Behavior |
+   |-----------|----------|
+   | No ATM binary on PATH | Complete silence — hooks exit immediately |
+   | ATM installed, no `.atm.toml`, no `.claude/` dir | Silence — not a Claude project |
+   | ATM installed, no `.atm.toml`, `.claude/` dir exists | Candidate for nudge — Claude project without ATM |
+   | ATM installed, `.atm.toml` with `disabled = true` | Silence — user opted out |
+   | ATM installed, `.atm.toml` present and valid | Full ATM functionality |
+
+4. **`atm team init` as the canonical setup entry point**
+   - The nudge message should always point to `atm team init <team>` as the single command to run
+   - `atm team init` must handle the full onboarding: create `.atm.toml`, install project hooks, set up agent prompts
+   - For first-time users: `atm team init --discover` could list available built-in packages and guide selection
+
+5. **Post-install verification**
+   - After `atm team init`, the next `SessionStart` hook should confirm setup: `ATM configured: team=atm-dev, packages=[rust-sprint]`
+   - `atm team status` could show current project setup health: installed packages, hook integrity (SHA256 check), missing components
+
+6. **Interaction with `atm team uninstall`**
+   - Uninstall should offer to either remove `.atm.toml` entirely (full cleanup) or set `disabled = true` (suppress nudges but keep the marker)
+   - If `.atm.toml` is removed, the nudge returns on next session (by design — it's re-discoverable)
+
+7. **Global hooks safety contract (learned from E.3 review)**
+   - All global hooks MUST check `.atm.toml` as the first operation in `main()`
+   - No file I/O, no directory creation, no socket connections before the guard passes
+   - This invariant must be enforced in F.3's built-in package tests
+   - Consider a shared `atm_guard()` utility function that all hooks import, ensuring consistent guard behavior
+
+### Phase F Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| F.1 | Package format + `atm team init` (global + project scopes) | Phase E | ⏳ PLANNED |
+| F.2 | `atm team uninstall` + receipt tracking | F.1 | ⏳ PLANNED |
+| F.3 | Ship built-in packages: `global`, `rust-sprint`, `generic-dev` | F.1 | ⏳ PLANNED |
+
+**Execution model**: F.1 is the MVP. F.2 and F.3 can run in parallel after F.1 merges.
+
+---
+
+### Sprint F.1 — Package Format + `atm team init`
+
+**Branch**: `feature/pF-s1-team-init`
+**Crate(s)**: `crates/atm` (new `team init` subcommand), `crates/atm-core` (manifest parsing, file copy, settings merge)
+**Depends on**: Phase E complete
+
+#### Exit Criteria
+
+- [ ] `manifest.toml` schema defined and parsed by `atm-core`
+- [ ] `atm team init <team>` copies scripts, agents, skills to `~/.claude/` subdirs
+- [ ] Hook entries in `settings-hooks.json` merged non-destructively into `~/.claude/settings.json`
+- [ ] `--dry-run` prints planned changes, makes no disk writes
+- [ ] `--force` overwrites differing files
+- [ ] Conflict handling: skip-identical, warn-on-different without `--force`
+- [ ] Install receipt written to `~/.atm/installed/<team>/receipt.toml`
+- [ ] ATM version compatibility check against `manifest.toml` `atm_min_version`
+- [ ] Global scope: installs to `~/.claude/scripts/`, merges into `~/.claude/settings.json`; skips if already present (SHA256 match)
+- [ ] Project scope: installs to `.claude/scripts/`, `.claude/agents/`, `.claude/skills/`, merges into `.claude/settings.json`
+- [ ] `--dry-run` prints planned changes per scope, makes no disk writes
+- [ ] `--force` overwrites differing global files
+- [ ] `--package <name>` installs only the named package
+- [ ] Global receipt written to `~/.atm/installed/<team>/receipt.toml`; project receipt to `.atm/installed/<package>.toml`
+- [ ] `.atm.toml` created/updated in cwd with `default_team = "<team>"`
+- [ ] Integration test: fresh temp dir → `atm team init` → verify global + project files installed, both settings.json updated
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint F.2 — `atm team uninstall` + Receipt Tracking
+
+**Branch**: `feature/pF-s2-team-uninstall`
+**Crate(s)**: `crates/atm` (new `team uninstall` subcommand), `crates/atm-core` (receipt read, selective removal)
+**Depends on**: F.1
+
+#### Exit Criteria
+
+- [ ] `atm team uninstall <team>` removes only receipt-tracked files unmodified since install (SHA256 check)
+- [ ] Global files: skip with warning if modified; remove from `~/.claude/settings.json` hook entries
+- [ ] Project files: removed unconditionally (project owns them)
+- [ ] Receipt deleted after successful uninstall
+- [ ] `--force` removes all installed files including modified globals
+- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] `cargo test --workspace` passes
+
+---
+
+### Sprint F.3 — Built-in Packages: `global`, `rust-sprint`, `generic-dev`
+
+**Branch**: `feature/pF-s3-builtin-packages`
+**Crate(s)**: `.claude/packages/` (package directories), `crates/atm` (bundle packages into binary or reference repo path)
+**Depends on**: F.1 (parallel with F.2)
+
+#### Packages
+
+**`global`** (scope: global) — machine-level hooks, installed once:
+- `session-start.py`, `session-end.py` with unit tests
+- `SessionStart` + `SessionEnd` entries for `~/.claude/settings.json`
+
+**`rust-sprint`** (scope: project) — full Rust sprint orchestration:
+- `gate-agent-spawns.py`, `teammate-idle-relay.py` with unit tests
+- Agent prompts: `scrum-master.md`, `rust-developer.md`, `rust-qa-agent.md`, `atm-qa-agent.md`
+- Skills: `phase-orchestration/`, `rust-development/`
+- `PreToolUse` + `TeammateIdle` entries for `.claude/settings.json`
+
+**`generic-dev`** (scope: project) — lighter orchestration for non-Rust projects:
+- Same hooks as `rust-sprint`
+- Agent prompts: `scrum-master.md`, `general-purpose` dev, `general-purpose` QA
+- Skills: `phase-orchestration/` only
+
+#### Exit Criteria
+
+- [ ] All three packages ship as directories under `.claude/packages/` in the repo
+- [ ] `atm team init atm-dev` installs `global` + `rust-sprint` by default (per team definition)
+- [ ] Each package's hook scripts have passing unit tests in `tests/`
+- [ ] `atm team init --package global` installs only the global package
+- [ ] `atm team init --package rust-sprint` installs only the rust-sprint project package
 - [ ] `cargo clippy --workspace -- -D warnings` clean
 - [ ] `cargo test --workspace` passes
 
@@ -2549,15 +3176,24 @@ Additional plugins planned (each is a self-contained sprint series):
 | **B** | B.3 | Teams session stabilization | ✅ | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
 | **C** | C.1 | Unified structured JSONL logging | ✅ | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
 | **C** | C.2a | Transport trait + McpTransport refactor | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
-| **C** | C.2b | JsonTransport + stdin queue + integration tests | 🔄 | — |
-| **C** | C.3 | Control receiver stub (daemon endpoint + dedupe) | ⏳ | — |
-| **D** | D.1 | TUI crate + live stream view (read-only) | ⏳ | — |
-| **D** | D.2 | Interactive controls (stdin inject, interrupt) | ⏳ | — |
-| **D** | D.3 | Identifier cleanup + user demo | ⏳ | — |
+| **C** | C.2b | JsonTransport + stdin queue + integration tests | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
+| **C** | C.3 | Control receiver stub (daemon endpoint + dedupe) | ✅ | [#126](https://github.com/randlee/agent-team-mail/pull/126) |
+| **D** | D.1 | TUI crate + live stream view (read-only) | ✅ | [#134](https://github.com/randlee/agent-team-mail/pull/134) |
+| **D** | D.2 | Interactive controls (stdin inject, interrupt) | ✅ | [#138](https://github.com/randlee/agent-team-mail/pull/138) |
+| **D** | D.3 | Identifier cleanup + user demo | ✅ | [#140](https://github.com/randlee/agent-team-mail/pull/140) |
+| **E** | E.1 | `atm teams resume` session ID reliability | ✅ | [#147](https://github.com/randlee/agent-team-mail/pull/147) |
+| **E** | E.2 | Inbox read scoping | ✅ | [#149](https://github.com/randlee/agent-team-mail/pull/149) |
+| **E** | E.3 | Hook-to-daemon state bridge | ✅ | [#152](https://github.com/randlee/agent-team-mail/pull/152) |
+| **E** | E.4 | TUI reliability hardening | ✅ | [#158](https://github.com/randlee/agent-team-mail/pull/158) |
+| **E** | E.5 | TUI performance, UX polish, and operational validation | ✅ | [#161](https://github.com/randlee/agent-team-mail/pull/161) |
+| **E** | E.6 | External agent member management and model registry | ✅ | [#164](https://github.com/randlee/agent-team-mail/pull/164) |
+| **E** | E.7 | Unified lifecycle source model + MCP lifecycle emission | ✅ | [#165](https://github.com/randlee/agent-team-mail/pull/165) |
+| **E** | E.8 | ATM Identity Role Mapping + Team Backup/Restore | ✅ | [#162](https://github.com/randlee/agent-team-mail/pull/162) |
+| **E** | — | Daemon hook-event auth validation | ✅ | [#163](https://github.com/randlee/agent-team-mail/pull/163) |
 
-**Completed**: 65 sprints across 13 phases (CI green)
-**Current version**: v0.13.0
-**Next**: C.2b QA → merge → C.3 → integrate/phase-C → develop; then Phase D (D.1 ∥ D.2)
+**Completed**: 79 sprints across 15 phases (CI green)
+**Current version**: v0.15.0
+**Next**: Phase E integration PR → develop; then Phase F planning
 
 **Sprint PRs (Phase 9)**:
 | Sprint | PR | Description |
@@ -2582,7 +3218,9 @@ Additional plugins planned (each is a self-contained sprint series):
 | Phase 10 | [#93](https://github.com/randlee/agent-team-mail/pull/93) | ✅ Merged |
 | Phase A | [#103](https://github.com/randlee/agent-team-mail/pull/103) | ✅ Merged |
 | Phase B | [#121](https://github.com/randlee/agent-team-mail/pull/121) | ✅ Merged |
-| Phase C | TBD | 🔄 IN PROGRESS |
+| Phase C | [#126](https://github.com/randlee/agent-team-mail/pull/126) | ✅ Merged |
+| Phase D | [#140](https://github.com/randlee/agent-team-mail/pull/140) | ✅ Merged |
+| Phase E | TBD | 🔄 Pending |
 
 ---
 

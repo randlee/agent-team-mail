@@ -127,10 +127,11 @@ fn test_send_read_verify_basic() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["read"], false);
 
-    // Read message
+    // Read message (as agent-a — identity must match to trigger mark-read)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "agent-a")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-a")
@@ -168,10 +169,11 @@ fn test_send_multiple_read_verify_all_marked() {
     assert_eq!(messages.len(), 3);
     assert!(messages.iter().all(|m| m["read"] == false));
 
-    // Read all messages
+    // Read all messages (as agent-a — identity must match to trigger mark-read)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "agent-a")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-a")
@@ -211,10 +213,11 @@ fn test_send_read_with_from_filter_verify() {
         .assert()
         .success();
 
-    // Read with --from filter
+    // Read with --from filter (as agent-a — identity must match to trigger mark-read)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "agent-a")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-a")
@@ -253,10 +256,11 @@ fn test_send_read_with_limit_verify() {
             .success();
     }
 
-    // Read with limit of 2
+    // Read with limit of 2 (as agent-a — identity must match to trigger mark-read)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "agent-a")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-a")
@@ -331,10 +335,11 @@ fn test_send_cross_team_read_verify() {
     let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
     assert_eq!(messages[0]["read"], false);
 
-    // Read from team-b
+    // Read from team-b (as agent-a — identity must match to trigger mark-read)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "team-b")
+        .env("ATM_IDENTITY", "agent-a")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-a")
@@ -417,11 +422,12 @@ fn test_broadcast_read_all_inboxes_verify() {
         assert_eq!(messages[0]["read"], false);
     }
 
-    // Read each agent's inbox
+    // Read each agent's inbox (as that agent — identity must match to trigger mark-read)
     for agent in &["agent-a", "agent-b", "agent-c"] {
         let mut cmd = cargo::cargo_bin_cmd!("atm");
         set_home_env(&mut cmd, &temp_dir);
         cmd.env("ATM_TEAM", "test-team")
+            .env("ATM_IDENTITY", agent)
             .arg("read")
         .arg("--no-since-last-seen")
             .arg(agent)
@@ -465,11 +471,12 @@ fn test_broadcast_cross_team_verify() {
         assert_eq!(messages[0]["text"], "Cross-team broadcast");
     }
 
-    // Read all team-b inboxes
+    // Read all team-b inboxes (as each agent — identity must match to trigger mark-read)
     for agent in &["agent-a", "agent-b", "agent-c"] {
         let mut cmd = cargo::cargo_bin_cmd!("atm");
         set_home_env(&mut cmd, &temp_dir);
         cmd.env("ATM_TEAM", "team-b")
+            .env("ATM_IDENTITY", agent)
             .arg("read")
         .arg("--no-since-last-seen")
             .arg(agent)
@@ -510,11 +517,12 @@ fn test_broadcast_multiple_times_verify_all_received() {
         assert_eq!(messages.len(), 3);
     }
 
-    // Read all messages for each agent
+    // Read all messages for each agent (as that agent — identity must match to trigger mark-read)
     for agent in &["agent-a", "agent-b", "agent-c"] {
         let mut cmd = cargo::cargo_bin_cmd!("atm");
         set_home_env(&mut cmd, &temp_dir);
         cmd.env("ATM_TEAM", "test-team")
+            .env("ATM_IDENTITY", agent)
             .arg("read")
         .arg("--no-since-last-seen")
             .arg(agent)
@@ -724,10 +732,11 @@ fn test_conversation_workflow() {
         .assert()
         .success();
 
-    // Step 2: Agent B reads the message
+    // Step 2: Agent B reads the message (as agent-b — identity must match to trigger mark-read)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "agent-b")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-b")
@@ -751,10 +760,11 @@ fn test_conversation_workflow() {
         .assert()
         .success();
 
-    // Step 4: Agent A reads the reply
+    // Step 4: Agent A reads the reply (as agent-a — identity must match to trigger mark-read)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "agent-a")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-a")
@@ -810,10 +820,11 @@ fn test_team_discussion_workflow() {
             .success();
     }
 
-    // Step 4: Team lead reads all replies
+    // Step 4: Team lead reads all replies (as team-lead — identity must match to trigger mark-read)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("team-lead")
@@ -845,10 +856,11 @@ fn test_cross_team_relay_workflow() {
         .assert()
         .success();
 
-    // Step 2: Agent in team-a reads the message
+    // Step 2: Agent in team-a reads the message (as agent-a — identity must match to trigger mark-read)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "team-a")
+        .env("ATM_IDENTITY", "agent-a")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-a")
@@ -872,10 +884,11 @@ fn test_cross_team_relay_workflow() {
         .assert()
         .success();
 
-    // Step 4: Team-b agent reads the forwarded message
+    // Step 4: Team-b agent reads the forwarded message (as agent-a — identity must match)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "team-b")
+        .env("ATM_IDENTITY", "agent-a")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-a")

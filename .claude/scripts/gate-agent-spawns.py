@@ -32,12 +32,14 @@ Exit codes: 0 = Allow, 2 = Block
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 # Orchestrator agents that require full teammate lifecycle
 ORCHESTRATORS = {"scrum-master"}
 
-DEBUG_LOG = Path("/tmp/gate-agent-spawns-debug.jsonl")
+DEBUG_LOG = Path(tempfile.gettempdir()) / "gate-agent-spawns-debug.jsonl"
+SESSION_ID_FILE = Path(tempfile.gettempdir()) / "atm-session-id"
 
 
 def get_required_team() -> str | None:
@@ -96,6 +98,18 @@ def main() -> int:
     teammate_name = tool_input.get("name", "")  # If present, spawns named teammate
     team_name = tool_input.get("team_name", "")  # If present, spawns into team
     session_id = data.get("session_id", "")
+
+    # Persist session ID as an audit/debug breadcrumb only.
+    # IMPORTANT: this file is NOT read by `atm teams resume` in the
+    # production path; session resolution uses CLAUDE_SESSION_ID/--session-id.
+    # Written every time session_id is non-empty so local diagnostics can
+    # inspect the latest observed hook payload.
+    if session_id:
+        try:
+            SESSION_ID_FILE.write_text(session_id)
+        except Exception:
+            pass
+
     required_team = get_required_team()
 
     # Rule 1: Orchestrators must be spawned with teammate_name

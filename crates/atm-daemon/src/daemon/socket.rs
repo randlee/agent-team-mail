@@ -26,18 +26,39 @@ use agent_team_mail_core::control::{
 };
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::schema::TeamConfig;
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use tracing::{debug, error, info, warn};
 
-use crate::daemon::dedup::{DedupeKey, DedupeStore};
+use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
 use crate::daemon::session_registry::SharedSessionRegistry;
 use crate::plugins::worker_adapter::AgentState;
 
 // ── Public API (cross-platform stubs) ────────────────────────────────────────
+
+/// Shared durable dedupe store, threaded through the socket server.
+///
+/// Wraps a [`DurableDedupeStore`] in an `Arc<Mutex<_>>` so it can be
+/// cloned cheaply and shared across connection-handler tasks.
+pub type SharedDedupeStore =
+    std::sync::Arc<std::sync::Mutex<DurableDedupeStore>>;
+
+/// Create a new [`SharedDedupeStore`] from the given home directory.
+///
+/// Reads `ATM_DEDUP_CAPACITY` and `ATM_DEDUP_TTL_SECS` from the environment.
+/// The backing file is `{home_dir}/.claude/daemon/dedup.jsonl`.
+///
+/// # Errors
+///
+/// Returns an error if the daemon directory cannot be created or the existing
+/// backing file cannot be read.
+pub fn new_dedup_store(home_dir: &std::path::Path) -> Result<SharedDedupeStore> {
+    let store = DurableDedupeStore::from_env(home_dir)?;
+    Ok(std::sync::Arc::new(std::sync::Mutex::new(store)))
+}
 
 /// Start the Unix socket server and return a handle that cleans up the socket
 /// on drop.
@@ -53,6 +74,8 @@ use crate::plugins::worker_adapter::AgentState;
 ///   worker adapter is disabled; the socket server will return a
 ///   `LAUNCH_UNAVAILABLE` error for any `"launch"` requests.
 /// * `session_registry` - Shared session registry for `session-query` requests
+/// * `dedup_store` - Shared durable dedupe store for idempotency across restarts.
+///   Create with [`new_dedup_store()`].
 /// * `cancel` - Cancellation token; server stops accepting when cancelled
 ///
 /// # Platform Behaviour
@@ -64,6 +87,7 @@ pub async fn start_socket_server(
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
+    dedup_store: SharedDedupeStore,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
@@ -74,6 +98,7 @@ pub async fn start_socket_server(
             pubsub_store,
             launch_tx,
             session_registry,
+            dedup_store,
             cancel,
         )
         .await
@@ -151,11 +176,6 @@ pub fn new_pubsub_store() -> SharedPubSubStore {
     std::sync::Arc::new(std::sync::Mutex::new(PubSub::new()))
 }
 
-fn control_dedupe_store() -> &'static std::sync::Mutex<DedupeStore> {
-    static STORE: OnceLock<std::sync::Mutex<DedupeStore>> = OnceLock::new();
-    STORE.get_or_init(|| std::sync::Mutex::new(DedupeStore::from_env()))
-}
-
 // ── Launch channel types ──────────────────────────────────────────────────────
 
 /// A request to launch a new agent, sent from the socket handler to the
@@ -193,6 +213,7 @@ async fn start_unix_socket_server(
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
+    dedup_store: SharedDedupeStore,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -225,10 +246,12 @@ async fn start_unix_socket_server(
     tokio::spawn(async move {
         run_accept_loop(
             listener,
+            home_dir,
             state_store,
             pubsub_store,
             launch_tx,
             session_registry,
+            dedup_store,
             cancel,
             &accept_socket_path,
             &accept_pid_path,
@@ -249,10 +272,12 @@ async fn start_unix_socket_server(
 )]
 async fn run_accept_loop(
     listener: tokio::net::UnixListener,
+    home_dir: std::path::PathBuf,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
+    dedup_store: SharedDedupeStore,
     cancel: tokio_util::sync::CancellationToken,
     socket_path: &std::path::Path,
     _pid_path: &std::path::Path,
@@ -268,12 +293,14 @@ async fn run_accept_loop(
             result = listener.accept() => {
                 match result {
                     Ok((stream, _addr)) => {
+                        let home = home_dir.clone();
                         let store = state_store.clone();
                         let ps = pubsub_store.clone();
                         let tx = launch_tx.clone();
                         let sr = session_registry.clone();
+                        let dd = dedup_store.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, store, ps, tx, sr).await {
+                            if let Err(e) = handle_connection(stream, home, store, ps, tx, sr, dd).await {
                                 error!("Socket connection handler error: {e}");
                             }
                         });
@@ -294,10 +321,12 @@ async fn run_accept_loop(
 #[cfg(unix)]
 async fn handle_connection(
     stream: tokio::net::UnixStream,
+    home: std::path::PathBuf,
     state_store: SharedStateStore,
     pubsub_store: SharedPubSubStore,
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
+    dedup_store: SharedDedupeStore,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -326,7 +355,10 @@ async fn handle_connection(
     let response = if is_launch_command(request_str) {
         handle_launch_command(request_str, &launch_tx).await
     } else if is_control_command(request_str) {
-        handle_control_command(request_str, &state_store, &session_registry).await
+        handle_control_command(request_str, &home, &state_store, &session_registry, &dedup_store)
+            .await
+    } else if is_hook_event_command(request_str) {
+        handle_hook_event_command(request_str, &state_store, &session_registry).await
     } else {
         match parse_and_dispatch(request_str, &state_store, &pubsub_store, &session_registry) {
             Ok(resp) => resp,
@@ -371,6 +403,246 @@ fn is_launch_command(request_str: &str) -> bool {
 fn is_control_command(request_str: &str) -> bool {
     request_str.contains(r#""command":"control""#)
         || request_str.contains(r#""command": "control""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"hook-event"` command.
+#[cfg(unix)]
+fn is_hook_event_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"hook-event""#)
+        || request_str.contains(r#""command": "hook-event""#)
+}
+
+#[cfg(unix)]
+struct HookEventAuth {
+    is_team_lead: bool,
+    /// Resolved lifecycle source, extracted from the `source` payload field.
+    ///
+    /// Defaults to [`LifecycleSourceKind::Unknown`] when the field is absent.
+    source: agent_team_mail_core::daemon_client::LifecycleSourceKind,
+}
+
+/// Resolve and authorize hook-event sender identity against team config.
+///
+/// Returns [`HookEventAuth`] containing:
+/// - `is_team_lead`: whether `agent` is the configured team lead
+/// - `source`: the resolved [`LifecycleSourceKind`] from the payload (or
+///   [`Unknown`](agent_team_mail_core::daemon_client::LifecycleSourceKind::Unknown)
+///   when the field is absent)
+#[cfg(unix)]
+fn authorize_hook_event(
+    team: &str,
+    agent: &str,
+    source: agent_team_mail_core::daemon_client::LifecycleSourceKind,
+) -> std::result::Result<HookEventAuth, String> {
+    let home_dir = if let Ok(path) = std::env::var("ATM_HOME") {
+        PathBuf::from(path)
+    } else if let Ok(path) = std::env::var("HOME") {
+        PathBuf::from(path)
+    } else if let Ok(path) = std::env::var("USERPROFILE") {
+        PathBuf::from(path)
+    } else {
+        return Err("missing ATM_HOME/HOME".to_string());
+    };
+
+    let config_path = home_dir.join(".claude/teams").join(team).join("config.json");
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|_| format!("team config not found: {}", config_path.display()))?;
+    let config: TeamConfig = serde_json::from_str(&content)
+        .map_err(|e| format!("invalid team config: {e}"))?;
+
+    // Support either canonical agent_id or bare name.
+    let expected_agent_id = format!("{agent}@{team}");
+    let Some(member) = config
+        .members
+        .iter()
+        .find(|m| m.name == agent || m.agent_id == expected_agent_id)
+    else {
+        return Err("agent not in team".to_string());
+    };
+
+    let is_team_lead = member.agent_id == config.lead_agent_id;
+    Ok(HookEventAuth { is_team_lead, source })
+}
+
+/// Handle the `"hook-event"` command, updating daemon state in real-time
+/// from Claude Code lifecycle hooks (session_start, teammate_idle, session_end).
+#[cfg(unix)]
+async fn handle_hook_event_command(
+    request_str: &str,
+    state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("bad hook-event: {e}"),
+            )
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            "unsupported version",
+        );
+    }
+
+    let event_type = request
+        .payload
+        .get("event")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let agent = request
+        .payload
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let session_id = request
+        .payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let team = request
+        .payload
+        .get("team")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let process_id = request
+        .payload
+        .get("process_id")
+        .and_then(|v| v.as_u64())
+        .map(|p| p as u32);
+
+    // Extract optional `source` field; default to Unknown for backward compat.
+    let source_kind = request
+        .payload
+        .get("source")
+        .and_then(|v| {
+            serde_json::from_value::<agent_team_mail_core::daemon_client::LifecycleSource>(
+                v.clone(),
+            )
+            .ok()
+        })
+        .map(|s| s.kind)
+        .unwrap_or(agent_team_mail_core::daemon_client::LifecycleSourceKind::Unknown);
+
+    if agent.is_empty() {
+        return make_ok_response(
+            &request.request_id,
+            serde_json::json!({"processed": false, "reason": "missing agent"}),
+        );
+    }
+    if team.is_empty() {
+        return make_ok_response(
+            &request.request_id,
+            serde_json::json!({"processed": false, "reason": "missing team"}),
+        );
+    }
+
+    let auth = match authorize_hook_event(&team, &agent, source_kind) {
+        Ok(auth) => auth,
+        Err(reason) => {
+            return make_ok_response(
+                &request.request_id,
+                serde_json::json!({"processed": false, "reason": reason}),
+            )
+        }
+    };
+
+    // Determine whether the source requires team-lead restriction on
+    // session_start / session_end.  `claude_hook` and `unknown` are strictest
+    // (fail-closed default).  `atm_mcp` and `agent_hook` relax the restriction
+    // because those adapters manage their own agent sessions.
+    use agent_team_mail_core::daemon_client::LifecycleSourceKind;
+    let require_lead_for_lifecycle = matches!(
+        auth.source,
+        LifecycleSourceKind::ClaudeHook | LifecycleSourceKind::Unknown
+    );
+
+    match event_type.as_str() {
+        "session_start" => {
+            if require_lead_for_lifecycle && !auth.is_team_lead {
+                return make_ok_response(
+                    &request.request_id,
+                    serde_json::json!({"processed": false, "reason": "only team-lead may send session_start"}),
+                );
+            }
+            if session_id.is_empty() {
+                return make_ok_response(
+                    &request.request_id,
+                    serde_json::json!({"processed": false, "reason": "missing session_id"}),
+                );
+            }
+            let pid = process_id.unwrap_or(0);
+            // SessionRegistry is currently keyed by bare agent name, not team.
+            // This matches existing daemon behavior but can collide across teams
+            // that reuse member names.
+            // TODO(atm-daemon): switch registry operations to team-scoped keys.
+            session_registry
+                .lock()
+                .unwrap()
+                .upsert(&agent, &session_id, pid);
+            {
+                let mut tracker = state_store.lock().unwrap();
+                if tracker.get_state(&agent).is_none() {
+                    tracker.register_agent(&agent);
+                }
+            }
+            info!(agent = %agent, session_id = %session_id, "hook_event.session_start");
+        }
+        "teammate_idle" => {
+            {
+                let mut tracker = state_store.lock().unwrap();
+                if tracker.get_state(&agent).is_some() {
+                    tracker.set_state(&agent, AgentState::Idle);
+                } else {
+                    tracker.register_agent(&agent);
+                    tracker.set_state(&agent, AgentState::Idle);
+                }
+            }
+            info!("hook_event teammate_idle: agent={agent}");
+        }
+        "session_end" => {
+            if require_lead_for_lifecycle && !auth.is_team_lead {
+                return make_ok_response(
+                    &request.request_id,
+                    serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
+                );
+            }
+            {
+                session_registry.lock().unwrap().mark_dead(&agent);
+            }
+            {
+                let mut tracker = state_store.lock().unwrap();
+                if tracker.get_state(&agent).is_some() {
+                    tracker.set_state(&agent, AgentState::Killed);
+                }
+            }
+            info!("hook_event session_end: agent={agent}");
+        }
+        other => {
+            debug!("hook_event unknown event type: {other}");
+            return make_ok_response(
+                &request.request_id,
+                serde_json::json!({"processed": false, "reason": format!("unknown event type: {other}")}),
+            );
+        }
+    }
+
+    make_ok_response(
+        &request.request_id,
+        serde_json::json!({"processed": true, "event": event_type, "agent": agent}),
+    )
 }
 
 /// Handle the `"launch"` command asynchronously by forwarding it through the
@@ -499,8 +771,10 @@ async fn handle_launch_command(request_str: &str, launch_tx: &LaunchSender) -> S
 #[cfg(unix)]
 async fn handle_control_command(
     request_str: &str,
+    home: &std::path::Path,
     state_store: &SharedStateStore,
     session_registry: &SharedSessionRegistry,
+    dedup_store: &SharedDedupeStore,
 ) -> SocketResponse {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
 
@@ -537,7 +811,8 @@ async fn handle_control_command(
         }
     };
 
-    let ack = process_control_request(control, state_store, session_registry).await;
+    let ack =
+        process_control_request(control, home, state_store, session_registry, dedup_store).await;
     make_ok_response(
         &request.request_id,
         serde_json::to_value(ack).unwrap_or_else(|_| serde_json::json!({})),
@@ -634,7 +909,7 @@ fn control_request_is_live(
 }
 
 #[cfg(unix)]
-fn validate_control_request(control: &ControlRequest) -> Option<String> {
+pub(crate) fn validate_control_request(control: &ControlRequest) -> Option<String> {
     if control.v != CONTROL_SCHEMA_VERSION {
         return Some(format!(
             "unsupported control schema version {}; expected {}",
@@ -716,8 +991,12 @@ fn read_content_ref_text(content_ref: &ContentRef) -> Result<String, String> {
 }
 
 #[cfg(unix)]
-async fn enqueue_stdin_message(team: &str, agent_id: &str, content: &str) -> Result<(), String> {
-    let home = agent_team_mail_core::home::get_home_dir().map_err(|e| e.to_string())?;
+async fn enqueue_stdin_message(
+    home: &std::path::Path,
+    team: &str,
+    agent_id: &str,
+    content: &str,
+) -> Result<(), String> {
     let dir = home
         .join(".config/atm/agent-sessions")
         .join(team)
@@ -736,8 +1015,10 @@ async fn enqueue_stdin_message(team: &str, agent_id: &str, content: &str) -> Res
 #[cfg(unix)]
 async fn process_control_request(
     control: ControlRequest,
+    home: &std::path::Path,
     state_store: &SharedStateStore,
     session_registry: &SharedSessionRegistry,
+    dedup_store: &SharedDedupeStore,
 ) -> ControlAck {
     emit_control_request_event(&control);
 
@@ -786,7 +1067,7 @@ async fn process_control_request(
         &control.agent_id,
         &control.request_id,
     );
-    let is_duplicate = control_dedupe_store().lock().unwrap().check_and_insert(key);
+    let is_duplicate = dedup_store.lock().unwrap().check_and_insert(key);
     if is_duplicate {
         let ack = control_ack(
             &control.request_id,
@@ -848,7 +1129,7 @@ async fn process_control_request(
                     Some("stdin payload cannot be empty".to_string()),
                 )
             } else {
-                match enqueue_stdin_message(&control.team, &control.agent_id, &content).await {
+                match enqueue_stdin_message(home, &control.team, &control.agent_id, &content).await {
                     Ok(()) => control_ack(
                         &control.request_id,
                         ControlResult::Ok,
@@ -930,6 +1211,12 @@ fn parse_and_dispatch(
             &request.request_id,
             "INTERNAL_ERROR",
             "Control command should have been handled by the async path",
+        ),
+        // "hook-event" is handled asynchronously before parse_and_dispatch is called.
+        "hook-event" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "hook-event command should have been handled by the async path",
         ),
         other => make_error_response(
             &request.request_id,
@@ -1241,10 +1528,14 @@ fn format_elapsed_as_iso8601(elapsed: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::dedup::DurableDedupeStore;
     use crate::daemon::session_registry::new_session_registry;
     use crate::plugins::worker_adapter::AgentStateTracker;
     use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+    use std::time::Duration;
+    use serial_test::serial;
+    use tempfile::TempDir;
 
     fn make_store() -> SharedStateStore {
         std::sync::Arc::new(std::sync::Mutex::new(AgentStateTracker::new()))
@@ -1258,12 +1549,105 @@ mod tests {
         new_session_registry()
     }
 
+    fn make_dd() -> (SharedDedupeStore, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("dedup.jsonl");
+        let store = DurableDedupeStore::new(path, Duration::from_secs(600), 1000).unwrap();
+        (std::sync::Arc::new(std::sync::Mutex::new(store)), dir)
+    }
+
+    fn make_dd_in(dir: &tempfile::TempDir) -> SharedDedupeStore {
+        let path = dir.path().join("dedup.jsonl");
+        let store = DurableDedupeStore::new(path, Duration::from_secs(600), 1000).unwrap();
+        std::sync::Arc::new(std::sync::Mutex::new(store))
+    }
+
     fn make_request(command: &str, payload: serde_json::Value) -> SocketRequest {
         SocketRequest {
             version: PROTOCOL_VERSION,
             request_id: "req-test".to_string(),
             command: command.to_string(),
             payload,
+        }
+    }
+
+    #[cfg(unix)]
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    #[cfg(unix)]
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: test-only env mutation, guarded by #[serial] on callers.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: test-only env mutation, guarded by #[serial] on callers.
+            unsafe {
+                match &self.previous {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    struct HookAuthFixture {
+        _temp: TempDir,
+        _atm_home_guard: EnvGuard,
+    }
+
+    #[cfg(unix)]
+    fn write_hook_auth_team_config(home_dir: &std::path::Path, team: &str, lead: &str, members: &[&str]) {
+        let team_dir = home_dir.join(".claude/teams").join(team);
+        std::fs::create_dir_all(&team_dir).unwrap();
+        let mut member_values = Vec::new();
+        for m in members {
+            member_values.push(serde_json::json!({
+                "agentId": format!("{m}@{team}"),
+                "name": m,
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1739284800000u64,
+                "cwd": home_dir.to_string_lossy().to_string(),
+                "subscriptions": []
+            }));
+        }
+        let config = serde_json::json!({
+            "name": team,
+            "description": "test team",
+            "createdAt": 1739284800000u64,
+            "leadAgentId": format!("{lead}@{team}"),
+            "leadSessionId": "test-lead-session",
+            "members": member_values,
+        });
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn setup_hook_auth_fixture(team: &str, lead: &str, members: &[&str]) -> HookAuthFixture {
+        let temp = TempDir::new().unwrap();
+        let atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), team, lead, members);
+
+        HookAuthFixture {
+            _temp: temp,
+            _atm_home_guard: atm_home_guard,
         }
     }
 
@@ -1430,10 +1814,11 @@ mod tests {
     #[test]
     fn test_agent_pane_found() {
         let store = make_store();
+        let log_path = std::env::temp_dir().join("arch-ctm.log");
         {
             let mut tracker = store.lock().unwrap();
             tracker.register_agent("arch-ctm");
-            tracker.set_pane_info("arch-ctm", "%42", std::path::Path::new("/tmp/arch-ctm.log"));
+            tracker.set_pane_info("arch-ctm", "%42", &log_path);
         }
 
         let req = make_request("agent-pane", serde_json::json!({"agent": "arch-ctm"}));
@@ -1441,7 +1826,10 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert_eq!(payload["pane_id"].as_str().unwrap(), "%42");
-        assert_eq!(payload["log_path"].as_str().unwrap(), "/tmp/arch-ctm.log");
+        assert_eq!(
+            payload["log_path"].as_str().unwrap(),
+            log_path.to_str().unwrap()
+        );
     }
 
     #[test]
@@ -1582,14 +1970,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    #[serial_test::serial]
     async fn test_control_stdin_enqueues_payload() {
         use crate::plugins::worker_adapter::AgentState;
         use uuid::Uuid;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: serialized test; env var restored by process teardown.
-        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
 
         let state_store = make_store();
         {
@@ -1619,7 +2004,8 @@ mod tests {
             content_ref: None,
         };
 
-        let ack = process_control_request(req, &state_store, &sr).await;
+        let dd = make_dd_in(&tmp);
+        let ack = process_control_request(req, tmp.path(), &state_store, &sr, &dd).await;
         assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
         assert!(!ack.duplicate);
 
@@ -1637,14 +2023,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    #[serial_test::serial]
     async fn test_control_duplicate_does_not_reenqueue() {
         use crate::plugins::worker_adapter::AgentState;
         use uuid::Uuid;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: serialized test; env var restored by process teardown.
-        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
 
         let state_store = make_store();
         {
@@ -1674,8 +2057,9 @@ mod tests {
             content_ref: None,
         };
 
-        let ack1 = process_control_request(mk_req(), &state_store, &sr).await;
-        let ack2 = process_control_request(mk_req(), &state_store, &sr).await;
+        let dd = make_dd_in(&tmp);
+        let ack1 = process_control_request(mk_req(), tmp.path(), &state_store, &sr, &dd).await;
+        let ack2 = process_control_request(mk_req(), tmp.path(), &state_store, &sr, &dd).await;
         assert_eq!(
             ack1.result,
             agent_team_mail_core::control::ControlResult::Ok
@@ -1729,7 +2113,8 @@ mod tests {
             payload: None,
             content_ref: None,
         };
-        let ack = process_control_request(req, &state_store, &sr).await;
+        let (dd, _dd_dir) = make_dd();
+        let ack = process_control_request(req, _dd_dir.path(), &state_store, &sr, &dd).await;
         assert_eq!(
             ack.result,
             agent_team_mail_core::control::ControlResult::Rejected
@@ -1776,8 +2161,9 @@ mod tests {
             content_ref: None,
         };
 
-        let ack1 = process_control_request(mk_req(), &state_store, &sr).await;
-        let ack2 = process_control_request(mk_req(), &state_store, &sr).await;
+        let (dd, _dd_dir) = make_dd();
+        let ack1 = process_control_request(mk_req(), _dd_dir.path(), &state_store, &sr, &dd).await;
+        let ack2 = process_control_request(mk_req(), _dd_dir.path(), &state_store, &sr, &dd).await;
         assert_eq!(
             ack1.result,
             agent_team_mail_core::control::ControlResult::Rejected
@@ -1824,7 +2210,8 @@ mod tests {
             payload: Some("payload".to_string()),
             content_ref: None,
         };
-        let ack = process_control_request(req, &state_store, &sr).await;
+        let (dd, _dd_dir) = make_dd();
+        let ack = process_control_request(req, _dd_dir.path(), &state_store, &sr, &dd).await;
         assert_eq!(
             ack.result,
             agent_team_mail_core::control::ControlResult::Rejected
@@ -1854,12 +2241,14 @@ mod tests {
 
         // Start the socket server
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             state_store,
             new_pubsub_store(),
             launch_tx,
             make_sr(),
+            dd,
             cancel.clone(),
         )
         .await
@@ -1919,12 +2308,14 @@ mod tests {
         }
 
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             state_store,
             new_pubsub_store(),
             launch_tx,
             make_sr(),
+            dd,
             cancel.clone(),
         )
         .await
@@ -1975,12 +2366,14 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             make_store(),
             new_pubsub_store(),
             launch_tx,
             make_sr(),
+            dd,
             cancel.clone(),
         )
         .await
@@ -2053,12 +2446,14 @@ mod tests {
         }
 
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             state_store,
             new_pubsub_store(),
             launch_tx,
             sr,
+            dd,
             cancel.clone(),
         )
         .await
@@ -2116,12 +2511,14 @@ mod tests {
         let state_store = make_store();
 
         let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
         let _handle = start_socket_server(
             home_dir.clone(),
             state_store,
             new_pubsub_store(),
             launch_tx,
             make_sr(),
+            dd,
             cancel.clone(),
         )
         .await
@@ -2141,6 +2538,492 @@ mod tests {
         cancel.cancel();
     }
 
+    // ── hook-event handler tests ───────────────────────────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_hook_event_command_detection() {
+        assert!(is_hook_event_command(
+            r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{}}"#
+        ));
+        assert!(is_hook_event_command(
+            r#"{"version":1,"request_id":"r1","command": "hook-event","payload":{}}"#
+        ));
+        assert!(!is_hook_event_command(
+            r#"{"version":1,"request_id":"r1","command":"agent-state","payload":{}}"#
+        ));
+        assert!(!is_hook_event_command(
+            r#"{"version":1,"request_id":"r1","command":"launch","payload":{}}"#
+        ));
+        assert!(!is_hook_event_command(
+            r#"{"version":1,"request_id":"r1","command":"control","payload":{}}"#
+        ));
+    }
+
+    #[test]
+    fn test_parse_and_dispatch_hook_event_internal_error() {
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-hook","command":"hook-event","payload":{"event":"session_start","agent":"test-agent","session_id":"s1"}}"#;
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_start_updates_registry() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-abc","process_id":9999}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "session_start");
+        assert_eq!(payload["agent"].as_str().unwrap(), "team-lead");
+
+        // Check session registry updated
+        let reg = sr.lock().unwrap();
+        let record = reg.query("team-lead").unwrap();
+        assert_eq!(record.session_id, "sess-abc");
+        assert_eq!(record.process_id, 9999);
+
+        // Check agent registered in state tracker
+        let tracker = store.lock().unwrap();
+        assert!(tracker.get_state("team-lead").is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_start_idempotent_if_already_tracked() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        // Pre-register agent as Idle
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("team-lead");
+            tracker.set_state("team-lead", AgentState::Idle);
+        }
+        let req_json = r#"{"version":1,"request_id":"r2","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-xyz","process_id":1234}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        // State should remain Idle (not reset to Launching) — session_start only registers if not already tracked
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_teammate_idle_updates_state() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        // Register agent as Busy first
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Busy);
+        }
+        let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-1","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "teammate_idle");
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_teammate_idle_rejects_unknown_agent() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        // Agent exists in payload but is not a member of the team config.
+        let req_json = r#"{"version":1,"request_id":"r4","command":"hook-event","payload":{"event":"teammate_idle","agent":"new-agent","session_id":"sess-2","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+
+        let tracker = store.lock().unwrap();
+        assert!(tracker.get_state("new-agent").is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_marks_dead() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("team-lead");
+            tracker.set_state("team-lead", AgentState::Idle);
+        }
+        {
+            sr.lock().unwrap().upsert("team-lead", "sess-end", 1111);
+        }
+        let req_json = r#"{"version":1,"request_id":"r5","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-end","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "session_end");
+
+        // Session registry should be marked dead
+        let reg = sr.lock().unwrap();
+        let record = reg.query("team-lead").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Dead
+        );
+
+        // State tracker should be Killed
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Killed));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_unknown_type_returns_ok_not_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r6","command":"hook-event","payload":{"event":"some_future_event","agent":"team-lead","team":"atm-dev","session_id":"s1"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert!(payload["reason"]
+            .as_str()
+            .unwrap()
+            .contains("unknown event type"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_missing_agent_returns_not_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r7","command":"hook-event","payload":{"event":"session_start","agent":"","team":"atm-dev","session_id":"sess-1"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "missing agent");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hook_event_version_mismatch() {
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":99,"request_id":"r8","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"s1"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_missing_team_returns_not_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-missing-team","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","session_id":"s1"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "missing team");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_non_lead_session_start_rejected() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-non-lead-start","command":"hook-event","payload":{"event":"session_start","agent":"arch-ctm","team":"atm-dev","session_id":"sess-x"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert!(payload["reason"]
+            .as_str()
+            .unwrap()
+            .contains("only team-lead"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_socket_server_hook_event_roundtrip() {
+        use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio_util::sync::CancellationToken;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let home_dir = temp_dir.path().to_path_buf();
+        let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
+        write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
+        let cancel = CancellationToken::new();
+
+        let state_store = make_store();
+        let session_registry = make_sr();
+
+        let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
+        let _handle = start_socket_server(
+            home_dir.clone(),
+            state_store.clone(),
+            new_pubsub_store(),
+            launch_tx,
+            session_registry.clone(),
+            dd,
+            cancel.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected socket server handle on unix");
+
+        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+
+        // Send a hook-event/session_start
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let request = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "hook-roundtrip-1".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "team-lead",
+                "session_id": "sess-roundtrip",
+                "process_id": std::process::id(),
+                "team": "atm-dev",
+                "source": "init",
+            }),
+        };
+        let req_line = format!("{}\n", serde_json::to_string(&request).unwrap());
+        let mut reader = BufReader::new(stream);
+        reader
+            .get_mut()
+            .write_all(req_line.as_bytes())
+            .await
+            .unwrap();
+        let mut resp_line = String::new();
+        reader.read_line(&mut resp_line).await.unwrap();
+        let resp: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line.trim()).unwrap();
+        assert!(resp.is_ok(), "session_start hook-event failed: {:?}", resp.error);
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        // Verify session registry updated
+        {
+            let reg = session_registry.lock().unwrap();
+            let record = reg.query("team-lead").unwrap();
+            assert_eq!(record.session_id, "sess-roundtrip");
+        }
+
+        // Send teammate_idle
+        let stream2 = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let request2 = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "hook-roundtrip-2".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "teammate_idle",
+                "agent": "team-lead",
+                "session_id": "sess-roundtrip",
+                "team": "atm-dev",
+            }),
+        };
+        let req_line2 = format!("{}\n", serde_json::to_string(&request2).unwrap());
+        let mut reader2 = BufReader::new(stream2);
+        reader2
+            .get_mut()
+            .write_all(req_line2.as_bytes())
+            .await
+            .unwrap();
+        let mut resp_line2 = String::new();
+        reader2.read_line(&mut resp_line2).await.unwrap();
+        let resp2: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line2.trim()).unwrap();
+        assert!(resp2.is_ok(), "teammate_idle hook-event failed: {:?}", resp2.error);
+
+        // Verify state updated to Idle
+        {
+            let tracker = state_store.lock().unwrap();
+            assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+        }
+
+        cancel.cancel();
+    }
+
+    /// Integration-style test: session_end hook-event over the unix socket marks
+    /// the session Dead and the agent Killed, verified via follow-up queries.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_socket_server_hook_event_session_end_roundtrip() {
+        use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio_util::sync::CancellationToken;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let home_dir = temp_dir.path().to_path_buf();
+        let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
+        write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
+        let cancel = CancellationToken::new();
+
+        let state_store = make_store();
+        let session_registry = make_sr();
+
+        // Pre-register the agent as Idle and insert a session record.
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("team-lead");
+            tracker.set_state("team-lead", AgentState::Idle);
+        }
+        {
+            let mut reg = session_registry.lock().unwrap();
+            reg.upsert("team-lead", "sess-end-roundtrip", std::process::id());
+        }
+
+        let launch_tx = new_launch_sender();
+        let (dd, _dd_dir) = make_dd();
+        let _handle = start_socket_server(
+            home_dir.clone(),
+            state_store.clone(),
+            new_pubsub_store(),
+            launch_tx,
+            session_registry.clone(),
+            dd,
+            cancel.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected socket server handle on unix");
+
+        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+
+        // ── Step 1: Send hook-event/session_end ───────────────────────────────
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let request = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "end-roundtrip-1".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_end",
+                "agent": "team-lead",
+                "session_id": "sess-end-roundtrip",
+                "team": "atm-dev",
+                "reason": "session_exit",
+            }),
+        };
+        let req_line = format!("{}\n", serde_json::to_string(&request).unwrap());
+        let mut reader = BufReader::new(stream);
+        reader
+            .get_mut()
+            .write_all(req_line.as_bytes())
+            .await
+            .unwrap();
+        let mut resp_line = String::new();
+        reader.read_line(&mut resp_line).await.unwrap();
+        let resp: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line.trim()).unwrap();
+        assert!(
+            resp.is_ok(),
+            "session_end hook-event failed: {:?}",
+            resp.error
+        );
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "session_end");
+
+        // ── Step 2: Query session-query — expects Dead state ──────────────────
+        let stream2 = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let request2 = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "end-roundtrip-2".to_string(),
+            command: "session-query".to_string(),
+            payload: serde_json::json!({"name": "team-lead"}),
+        };
+        let req_line2 = format!("{}\n", serde_json::to_string(&request2).unwrap());
+        let mut reader2 = BufReader::new(stream2);
+        reader2
+            .get_mut()
+            .write_all(req_line2.as_bytes())
+            .await
+            .unwrap();
+        let mut resp_line2 = String::new();
+        reader2.read_line(&mut resp_line2).await.unwrap();
+        let resp2: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line2.trim()).unwrap();
+        // session-query returns ok with the record, but alive should be false
+        // (PID is from current process, but state is Dead).  We verify liveness
+        // through the in-memory registry directly rather than the alive flag,
+        // because alive checks the OS process table and our PID is real.
+        assert!(resp2.is_ok(), "session-query failed: {:?}", resp2.error);
+        {
+            let reg = session_registry.lock().unwrap();
+            let record = reg.query("team-lead").unwrap();
+            assert_eq!(
+                record.state,
+                crate::daemon::session_registry::SessionState::Dead,
+                "Session registry must reflect Dead state after session_end"
+            );
+        }
+
+        // ── Step 3: Query agent-state — expects Killed ────────────────────────
+        let stream3 = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let request3 = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "end-roundtrip-3".to_string(),
+            command: "agent-state".to_string(),
+            payload: serde_json::json!({"agent": "team-lead", "team": "atm-dev"}),
+        };
+        let req_line3 = format!("{}\n", serde_json::to_string(&request3).unwrap());
+        let mut reader3 = BufReader::new(stream3);
+        reader3
+            .get_mut()
+            .write_all(req_line3.as_bytes())
+            .await
+            .unwrap();
+        let mut resp_line3 = String::new();
+        reader3.read_line(&mut resp_line3).await.unwrap();
+        let resp3: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(resp_line3.trim()).unwrap();
+        assert!(resp3.is_ok(), "agent-state failed: {:?}", resp3.error);
+        let payload3 = resp3.payload.unwrap();
+        assert_eq!(
+            payload3["state"].as_str().unwrap(),
+            "killed",
+            "Agent state must be 'killed' after session_end"
+        );
+
+        cancel.cancel();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_socket_file_cleaned_up_on_drop() {
@@ -2155,12 +3038,14 @@ mod tests {
 
         {
             let launch_tx = new_launch_sender();
+            let (dd, _dd_dir) = make_dd();
             let _handle = start_socket_server(
                 home_dir.clone(),
                 state_store,
                 new_pubsub_store(),
                 launch_tx,
                 make_sr(),
+                dd,
                 cancel.clone(),
             )
             .await
@@ -2236,5 +3121,421 @@ mod tests {
         assert_eq!(payload["session_id"].as_str().unwrap(), "sess-deadbeef");
         // alive is false because the PID doesn't exist (non-unix: always false)
         assert!(!payload["alive"].as_bool().unwrap());
+    }
+
+    // ── hook-event session_start with empty session_id tests ──────────────────
+
+    /// When session_id is empty in a session_start event, the handler must
+    /// return processed=false immediately without mutating session registry or
+    /// agent state tracker.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_start_empty_session_id_returns_not_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let state_store = make_store();
+        let sr = make_sr();
+
+        let request = SocketRequest {
+            version: agent_team_mail_core::daemon_client::PROTOCOL_VERSION,
+            request_id: "req-empty-sid".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "team-lead",
+                "team": "atm-dev",
+                "session_id": "",
+                "process_id": 12345_u32,
+            }),
+        };
+        let req_str = serde_json::to_string(&request).unwrap();
+
+        let resp = handle_hook_event_command(&req_str, &state_store, &sr).await;
+
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "processed must be false when session_id is empty"
+        );
+        assert_eq!(
+            payload["reason"].as_str().unwrap(),
+            "missing session_id",
+        );
+
+        // Session registry must remain empty — no upsert occurred
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query("team-lead").is_none(),
+            "session registry must not be mutated when session_id is empty"
+        );
+        drop(reg);
+
+        // State tracker must remain empty — no register_agent occurred
+        let tracker = state_store.lock().unwrap();
+        assert!(
+            tracker.get_state("team-lead").is_none(),
+            "agent state tracker must not be mutated when session_id is empty"
+        );
+    }
+
+    /// Confirm that the agent is NOT registered in the state tracker when
+    /// session_id is absent, even if the agent field is present.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_start_no_agent_registration_without_session_id() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let state_store = make_store();
+        let sr = make_sr();
+
+        let request = SocketRequest {
+            version: agent_team_mail_core::daemon_client::PROTOCOL_VERSION,
+            request_id: "req-no-reg".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "",
+            }),
+        };
+        let req_str = serde_json::to_string(&request).unwrap();
+
+        let _resp = handle_hook_event_command(&req_str, &state_store, &sr).await;
+
+        // Agent must NOT appear in the tracker after an empty-session_id event
+        let tracker = state_store.lock().unwrap();
+        assert!(
+            tracker.get_state("arch-ctm").is_none(),
+            "arch-ctm must not be registered when session_id is empty"
+        );
+    }
+
+    // ── sent_at skew validation unit tests ────────────────────────────────────
+
+    /// Helper: build a minimal valid ControlRequest with the given sent_at string.
+    #[cfg(unix)]
+    fn make_control_req_with_sent_at(sent_at: &str) -> ControlRequest {
+        ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: "req-skew-test".to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
+            sent_at: sent_at.to_string(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-skew".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("hello".to_string()),
+            content_ref: None,
+        }
+    }
+
+    /// A `sent_at` timestamp 400 seconds in the past exceeds the default 300s window.
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_sent_at_too_old_rejected() {
+        let old = chrono::Utc::now() - chrono::Duration::seconds(400);
+        let req = make_control_req_with_sent_at(&old.to_rfc3339());
+        let err = validate_control_request(&req);
+        assert!(err.is_some(), "should be rejected");
+        assert!(
+            err.unwrap().contains("skew"),
+            "error should mention skew"
+        );
+    }
+
+    /// A `sent_at` timestamp within the default 300s window is accepted.
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_sent_at_within_window_accepted() {
+        let recent = chrono::Utc::now() - chrono::Duration::seconds(100);
+        let req = make_control_req_with_sent_at(&recent.to_rfc3339());
+        let err = validate_control_request(&req);
+        assert!(err.is_none(), "should be accepted, got: {:?}", err);
+    }
+
+    /// A `sent_at` timestamp 400 seconds in the future exceeds the default 300s window.
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_sent_at_future_skew_rejected() {
+        let future = chrono::Utc::now() + chrono::Duration::seconds(400);
+        let req = make_control_req_with_sent_at(&future.to_rfc3339());
+        let err = validate_control_request(&req);
+        assert!(err.is_some(), "future skew should be rejected");
+        assert!(
+            err.unwrap().contains("skew"),
+            "error should mention skew"
+        );
+    }
+
+    /// A `sent_at` timestamp at "now" (within a few seconds) is accepted.
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_sent_at_now_accepted() {
+        let now = chrono::Utc::now();
+        let req = make_control_req_with_sent_at(&now.to_rfc3339());
+        let err = validate_control_request(&req);
+        assert!(err.is_none(), "current timestamp should be accepted, got: {:?}", err);
+    }
+
+    /// A malformed `sent_at` value fails RFC3339 parse → rejected.
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_sent_at_malformed_rejected() {
+        let req = make_control_req_with_sent_at("not-a-timestamp");
+        let err = validate_control_request(&req);
+        assert!(err.is_some(), "malformed sent_at should be rejected");
+    }
+
+    // ── source-aware lifecycle validation ────────────────────────────────────
+
+    /// `claude_hook` source: `session_start` from non-lead member is rejected.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_claude_hook_source_non_lead_session_start_rejected() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-claude-hook".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "sess-non-lead",
+                "source": {"kind": "claude_hook"},
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "non-lead claude_hook session_start must be rejected"
+        );
+        assert!(
+            payload["reason"].as_str().unwrap().contains("only team-lead"),
+            "rejection reason should mention team-lead"
+        );
+    }
+
+    /// `atm_mcp` source: `session_start` from a non-lead member is accepted.
+    ///
+    /// MCP proxies manage their own Codex agent sessions, so any team member
+    /// may emit lifecycle events via this source.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_atm_mcp_source_non_lead_session_start_accepted() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-atm-mcp".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "codex:abc-session-1",
+                "source": {"kind": "atm_mcp"},
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            payload["processed"].as_bool().unwrap(),
+            "atm_mcp non-lead session_start must be accepted; got: {payload}"
+        );
+        // Verify the session was actually registered.
+        let reg = sr.lock().unwrap();
+        let record = reg.query("arch-ctm").expect("arch-ctm must be in session registry");
+        assert_eq!(record.session_id, "codex:abc-session-1");
+    }
+
+    /// `unknown` source behaves like `claude_hook` (fail-closed default).
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_unknown_source_non_lead_session_start_rejected() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        // Explicitly set source.kind = "unknown"
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-unknown-src".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "sess-unknown",
+                "source": {"kind": "unknown"},
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "unknown source must be treated like claude_hook (strictest)"
+        );
+        assert!(
+            payload["reason"].as_str().unwrap().contains("only team-lead"),
+            "rejection reason should mention team-lead"
+        );
+    }
+
+    /// Missing `source` field also behaves like `claude_hook` (backward compat).
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_absent_source_non_lead_session_start_rejected() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        // No "source" field in payload.
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-no-src".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "sess-no-src",
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "absent source must default to Unknown (strictest) and reject non-lead"
+        );
+    }
+
+    /// Legacy E.3 payloads used a flat string for `source` on session_start
+    /// (for example `"init"` / `"compact"`). The E.7 parser expects an object
+    /// (`{"kind":"..."}`), so legacy string payloads must degrade gracefully
+    /// to `unknown` and enforce strict validation.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_legacy_flat_string_source_degrades_to_unknown() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-legacy-flat-source".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "sess-legacy-flat",
+                "source": "init",
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "legacy flat-string source must degrade to Unknown (strictest)"
+        );
+        assert!(
+            payload["reason"].as_str().unwrap().contains("only team-lead"),
+            "legacy flat-string source should follow Unknown/claude_hook restrictions"
+        );
+    }
+
+    /// `agent_hook` source: `session_start` from a non-lead member is accepted
+    /// (same policy as `atm_mcp`).
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_agent_hook_source_non_lead_session_start_accepted() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-agent-hook".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "codex:agent-hook-sess",
+                "source": {"kind": "agent_hook"},
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            payload["processed"].as_bool().unwrap(),
+            "agent_hook non-lead session_start must be accepted"
+        );
+    }
+
+    /// `atm_mcp` source: `session_end` from a non-lead member is accepted.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_atm_mcp_source_non_lead_session_end_accepted() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        // Pre-populate registry so mark_dead has something to work with.
+        sr.lock().unwrap().upsert("arch-ctm", "codex:sess-end-test", 0);
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-mcp-end".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_end",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "source": {"kind": "atm_mcp"},
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            payload["processed"].as_bool().unwrap(),
+            "atm_mcp non-lead session_end must be accepted"
+        );
+        // Verify session marked dead.
+        use crate::daemon::session_registry::SessionState;
+        let reg = sr.lock().unwrap();
+        let record = reg.query("arch-ctm").expect("arch-ctm must remain in registry");
+        assert_eq!(record.state, SessionState::Dead);
     }
 }

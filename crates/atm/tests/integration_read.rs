@@ -201,7 +201,9 @@ fn test_read_marks_as_read() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
+    // ATM_IDENTITY must match the target agent so the mark-read guard allows marking.
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "test-agent")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("test-agent")
@@ -322,6 +324,79 @@ fn test_read_agent_not_found() {
         .arg("nonexistent-agent")
         .assert()
         .failure();
+}
+
+#[test]
+fn test_read_role_with_team_suffix_resolves_end_to_end() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = temp_dir.path().join(".claude/teams").join("test-team");
+    let inboxes_dir = team_dir.join("inboxes");
+    fs::create_dir_all(&inboxes_dir).unwrap();
+
+    // Team member is arch-atm (role target), not literal team-lead.
+    let config = serde_json::json!({
+        "name": "test-team",
+        "description": "Test team",
+        "createdAt": 1739284800000i64,
+        "leadAgentId": "arch-atm@test-team",
+        "leadSessionId": "test-session-id",
+        "members": [
+            {
+                "agentId": "reader@test-team",
+                "name": "reader",
+                "agentType": "general-purpose",
+                "model": "claude-opus-4-6",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": []
+            },
+            {
+                "agentId": "arch-atm@test-team",
+                "name": "arch-atm",
+                "agentType": "general-purpose",
+                "model": "claude-haiku-4-5-20251001",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": []
+            }
+        ]
+    });
+    fs::write(
+        team_dir.join("config.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    // Inbox exists only for arch-atm.
+    let messages = vec![serde_json::json!({
+        "from": "reader",
+        "text": "Role routed read",
+        "timestamp": "2026-02-11T10:00:00Z",
+        "read": false,
+        "message_id": "msg-role-001"
+    })];
+    create_test_inbox(&team_dir, "arch-atm", messages);
+
+    // Configure role team-lead -> arch-atm in global ATM config under ATM_HOME.
+    let global_cfg_dir = temp_dir.path().join(".config/atm");
+    fs::create_dir_all(&global_cfg_dir).unwrap();
+    fs::write(
+        global_cfg_dir.join("config.toml"),
+        "[core]\ndefault_team = \"test-team\"\nidentity = \"reader\"\n\n[roles]\nteam-lead = \"arch-atm\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("team-lead@test-team")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Role routed read"));
 }
 
 #[test]
@@ -609,4 +684,107 @@ fn test_read_updates_last_seen_from_displayed_messages_only() {
         .as_str()
         .unwrap();
     assert!(ts.starts_with("2026-02-11T11:00:00"));
+}
+
+/// Regression test: `atm read arch-ctm` run as team-lead must never modify arch-ctm's read flags.
+///
+/// Only the message's owner (arch-ctm) should mark their own inbox as read.
+/// Cross-agent reads are "peek" operations and must be non-destructive.
+#[test]
+fn test_read_does_not_mark_other_agents_messages() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_name = "test-team";
+    let team_dir = temp_dir.path().join(".claude/teams").join(team_name);
+    let inboxes_dir = team_dir.join("inboxes");
+    fs::create_dir_all(&inboxes_dir).unwrap();
+
+    // Team config includes both team-lead and arch-ctm.
+    let config = serde_json::json!({
+        "name": team_name,
+        "description": "Test team",
+        "createdAt": 1739284800000i64,
+        "leadAgentId": format!("team-lead@{}", team_name),
+        "leadSessionId": "test-session-id",
+        "members": [
+            {
+                "agentId": format!("team-lead@{}", team_name),
+                "name": "team-lead",
+                "agentType": "general-purpose",
+                "model": "claude-haiku-4-5-20251001",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": []
+            },
+            {
+                "agentId": format!("arch-ctm@{}", team_name),
+                "name": "arch-ctm",
+                "agentType": "general-purpose",
+                "model": "claude-sonnet-4-6",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "%1",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": []
+            }
+        ]
+    });
+    fs::write(
+        team_dir.join("config.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    // Populate arch-ctm's inbox with one unread message.
+    let arch_ctm_inbox = inboxes_dir.join("arch-ctm.json");
+    let arch_ctm_messages = serde_json::json!([{
+        "from": "team-lead",
+        "text": "Important message for arch-ctm",
+        "timestamp": "2026-02-20T10:00:00Z",
+        "read": false,
+        "message_id": "msg-arch-ctm-001"
+    }]);
+    fs::write(
+        &arch_ctm_inbox,
+        serde_json::to_string_pretty(&arch_ctm_messages).unwrap(),
+    )
+    .unwrap();
+
+    // team-lead reads arch-ctm's inbox with --no-mark (baseline sanity check).
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", team_name)
+        .env("ATM_IDENTITY", "team-lead")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("--no-mark")
+        .arg("arch-ctm")
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&arch_ctm_inbox).unwrap();
+    let msgs: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        msgs[0]["read"], false,
+        "arch-ctm message must remain unread when team-lead reads with --no-mark"
+    );
+
+    // team-lead reads arch-ctm's inbox WITHOUT --no-mark — this is the regression test.
+    // The fix must prevent team-lead from altering arch-ctm's read flags.
+    let mut cmd2 = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd2, &temp_dir);
+    cmd2.env("ATM_TEAM", team_name)
+        .env("ATM_IDENTITY", "team-lead")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("--all")
+        .arg("arch-ctm")
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&arch_ctm_inbox).unwrap();
+    let msgs: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        msgs[0]["read"], false,
+        "arch-ctm message must NOT be marked as read when team-lead runs `atm read arch-ctm`"
+    );
 }

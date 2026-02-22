@@ -32,6 +32,7 @@
 
 mod agent_terminal;
 mod app;
+mod config;
 mod dashboard;
 mod events;
 mod ui;
@@ -59,6 +60,7 @@ use agent_team_mail_core::{
 };
 
 use app::{App, MemberRow, PendingControl};
+use config::{TuiConfig, load_tui_config};
 use dashboard::{get_inbox_count, session_log_path};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -81,6 +83,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let team = cli.team.clone();
 
+    // Load user preferences before terminal setup so parse warnings go to stderr.
+    let config = load_tui_config();
+
     emit_event_best_effort(EventFields {
         level: "info",
         source: "atm-tui",
@@ -97,7 +102,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let result = run_app(&mut terminal, team.clone()).await;
+    let result = run_app(&mut terminal, team.clone(), config).await;
 
     // Restore terminal on exit (even on error)
     disable_raw_mode().ok();
@@ -126,8 +131,9 @@ async fn main() -> Result<()> {
 async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     team: String,
+    config: TuiConfig,
 ) -> Result<()> {
-    let mut app = App::new(team.clone());
+    let mut app = App::new(team.clone(), config);
 
     // Rate-limit daemon/inbox queries to 2-second intervals.
     const DAEMON_REFRESH: Duration = Duration::from_secs(2);
@@ -191,24 +197,45 @@ async fn run_app<B: ratatui::backend::Backend>(
         }
 
         // ── Session log tail (100 ms) ─────────────────────────────────────────
-        if let Some(ref log_path) = app.session_log_path.clone()
-            && let Ok((new_lines, new_pos)) = tail_log_file(log_path, app.stream_pos).await
-            && new_pos > app.stream_pos
-        {
-            // Emit stream_attach on first successful read.
-            if app.stream_pos == 0 && !new_lines.is_empty() {
-                emit_event_best_effort(EventFields {
-                    level: "info",
-                    source: "atm-tui",
-                    action: "stream_attach",
-                    team: Some(team.clone()),
-                    agent_id: app.streaming_agent.clone(),
-                    result: Some("ok".to_string()),
-                    ..Default::default()
-                });
+        if let Some(ref log_path) = app.session_log_path.clone() {
+            match tail_log_file(log_path, app.stream_pos).await {
+                Ok((new_lines, new_pos)) => {
+                    if new_pos == 0 && app.stream_pos > 0 {
+                        // Log was truncated — daemon likely restarted.
+                        // Reset to start and show a freeze/reset indicator.
+                        app.stream_pos = 0;
+                        app.stream_lines.clear();
+                        app.stream_source_error =
+                            Some("stream reset: log truncated (daemon restart?)".to_string());
+                    } else if new_pos > app.stream_pos {
+                        // Successful read: clear any previous freeze indicator.
+                        app.stream_source_error = None;
+
+                        // Emit stream_attach on first successful read.
+                        if app.stream_pos == 0 && !new_lines.is_empty() {
+                            emit_event_best_effort(EventFields {
+                                level: "info",
+                                source: "atm-tui",
+                                action: "stream_attach",
+                                team: Some(team.clone()),
+                                agent_id: app.streaming_agent.clone(),
+                                result: Some("ok".to_string()),
+                                ..Default::default()
+                            });
+                        }
+                        app.stream_pos = new_pos;
+                        app.append_stream_lines(new_lines);
+                    }
+                    // else: new_pos == app.stream_pos — no new data, no change.
+                }
+                Err(_) => {
+                    // File unreadable (permissions changed, filesystem error, etc.).
+                    if app.stream_pos > 0 {
+                        app.stream_source_error =
+                            Some("stream frozen: log unreadable".to_string());
+                    }
+                }
             }
-            app.stream_pos = new_pos;
-            app.append_stream_lines(new_lines);
         }
 
         // ── Input event handling ──────────────────────────────────────────────
@@ -221,7 +248,11 @@ async fn run_app<B: ratatui::backend::Backend>(
 
         // ── Control action dispatch ───────────────────────────────────────────
         if let Some(pending) = app.pending_control.take() {
-            let result = execute_control(&team, &app.streaming_agent, pending).await;
+            let stdin_timeout = app.config.stdin_timeout_secs;
+            let interrupt_timeout = app.config.interrupt_timeout_secs;
+            let result =
+                execute_control(&team, &app.streaming_agent, pending, stdin_timeout, interrupt_timeout)
+                    .await;
             app.status_message = Some(result);
         }
 
@@ -257,7 +288,18 @@ fn build_member_rows(agents: &[AgentSummary], home: &std::path::Path, team: &str
 /// Read new bytes from a log file since `pos`, returning new lines and the
 /// updated byte position.
 ///
-/// Returns `Ok((vec![], pos))` when the file does not exist or has no new data.
+/// # Truncation detection
+///
+/// When `file_len < pos` the file has been truncated (e.g., the daemon
+/// restarted and cleared its log). In that case the function returns
+/// `Ok((vec![], 0))` — a `new_pos` of `0` signals to the caller that the
+/// stream position should be reset to the beginning of the file.
+///
+/// # No-op conditions
+///
+/// Returns `Ok((vec![], pos))` (unchanged position) when:
+/// - The file does not exist.
+/// - The file has not grown since `pos`.
 async fn tail_log_file(path: &std::path::Path, pos: u64) -> Result<(Vec<String>, u64)> {
     use tokio::fs::File;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -270,7 +312,13 @@ async fn tail_log_file(path: &std::path::Path, pos: u64) -> Result<(Vec<String>,
     let metadata = file.metadata().await?;
     let file_len = metadata.len();
 
-    if file_len <= pos {
+    // Truncation: file shrank (daemon restart cleared the log).
+    // Signal reset by returning new_pos=0.
+    if file_len < pos {
+        return Ok((Vec::new(), 0));
+    }
+
+    if file_len == pos {
         return Ok((Vec::new(), pos));
     }
 
@@ -308,11 +356,16 @@ fn emit_stream_detach_event(team: &str, agent: &str) {
 ///
 /// If no agent is selected, returns an error message without touching the
 /// daemon.  On a first-attempt [`ControlResult::Timeout`] the request is
-/// retried once after a 2-second delay with the same idempotency key.
+/// retried once after `timeout_secs / 2` seconds with the same idempotency key.
+///
+/// `stdin_timeout_secs` controls the total retry budget for stdin actions;
+/// `interrupt_timeout_secs` controls the budget for interrupt actions.
 async fn execute_control(
     team: &str,
     streaming_agent: &Option<String>,
     action: PendingControl,
+    stdin_timeout_secs: u64,
+    interrupt_timeout_secs: u64,
 ) -> String {
     let Some(agent_id) = streaming_agent else {
         return "No agent selected".to_string();
@@ -324,6 +377,12 @@ async fn execute_control(
     let (control_action, payload) = match &action {
         PendingControl::Stdin(text) => (ControlAction::Stdin, Some(text.clone())),
         PendingControl::Interrupt => (ControlAction::Interrupt, None),
+    };
+
+    // Select per-action timeout from config before control_action is moved.
+    let timeout_secs = match &control_action {
+        ControlAction::Stdin => stdin_timeout_secs,
+        ControlAction::Interrupt => interrupt_timeout_secs,
     };
 
     let msg_type = match &control_action {
@@ -360,7 +419,7 @@ async fn execute_control(
         ..Default::default()
     });
 
-    let ack = send_with_retry(&request).await;
+    let ack = send_with_retry(&request, timeout_secs).await;
 
     let result_str = match &ack {
         Ok(a) => format_ack_result(a),
@@ -384,13 +443,19 @@ async fn execute_control(
 ///
 /// Uses [`tokio::task::spawn_blocking`] because [`send_control`] performs
 /// blocking Unix socket I/O.
-async fn send_with_retry(request: &ControlRequest) -> anyhow::Result<ControlAck> {
+///
+/// On a first-attempt timeout the function sleeps for `timeout_secs / 2`
+/// seconds before issuing one retry with the same idempotency key. The
+/// `timeout_secs` value comes from the per-action TUI config fields
+/// (`stdin_timeout_secs` or `interrupt_timeout_secs`).
+async fn send_with_retry(request: &ControlRequest, timeout_secs: u64) -> anyhow::Result<ControlAck> {
     let req1 = request.clone();
     let result = tokio::task::spawn_blocking(move || send_control(&req1)).await??;
 
     if result.result == ControlResult::Timeout {
-        // Single retry after 2 s with the same idempotency key.
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Single retry after half the configured timeout budget.
+        let delay = Duration::from_secs(timeout_secs / 2);
+        tokio::time::sleep(delay).await;
         let req2 = request.clone();
         return tokio::task::spawn_blocking(move || send_control(&req2)).await?;
     }
@@ -487,7 +552,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_control_no_agent_returns_message() {
         // When streaming_agent is None, execute_control returns a "no agent" message.
-        let result = execute_control("atm-dev", &None, PendingControl::Interrupt).await;
+        let result = execute_control("atm-dev", &None, PendingControl::Interrupt, 10, 5).await;
         assert_eq!(result, "No agent selected");
     }
 
@@ -499,8 +564,107 @@ mod tests {
             "atm-dev",
             &Some("arch-ctm".to_string()),
             PendingControl::Stdin("hello".to_string()),
+            10,
+            5,
         )
         .await;
         assert!(!result.is_empty(), "result should be non-empty on daemon error");
+    }
+
+    // ── tail_log_file tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_tail_log_file_missing_returns_empty_unchanged_pos() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.log");
+        let (lines, new_pos) = tail_log_file(&path, 0).await.unwrap();
+        assert!(lines.is_empty());
+        assert_eq!(new_pos, 0);
+    }
+
+    #[tokio::test]
+    async fn test_tail_log_file_reads_new_data() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("agent.log");
+        tokio::fs::write(&path, b"line one\nline two\n").await.unwrap();
+        let (lines, new_pos) = tail_log_file(&path, 0).await.unwrap();
+        assert!(!lines.is_empty());
+        assert!(new_pos > 0);
+    }
+
+    #[tokio::test]
+    async fn test_tail_log_file_no_new_data_unchanged_pos() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("agent.log");
+        tokio::fs::write(&path, b"data").await.unwrap();
+        let (_, first_pos) = tail_log_file(&path, 0).await.unwrap();
+        let (lines2, new_pos2) = tail_log_file(&path, first_pos).await.unwrap();
+        assert!(lines2.is_empty());
+        assert_eq!(new_pos2, first_pos);
+    }
+
+    /// When the log file shrinks (truncated), `tail_log_file` returns new_pos=0
+    /// to signal that the caller should reset the stream position.
+    #[tokio::test]
+    async fn test_tail_log_file_truncation_signals_reset() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("agent.log");
+
+        // Write initial content and advance position.
+        tokio::fs::write(&path, b"initial content that is quite long\n")
+            .await
+            .unwrap();
+        let (_, pos_after_first) = tail_log_file(&path, 0).await.unwrap();
+        assert!(pos_after_first > 0, "should have advanced position");
+
+        // Truncate the file (simulates daemon restart clearing the log).
+        tokio::fs::write(&path, b"new").await.unwrap();
+
+        let (lines, new_pos) = tail_log_file(&path, pos_after_first).await.unwrap();
+        assert_eq!(
+            new_pos, 0,
+            "new_pos should be 0 to signal truncation/reset"
+        );
+        assert!(
+            lines.is_empty(),
+            "no lines should be returned on truncation signal"
+        );
+    }
+
+    /// Test that the stream source error freeze-then-clear cycle works at the
+    /// `tail_log_file` level.
+    ///
+    /// Architecture §12 requires that after a truncation signal (`new_pos=0`)
+    /// the caller resets `stream_pos` to 0 and clears `stream_source_error` on
+    /// the next successful read.  This test validates that `tail_log_file`
+    /// returns the correct signals at each stage so the caller can implement
+    /// that cycle correctly.
+    #[tokio::test]
+    async fn test_stream_source_error_cleared_on_recovery() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("agent.log");
+
+        // Step 1: file exists, first read succeeds and advances position.
+        tokio::fs::write(&log_path, b"line one\nline two\n").await.unwrap();
+        let (lines, pos1) = tail_log_file(&log_path, 0).await.unwrap();
+        assert!(!lines.is_empty(), "should read initial content");
+        assert!(pos1 > 0, "position must advance after first read");
+
+        // Step 2: file is truncated to a smaller size (daemon restart scenario).
+        // tail_log_file must return new_pos=0 to signal the caller to reset.
+        tokio::fs::write(&log_path, b"x").await.unwrap(); // 1 byte < pos1
+        let (trunc_lines, trunc_pos) = tail_log_file(&log_path, pos1).await.unwrap();
+        assert_eq!(trunc_pos, 0, "truncation must return new_pos=0 (reset signal)");
+        assert!(trunc_lines.is_empty(), "no lines on truncation signal");
+
+        // Step 3: caller simulates clearing stream_source_error by resetting pos to 0.
+        // File now has new content after the restart.
+        tokio::fs::write(&log_path, b"new content after restart\n").await.unwrap();
+        let (new_lines, new_pos) = tail_log_file(&log_path, 0).await.unwrap();
+        assert!(
+            !new_lines.is_empty(),
+            "should read new content after recovery (stream_source_error cleared)"
+        );
+        assert!(new_pos > 0, "position must advance after recovery read");
     }
 }

@@ -1,6 +1,6 @@
 //! Main daemon event loop
 
-use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedPubSubStore, SharedSessionRegistry, SharedStateStore};
+use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedDedupeStore, SharedPubSubStore, SharedSessionRegistry, SharedStateStore};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
@@ -50,6 +50,8 @@ use tracing::{debug, error, info, warn};
 ///   `new_launch_sender()` (with empty inner) when the plugin is absent.
 /// * `session_registry` - Shared session registry for `session-query` socket
 ///   commands. Pass `new_session_registry()` from `crate::daemon`.
+/// * `dedup_store` - Durable dedupe store shared with the socket server for
+///   restart-safe idempotency. Create with `crate::daemon::new_dedup_store()`.
 #[expect(
     clippy::too_many_arguments,
     reason = "event loop wiring needs shared runtime handles and plugin coordination state"
@@ -63,6 +65,7 @@ pub async fn run(
     pubsub_store: SharedPubSubStore,
     launch_tx: crate::daemon::LaunchSender,
     session_registry: SharedSessionRegistry,
+    dedup_store: SharedDedupeStore,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -120,7 +123,7 @@ pub async fn run(
             agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
         });
     let socket_cancel = cancel.clone();
-    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, session_registry, socket_cancel).await {
+    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, session_registry, dedup_store, socket_cancel).await {
         Ok(handle) => {
             if handle.is_some() {
                 info!("Unix socket server started successfully");

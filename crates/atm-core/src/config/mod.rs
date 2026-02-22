@@ -12,7 +12,7 @@ mod bridge;
 mod discovery;
 mod types;
 
-pub use aliases::resolve_alias;
+pub use aliases::{resolve_alias, resolve_identity};
 pub use bridge::{BridgeConfig, BridgeRole, HostnameRegistry, RemoteConfig};
 pub use discovery::{resolve_config, resolve_settings, ConfigError, ConfigOverrides};
 pub use types::{CleanupStrategy, Config, CoreConfig, DisplayConfig, MessagingConfig, OutputFormat, RetentionConfig, TimestampFormat};

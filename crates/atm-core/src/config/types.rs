@@ -18,12 +18,24 @@ pub struct Config {
     /// Retention configuration
     #[serde(default)]
     pub retention: RetentionConfig,
-    /// Identity aliases: map role-based names to actual inbox identities.
+    /// Identity aliases: map alias-names to actual inbox identities.
     ///
-    /// For example, `arch-atm = "team-lead"` causes `atm send arch-atm …`
-    /// to deliver to the `team-lead` inbox instead.
+    /// Use aliases for stable name shortcuts (e.g., `arch-atm = "team-lead"`).
+    /// Unlike `[roles]`, aliases do not carry semantic role meaning — they are
+    /// simply alternative names for an inbox.
+    ///
+    /// Resolution order when sending/reading: roles → aliases → literal fallback.
     #[serde(default)]
     pub aliases: HashMap<String, String>,
+    /// Role-to-identity mapping: maps logical role names to actual inbox identities.
+    ///
+    /// Resolution order: roles → aliases → literal fallback.
+    /// For example, `team-lead = "arch-atm"` causes `atm send team-lead …`
+    /// to deliver to the `arch-atm` inbox.
+    ///
+    /// Roles take precedence over aliases when the same key appears in both maps.
+    #[serde(default)]
+    pub roles: HashMap<String, String>,
     /// Plugin-specific configuration sections: [plugins.<name>]
     #[serde(default)]
     pub plugins: HashMap<String, toml::Table>,
@@ -308,6 +320,47 @@ strategy = "delete"
         // New fields should use defaults
         assert!(!config.retention.enabled);
         assert_eq!(config.retention.interval_secs, 300);
+    }
+
+    #[test]
+    fn test_roles_section_parsed_from_toml() {
+        let toml_str = r#"
+[core]
+default_team = "test-team"
+identity = "test-user"
+
+[roles]
+team-lead = "arch-atm"
+qa = "worker-2"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.roles.get("team-lead").map(|s| s.as_str()), Some("arch-atm"));
+        assert_eq!(config.roles.get("qa").map(|s| s.as_str()), Some("worker-2"));
+        assert_eq!(config.roles.len(), 2);
+    }
+
+    #[test]
+    fn test_roles_round_trips_through_serialization() {
+        let toml_str = r#"
+[core]
+default_team = "test-team"
+identity = "test-user"
+
+[roles]
+team-lead = "arch-atm"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let reserialized = toml::to_string(&config).unwrap();
+        let config2: Config = toml::from_str(&reserialized).unwrap();
+        assert_eq!(config.roles, config2.roles);
+    }
+
+    #[test]
+    fn test_roles_default_is_empty() {
+        let config = Config::default();
+        assert!(config.roles.is_empty(), "roles should default to empty HashMap");
     }
 
     #[test]

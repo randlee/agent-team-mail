@@ -202,7 +202,7 @@ jobs:
       - name: Publish atm-agent-mcp
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p atm-agent-mcp || echo "already published (skipping)"
+        run: cargo publish -p agent-team-mail-mcp || echo "already published (skipping)"
 
       - name: Wait for crates.io indexing
         run: sleep 60
@@ -210,4 +210,4 @@ jobs:
       - name: Publish atm-tui
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p atm-tui || echo "already published (skipping)"
+        run: cargo publish -p agent-team-mail-tui || echo "already published (skipping)"

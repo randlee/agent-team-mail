@@ -63,6 +63,7 @@ pub fn session_log_path(team: &str, agent: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -85,6 +86,7 @@ mod tests {
     // ── test_session_log_path ────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_session_log_path() {
         with_tmp_home(|home| {
             let path = session_log_path("atm-dev", "arch-ctm");
@@ -100,6 +102,7 @@ mod tests {
     // ── test_inbox_count_empty ───────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_inbox_count_empty() {
         with_tmp_home(|home| {
             // Inbox file does not exist yet.
@@ -119,6 +122,7 @@ mod tests {
     // ── test_inbox_count_with_messages ──────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_inbox_count_with_messages() {
         with_tmp_home(|home| {
             let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");
