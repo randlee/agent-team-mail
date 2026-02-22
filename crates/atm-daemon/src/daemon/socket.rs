@@ -415,11 +415,25 @@ fn is_hook_event_command(request_str: &str) -> bool {
 #[cfg(unix)]
 struct HookEventAuth {
     is_team_lead: bool,
+    /// Resolved lifecycle source, extracted from the `source` payload field.
+    ///
+    /// Defaults to [`LifecycleSourceKind::Unknown`] when the field is absent.
+    source: agent_team_mail_core::daemon_client::LifecycleSourceKind,
 }
 
 /// Resolve and authorize hook-event sender identity against team config.
+///
+/// Returns [`HookEventAuth`] containing:
+/// - `is_team_lead`: whether `agent` is the configured team lead
+/// - `source`: the resolved [`LifecycleSourceKind`] from the payload (or
+///   [`Unknown`](agent_team_mail_core::daemon_client::LifecycleSourceKind::Unknown)
+///   when the field is absent)
 #[cfg(unix)]
-fn authorize_hook_event(team: &str, agent: &str) -> std::result::Result<HookEventAuth, String> {
+fn authorize_hook_event(
+    team: &str,
+    agent: &str,
+    source: agent_team_mail_core::daemon_client::LifecycleSourceKind,
+) -> std::result::Result<HookEventAuth, String> {
     let home_dir = if let Ok(path) = std::env::var("ATM_HOME") {
         PathBuf::from(path)
     } else if let Ok(path) = std::env::var("HOME") {
@@ -447,7 +461,7 @@ fn authorize_hook_event(team: &str, agent: &str) -> std::result::Result<HookEven
     };
 
     let is_team_lead = member.agent_id == config.lead_agent_id;
-    Ok(HookEventAuth { is_team_lead })
+    Ok(HookEventAuth { is_team_lead, source })
 }
 
 /// Handle the `"hook-event"` command, updating daemon state in real-time
@@ -509,6 +523,19 @@ async fn handle_hook_event_command(
         .and_then(|v| v.as_u64())
         .map(|p| p as u32);
 
+    // Extract optional `source` field; default to Unknown for backward compat.
+    let source_kind = request
+        .payload
+        .get("source")
+        .and_then(|v| {
+            serde_json::from_value::<agent_team_mail_core::daemon_client::LifecycleSource>(
+                v.clone(),
+            )
+            .ok()
+        })
+        .map(|s| s.kind)
+        .unwrap_or(agent_team_mail_core::daemon_client::LifecycleSourceKind::Unknown);
+
     if agent.is_empty() {
         return make_ok_response(
             &request.request_id,
@@ -522,7 +549,7 @@ async fn handle_hook_event_command(
         );
     }
 
-    let auth = match authorize_hook_event(&team, &agent) {
+    let auth = match authorize_hook_event(&team, &agent, source_kind) {
         Ok(auth) => auth,
         Err(reason) => {
             return make_ok_response(
@@ -532,9 +559,19 @@ async fn handle_hook_event_command(
         }
     };
 
+    // Determine whether the source requires team-lead restriction on
+    // session_start / session_end.  `claude_hook` and `unknown` are strictest
+    // (fail-closed default).  `atm_mcp` and `agent_hook` relax the restriction
+    // because those adapters manage their own agent sessions.
+    use agent_team_mail_core::daemon_client::LifecycleSourceKind;
+    let require_lead_for_lifecycle = matches!(
+        auth.source,
+        LifecycleSourceKind::ClaudeHook | LifecycleSourceKind::Unknown
+    );
+
     match event_type.as_str() {
         "session_start" => {
-            if !auth.is_team_lead {
+            if require_lead_for_lifecycle && !auth.is_team_lead {
                 return make_ok_response(
                     &request.request_id,
                     serde_json::json!({"processed": false, "reason": "only team-lead may send session_start"}),
@@ -572,7 +609,7 @@ async fn handle_hook_event_command(
             info!("hook_event teammate_idle: agent={agent}");
         }
         "session_end" => {
-            if !auth.is_team_lead {
+            if require_lead_for_lifecycle && !auth.is_team_lead {
                 return make_ok_response(
                     &request.request_id,
                     serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
@@ -3247,5 +3284,216 @@ mod tests {
         let req = make_control_req_with_sent_at("not-a-timestamp");
         let err = validate_control_request(&req);
         assert!(err.is_some(), "malformed sent_at should be rejected");
+    }
+
+    // ── source-aware lifecycle validation ────────────────────────────────────
+
+    /// `claude_hook` source: `session_start` from non-lead member is rejected.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_claude_hook_source_non_lead_session_start_rejected() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-claude-hook".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "sess-non-lead",
+                "source": {"kind": "claude_hook"},
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "non-lead claude_hook session_start must be rejected"
+        );
+        assert!(
+            payload["reason"].as_str().unwrap().contains("only team-lead"),
+            "rejection reason should mention team-lead"
+        );
+    }
+
+    /// `atm_mcp` source: `session_start` from a non-lead member is accepted.
+    ///
+    /// MCP proxies manage their own Codex agent sessions, so any team member
+    /// may emit lifecycle events via this source.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_atm_mcp_source_non_lead_session_start_accepted() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-atm-mcp".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "codex:abc-session-1",
+                "source": {"kind": "atm_mcp"},
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            payload["processed"].as_bool().unwrap(),
+            "atm_mcp non-lead session_start must be accepted; got: {payload}"
+        );
+        // Verify the session was actually registered.
+        let reg = sr.lock().unwrap();
+        let record = reg.query("arch-ctm").expect("arch-ctm must be in session registry");
+        assert_eq!(record.session_id, "codex:abc-session-1");
+    }
+
+    /// `unknown` source behaves like `claude_hook` (fail-closed default).
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_unknown_source_non_lead_session_start_rejected() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        // Explicitly set source.kind = "unknown"
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-unknown-src".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "sess-unknown",
+                "source": {"kind": "unknown"},
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "unknown source must be treated like claude_hook (strictest)"
+        );
+        assert!(
+            payload["reason"].as_str().unwrap().contains("only team-lead"),
+            "rejection reason should mention team-lead"
+        );
+    }
+
+    /// Missing `source` field also behaves like `claude_hook` (backward compat).
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_absent_source_non_lead_session_start_rejected() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        // No "source" field in payload.
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-no-src".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "sess-no-src",
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "absent source must default to Unknown (strictest) and reject non-lead"
+        );
+    }
+
+    /// `agent_hook` source: `session_start` from a non-lead member is accepted
+    /// (same policy as `atm_mcp`).
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_agent_hook_source_non_lead_session_start_accepted() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-agent-hook".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "codex:agent-hook-sess",
+                "source": {"kind": "agent_hook"},
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            payload["processed"].as_bool().unwrap(),
+            "agent_hook non-lead session_start must be accepted"
+        );
+    }
+
+    /// `atm_mcp` source: `session_end` from a non-lead member is accepted.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_atm_mcp_source_non_lead_session_end_accepted() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        // Pre-populate registry so mark_dead has something to work with.
+        sr.lock().unwrap().upsert("arch-ctm", "codex:sess-end-test", 0);
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-mcp-end".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_end",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "source": {"kind": "atm_mcp"},
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            payload["processed"].as_bool().unwrap(),
+            "atm_mcp non-lead session_end must be accepted"
+        );
+        // Verify session marked dead.
+        use crate::daemon::session_registry::SessionState;
+        let reg = sr.lock().unwrap();
+        let record = reg.query("arch-ctm").expect("arch-ctm must remain in registry");
+        assert_eq!(record.state, SessionState::Dead);
     }
 }
