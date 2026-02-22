@@ -202,6 +202,7 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
         self.assertEqual(request["command"], "hook-event")
         self.assertEqual(request["payload"]["event"], "teammate_idle")
         self.assertEqual(request["payload"]["agent"], "arch-ctm")
+        self.assertEqual(request["payload"]["source"]["kind"], "claude_hook")
         self.assertIn("received_at", request["payload"])
         self.assertRegex(
             request["payload"]["received_at"],
@@ -330,6 +331,42 @@ class TestTeammateIdleRelayGuards(unittest.TestCase):
         self.assertFalse(
             events_file.exists(),
             "events.jsonl must NOT be created when tomllib is unavailable"
+        )
+
+    def test_missing_agent_or_team_skips_audit_write_and_socket(self):
+        """If agent/team cannot be resolved, relay skips both file write and socket send."""
+        socket_calls = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            orig_dir = os.getcwd()
+            try:
+                run_dir = Path(tmpdir) / "run"
+                run_dir.mkdir()
+                os.chdir(run_dir)
+                # .atm.toml present, but no default_team / identity fallbacks.
+                (run_dir / ".atm.toml").write_text("[core]\n")
+
+                stdin_text = json.dumps({"session_id": "sess-missing-identity"})
+                with patch("sys.stdin", StringIO(stdin_text)), \
+                     patch.dict(
+                         os.environ,
+                         {"ATM_HOME": str(atm_home), "ATM_TEAM": "", "ATM_IDENTITY": ""},
+                         clear=False,
+                     ), \
+                     patch("socket.socket") as mock_sock:
+                    mock_sock.side_effect = lambda *a, **kw: socket_calls.append(1) or MagicMock()
+                    mod = _load_module("teammate_idle_relay", _RELAY_PATH)
+                    rc = mod.main()
+            finally:
+                os.chdir(orig_dir)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(socket_calls, [], "Socket must not be called when agent/team are missing")
+        events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+        self.assertFalse(
+            events_file.exists(),
+            "events.jsonl must NOT be created when agent/team are unresolved"
         )
 
 

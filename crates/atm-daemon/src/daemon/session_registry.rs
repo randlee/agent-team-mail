@@ -50,6 +50,12 @@ impl SessionRecord {
 /// Registry mapping agent names to their session records.
 ///
 /// Wrap in `Arc<Mutex<SessionRegistry>>` for concurrent access.
+///
+/// NOTE: Keys are currently bare agent names, not `(team, name)`.
+/// This is sufficient for current single-team deployments but can collide when
+/// multiple teams on one daemon have the same member name.
+/// TODO(atm-daemon): migrate to a team-scoped key once multi-team registry
+/// semantics are implemented.
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
     sessions: HashMap<String, SessionRecord>,

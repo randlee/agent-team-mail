@@ -2525,13 +2525,15 @@ All hook scripts are Python (not bash) for cross-platform compatibility and test
 
 Socket message payloads (single `hook-event` command path):
 ```json
-{"event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": "init|compact"}
+{"event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": {"kind": "claude_hook"}}
 {"event": "teammate_idle", "session_id": "...", "agent": "...", "team": "...", "received_at": "YYYY-MM-DDTHH:MM:SSZ"}
 {"event": "session_end",   "session_id": "...", "agent": "...", "team": "...", "reason": "..."}
 ```
 
-`source` is currently a flat string sent by Claude hook scripts (`init` or `compact` on session start).
-Future lifecycle-source expansion remains planned in Sprint E.7.
+`source` shape was initially described in E.3 as a flat string (`"init"` / `"compact"`).
+Sprint E.7 supersedes that format: lifecycle source is now an object discriminator
+(`source.kind`) for unified, extensible validation (`claude_hook` / `atm_mcp` /
+`agent_hook` / `unknown`). Legacy flat-string payloads degrade to `unknown`.
 
 **Unit tests** live in `tests/hook-scripts/`:
 - `test_session_start.py` — mock socket, verify message shape, verify `.atm.toml` guard, verify fail-open on socket error
@@ -2554,6 +2556,8 @@ Add `SocketCommand::HookEvent` variant. Handler updates session registry and age
 - Global `~/.claude/settings.json` updated to add `SessionEnd` hook pointing to `session-end.py`
 - Keep one daemon lifecycle handler path (`hook-event`) with source-aware validation;
   avoid splitting lifecycle transport into multiple packet families
+- SessionRegistry is currently keyed by bare agent name (not `(team, name)`);
+  this is a known limitation and a TODO for future multi-team daemon support
 
 #### Exit Criteria
 
@@ -2775,13 +2779,13 @@ explicit MCP lifecycle emission coverage.
 
 #### Exit Criteria
 
-- [ ] Lifecycle payload supports expandable `source.kind` with backward-compatible handling
-- [ ] Daemon lifecycle handler performs source-aware validation in one command path
-- [ ] `atm-agent-mcp` emits start/idle/end lifecycle events to daemon
-- [ ] Tests cover: source-kind parsing, source-aware authz, MCP lifecycle emission
-- [ ] Docs updated with adapter wiring pattern for future agent hooks
-- [ ] `cargo clippy --workspace -- -D warnings` clean
-- [ ] `cargo test --workspace` passes
+- [x] Lifecycle payload supports expandable `source.kind` with backward-compatible handling
+- [x] Daemon lifecycle handler performs source-aware validation in one command path
+- [x] `atm-agent-mcp` emits start/idle/end lifecycle events to daemon
+- [x] Tests cover: source-kind parsing, source-aware authz, MCP lifecycle emission
+- [x] Docs updated with adapter wiring pattern for future agent hooks
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo test --workspace` passes
 
 ---
 
@@ -2824,7 +2828,7 @@ explicit MCP lifecycle emission coverage.
 | E.4 | TUI reliability hardening (restart, reconnect, failure injection) | E.3 | ✅ MERGED (#158) |
 | E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ DONE (PR pending) |
 | E.6 | External agent member management and model registry | E.3 | ✅ DONE (PR pending) |
-| E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ⏳ PLANNED |
+| E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ✅ DONE (PR pending) |
 | E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ MERGED (#162) |
 
 **Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.6 is member management for external agents (Codex/Gemini). E.7 extends lifecycle handling to source-aware validation + MCP lifecycle emission. E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4. E.6 can run parallel to E.4/E.5. E.7 starts after E.6 interface contracts settle.

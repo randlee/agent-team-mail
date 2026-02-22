@@ -866,6 +866,23 @@ pub async fn handle_agent_close(
         );
     }
 
+    // Emit session_end lifecycle event to the daemon (best-effort).
+    {
+        let identity_clone = entry.identity.clone();
+        let team_clone = entry.team.clone();
+        let agent_id_clone = resolved_agent_id.clone();
+        tokio::spawn(async move {
+            crate::lifecycle_emit::emit_lifecycle_event(
+                crate::lifecycle_emit::EventKind::SessionEnd,
+                &identity_clone,
+                &team_clone,
+                &agent_id_clone,
+                None,
+            )
+            .await;
+        });
+    }
+
     // Cancel any pending elicitations for this agent (FR-18.5)
     elicitation_registry.lock().await.cancel_for_agent(
         &resolved_agent_id,

@@ -1560,6 +1560,26 @@ Session ending. Write a concise summary of:\n\
                             }
                         }
                     }
+
+                    // Emit teammate_idle lifecycle event after each turn
+                    // completes (best-effort, non-fatal).
+                    if let (Some(agent_id), Some(identity)) =
+                        (&completed_agent_id, &completed_identity)
+                    {
+                        let agent_id_clone = agent_id.clone();
+                        let identity_clone = identity.clone();
+                        let team_clone = team_for_thread_map.clone();
+                        tokio::spawn(async move {
+                            crate::lifecycle_emit::emit_lifecycle_event(
+                                crate::lifecycle_emit::EventKind::TeammateIdle,
+                                &identity_clone,
+                                &team_clone,
+                                &agent_id_clone,
+                                None,
+                            )
+                            .await;
+                        });
+                    }
                 }
                 Ok(Err(_)) => {
                     // Sender dropped (child died)
@@ -1742,6 +1762,24 @@ Session ending. Write a concise summary of:\n\
             .join("registry.json");
         if let Err(e) = Self::persist_registry(&self.registry, &sessions_path).await {
             tracing::warn!("failed to persist registry after register: {e}");
+        }
+
+        // Emit session_start lifecycle event to the daemon (best-effort).
+        // Uses source.kind = "atm_mcp" so the daemon applies relaxed validation.
+        {
+            let agent_id_clone = entry.agent_id.clone();
+            let identity_clone = identity.clone();
+            let team_clone = team.clone();
+            tokio::spawn(async move {
+                crate::lifecycle_emit::emit_lifecycle_event(
+                    crate::lifecycle_emit::EventKind::SessionStart,
+                    &identity_clone,
+                    &team_clone,
+                    &agent_id_clone,
+                    None,
+                )
+                .await;
+            });
         }
 
         // Build developer-instructions context string

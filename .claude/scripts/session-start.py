@@ -115,7 +115,7 @@ def main() -> int:
             "session_id": session_id,
             "agent": identity,
             "team": default_team,
-            "source": source if source == "compact" else "init",
+            "source": {"kind": "claude_hook"},
             "process_id": os.getpid(),
         }
         send_hook_event(payload)

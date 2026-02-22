@@ -388,9 +388,16 @@ fn apply_hook_event(
             }
 
             // Best-effort: auto-update session_id on matching external members
-            // in team config files under claude_root/teams/.
+            // in the target team config under claude_root/teams/<team>/.
             if let Some(root) = claude_root {
-                auto_update_member_session_id(root, &agent_id, &session_id);
+                if let Some(team) = event.team.as_deref() {
+                    auto_update_member_session_id(root, team, &agent_id, &session_id);
+                } else {
+                    debug!(
+                        "session-start event missing 'team'; skipping config sessionId auto-update for '{}'",
+                        agent_id
+                    );
+                }
             }
         }
         "session-end" => {
@@ -439,72 +446,77 @@ fn write_team_config_atomic(config_path: &Path, config: &TeamConfig) -> Result<(
     Ok(())
 }
 
-/// Scan all team config files under `{claude_root}/teams/` and update the
-/// `sessionId` field of any member whose `name` matches `agent_name` (the
-/// bare agent name, without `@team` suffix) and whose stored `sessionId`
-/// differs from `new_session_id`.
+/// Update `sessionId` in one team config under
+/// `{claude_root}/teams/{team}/config.json` for any member whose `name`
+/// matches `agent_name` (the bare agent name, without `@team` suffix) and
+/// whose stored `sessionId` differs from `new_session_id`.
 ///
 /// This is a best-effort operation: all errors are logged at `debug` level
 /// and never propagated to the caller.  Only members that have
 /// `externalBackendType` set (i.e., external agents registered via
 /// `add-member`) are updated; Claude Code members are left untouched.
-fn auto_update_member_session_id(claude_root: &Path, agent_name: &str, new_session_id: &str) {
-    let teams_dir = claude_root.join("teams");
-    let entries = match std::fs::read_dir(&teams_dir) {
-        Ok(e) => e,
+fn auto_update_member_session_id(
+    claude_root: &Path,
+    team: &str,
+    agent_name: &str,
+    new_session_id: &str,
+) {
+    let config_path = claude_root.join("teams").join(team).join("config.json");
+    if !config_path.is_file() {
+        debug!(
+            "auto_update_member_session_id: team config not found for team '{}': {}",
+            team,
+            config_path.display()
+        );
+        return;
+    }
+
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
         Err(e) => {
-            debug!("auto_update_member_session_id: cannot read teams dir: {e}");
+            debug!(
+                "auto_update_member_session_id: failed to read {}: {e}",
+                config_path.display()
+            );
             return;
         }
     };
 
-    for entry in entries.flatten() {
-        let config_path = entry.path().join("config.json");
-        if !config_path.is_file() {
-            continue;
+    let mut team_config: TeamConfig = match serde_json::from_str(&content) {
+        Ok(tc) => tc,
+        Err(e) => {
+            debug!(
+                "auto_update_member_session_id: failed to parse {}: {e}",
+                config_path.display()
+            );
+            return;
         }
+    };
 
-        let content = match std::fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                debug!("auto_update_member_session_id: failed to read {}: {e}", config_path.display());
-                continue;
-            }
-        };
-
-        let mut team_config: TeamConfig = match serde_json::from_str(&content) {
-            Ok(tc) => tc,
-            Err(e) => {
-                debug!("auto_update_member_session_id: failed to parse {}: {e}", config_path.display());
-                continue;
-            }
-        };
-
-        let mut changed = false;
-        for member in team_config.members.iter_mut() {
-            // Only update external agents (those with externalBackendType set).
-            if member.name == agent_name
-                && member.external_backend_type.is_some()
-                && member.session_id.as_deref() != Some(new_session_id)
-            {
-                debug!(
-                    "auto_update_member_session_id: updating sessionId for '{}' in '{}'",
-                    agent_name,
-                    config_path.display()
-                );
-                member.session_id = Some(new_session_id.to_string());
-                changed = true;
-            }
+    let mut changed = false;
+    for member in &mut team_config.members {
+        // Only update external agents (those with externalBackendType set).
+        if member.name == agent_name
+            && member.external_backend_type.is_some()
+            && member.session_id.as_deref() != Some(new_session_id)
+        {
+            debug!(
+                "auto_update_member_session_id: updating sessionId for '{}' in '{}'",
+                agent_name,
+                config_path.display()
+            );
+            member.session_id = Some(new_session_id.to_string());
+            changed = true;
         }
+    }
 
-        if !changed {
-            continue;
-        }
+    if !changed {
+        return;
+    }
 
-        // Write updated config atomically via lock + tmp file + atomic swap.
-        if let Err(e) = write_team_config_atomic(&config_path, &team_config) {
-            debug!("auto_update_member_session_id: atomic write failed: {e}");
-        }
+    // Write updated config atomically via lock + tmp file + atomic swap.
+    if let Err(e) = write_team_config_atomic(&config_path, &team_config) {
+        debug!("auto_update_member_session_id: atomic write failed: {e}");
     }
 }
 
@@ -856,7 +868,7 @@ mod tests {
 
         // Call the function under test with the `.claude` directory (parent of `teams/`).
         let claude_root = dir.path();
-        auto_update_member_session_id(claude_root, "arch-ctm", "new-session-id");
+        auto_update_member_session_id(claude_root, "atm-dev", "arch-ctm", "new-session-id");
 
         // Read back and assert the sessionId was updated.
         let updated_content = std::fs::read_to_string(&config_path).unwrap();
@@ -909,7 +921,7 @@ mod tests {
         .unwrap();
 
         let claude_root = dir.path();
-        auto_update_member_session_id(claude_root, "team-lead", "new-session");
+        auto_update_member_session_id(claude_root, "atm-dev", "team-lead", "new-session");
 
         // The standard member's sessionId should remain unchanged.
         let after: serde_json::Value =
@@ -919,5 +931,68 @@ mod tests {
             session_id, "old-session",
             "Claude Code member sessionId should not be updated by auto_update_member_session_id"
         );
+    }
+    #[test]
+    fn test_auto_update_member_session_id_scoped_to_target_team() {
+        let dir = tempfile::tempdir().unwrap();
+        let teams_dir = dir.path().join("teams");
+        let team_a_dir = teams_dir.join("atm-dev");
+        let team_b_dir = teams_dir.join("other-team");
+        std::fs::create_dir_all(&team_a_dir).unwrap();
+        std::fs::create_dir_all(&team_b_dir).unwrap();
+
+        let config_a = serde_json::json!({
+            "name": "atm-dev",
+            "createdAt": 1739284800000i64,
+            "leadAgentId": "team-lead@atm-dev",
+            "leadSessionId": "lead-a",
+            "members": [
+                {
+                    "agentId": "arch-ctm@atm-dev",
+                    "name": "arch-ctm",
+                    "agentType": "codex",
+                    "model": "gpt5.3-codex",
+                    "joinedAt": 1739284800000i64,
+                    "cwd": "/tmp",
+                    "subscriptions": [],
+                    "externalBackendType": "codex",
+                    "sessionId": "old-a"
+                }
+            ]
+        });
+        let config_b = serde_json::json!({
+            "name": "other-team",
+            "createdAt": 1739284800000i64,
+            "leadAgentId": "team-lead@other-team",
+            "leadSessionId": "lead-b",
+            "members": [
+                {
+                    "agentId": "arch-ctm@other-team",
+                    "name": "arch-ctm",
+                    "agentType": "codex",
+                    "model": "gpt5.3-codex",
+                    "joinedAt": 1739284800000i64,
+                    "cwd": "/tmp",
+                    "subscriptions": [],
+                    "externalBackendType": "codex",
+                    "sessionId": "old-b"
+                }
+            ]
+        });
+
+        let config_a_path = team_a_dir.join("config.json");
+        let config_b_path = team_b_dir.join("config.json");
+        std::fs::write(&config_a_path, serde_json::to_string_pretty(&config_a).unwrap()).unwrap();
+        std::fs::write(&config_b_path, serde_json::to_string_pretty(&config_b).unwrap()).unwrap();
+
+        auto_update_member_session_id(dir.path(), "atm-dev", "arch-ctm", "new-a");
+
+        let after_a: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_a_path).unwrap()).unwrap();
+        let after_b: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_b_path).unwrap()).unwrap();
+
+        assert_eq!(after_a["members"][0]["sessionId"].as_str(), Some("new-a"));
+        assert_eq!(after_b["members"][0]["sessionId"].as_str(), Some("old-b"));
     }
 }

@@ -233,17 +233,113 @@ The `TeammateIdle` hook is the signal that a teammate has finished a turn and is
 
 ## Extensible Lifecycle Sources
 
-Daemon lifecycle handling should remain on one command path (`hook-event`) with a source-kind discriminator
-so Claude hooks, MCP, and future adapters share one state machine.
+Daemon lifecycle handling uses one command path (`hook-event`) with a `source.kind` discriminator
+so Claude hooks, MCP proxies, and future adapters share one state machine.
 
-Recommended `source` kinds:
-- `claude_hook` — this document's hooks
-- `atm_mcp` — lifecycle events emitted by `atm-agent-mcp`
-- `agent_hook` — future provider hooks/adapters (for example Codex/Gemini if/when exposed)
-- `unknown` — default fallback
+### `source.kind` Values
 
-When non-Claude adapters gain lifecycle callbacks, they should emit `session_start`, `teammate_idle`,
-and `session_end` using the same envelope and daemon command path.
+| `kind`        | Emitted by                              | `session_start` / `session_end` restriction |
+|---------------|-----------------------------------------|---------------------------------------------|
+| `claude_hook` | Claude Code hook scripts (this document)| Team-lead only (strictest)                  |
+| `atm_mcp`     | `atm-agent-mcp` proxy                  | Any team member                             |
+| `agent_hook`  | Future non-Claude agent relay scripts   | Any team member                             |
+| `unknown`     | Absent or unrecognised field            | Treated as `claude_hook` (fail-closed)      |
+
+The `source` field is **optional** for backward compatibility. Payloads that omit it parse
+correctly and default to `unknown` (strictest validation).
+
+---
+
+## Wiring a New Lifecycle Adapter
+
+When a new agent runtime gains lifecycle callbacks (e.g., a Codex Gemini fork or an internal
+CI agent), connect it to the ATM daemon by implementing one of two patterns.
+
+### Pattern A — Hook Relay Script (external, file-based)
+
+Use this pattern when the agent runtime fires shell-level hooks (similar to Claude Code's
+`TeammateIdle` hook). The relay script appends one JSON line to `events.jsonl` **and** sends
+a direct socket call to the daemon.
+
+Reference implementation: `.claude/scripts/teammate-idle-relay.py`
+
+Steps:
+1. Write a script that receives the hook payload on stdin.
+2. Resolve `agent` name and `team` from the payload or environment.
+3. Build the `hook-event` payload:
+
+```json
+{
+  "command": "hook-event",
+  "payload": {
+    "event": "session_start",
+    "agent": "<agent-name>",
+    "team": "<team-name>",
+    "session_id": "<runtime-session-id>",
+    "source": {"kind": "agent_hook"}
+  }
+}
+```
+
+4. Send it to `${ATM_HOME}/.claude/daemon/atm-daemon.sock` using the newline-delimited
+   protocol (one JSON line per request, one JSON line response).
+5. Exit `0` regardless of errors — lifecycle relay must never block agent execution.
+
+Use `source.kind = "agent_hook"` so the daemon permits non-lead agents to emit
+`session_start` and `session_end` events.
+
+### Pattern B — In-Process Emission (MCP proxy or library)
+
+Use this pattern when you control the proxy or library that wraps the agent runtime.
+Emit lifecycle events directly from Rust (or another async language) without a relay script.
+
+Reference implementation: `crates/atm-agent-mcp/src/lifecycle_emit.rs`
+
+Key design principles:
+- Use `tokio::spawn` to fire-and-forget the emission; do **not** `await` it inline.
+- Wrap every emission in a `warn!` log on error — never propagate errors to the caller.
+- Gate the Unix socket call with `#[cfg(unix)]` — the function must compile and no-op on Windows.
+- Set `source.kind = "atm_mcp"` (or `"agent_hook"`) in the payload.
+
+Minimal example:
+
+```rust
+use atm_agent_mcp::lifecycle_emit::{emit_lifecycle_event, EventKind};
+
+// After session registration:
+tokio::spawn(async move {
+    emit_lifecycle_event(
+        EventKind::SessionStart,
+        &identity,
+        &team,
+        &session_id,
+        Some(process_id),
+    ).await;
+});
+
+// After a turn completes (thread → Idle):
+tokio::spawn(async move {
+    emit_lifecycle_event(EventKind::TeammateIdle, &identity, &team, &agent_id, None).await;
+});
+
+// On session close:
+tokio::spawn(async move {
+    emit_lifecycle_event(EventKind::SessionEnd, &identity, &team, &agent_id, None).await;
+});
+```
+
+### Validation Policy Summary
+
+The daemon enforces different rules depending on `source.kind`:
+
+- **`claude_hook` / `unknown`** (strictest): only the team-lead may emit `session_start` or
+  `session_end`. This protects the team-lead's Claude Code session record from accidental
+  overwrite by untrusted sources.
+- **`atm_mcp` / `agent_hook`** (relaxed): any team member registered in `config.json` may
+  emit lifecycle events. This is necessary because MCP proxies and external adapters manage
+  their own agent sessions, not the team-lead's session.
+- **All sources**: the `agent` field must be a registered team member in the named team.
+  Unknown agents are rejected regardless of source kind.
 
 ---
 
@@ -316,12 +412,17 @@ Personal machine settings. Applies to all Claude Code sessions regardless of pro
 
 ## Hook Payload Reference
 
-Each hook receives a JSON payload on stdin. Key fields:
+There are two payload layers:
+
+1. Claude Code hook stdin payload (raw event from Claude)
+2. ATM daemon socket payload (`command: "hook-event"`) emitted by ATM scripts/proxies
+
+### 1) Claude Hook Stdin Payload
 
 | Field | Present In | Description |
 |-------|-----------|-------------|
 | `session_id` | All hooks | UUID of the calling Claude Code session |
-| `source` | `SessionStart` | `"init"` (fresh start), `"compact"` (post-compaction), `"resume"` (--continue) |
+| `source` | `SessionStart` | Claude-native start mode: `"init"` (fresh), `"compact"` (post-compaction), `"resume"` (`--continue`) |
 | `reason` | `SessionEnd` | `"clear"`, `"logout"`, `"prompt_input_exit"`, `"bypass_permissions_disabled"`, `"other"` |
 | `transcript_path` | `SessionEnd` | Path to the session transcript JSONL file |
 | `tool_name` | `PreToolUse` | Name of the tool being called (e.g., `"Task"`) |
@@ -331,6 +432,16 @@ Each hook receives a JSON payload on stdin. Key fields:
 | `tool_input.team_name` | `PreToolUse(Task)` | Team to join (if present, adds to team) |
 | `name` | `TeammateIdle` | Name of the idle teammate |
 | `team_name` | `TeammateIdle` | Team the teammate belongs to |
+
+### 2) ATM Daemon Socket Payload (`hook-event`)
+
+| Field | Description |
+|-------|-------------|
+| `event` | `session_start` \| `teammate_idle` \| `session_end` |
+| `session_id` | Session identifier used by daemon liveness/state tracking |
+| `agent` | ATM member identity |
+| `team` | ATM team name |
+| `source.kind` | Lifecycle source discriminator (`claude_hook`, `atm_mcp`, `agent_hook`, `unknown`) |
 
 ---
 
@@ -351,4 +462,5 @@ All hook scripts follow these conventions:
 - **Project-level hooks only fire for interactive sessions.** Task-tool-spawned teammates (background agents or named teammates) do NOT trigger `PreToolUse` or `TeammateIdle` for their own Tool calls — only the parent session's hook fires when spawning them.
 - **`SessionStart` is global, not project-scoped.** All sessions on the machine get the hook output, even in unrelated projects. The hook gracefully does nothing if `.atm.toml` is absent.
 - **`leadSessionId` must be current** for Rule 2 to work correctly. If `atm teams resume` has not been run after a session restart, the gate may incorrectly block the team lead. See `atm teams resume` documentation and issue [#141](https://github.com/randlee/agent-team-mail/issues/141).
+- **Daemon session registry is currently keyed by agent name only.** Cross-team duplicate member names can collide in session tracking until the registry is migrated to a team-scoped key (`(team, name)`).
 - **Agent-teams is pre-release** as of Claude Code v2.1.39. Hook behavior may change in future versions.

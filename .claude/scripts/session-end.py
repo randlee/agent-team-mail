@@ -103,6 +103,7 @@ def main() -> int:
         "agent": identity,
         "team": default_team,
         "reason": "session_exit",
+        "source": {"kind": "claude_hook"},
     }
     send_hook_event(payload)
 
