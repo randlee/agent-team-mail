@@ -242,6 +242,27 @@ mod tests {
         assert_eq!(EventKind::SessionEnd.as_str(), "session_end");
     }
 
+    /// Verify that `EventKind::SessionStart` maps to the exact daemon protocol
+    /// string used by the `proxy.rs` session-registration call site.
+    #[test]
+    fn event_kind_session_start_maps_to_protocol_string() {
+        assert_eq!(EventKind::SessionStart.as_str(), "session_start");
+    }
+
+    /// Verify that `EventKind::TeammateIdle` maps to the exact daemon protocol
+    /// string used by the `proxy.rs` thread-idle call site.
+    #[test]
+    fn event_kind_teammate_idle_maps_to_protocol_string() {
+        assert_eq!(EventKind::TeammateIdle.as_str(), "teammate_idle");
+    }
+
+    /// Verify that `EventKind::SessionEnd` maps to the exact daemon protocol
+    /// string used by the `atm_tools.rs` session-close call site.
+    #[test]
+    fn event_kind_session_end_maps_to_protocol_string() {
+        assert_eq!(EventKind::SessionEnd.as_str(), "session_end");
+    }
+
     /// Emitting with no daemon running must not panic or return an error.
     #[tokio::test]
     async fn emit_lifecycle_event_no_daemon_is_noop() {
@@ -321,6 +342,98 @@ mod tests {
         assert!(
             json.contains("\"session_start\""),
             "payload must include event = session_start; got: {json}"
+        );
+
+        // Deserialize the source back and verify kind.
+        let source: LifecycleSource =
+            serde_json::from_value(payload["source"].clone()).unwrap();
+        assert_eq!(source.kind, LifecycleSourceKind::AtmMcp);
+    }
+
+    /// Verify that the `teammate_idle` payload (as built by `proxy.rs`) includes
+    /// `source.kind = "atm_mcp"` and the correct event type string.
+    ///
+    /// This test mirrors the call site in `proxy.rs` that uses
+    /// `EventKind::TeammateIdle` when a Codex thread completes its turn.
+    #[test]
+    fn teammate_idle_payload_structure_is_correct() {
+        use agent_team_mail_core::daemon_client::{
+            LifecycleSource, LifecycleSourceKind, PROTOCOL_VERSION,
+            SocketRequest,
+        };
+
+        // Build the same payload that emit_lifecycle_event_unix constructs for
+        // the TeammateIdle variant (process_id is None at the idle call site).
+        let payload = serde_json::json!({
+            "event": EventKind::TeammateIdle.as_str(),
+            "agent": "arch-ctm",
+            "team": "atm-dev",
+            "session_id": "codex:abc-456",
+            "source": LifecycleSource::new(LifecycleSourceKind::AtmMcp),
+        });
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-idle-test".to_string(),
+            command: "hook-event".to_string(),
+            payload: payload.clone(),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+
+        assert!(
+            json.contains("\"atm_mcp\""),
+            "teammate_idle payload must include source.kind = atm_mcp; got: {json}"
+        );
+        assert!(
+            json.contains("\"teammate_idle\""),
+            "teammate_idle payload must include event = teammate_idle; got: {json}"
+        );
+
+        // Deserialize the source back and verify kind.
+        let source: LifecycleSource =
+            serde_json::from_value(payload["source"].clone()).unwrap();
+        assert_eq!(source.kind, LifecycleSourceKind::AtmMcp);
+    }
+
+    /// Verify that the `session_end` payload (as built by `atm_tools.rs`) includes
+    /// `source.kind = "atm_mcp"` and the correct event type string.
+    ///
+    /// This test mirrors the call site in `atm_tools.rs` that uses
+    /// `EventKind::SessionEnd` when a Codex session is closed or torn down.
+    #[test]
+    fn session_end_payload_structure_is_correct() {
+        use agent_team_mail_core::daemon_client::{
+            LifecycleSource, LifecycleSourceKind, PROTOCOL_VERSION,
+            SocketRequest,
+        };
+
+        // Build the same payload that emit_lifecycle_event_unix constructs for
+        // the SessionEnd variant (process_id is None at the session-end call site).
+        let payload = serde_json::json!({
+            "event": EventKind::SessionEnd.as_str(),
+            "agent": "arch-ctm",
+            "team": "atm-dev",
+            "session_id": "codex:abc-789",
+            "source": LifecycleSource::new(LifecycleSourceKind::AtmMcp),
+        });
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-end-test".to_string(),
+            command: "hook-event".to_string(),
+            payload: payload.clone(),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+
+        assert!(
+            json.contains("\"atm_mcp\""),
+            "session_end payload must include source.kind = atm_mcp; got: {json}"
+        );
+        assert!(
+            json.contains("\"session_end\""),
+            "session_end payload must include event = session_end; got: {json}"
         );
 
         // Deserialize the source back and verify kind.
