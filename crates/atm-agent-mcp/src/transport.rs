@@ -1841,8 +1841,8 @@ mod tests {
         let content = "You have 1 unread message:\n\n[1] From: alice | ...";
         let req_id: u64 = 42;
 
+        // Per the app-server protocol spec (Section 1), messages omit the `jsonrpc` field.
         let msg = serde_json::json!({
-            "jsonrpc": "2.0",
             "id": req_id,
             "method": "turn/start",
             "params": {
@@ -1851,6 +1851,10 @@ mod tests {
             }
         });
 
+        assert!(
+            msg.get("jsonrpc").is_none(),
+            "jsonrpc must be omitted per protocol spec"
+        );
         assert_eq!(
             msg["method"].as_str().unwrap(),
             "turn/start",
@@ -1885,8 +1889,8 @@ mod tests {
         let content = "You have 2 unread messages:\n\n[1] From: bob | ...";
         let req_id: u64 = 99;
 
+        // Per the app-server protocol spec (Section 1), messages omit the `jsonrpc` field.
         let msg = serde_json::json!({
-            "jsonrpc": "2.0",
             "id": req_id,
             "method": "turn/steer",
             "params": {
@@ -1896,6 +1900,10 @@ mod tests {
             }
         });
 
+        assert!(
+            msg.get("jsonrpc").is_none(),
+            "jsonrpc must be omitted per protocol spec"
+        );
         assert_eq!(
             msg["method"].as_str().unwrap(),
             "turn/steer",

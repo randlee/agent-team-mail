@@ -2975,8 +2975,8 @@ async fn dispatch_auto_mail_app_server(
 
     let auto_msg = if let Some(ref turn_id) = active_turn_id {
         // Thread is Busy — use turn/steer with expectedTurnId.
+        // Per the app-server protocol spec (Section 1), messages omit the `jsonrpc` field.
         json!({
-            "jsonrpc": "2.0",
             "id": req_id_val,
             "method": "turn/steer",
             "params": {
@@ -2987,8 +2987,8 @@ async fn dispatch_auto_mail_app_server(
         })
     } else {
         // Thread is Idle or Terminal — use turn/start.
+        // Per the app-server protocol spec (Section 1), messages omit the `jsonrpc` field.
         json!({
-            "jsonrpc": "2.0",
             "id": req_id_val,
             "method": "turn/start",
             "params": {
