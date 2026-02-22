@@ -2718,19 +2718,19 @@ Additionally, when an external agent reconnects with a new session/agent ID, the
 
 #### Exit Criteria
 
-- [ ] `atm teams add-member --session-id <id>` stores session ID in member record
-- [ ] `atm teams add-member --backend-type codex` stores backend type
-- [ ] `atm teams add-member --backend-type human:randlee` stores human backend with username
-- [ ] `atm teams add-member --model gpt5.3-codex` validates against registry; `--model foo` rejected; `--model custom:foo` accepted
-- [ ] Model validation only applies to `add-member` / `update-member`; Claude Code-managed member models are never overwritten or validated
-- [ ] Daemon auto-updates session-id when hook event arrives with new ID for known agent
-- [ ] MCP auto-add/join rejects active-name collisions when `agent_id` differs; idempotent on matching `agent_id`
-- [ ] `atm teams update-member <team> <agent> --session-id <new-id>` updates existing member
-- [ ] `atm teams cleanup` uses session-id for liveness checks on external agents
-- [ ] `human:<username>` backend type is never set as default — must be explicit
-- [ ] Integration tests cover: add with session-id, daemon auto-update, update-member, cleanup with external agent, human backend type parsing
-- [ ] `cargo clippy --workspace -- -D warnings` clean
-- [ ] `cargo test --workspace` passes
+- [x] `atm teams add-member --session-id <id>` stores session ID in member record
+- [x] `atm teams add-member --backend-type codex` stores backend type
+- [x] `atm teams add-member --backend-type human:randlee` stores human backend with username
+- [x] `atm teams add-member --model gpt5.3-codex` validates against registry; `--model foo` rejected; `--model custom:foo` accepted
+- [x] Model validation only applies to `add-member` / `update-member`; Claude Code-managed member models are never overwritten or validated
+- [x] Daemon auto-updates session-id when hook event arrives with new ID for known agent
+- [x] MCP auto-add/join rejects active-name collisions when `agent_id` differs; idempotent on matching `agent_id`
+- [x] `atm teams update-member <team> <agent> --session-id <new-id>` updates existing member
+- [x] `atm teams cleanup` uses session-id for liveness checks on external agents (conservative: unknown = keep)
+- [x] `human:<username>` backend type is never set as default — must be explicit
+- [x] Integration tests cover: add with session-id, daemon auto-update, update-member, cleanup with external agent, human backend type parsing
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo test --workspace` passes (1511 tests)
 
 ---
 
@@ -2823,7 +2823,7 @@ explicit MCP lifecycle emission coverage.
 | E.3 | Hook-to-daemon state bridge | E.1 (parallel with E.2) | ✅ MERGED (#152) |
 | E.4 | TUI reliability hardening (restart, reconnect, failure injection) | E.3 | ✅ MERGED (#158) |
 | E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ DONE (PR pending) |
-| E.6 | External agent member management and model registry | E.3 | 🔄 IN PROGRESS |
+| E.6 | External agent member management and model registry | E.3 | ✅ DONE (PR pending) |
 | E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ⏳ PLANNED |
 | E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ MERGED (#162) |
 
