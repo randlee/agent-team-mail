@@ -3129,17 +3129,19 @@ Design references:
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| G.1 | Mode baseline docs + naming cleanup (`json` -> `cli-json`) | Phase E | 🔄 IN PROGRESS (mostly complete in branch) |
-| G.2 | CLI-JSON streaming verification + idle detection hardening | G.1 | ⏳ PLANNED |
-| G.3 | App-server transport adapter (`CodexTransport` impl) | G.1, G.2 | ⏳ PLANNED |
+| G.1 | Mode baseline docs + naming cleanup (`json` -> `cli-json`) | Phase E | ✅ COMPLETE (PR #168) |
+| G.3 | App-server transport adapter (`CodexTransport` impl) | G.1 | ⏳ PLANNED |
 | G.4 | Unified turn control + daemon turn-state reporting across all transports | G.3 | ⏳ PLANNED |
 | G.5 | Approval/elicitation bridging parity for app-server | G.4 | ⏳ PLANNED |
 | G.6 | Mail injection parity (`mcp`, `cli-json`, `app-server`) + queue semantics | G.4 | ⏳ PLANNED |
 | G.7 | TUI streaming normalization + daemon pubsub/UDP fanout architecture | G.4, G.6 | ⏳ PLANNED |
-| G.8 | Cross-platform reliability + soak testing (Linux/macOS/Windows) | G.5, G.6, G.7 | ⏳ PLANNED |
+| G.2 | CLI-JSON streaming verification + idle detection hardening | G.7 | ⏳ DEFERRED (moved after G.7) |
+| G.8 | Cross-platform reliability + soak testing (Linux/macOS/Windows) | G.2, G.5, G.6, G.7 | ⏳ PLANNED |
 | G.9 | Docs finalization, migration notes, and release gate | G.8 | ⏳ PLANNED |
 
-**Execution model**: G.1 is largely complete in current docs branch. G.2 is a dedicated validation sprint for existing `cli-json` behavior before adding more transport complexity. G.3 enables app-server runtime. G.4 sets cross-transport control and daemon state contracts. G.5 and G.6 run in parallel after G.4. G.7-G.8 harden observability/runtime reliability. G.9 is release readiness.
+**Execution model**: G.1 complete (PR #168). G.3 is the first implementation sprint — app-server transport adapter. G.4 sets cross-transport control and daemon state contracts. G.5 and G.6 run in parallel after G.4. G.7 hardens TUI streaming/fanout. G.2 (CLI-JSON verification) is deferred until after G.7 so streaming infrastructure is shared with app-server rather than validated in isolation. G.8-G.9 are reliability and release readiness.
+
+**Design principle**: App-server and CLI-JSON streaming MUST share common code paths (event normalization, turn-state tracking, daemon emission). G.3/G.4 should build these abstractions; G.2 then verifies CLI-JSON uses them correctly.
 
 ---
 
@@ -3181,7 +3183,7 @@ Design references:
 
 **Branch**: `feature/pG-s3-app-server-transport`
 **Crate(s)**: `crates/atm-agent-mcp`
-**Depends on**: G.1, G.2
+**Depends on**: G.1
 
 #### Exit Criteria
 
@@ -3194,6 +3196,7 @@ Design references:
 - [ ] Child process crash path implemented: mark affected sessions, clear in-flight turn state, release/repair transport state, and allow clean reconnect/restart by caller
 - [ ] Backpressure handling for app-server overload (`-32001`) implemented with bounded retry/backoff and clear terminal error reporting when retries exhaust
 - [ ] Unknown notifications are non-fatal and logged with schema version context
+- [ ] Streaming event normalization and turn-state tracking abstractions are designed to be shared with `cli-json` transport (not app-server-specific)
 - [ ] Integration tests validate startup, turn creation, and graceful shutdown
 
 ---
