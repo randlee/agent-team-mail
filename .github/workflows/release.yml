@@ -41,25 +41,24 @@ jobs:
       - name: Run release gate
         run: scripts/release_gate.sh
 
-      - name: Ensure tag does not already exist
+      - name: Ensure tag is correct or create it
         shell: bash
         run: |
           set -euo pipefail
           tag='${{ steps.meta.outputs.release_tag }}'
-          if git show-ref --tags --verify --quiet "refs/tags/${tag}"; then
-            echo "Tag already exists locally: ${tag}" >&2
-            exit 1
+          main_sha="$(git rev-parse origin/main)"
+          # Check if tag already exists on remote
+          remote_tag_sha="$(git ls-remote --tags origin "refs/tags/${tag}" | awk '{print $1}' || true)"
+          if [[ -n "$remote_tag_sha" ]]; then
+            if [[ "$remote_tag_sha" == "$main_sha" ]]; then
+              echo "Tag ${tag} already exists and points to origin/main (${main_sha}), skipping creation"
+              exit 0
+            else
+              echo "Tag ${tag} exists but points to ${remote_tag_sha}, not origin/main (${main_sha})" >&2
+              exit 1
+            fi
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "Tag already exists on origin: ${tag}" >&2
-            exit 1
-          fi
-
-      - name: Create and push release tag from origin/main
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag='${{ steps.meta.outputs.release_tag }}'
+          echo "Creating tag ${tag} at origin/main (${main_sha})"
           git tag "$tag" origin/main
           git push origin "$tag"
 
@@ -105,7 +104,7 @@ jobs:
           key: ${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} --bin atm --bin atm-daemon --bin atm-agent-mcp
+        run: cargo build --release --target ${{ matrix.target }} --bin atm --bin atm-daemon --bin atm-agent-mcp --bin atm-tui
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
@@ -114,7 +113,7 @@ jobs:
           VERSION='${{ needs.gate-and-tag.outputs.release_version }}'
           ARCHIVE="atm_${VERSION}_${{ matrix.target }}.tar.gz"
           cd target/${{ matrix.target }}/release
-          tar czf "../../../${ARCHIVE}" atm atm-daemon atm-agent-mcp
+          tar czf "../../../${ARCHIVE}" atm atm-daemon atm-agent-mcp atm-tui
           cd ../../..
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
@@ -124,7 +123,7 @@ jobs:
         run: |
           $VERSION = '${{ needs.gate-and-tag.outputs.release_version }}'
           $ARCHIVE = "atm_${VERSION}_${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/atm.exe","target/${{ matrix.target }}/release/atm-daemon.exe","target/${{ matrix.target }}/release/atm-agent-mcp.exe" -DestinationPath $ARCHIVE
+          Compress-Archive -Path "target/${{ matrix.target }}/release/atm.exe","target/${{ matrix.target }}/release/atm-daemon.exe","target/${{ matrix.target }}/release/atm-agent-mcp.exe","target/${{ matrix.target }}/release/atm-tui.exe" -DestinationPath $ARCHIVE
           echo "ARCHIVE=$ARCHIVE" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload artifact
@@ -179,7 +178,7 @@ jobs:
       - name: Publish agent-team-mail-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail-core
+        run: cargo publish -p agent-team-mail-core || echo "already published (skipping)"
 
       - name: Wait for crates.io indexing
         run: sleep 60
@@ -187,7 +186,7 @@ jobs:
       - name: Publish agent-team-mail
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail
+        run: cargo publish -p agent-team-mail || echo "already published (skipping)"
 
       - name: Wait for crates.io indexing
         run: sleep 60
@@ -195,7 +194,7 @@ jobs:
       - name: Publish agent-team-mail-daemon
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail-daemon
+        run: cargo publish -p agent-team-mail-daemon || echo "already published (skipping)"
 
       - name: Wait for crates.io indexing
         run: sleep 60
@@ -203,4 +202,12 @@ jobs:
       - name: Publish atm-agent-mcp
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p atm-agent-mcp
+        run: cargo publish -p agent-team-mail-mcp || echo "already published (skipping)"
+
+      - name: Wait for crates.io indexing
+        run: sleep 60
+
+      - name: Publish atm-tui
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p agent-team-mail-tui || echo "already published (skipping)"

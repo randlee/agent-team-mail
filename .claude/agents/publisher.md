@@ -37,7 +37,8 @@ If the gate fails: stop and report; do not workaround.
   - `agent-team-mail-core`
   - `agent-team-mail`
   - `agent-team-mail-daemon`
-  - `atm-agent-mcp`
+  - `agent-team-mail-mcp`
+  - `agent-team-mail-tui`
 - Published crates’ `.cargo_vcs_info.json` points to the expected release commit.
 - Homebrew formulas (`agent-team-mail.rb` and `atm.rb`) both match the released version and checksums.
 
