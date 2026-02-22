@@ -837,38 +837,91 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         // Safety rule: only remove a member when the daemon *explicitly* confirms
         // the session is gone.  If the daemon is unreachable we cannot determine
         // liveness, so we skip the member unless --force is given.
-        let is_dead = match agent_team_mail_core::daemon_client::query_session(&member.name) {
-            Ok(Some(ref info)) => {
-                // Daemon responded with an explicit record — trust it.
-                !info.alive
-            }
-            Ok(None) if daemon_running => {
-                // Daemon is running but has no record for this member — session is gone.
-                true
-            }
-            Ok(None) => {
-                // Daemon is not running: we cannot confirm liveness.
-                // Skip unless --force.
-                if args.force {
-                    true
-                } else {
+        //
+        // External agents (those with `external_backend_type` set) require
+        // additional conservatism: they do not use the Claude Code hook system,
+        // so the daemon may have no record for them even when they are alive.
+        // We only remove an external agent when:
+        //   1. It has a `session_id` set, AND
+        //   2. The daemon explicitly confirms that session is dead (`alive == false`).
+        // Any other outcome (no session_id, daemon unreachable, no daemon record)
+        // is treated as "unknown liveness" → the external agent is kept.
+        let is_external = member.external_backend_type.is_some();
+
+        let is_dead = if is_external {
+            // External agent: use session_id for the liveness query if available.
+            let query_key = match &member.session_id {
+                Some(sid) => sid.clone(),
+                None => {
+                    // No session_id → cannot confirm liveness; keep the member.
                     warn!(
-                        "Warning: daemon unreachable, skipping {} — use --force to override",
+                        "Warning: external agent '{}' has no session_id, skipping (unknown liveness)",
+                        member.name
+                    );
+                    skipped_names.push(member.name.clone());
+                    continue;
+                }
+            };
+
+            match agent_team_mail_core::daemon_client::query_session(&query_key) {
+                Ok(Some(ref info)) if !info.alive => {
+                    // Daemon explicitly reports the session as dead → safe to remove.
+                    true
+                }
+                Ok(_) => {
+                    // Daemon unreachable, session alive, or no record → keep the agent.
+                    warn!(
+                        "Warning: external agent '{}' liveness unknown, skipping — use --force to override",
+                        member.name
+                    );
+                    skipped_names.push(member.name.clone());
+                    continue;
+                }
+                Err(_) => {
+                    // I/O error → keep the agent to be safe.
+                    warn!(
+                        "Warning: daemon query error for external agent '{}', skipping",
                         member.name
                     );
                     skipped_names.push(member.name.clone());
                     continue;
                 }
             }
-            Err(e) => {
-                // Unexpected I/O error after connection was established — cannot
-                // determine liveness; skip the member to avoid unsafe removal.
-                warn!(
-                    "Warning: daemon query error for {}, skipping: {e}",
-                    member.name
-                );
-                skipped_names.push(member.name.clone());
-                continue;
+        } else {
+            // Standard Claude Code member: existing liveness logic unchanged.
+            match agent_team_mail_core::daemon_client::query_session(&member.name) {
+                Ok(Some(ref info)) => {
+                    // Daemon responded with an explicit record — trust it.
+                    !info.alive
+                }
+                Ok(None) if daemon_running => {
+                    // Daemon is running but has no record for this member — session is gone.
+                    true
+                }
+                Ok(None) => {
+                    // Daemon is not running: we cannot confirm liveness.
+                    // Skip unless --force.
+                    if args.force {
+                        true
+                    } else {
+                        warn!(
+                            "Warning: daemon unreachable, skipping {} — use --force to override",
+                            member.name
+                        );
+                        skipped_names.push(member.name.clone());
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    // Unexpected I/O error after connection was established — cannot
+                    // determine liveness; skip the member to avoid unsafe removal.
+                    warn!(
+                        "Warning: daemon query error for {}, skipping: {e}",
+                        member.name
+                    );
+                    skipped_names.push(member.name.clone());
+                    continue;
+                }
             }
         };
 

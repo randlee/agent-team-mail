@@ -33,6 +33,8 @@
 
 use super::agent_state::{AgentState, AgentStateTracker};
 use crate::daemon::session_registry::SharedSessionRegistry;
+use agent_team_mail_core::io::atomic::atomic_swap;
+use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::schema::TeamConfig;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
@@ -410,6 +412,33 @@ fn apply_hook_event(
     }
 }
 
+/// Atomically write `team_config` to `config_path` using a lock file, a `.tmp`
+/// staging file, and the project's `atomic_swap` infrastructure.
+///
+/// This is the daemon-side equivalent of `write_team_config` in the CLI crate.
+/// Returns `Err` on any I/O failure so callers can log at the appropriate level.
+fn write_team_config_atomic(config_path: &Path, config: &TeamConfig) -> Result<(), anyhow::Error> {
+    let lock_path = config_path.with_extension("lock");
+    let _lock = acquire_lock(&lock_path, 5)
+        .map_err(|e| anyhow::anyhow!("failed to acquire lock: {e}"))?;
+
+    let serialized = serde_json::to_string_pretty(config)
+        .map_err(|e| anyhow::anyhow!("serialisation failed: {e}"))?;
+
+    let tmp_path = config_path.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp_path)
+        .map_err(|e| anyhow::anyhow!("cannot create tmp file: {e}"))?;
+    file.write_all(serialized.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|e| anyhow::anyhow!("write failed: {e}"))?;
+    drop(file);
+
+    atomic_swap(config_path, &tmp_path)
+        .map_err(|e| anyhow::anyhow!("atomic swap failed: {e}"))?;
+
+    Ok(())
+}
+
 /// Scan all team config files under `{claude_root}/teams/` and update the
 /// `sessionId` field of any member whose `name` matches `agent_name` (the
 /// bare agent name, without `@team` suffix) and whose stored `sessionId`
@@ -472,31 +501,9 @@ fn auto_update_member_session_id(claude_root: &Path, agent_name: &str, new_sessi
             continue;
         }
 
-        // Write updated config atomically via tmp file.
-        let tmp_path = config_path.with_extension("tmp");
-        let serialized = match serde_json::to_string_pretty(&team_config) {
-            Ok(s) => s,
-            Err(e) => {
-                debug!("auto_update_member_session_id: serialisation failed: {e}");
-                continue;
-            }
-        };
-
-        match std::fs::File::create(&tmp_path) {
-            Ok(mut f) => {
-                if let Err(e) = f.write_all(serialized.as_bytes()).and_then(|_| f.sync_all()) {
-                    debug!("auto_update_member_session_id: write failed: {e}");
-                    continue;
-                }
-            }
-            Err(e) => {
-                debug!("auto_update_member_session_id: cannot create tmp file: {e}");
-                continue;
-            }
-        }
-
-        if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
-            debug!("auto_update_member_session_id: rename failed: {e}");
+        // Write updated config atomically via lock + tmp file + atomic swap.
+        if let Err(e) = write_team_config_atomic(&config_path, &team_config) {
+            debug!("auto_update_member_session_id: atomic write failed: {e}");
         }
     }
 }
@@ -800,5 +807,117 @@ mod tests {
         let record = reg.query("arch-ctm").expect("agent should be in registry");
         assert_eq!(record.session_id, "sess-xyz");
         assert_eq!(record.process_id, 999);
+    }
+
+    // ── auto_update_member_session_id unit tests ──────────────────────────
+
+    /// Verify that `auto_update_member_session_id` updates the `sessionId`
+    /// field in a team config file for a matching external agent.
+    ///
+    /// This test works entirely with the file system and does not require the
+    /// daemon to be running.
+    #[test]
+    fn test_auto_update_member_session_id_updates_external_member() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a minimal `.claude/teams/<team>/` structure.
+        let teams_dir = dir.path().join("teams");
+        let team_dir = teams_dir.join("atm-dev");
+        std::fs::create_dir_all(&team_dir).unwrap();
+
+        // Write a minimal config.json containing one external member with an old sessionId.
+        let config_json = serde_json::json!({
+            "name": "atm-dev",
+            "description": "test team",
+            "createdAt": 1739284800000i64,
+            "leadAgentId": "team-lead@atm-dev",
+            "leadSessionId": "team-session",
+            "members": [
+                {
+                    "agentId": "arch-ctm@atm-dev",
+                    "name": "arch-ctm",
+                    "agentType": "codex",
+                    "model": "gpt5.3-codex",
+                    "joinedAt": 1739284800000i64,
+                    "cwd": "/tmp",
+                    "subscriptions": [],
+                    "externalBackendType": "codex",
+                    "sessionId": "old-session-id"
+                }
+            ]
+        });
+
+        let config_path = team_dir.join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&config_json).unwrap(),
+        )
+        .unwrap();
+
+        // Call the function under test with the `.claude` directory (parent of `teams/`).
+        let claude_root = dir.path();
+        auto_update_member_session_id(claude_root, "arch-ctm", "new-session-id");
+
+        // Read back and assert the sessionId was updated.
+        let updated_content = std::fs::read_to_string(&config_path).unwrap();
+        let updated: serde_json::Value = serde_json::from_str(&updated_content).unwrap();
+
+        let session_id = updated["members"][0]["sessionId"]
+            .as_str()
+            .expect("sessionId should be present after update");
+
+        assert_eq!(
+            session_id, "new-session-id",
+            "sessionId should have been updated from 'old-session-id' to 'new-session-id'"
+        );
+    }
+
+    /// Verify that `auto_update_member_session_id` does NOT update members
+    /// that lack `externalBackendType` (i.e., standard Claude Code members).
+    #[test]
+    fn test_auto_update_member_session_id_skips_claude_code_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let teams_dir = dir.path().join("teams");
+        let team_dir = teams_dir.join("atm-dev");
+        std::fs::create_dir_all(&team_dir).unwrap();
+
+        // A member without externalBackendType — this should NOT be updated.
+        let config_json = serde_json::json!({
+            "name": "atm-dev",
+            "createdAt": 1739284800000i64,
+            "leadAgentId": "team-lead@atm-dev",
+            "leadSessionId": "team-session",
+            "members": [
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "claude-opus-4-6",
+                    "joinedAt": 1739284800000i64,
+                    "cwd": "/tmp",
+                    "subscriptions": [],
+                    "sessionId": "old-session"
+                }
+            ]
+        });
+
+        let config_path = team_dir.join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&config_json).unwrap(),
+        )
+        .unwrap();
+
+        let claude_root = dir.path();
+        auto_update_member_session_id(claude_root, "team-lead", "new-session");
+
+        // The standard member's sessionId should remain unchanged.
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let session_id = after["members"][0]["sessionId"].as_str().unwrap_or("old-session");
+        assert_eq!(
+            session_id, "old-session",
+            "Claude Code member sessionId should not be updated by auto_update_member_session_id"
+        );
     }
 }

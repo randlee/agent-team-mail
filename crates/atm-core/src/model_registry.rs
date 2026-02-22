@@ -33,6 +33,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 
+/// Error returned when parsing a [`ModelId`] or [`BackendType`] string fails.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct ParseError(pub String);
+
 /// A validated AI model identifier.
 ///
 /// Known variants cover models in active use at the time of writing.
@@ -89,7 +94,7 @@ impl fmt::Display for ModelId {
 }
 
 impl FromStr for ModelId {
-    type Err = String;
+    type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -106,14 +111,17 @@ impl FromStr for ModelId {
             s if s.starts_with("custom:") => {
                 let id = &s["custom:".len()..];
                 if id.is_empty() {
-                    Err("'custom:' requires a non-empty identifier (e.g., 'custom:my-model')".to_string())
+                    Err(ParseError(
+                        "'custom:' requires a non-empty identifier (e.g., 'custom:my-model')"
+                            .to_string(),
+                    ))
                 } else {
                     Ok(ModelId::Custom(id.to_string()))
                 }
             }
-            other => Err(format!(
+            other => Err(ParseError(format!(
                 "Unknown model '{other}'. Use 'custom:<identifier>' for unlisted models."
-            )),
+            ))),
         }
     }
 }
@@ -180,20 +188,23 @@ mod tests {
     #[test]
     fn custom_empty_identifier_rejected() {
         let err = ModelId::from_str("custom:").unwrap_err();
-        assert!(err.contains("non-empty identifier"), "error was: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("non-empty identifier"), "error was: {msg}");
     }
 
     #[test]
     fn unknown_string_rejected() {
         let err = ModelId::from_str("totally-unknown").unwrap_err();
-        assert!(err.contains("Unknown model"), "error was: {err}");
-        assert!(err.contains("custom:"), "error was: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown model"), "error was: {msg}");
+        assert!(msg.contains("custom:"), "error was: {msg}");
     }
 
     #[test]
     fn another_unknown_string_rejected() {
         let err = ModelId::from_str("gpt-4o").unwrap_err();
-        assert!(err.contains("Unknown model"), "error was: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown model"), "error was: {msg}");
     }
 
     // ── Default ───────────────────────────────────────────────────────────

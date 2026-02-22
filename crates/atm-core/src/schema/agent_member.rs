@@ -1,6 +1,6 @@
 //! Agent member schema for team configuration
 
-use crate::model_registry::ModelId;
+use crate::model_registry::{ModelId, ParseError};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt;
@@ -60,7 +60,7 @@ impl fmt::Display for BackendType {
 }
 
 impl FromStr for BackendType {
-    type Err = String;
+    type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -71,14 +71,16 @@ impl FromStr for BackendType {
             s if s.starts_with("human:") => {
                 let username = &s["human:".len()..];
                 if username.is_empty() {
-                    Err("'human:' requires a username (e.g., 'human:randlee')".to_string())
+                    Err(ParseError(
+                        "'human:' requires a username (e.g., 'human:randlee')".to_string(),
+                    ))
                 } else {
                     Ok(BackendType::Human(username.to_string()))
                 }
             }
-            other => Err(format!(
+            other => Err(ParseError(format!(
                 "Unknown backend type '{other}'. Valid values: claude-code, codex, gemini, external, human:<username>"
-            )),
+            ))),
         }
     }
 }
@@ -94,6 +96,34 @@ impl<'de> Deserialize<'de> for BackendType {
         let s = String::deserialize(deserializer)?;
         BackendType::from_str(&s).map_err(serde::de::Error::custom)
     }
+}
+
+/// Lenient deserialiser for `Option<ModelId>`.
+///
+/// Falls back to [`ModelId::Unknown`] for unrecognised strings instead of
+/// returning a hard error, preserving forward compatibility when the model
+/// registry expands.
+fn deserialize_optional_model<'de, D>(deserializer: D) -> Result<Option<ModelId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.map(|s| ModelId::from_str(&s).unwrap_or(ModelId::Unknown)))
+}
+
+/// Lenient deserialiser for `Option<BackendType>`.
+///
+/// Falls back to [`BackendType::External`] for unrecognised strings instead of
+/// returning a hard error, preserving forward compatibility when new backend
+/// types are added.
+fn deserialize_optional_backend_type<'de, D>(
+    deserializer: D,
+) -> Result<Option<BackendType>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.map(|s| BackendType::from_str(&s).unwrap_or(BackendType::External)))
 }
 
 /// Agent member in a team
@@ -166,14 +196,30 @@ pub struct AgentMember {
     ///
     /// Separate from [`backend_type`] to avoid conflicting with the string
     /// values used by the Claude Code API (e.g., `"tmux"`).
-    #[serde(rename = "externalBackendType", default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Unrecognised strings fall back to [`BackendType::External`] rather than
+    /// failing deserialization, preserving forward compatibility.
+    #[serde(
+        rename = "externalBackendType",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_backend_type"
+    )]
     pub external_backend_type: Option<BackendType>,
 
     /// Validated model identifier for external agents.
     ///
     /// Separate from [`model`] (which is preserved for Claude Code
     /// compatibility).  Set by `add-member --model` with registry validation.
-    #[serde(rename = "externalModel", default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Unrecognised strings fall back to [`ModelId::Unknown`] rather than
+    /// failing deserialization, preserving forward compatibility.
+    #[serde(
+        rename = "externalModel",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_model"
+    )]
     pub external_model: Option<ModelId>,
 
     /// Unknown fields for forward compatibility
@@ -182,11 +228,17 @@ pub struct AgentMember {
 }
 
 impl AgentMember {
-    /// Return the effective backend type for this member.
+    /// Returns the effective backend type for this member.
     ///
     /// Prefers [`external_backend_type`] (typed, E.6 semantics) over
     /// [`backend_type`] (legacy string from Claude Code).  If neither is set
     /// returns `None`.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(BackendType)` preferring the typed `external_backend_type` field.
+    /// Falls back to parsing the legacy `backend_type` string field if present.
+    /// Returns `None` if neither field is populated or the legacy string cannot be parsed.
     pub fn effective_backend_type(&self) -> Option<BackendType> {
         if let Some(ref bt) = self.external_backend_type {
             return Some(bt.clone());
@@ -405,13 +457,15 @@ mod tests {
     #[test]
     fn backend_type_human_without_username_rejected() {
         let err = BackendType::from_str("human:").unwrap_err();
-        assert!(err.contains("requires a username"), "error was: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("requires a username"), "error was: {msg}");
     }
 
     #[test]
     fn backend_type_unknown_string_rejected() {
         let err = BackendType::from_str("alien-ai").unwrap_err();
-        assert!(err.contains("Unknown backend type"), "error was: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown backend type"), "error was: {msg}");
     }
 
     #[test]

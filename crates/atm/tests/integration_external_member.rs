@@ -15,7 +15,7 @@
 use assert_cmd::cargo;
 use serial_test::serial;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 }
 
 /// Read the team config and return the list of member names.
-fn member_names(team_dir: &PathBuf) -> Vec<String> {
+fn member_names(team_dir: &Path) -> Vec<String> {
     let config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(team_dir.join("config.json")).unwrap()).unwrap();
     config["members"]
@@ -78,7 +78,7 @@ fn member_names(team_dir: &PathBuf) -> Vec<String> {
 }
 
 /// Read the team config and find a member by name. Returns the member JSON.
-fn find_member(team_dir: &PathBuf, name: &str) -> serde_json::Value {
+fn find_member(team_dir: &Path, name: &str) -> serde_json::Value {
     let config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(team_dir.join("config.json")).unwrap()).unwrap();
     config["members"]
@@ -624,4 +624,61 @@ fn test_full_external_member_lifecycle() {
 
     let deactivated = find_member(&team_dir, "arch-ctm");
     assert_eq!(deactivated["isActive"].as_bool(), Some(false));
+}
+
+// ── E.6 cleanup conservatism: external agents skipped when daemon unreachable ─
+
+/// Verify that `atm teams cleanup` does NOT remove an external agent member
+/// when the daemon is not running (daemon unreachable → unknown liveness →
+/// conservative = keep the member).
+///
+/// External agents (those with `externalBackendType` set) are only removed when
+/// the daemon *explicitly* confirms the associated session is dead.  Since there
+/// is no running daemon socket in this test environment, the cleanup must skip
+/// the external agent and exit with a non-zero status (incomplete cleanup).
+#[test]
+fn test_cleanup_skips_external_agent_without_session_confirmation() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "cleanup-ext-team");
+
+    // Manually inject an external agent into config.json with all required fields.
+    let config_path = team_dir.join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["members"].as_array_mut().unwrap().push(serde_json::json!({
+        "agentId": "arch-ctm@cleanup-ext-team",
+        "name": "arch-ctm",
+        "agentType": "codex",
+        "model": "gpt5.3-codex",
+        "joinedAt": 1739284800000i64,
+        "cwd": temp_dir.path().to_str().unwrap(),
+        "subscriptions": [],
+        "externalBackendType": "codex",
+        "sessionId": "test-session-123",
+        "isActive": true
+    }));
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    // Ensure no ATM_HOME socket or daemon process is reachable.
+    // The daemon socket path depends on ATM_HOME, which is set to temp_dir.
+    // Since we never started a daemon, any socket-based query will fail.
+
+    // Run cleanup — should fail (incomplete) because the daemon is unreachable
+    // and the external agent therefore has unknown liveness.
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "cleanup-ext-team")
+        .arg("teams")
+        .arg("cleanup")
+        .arg("cleanup-ext-team")
+        .assert()
+        .failure(); // Non-zero exit: cleanup incomplete (member skipped)
+
+    // The external agent must still be present in config.json after the failed cleanup.
+    let names = member_names(&team_dir);
+    assert!(
+        names.contains(&"arch-ctm".to_string()),
+        "external agent 'arch-ctm' should NOT have been removed when daemon is unreachable; \
+         found members: {names:?}"
+    );
 }
