@@ -3191,7 +3191,7 @@ Design references:
 - [ ] Stdio JSONL framing handles request/response/notification safely
 - [ ] `initialize` -> `initialized` handshake implemented and validated before thread/turn calls
 - [ ] Runtime protocol/version capability detection is captured at startup; incompatibility is surfaced explicitly (no silent downgrade/failure)
-- [ ] Thread/turn IDs mapped into existing session registry model
+- [ ] Transport-local thread registry established: Codex threadId values recorded at fork with a `"pending-atm-session:<threadId>"` sentinel; full integration with the shared `SessionRegistry` from `session.rs` is deferred to Sprint G.4
 - [ ] `thread/fork` supported and covered by integration tests (forked thread identity/session semantics documented)
 - [ ] Child process crash path implemented: mark affected sessions, clear in-flight turn state, release/repair transport state, and allow clean reconnect/restart by caller
 - [ ] Backpressure handling for app-server overload (`-32001`) implemented with bounded retry/backoff and clear terminal error reporting when retries exhaust
