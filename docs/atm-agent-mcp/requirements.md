@@ -8,7 +8,7 @@
 
 ## 1. Problem Statement
 
-Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `codex-reply` tools for starting and continuing agentic coding sessions. However, using Codex as a Claude subagent today requires manual setup of identity, team context, communication channels, and session persistence.
+Codex CLI can run in multiple execution modes (`codex mcp-server`, `codex exec --json`, `codex app-server`) for starting and continuing agentic coding sessions. However, using Codex as a Claude subagent today requires manual setup of identity, team context, communication channels, and session persistence.
 
 **Current pain points:**
 - No automatic identity/team injection — every call must manually set context
@@ -18,7 +18,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 - No session resume — context is lost on shutdown/crash
 - No subagent awareness — Codex's native multi-agent tools are disconnected from ATM
 
-**Goal:** A thin Rust MCP proxy that wraps a single `codex mcp-server` child process, managing multiple concurrent Codex sessions (threads) with per-session identity, team context, communication, and lifecycle. `atm-agent-mcp` is the general name for this agent-oriented proxy layer; Codex is the first supported backend.
+**Goal:** A thin Rust MCP-facing proxy that wraps a single downstream CLI child process in a selected execution mode (`mcp`, `cli-json`, `app-server`), managing multiple concurrent Codex sessions (threads) with per-session identity, team context, communication, and lifecycle. `atm-agent-mcp` is the general name for this agent-oriented proxy layer; Codex is the first supported backend.
 
 > **Architecture Decision**: One proxy instance manages one Codex child process and 0..N concurrent agent sessions. Each session has an `agent_id` (proxy-assigned, exposed to Claude) which maps internally to a Codex `threadId`. Each `agent_id` maps 1:1 to an ATM identity while active. The proxy owns the identity namespace — no external collision detection needed.
 >
@@ -33,6 +33,16 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 5. ATM messages addressed to bound identities are delivered by deterministic identity routing.
 6. Registry/audit/summaries persist under team-scoped paths for resume and review.
 
+### Execution Modes
+
+`atm-agent-mcp` supports three downstream execution modes:
+
+- `mcp`: `codex mcp-server`
+- `cli-json`: `codex exec --json`
+- `app-server`: `codex app-server`
+
+Reference: `docs/atm-agent-mcp/codex-execution-modes.md`
+
 ---
 
 ## 2. Actors
@@ -41,7 +51,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 |-------|-------------|
 | **Claude** | MCP client (orchestrator). Sends `codex`/`codex-reply` tool calls. |
 | **atm-agent-mcp** | MCP proxy server. Intercepts, augments, and forwards requests. |
-| **codex mcp-server** | Downstream Codex MCP server (child process). |
+| **Codex child process** | Downstream Codex runtime in one selected execution mode. |
 | **Codex subagents** | Native subagents spawned by Codex via `spawn_agent`. |
 | **ATM team members** | Other agents (Claude teammates, humans, CI) communicating via ATM. |
 
@@ -51,9 +61,9 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ### FR-1: MCP Proxy Pass-Through
 
-- **FR-1.1**: Proxy MUST forward all standard MCP requests/responses between Claude and `codex mcp-server` without modification, except for intercepted tool calls listed below.
+- **FR-1.1**: Proxy MUST forward all standard MCP requests/responses between Claude and the downstream child process without modification, except for intercepted tool calls listed below.
 - **FR-1.2**: Proxy MUST implement protocol-compliant JSON-RPC transport handling, including Content-Length framed messages where applicable. Newline-delimited JSON MAY be supported as a compatibility mode for the downstream child process, but the normative framing behavior MUST follow the MCP stdio transport specification. Proxy MUST handle both framing styles on the upstream (Claude) side.
-- **FR-1.3**: Proxy MUST handle `codex mcp-server` process lifecycle (lazy spawn on first Codex request, terminate on shutdown, detect crashes).
+- **FR-1.3**: Proxy MUST handle downstream child process lifecycle (lazy spawn on first Codex request, terminate on shutdown, detect crashes) for all supported modes (`mcp`, `cli-json`, `app-server`).
 
 ### FR-2: Per-Thread Identity and Context Injection
 
@@ -123,11 +133,11 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ### FR-8: Incoming Mail Handling (Automatic Turn Injection)
 
-> **Design Decision**: The MCP protocol constraint (server cannot push to client) applies to the Claude→proxy direction. However, the proxy owns the `codex mcp-server` child process and CAN initiate `codex-reply` calls to it directly. Mail delivery uses automatic turn injection at the proxy→Codex boundary.
+> **Design Decision**: The MCP protocol constraint (server cannot push to client) applies to the Claude→proxy direction. However, the proxy owns the downstream child process and CAN initiate downstream continuation turns directly. Mail delivery uses automatic turn injection at the proxy→Codex boundary.
 
 **Mail delivery triggers:**
 
-- **FR-8.1**: **Post-turn mail check** — When a Codex turn ends (proxy receives the response from `codex mcp-server`), proxy MUST check for unread mail addressed to the thread's bound identity. If mail exists, proxy MUST automatically issue a `codex-reply` with the mail content, starting a new Codex turn.
+- **FR-8.1**: **Post-turn mail check** — When a Codex turn ends (proxy receives the response from the downstream child process), proxy MUST check for unread mail addressed to the thread's bound identity. If mail exists, proxy MUST automatically issue a continuation turn with the mail content, starting a new Codex turn.
 - **FR-8.2**: **Idle mail delivery** — If no Codex turn is active for a thread's identity and mail arrives, proxy MUST automatically start a new Codex turn via `codex-reply` with the mail content. The proxy polls for new mail on a configurable interval (default: 5s) when threads are idle.
 - **FR-8.3**: **Mail routing** — Mail is always delivered to the thread bound to the addressed identity (1:1 mapping). No heuristic routing. If no thread is bound to the addressed identity, mail remains unread in the ATM inbox.
 
@@ -166,7 +176,7 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
 
 ### FR-11: Codex Process Health
 
-- **FR-11.1**: Proxy MUST detect child process (`codex mcp-server`) crashes and report error to Claude on next request.
+- **FR-11.1**: Proxy MUST detect child process crashes and report error to Claude on next request.
 - **FR-11.2**: Proxy MUST NOT auto-restart the child process. Return an error indicating the child died, with the exit code/signal.
 - **FR-11.3**: Claude can decide to restart by closing and re-opening the MCP connection.
 
@@ -189,16 +199,20 @@ Codex CLI can run as an MCP server (`codex mcp-server`), exposing `codex` and `c
   | `codex_bin` | `ATM_AGENT_MCP_CODEX_BIN` | (none) |
   | `mail_poll_interval_ms` | `ATM_AGENT_MCP_MAIL_POLL_INTERVAL_MS` | (none) |
   | `fast_model` | `ATM_AGENT_MCP_FAST_MODEL` | `--fast` (selects fast_model) |
+  | `transport` | `ATM_AGENT_MCP_TRANSPORT` | (none) |
+
+- **FR-12.7**: `transport` MUST support `mcp`, `cli-json`, and `app-server`. Unknown values MUST fall back to `mcp` with a warning.
 
 ### FR-13: CLI Interface
 
-- **FR-13.1**: `atm-agent-mcp serve` — start MCP server (stdio mode).
+- **FR-13.1**: `atm-agent-mcp serve` — start MCP server (upstream stdio mode).
 - **FR-13.2**: `atm-agent-mcp serve --identity <name> --role <preset>` — with overrides.
 - **FR-13.3**: `atm-agent-mcp serve --resume [<agent-id>]` — resume previous session.
 - **FR-13.4**: `atm-agent-mcp config` — show resolved configuration.
 - **FR-13.5**: `atm-agent-mcp sessions [--repo <name>] [--identity <name>] [--prune]` — list/manage sessions.
 - **FR-13.6**: `atm-agent-mcp summary <agent-id>` — display saved summary.
 - **FR-13.7**: High-level flags SHOULD be supported for common profiles: `--fast`, `--subagents`, and `--readonly`/`--explore`.
+- **FR-13.8**: Downstream execution mode is config-driven (`transport = "mcp" | "cli-json" | "app-server"`). CLI MAY add `--transport` later.
 
 ### FR-14: Request Timeouts
 
@@ -371,7 +385,7 @@ Notes:
 1. **Should subagents inherit the parent's ATM identity with a suffix?** (e.g., `codex-architect/worker-1`) — or should they be invisible to ATM?
 2. **Should `codex-reply` calls include thread metadata in the response?** (e.g., turn count, token usage) — useful for orchestrator decisions.
 3. ~~**What is the maximum number of concurrent threads per identity?**~~ — **RESOLVED**: `max_concurrent_threads` config (default: 10) per FR-3.3.
-4. ~~**Should the proxy support multiple downstream Codex instances?**~~ — **RESOLVED**: Single `codex mcp-server` child, multiple concurrent threads via threadId. Different roles/models configured per thread via role presets.
+4. ~~**Should the proxy support multiple downstream Codex instances?**~~ — **RESOLVED**: Single downstream Codex child process per proxy instance (selected via `transport`: `mcp`, `cli-json`, or `app-server`), with multiple concurrent threads via `threadId`. Different roles/models configured per thread via role presets.
 
 ---
 
@@ -396,7 +410,7 @@ Notes:
 | Sprint | Deliverable | Dependencies |
 |--------|-------------|--------------|
 | A.1 | **Crate scaffold + config** — workspace integration, CLI skeleton (`serve`, `config`, `sessions`), config resolution from `.atm.toml` via `atm-core`, default identity + role preset structs, `atm-agent-mcp config` subcommand | atm-core config |
-| A.2 | **MCP stdio proxy** — lazy-spawn `codex mcp-server` child on first request, JSON-RPC pass-through (Content-Length framing with newline-delimited compatibility, partial reads, interleaved messages), `tools/list` interception to inject synthetic tool definitions, child process health monitoring (crash detection, exit code capture), request timeout (FR-14), `codex/event` notification forwarding to upstream client with agent_id metadata (FR-19) | A.1 |
+| A.2 | **Proxy transport core** — lazy-spawn downstream child on first request (`mcp`: `codex mcp-server`, `cli-json`: `codex exec --json`, `app-server`: `codex app-server`), mode-specific protocol pass-through, `tools/list` interception where applicable to inject synthetic ATM tool definitions, child process health monitoring (crash detection, exit code capture), request timeout (FR-14), event forwarding to upstream client with agent_id metadata (FR-19) | A.1 |
 | A.3 | **Identity binding + context injection** — per-session identity assignment on `codex` calls (FR-2.1–2.8), identity→agent_id namespace management (FR-3), cross-process identity-collision lock (FR-20.1), `developer-instructions` injection with per-turn context refresh (repo_root, repo_name, branch, cwd — null when outside git), session initialization modes: agent_file, inline prompt, resume (FR-16) | A.2 |
 | A.4 | **ATM communication tools** — implement `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` as MCP tools via atm-core (FR-4), thread-bound identity enforcement (no spoofing, subagent invisibility FR-20.4–20.5), mail envelope wrapping for injection (FR-8.4–8.5), `max_messages` and `max_message_length` truncation | A.3 |
 | A.5 | **Session registry + persistence** — in-memory registry with atomic disk persistence (FR-5), agent_id→backend_id mapping, per-session cwd tracking, stale-session detection on startup (FR-3.2), `max_concurrent_threads` enforcement (FR-3.3), per-instance independent registry (FR-20.2–20.3), `agent_sessions` and `agent_status` MCP tools (FR-10) | A.4 |
@@ -471,7 +485,7 @@ Notes:
 ## 9. Acceptance Test Checklist
 
 ### Proxy Core
-- [ ] Start `atm-agent-mcp serve`, verify `codex mcp-server` child spawns
+- [ ] Start `atm-agent-mcp serve`, verify downstream child spawns for configured `transport` (`mcp`, `cli-json`, `app-server`)
 - [ ] Send `codex` tool call through proxy, verify response includes `agent_id`
 - [ ] Send `codex-reply` with `agent_id`, verify conversation continues
 - [ ] Kill child process, verify next request returns error with exit code
@@ -587,12 +601,17 @@ Notes:
 | 2026-02-18 | team-lead | Split A.3/A.4 into 8 focused sprints, add NFR-6 error response format with error codes, add test strategy, add Codex MCP protocol reference appendix. |
 | 2026-02-18 | team-lead + arch-ctm | FR-18 (approval/elicitation bridging), FR-19 (event forwarding), fix FR-1.2 framing to protocol-compliant (not newline-only), confirm error codes -32001..-32009 as authoritative. |
 | 2026-02-18 | team-lead | FR-4 expanded: MCP tool params aligned with CLI (limit, since, from, all, team override). FR-4.7 atm_pending_count. FR-20: multi-instance identity isolation and Codex subagent invisibility. |
+| 2026-02-22 | arch-ctm | Added explicit downstream execution modes (`mcp`, `cli-json`, `app-server`), transport naming update (`json` -> `cli-json`), and cross-references to execution mode docs. |
 
 ---
 
 ## Appendix A: Codex MCP Protocol Reference
 
-> Source: `codex` CLI source code at `/Users/randlee/Documents/github/codex`. This appendix documents the actual wire protocol that `atm-agent-mcp` must proxy.
+> Source: `codex` CLI source code at `/Users/randlee/Documents/github/codex`. This appendix documents the `mcp` downstream wire protocol that `atm-agent-mcp` can proxy.
+>
+> For other downstream modes, see:
+> - `docs/codex-json-schema.md` (`cli-json`)
+> - `docs/atm-agent-mcp/codex-execution-modes.md` (`app-server` overview and protocol pointers)
 
 ### A.1 Server Startup
 

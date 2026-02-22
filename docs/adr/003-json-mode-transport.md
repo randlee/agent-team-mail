@@ -1,4 +1,4 @@
-# ADR 003: JSON Mode Transport
+# ADR 003: CLI-JSON Mode Transport
 
 Status: Accepted
 Date: 2026-02-20
@@ -16,15 +16,16 @@ The JSONL event stream offers advantages for certain use cases:
 ## Decision
 
 Add `JsonCodecTransport` as a second production transport alongside `McpTransport`. Both implement the `CodexTransport` trait introduced in Sprint C.2a.
+In current terminology, this mode is named `cli-json`.
 
 ### Key design choices
 
 1. **Transport selection via config**: The `.atm.toml` `transport` field selects the transport:
    - `"mcp"` (default) -> `McpTransport` (spawns `codex mcp-server`)
-   - `"json"` -> `JsonCodecTransport` (spawns `codex exec --json`)
+   - `"cli-json"` -> `JsonCodecTransport` (spawns `codex exec --json`)
    - `"mock"` -> `MockTransport` (in-memory test double)
 
-2. **Idle flag with atomic bool**: `JsonCodecTransport` maintains a shared `Arc<AtomicBool>` idle flag. A background task monitors child stdout for `idle` JSONL events and sets the flag. The flag is also stored in `RawChildIo.idle_flag` so the proxy reader task can access it.
+2. **Idle flag with atomic bool**: `JsonCodecTransport` (`cli-json`) maintains a shared `Arc<AtomicBool>` idle flag. A background task monitors child stdout for `idle` JSONL events and sets the flag. The flag is also stored in `RawChildIo.idle_flag` so the proxy reader task can access it.
 
 3. **Duplex stream forwarding**: Rather than giving the proxy direct access to the real child stdout, the background task reads from the child and forwards all lines to a `tokio::io::duplex` stream. This allows the background task to intercept `idle` events without disrupting the proxy's line-by-line reading.
 
@@ -36,10 +37,10 @@ Add `JsonCodecTransport` as a second production transport alongside `McpTranspor
 
 ### Positive
 
-- Two production transport modes available, selectable via configuration
+- Three production transport modes are planned (`mcp`, `cli-json`, `app-server`), selectable via configuration
 - Idle detection enables non-blocking message injection mid-session
 - File-based stdin queue is safe for concurrent writers (atomic rename claim)
-- Clean separation: `MockTransport` for tests, `JsonCodecTransport` for production JSON mode
+- Clean separation: `MockTransport` for tests, `JsonCodecTransport` for production cli-json mode
 
 ### Negative
 
@@ -51,3 +52,7 @@ Add `JsonCodecTransport` as a second production transport alongside `McpTranspor
 
 - `RawChildIo` gained an `idle_flag` field (always `None` for MCP/Mock transports)
 - The `CodexTransport` trait gained an `is_idle()` method with a default `false` implementation
+
+## Follow-up
+
+`app-server` is now a planned third production mode for richer thread/turn control (`turn/start`, `turn/steer`, `turn/interrupt`), while preserving MCP upstream compatibility.
