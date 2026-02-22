@@ -3,7 +3,7 @@
 //! This module contains all data structures that map to the Claude agent team
 //! file-based API. All types preserve unknown fields for forward compatibility.
 
-mod agent_member;
+pub mod agent_member;
 mod inbox_message;
 mod permissions;
 mod settings;
@@ -11,7 +11,7 @@ mod task;
 mod team_config;
 mod version;
 
-pub use agent_member::AgentMember;
+pub use agent_member::{AgentMember, BackendType};
 pub use inbox_message::InboxMessage;
 pub use permissions::Permissions;
 pub use settings::SettingsJson;

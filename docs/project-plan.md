@@ -2823,7 +2823,7 @@ explicit MCP lifecycle emission coverage.
 | E.3 | Hook-to-daemon state bridge | E.1 (parallel with E.2) | ✅ MERGED (#152) |
 | E.4 | TUI reliability hardening (restart, reconnect, failure injection) | E.3 | ✅ MERGED (#158) |
 | E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ DONE (PR pending) |
-| E.6 | External agent member management and model registry | E.3 | ⏳ PLANNED |
+| E.6 | External agent member management and model registry | E.3 | 🔄 IN PROGRESS |
 | E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ⏳ PLANNED |
 | E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ MERGED (#162) |
 

@@ -210,6 +210,9 @@ mod tests {
             backend_type: None,
             is_active: Some(false),
             last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
             unknown_fields: HashMap::new(),
         }
     }
