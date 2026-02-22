@@ -1,7 +1,7 @@
 //! Read command implementation
 
 use anyhow::Result;
-use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::config::{resolve_config, resolve_identity, ConfigOverrides};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Utc};
@@ -82,7 +82,16 @@ pub fn execute(args: ReadArgs) -> Result<()> {
 
     // Determine agent and team
     let (agent_name, team_name) = if let Some(ref agent_addr) = args.agent {
-        parse_address(agent_addr, &args.team, &config.core.default_team)?
+        let (parsed_agent, parsed_team) =
+            parse_address(agent_addr, &args.team, &config.core.default_team)?;
+        let resolved = resolve_identity(&parsed_agent, &config.roles, &config.aliases);
+        if resolved != parsed_agent {
+            eprintln!(
+                "Note: '{}' resolved via roles/alias to '{}'",
+                parsed_agent, resolved
+            );
+        }
+        (resolved, parsed_team)
     } else {
         // Read own inbox
         (config.core.identity.clone(), config.core.default_team.clone())

@@ -139,6 +139,11 @@ fn merge_config(base: &mut Config, file: Config) {
         base.aliases.insert(alias, identity);
     }
 
+    // Merge roles (later sources override earlier ones)
+    for (role, identity) in file.roles {
+        base.roles.insert(role, identity);
+    }
+
     // Merge plugin config sections
     for (name, table) in file.plugins {
         base.plugins.insert(name, table);
@@ -550,5 +555,39 @@ enabled = false
             Some("lead-override")
         );
         assert_eq!(config.aliases.get("qa").map(String::as_str), Some("qa-bot"));
+    }
+
+    #[test]
+    fn test_roles_merge_via_resolve_with_repo_override() {
+        use tempfile::TempDir;
+
+        // Global config defines role values, repo config overrides one role.
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let global_cfg_dir = home_dir.join(".config/atm");
+        std::fs::create_dir_all(&global_cfg_dir).unwrap();
+        std::fs::write(
+            global_cfg_dir.join("config.toml"),
+            "[roles]\nteam-lead = \"arch-atm\"\nreviewer = \"qa-bot\"\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            "[roles]\nteam-lead = \"lead-override\"\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigOverrides::default();
+        let config = resolve_config(&overrides, &repo_dir, home_dir).unwrap();
+
+        assert_eq!(
+            config.roles.get("team-lead").map(String::as_str),
+            Some("lead-override")
+        );
+        assert_eq!(config.roles.get("reviewer").map(String::as_str), Some("qa-bot"));
     }
 }

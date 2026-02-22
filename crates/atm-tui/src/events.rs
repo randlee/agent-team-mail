@@ -229,8 +229,7 @@ mod tests {
     }
 
     fn app_with_policy(policy: InterruptPolicy) -> App {
-        let mut cfg = TuiConfig::default();
-        cfg.interrupt_policy = policy;
+        let cfg = TuiConfig { interrupt_policy: policy, ..Default::default() };
         let mut app = App::new("atm-dev".to_string(), cfg);
         app.members = vec![
             MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 },

@@ -54,6 +54,7 @@
 
 **Primary references — read as needed:**
 
+- [`docs/team-protocol.md`](./docs/team-protocol.md) - **MUST READ** ATM dogfooding messaging protocol (ack -> work -> completion -> acknowledgement)
 - [`docs/requirements.md`](./docs/requirements.md) - System requirements, architecture, plugin design
 - [`docs/project-plan.md`](./docs/project-plan.md) - Phased sprint plan with dependency graphs
 - [`docs/agent-team-api.md`](./docs/agent-team-api.md) - Claude agent team API reference (schema baseline: Claude Code 2.1.39)

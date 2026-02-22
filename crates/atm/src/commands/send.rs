@@ -1,7 +1,7 @@
 //! Send command implementation
 
 use anyhow::Result;
-use agent_team_mail_core::config::{resolve_alias, resolve_config, Config, ConfigOverrides};
+use agent_team_mail_core::config::{resolve_identity, resolve_config, Config, ConfigOverrides};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{inbox_append, WriteOutcome};
@@ -89,10 +89,10 @@ pub fn execute(args: SendArgs) -> Result<()> {
     // Parse addressing (agent@team or just agent) first so alias lookup runs on
     // only the agent token, even when input uses @team suffix.
     let (parsed_agent, team_name) = parse_address(&args.agent, &args.team, &config.core.default_team)?;
-    let agent_name = resolve_alias(&parsed_agent, &config.aliases);
+    let agent_name = resolve_identity(&parsed_agent, &config.roles, &config.aliases);
     if agent_name != parsed_agent {
         eprintln!(
-            "Note: '{}' resolved via alias to '{}'",
+            "Note: '{}' resolved via roles/alias to '{}'",
             parsed_agent, agent_name
         );
     }
