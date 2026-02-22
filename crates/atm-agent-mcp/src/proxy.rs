@@ -1782,6 +1782,20 @@ Session ending. Write a concise summary of:\n\
             });
         }
 
+        // Wire session context into transport's TurnTracker for turn-state daemon
+        // emission. After this point, TurnCompleted and crash-path interrupt_turn
+        // calls in AppServerTransport's background task will emit TeammateIdle
+        // events to the daemon. McpTransport and JsonCodecTransport use the
+        // default no-op implementation of set_turn_session_context.
+        {
+            let turn_ctx = crate::turn_control::SessionContext::new(
+                &identity,
+                &team,
+                &entry.agent_id,
+            );
+            self.transport.set_turn_session_context(turn_ctx);
+        }
+
         // Build developer-instructions context string
         let context_str = build_session_context(
             &identity,
@@ -3233,7 +3247,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn codex_call_with_agent_file_and_prompt_returns_invalid_params() {
-        unsafe { std::env::set_var("ATM_HOME", "/tmp/atm-test-proxy-invalid") };
+        let _dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ATM_HOME", _dir.path()) };
 
         let config = crate::config::AgentMcpConfig::default();
         let mut proxy = ProxyServer::new(config);
@@ -3270,7 +3285,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn codex_call_with_missing_agent_file_returns_not_found() {
-        unsafe { std::env::set_var("ATM_HOME", "/tmp/atm-test-proxy-notfound") };
+        let _dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ATM_HOME", _dir.path()) };
 
         let config = crate::config::AgentMcpConfig::default();
         let mut proxy = ProxyServer::new(config);
@@ -3278,6 +3294,9 @@ mod tests {
         let dropped = Arc::new(AtomicU64::new(0));
         let pending = Arc::new(Mutex::new(PendingRequests::new()));
 
+        // Use a path that is guaranteed not to exist: a non-existent file inside
+        // the temp dir (which is freshly created and empty).
+        let missing_file = _dir.path().join("definitely-does-not-exist.md");
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -3285,7 +3304,7 @@ mod tests {
             "params": {
                 "name": "codex",
                 "arguments": {
-                    "agent_file": "/tmp/definitely-does-not-exist-12345.md"
+                    "agent_file": missing_file.to_string_lossy()
                 }
             }
         });
@@ -3471,7 +3490,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn codex_resume_with_unknown_agent_id_returns_error() {
-        unsafe { std::env::set_var("ATM_HOME", "/tmp/atm-test-resume-unknown") };
+        let _dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ATM_HOME", _dir.path()) };
 
         let config = crate::config::AgentMcpConfig::default();
         let mut proxy = ProxyServer::new(config);
@@ -3677,7 +3697,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn identity_conflict_error_uses_conflicting_agent_id_key() {
-        unsafe { std::env::set_var("ATM_HOME", "/tmp/atm-test-conflict-key") };
+        let _dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ATM_HOME", _dir.path()) };
 
         let config = crate::config::AgentMcpConfig::default();
         let mut proxy = ProxyServer::new(config);

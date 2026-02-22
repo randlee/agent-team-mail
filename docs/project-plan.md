@@ -3210,10 +3210,12 @@ Design references:
 #### Exit Criteria
 
 - [ ] Common control API for `start_turn`, `steer_turn`, `interrupt_turn`
-- [ ] Active `turn_id` tracking is consistent across `mcp`, `cli-json`, and `app-server`
-- [ ] Turn state (`busy`/`idle`/terminal) is emitted to daemon for all modes via one normalized event path
+- [ ] Active `turn_id` tracking is implemented for `app-server` (primary); `mcp` and `cli-json` tracking deferred to G.5/G.6 (those transports lack explicit turn notifications at the protocol level)
+- [ ] Turn state (`busy`/`idle`/terminal) is emitted to daemon for `app-server` mode via the `TurnTracker` → `lifecycle_emit` normalized path; mcp/cli-json parity deferred to G.5/G.6
 - [ ] `turn/steer` stale-turn handling covered by tests
 - [ ] Queue ordering rules (Claude > auto-mail) enforced transport-independently
+
+> **G.4 Scope Note**: Turn tracking for `mcp` and `cli-json` transports is deferred to G.5/G.6 because: (1) `McpTransport` has no background notification task — MCP turn lifecycle is managed at the proxy layer; (2) `JsonCodecTransport` uses a separate `cli_json_turn_state` mechanism with different signal semantics. `TurnTracker` fields are present in all three transports for API consistency; full emission wiring for non-app-server transports is a G.5/G.6 deliverable.
 
 ---
 

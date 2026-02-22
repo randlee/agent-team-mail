@@ -223,8 +223,8 @@ request_timeout_secs = 600
 max_concurrent_threads = 5
 persist_threads = false
 auto_mail = false
-base_prompt_file = "/tmp/base.md"
-extra_instructions_file = "/tmp/extra.md"
+base_prompt_file = "base.md"
+extra_instructions_file = "extra.md"
 "#;
         let cfg: AgentMcpConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.codex_bin, "/usr/local/bin/codex");
@@ -239,8 +239,8 @@ extra_instructions_file = "/tmp/extra.md"
         assert_eq!(cfg.max_concurrent_threads, 5);
         assert!(!cfg.persist_threads);
         assert!(!cfg.auto_mail);
-        assert_eq!(cfg.base_prompt_file, Some("/tmp/base.md".to_string()));
-        assert_eq!(cfg.extra_instructions_file, Some("/tmp/extra.md".to_string()));
+        assert_eq!(cfg.base_prompt_file, Some("base.md".to_string()));
+        assert_eq!(cfg.extra_instructions_file, Some("extra.md".to_string()));
     }
 
     #[test]

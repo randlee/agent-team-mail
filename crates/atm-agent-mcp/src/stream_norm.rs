@@ -69,9 +69,16 @@ impl TurnState {
 #[derive(Debug)]
 pub enum AppServerNotification {
     /// A new turn has begun (`turn/started`).
-    TurnStarted { turn_id: String },
+    ///
+    /// `thread_id` identifies the thread on which the turn is running.
+    /// `turn_id` is the unique identifier for this specific turn.
+    /// A single thread may have multiple sequential turns.
+    TurnStarted { thread_id: String, turn_id: String },
     /// The current turn has ended (`turn/completed`).
-    TurnCompleted { turn_id: String, status: TurnStatus },
+    ///
+    /// `thread_id` identifies the thread on which the turn ran.
+    /// `turn_id` is the unique identifier for the completed turn.
+    TurnCompleted { thread_id: String, turn_id: String, status: TurnStatus },
     /// A content item within a turn has started (`item/started`).
     ItemStarted { item_id: String },
     /// A content item within a turn has completed (`item/completed`).
@@ -102,15 +109,27 @@ pub fn parse_app_server_notification(line: &str) -> Option<AppServerNotification
 
     let notification = match method.as_str() {
         "turn/started" => {
+            let thread_id = params
+                .get("threadId")
+                .or_else(|| params.get("thread_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let turn_id = params
                 .get("turnId")
                 .or_else(|| params.get("turn_id"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            AppServerNotification::TurnStarted { turn_id }
+            AppServerNotification::TurnStarted { thread_id, turn_id }
         }
         "turn/completed" => {
+            let thread_id = params
+                .get("threadId")
+                .or_else(|| params.get("thread_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let turn_id = params
                 .get("turnId")
                 .or_else(|| params.get("turn_id"))
@@ -126,7 +145,7 @@ pub fn parse_app_server_notification(line: &str) -> Option<AppServerNotification
                 "failed" => TurnStatus::Failed,
                 _ => TurnStatus::Completed,
             };
-            AppServerNotification::TurnCompleted { turn_id, status }
+            AppServerNotification::TurnCompleted { thread_id, turn_id, status }
         }
         "item/started" => {
             let item_id = params
@@ -213,30 +232,69 @@ mod tests {
 
     #[test]
     fn parse_turn_started() {
+        let line = r#"{"method":"turn/started","params":{"threadId":"th1","turnId":"t1"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            matches!(&n, AppServerNotification::TurnStarted { thread_id, turn_id }
+                if thread_id == "th1" && turn_id == "t1"),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_turn_started_fallback_snake_case() {
+        // Dual-key fallback: thread_id / turn_id (snake_case).
+        let line = r#"{"method":"turn/started","params":{"thread_id":"th2","turn_id":"t2"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            matches!(&n, AppServerNotification::TurnStarted { thread_id, turn_id }
+                if thread_id == "th2" && turn_id == "t2"),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_turn_started_missing_thread_id_defaults_empty() {
+        // When threadId is absent, thread_id defaults to empty string.
         let line = r#"{"method":"turn/started","params":{"turnId":"t1"}}"#;
         let n = parse_app_server_notification(line).unwrap();
-        assert!(matches!(n, AppServerNotification::TurnStarted { turn_id } if turn_id == "t1"));
+        assert!(
+            matches!(&n, AppServerNotification::TurnStarted { thread_id, turn_id }
+                if thread_id.is_empty() && turn_id == "t1"),
+            "unexpected: {n:?}"
+        );
     }
 
     #[test]
     fn parse_turn_completed_default_status() {
-        let line = r#"{"method":"turn/completed","params":{"turnId":"t1"}}"#;
+        let line = r#"{"method":"turn/completed","params":{"threadId":"th1","turnId":"t1"}}"#;
         let n = parse_app_server_notification(line).unwrap();
-        assert!(matches!(
-            n,
-            AppServerNotification::TurnCompleted { turn_id, status: TurnStatus::Completed }
-            if turn_id == "t1"
-        ));
+        assert!(
+            matches!(&n, AppServerNotification::TurnCompleted { thread_id, turn_id, status: TurnStatus::Completed }
+                if thread_id == "th1" && turn_id == "t1"),
+            "unexpected: {n:?}"
+        );
     }
 
     #[test]
     fn parse_turn_completed_interrupted() {
-        let line = r#"{"method":"turn/completed","params":{"turnId":"t2","status":"interrupted"}}"#;
+        let line = r#"{"method":"turn/completed","params":{"threadId":"th2","turnId":"t2","status":"interrupted"}}"#;
         let n = parse_app_server_notification(line).unwrap();
         assert!(matches!(
             n,
             AppServerNotification::TurnCompleted { status: TurnStatus::Interrupted, .. }
         ));
+    }
+
+    #[test]
+    fn parse_turn_completed_preserves_thread_and_turn_ids() {
+        let line = r#"{"method":"turn/completed","params":{"threadId":"thread-x","turnId":"turn-y","status":"failed"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            matches!(&n, AppServerNotification::TurnCompleted { thread_id, turn_id, status: TurnStatus::Failed }
+                if thread_id == "thread-x" && turn_id == "turn-y"),
+            "unexpected: {n:?}"
+        );
     }
 
     #[test]
