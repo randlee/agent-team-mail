@@ -16,6 +16,7 @@ For `transport = "cli-json"`, see `docs/codex-json-schema.md`.
 - Protocol shape is JSON-RPC-like request/response/notification.
 - Messages omit the `jsonrpc` field.
 - Requests include `id`; notifications do not.
+- Codex source also includes a WebSocket transport implementation path; ATM currently treats that as out-of-scope and targets stdio transport only.
 
 Request example:
 
@@ -91,7 +92,12 @@ Direct command method:
 - Turn ID mismatch is rejected.
 - Empty steer input is rejected.
 
-Error mapping is returned as invalid request errors at the app-server boundary.
+Error mapping is returned as invalid request (`-32600`) at the app-server boundary for:
+
+- no active turn,
+- expected turn mismatch,
+- empty steer input.
+
 ATM implications:
 
 - `atm-agent-mcp` must track the currently active `turnId` per managed thread for steer calls.
@@ -191,11 +197,26 @@ Recommended transport-neutral operations in `atm-agent-mcp`:
 
 This keeps `mcp`, `cli-json`, and `app-server` behind one adapter boundary with identical queue/lifecycle semantics.
 
+ATM integration requirement:
+
+- App-server adapter must emit normalized lifecycle events (session start/end, turn busy/idle/terminal transitions) to `atm-daemon` using the same path used by other transports, so daemon and TUI remain transport-agnostic.
+
 ## 12. Open Gaps to Track in Phase Plan
 
 - Socket-level integration tests validating full app-server framing and notification order.
 - Approval/elicitation parity behavior between `mcp` and `app-server` transports.
 - TUI fanout contract for app-server deltas (`udp`/pubsub normalization).
+
+## 13. Out of Scope / Not Required for ATM MVP
+
+Codex app-server defines additional capabilities that are intentionally not required for ATM Phase G baseline:
+
+- `thread/rollback`
+- `thread/archive` and `thread/unarchive`
+- conversation listing/read operations (for example `conversation/list`)
+- optional review/config/skill surfaces not needed for ATM mail/lifecycle parity
+
+These can be added later without changing the core ATM lifecycle and mail-injection contracts.
 
 ---
 

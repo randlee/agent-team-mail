@@ -2298,7 +2298,7 @@ Session ending. Write a concise summary of:\n\
                                     source: "atm-agent-mcp",
                                     action: "idle_detected",
                                     team: Some(team_for_reader.clone()),
-                                    result: Some("json".to_string()),
+                                    result: Some("cli-json".to_string()),
                                     ..Default::default()
                                 },
                             );
@@ -2333,7 +2333,7 @@ Session ending. Write a concise summary of:\n\
                                     source: "atm-agent-mcp",
                                     action: "codex_done",
                                     team: Some(team_for_reader.clone()),
-                                    result: Some("json".to_string()),
+                                    result: Some("cli-json".to_string()),
                                     ..Default::default()
                                 },
                             );
