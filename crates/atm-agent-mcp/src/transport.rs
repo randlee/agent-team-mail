@@ -65,7 +65,7 @@ pub struct RawChildIo {
 /// Abstracts the mechanism by which the proxy communicates with a Codex agent.
 ///
 /// Implement this trait to swap in alternative transports (e.g. a test double
-/// or the [`JsonCodecTransport`] for JSON mode) without changing
+/// or the [`JsonCodecTransport`] for cli-json mode) without changing
 /// [`crate::proxy::ProxyServer`].
 ///
 /// The trait is object-safe via [`async_trait`], allowing `Box<dyn
@@ -213,7 +213,7 @@ impl JsonCodecTransport {
             source: "atm-agent-mcp",
             action: "transport_init",
             team: Some(team.clone()),
-            result: Some("json".to_string()),
+            result: Some("cli-json".to_string()),
             ..Default::default()
         });
         Self {
@@ -231,7 +231,7 @@ impl Drop for JsonCodecTransport {
             source: "atm-agent-mcp",
             action: "transport_shutdown",
             team: Some(self.team.clone()),
-            result: Some("json".to_string()),
+            result: Some("cli-json".to_string()),
             ..Default::default()
         });
     }
@@ -313,7 +313,7 @@ impl CodexTransport for JsonCodecTransport {
                             source: "atm-agent-mcp",
                             action: "idle_detected",
                             team: Some(team_for_task.clone()),
-                            result: Some("json".to_string()),
+                            result: Some("cli-json".to_string()),
                             ..Default::default()
                         });
                     }
@@ -323,7 +323,7 @@ impl CodexTransport for JsonCodecTransport {
                             source: "atm-agent-mcp",
                             action: "codex_done",
                             team: Some(team_for_task.clone()),
-                            result: Some("json".to_string()),
+                            result: Some("cli-json".to_string()),
                             ..Default::default()
                         });
                         // Reset idle flag on done (session complete)
@@ -368,7 +368,7 @@ impl CodexTransport for JsonCodecTransport {
 ///
 /// Recognised values:
 /// - `None` / `"mcp"` -> [`McpTransport`] (spawns `codex mcp-server`).
-/// - `"json"` -> [`JsonCodecTransport`] (spawns `codex exec --json`).
+/// - `"cli-json"` -> [`JsonCodecTransport`] (spawns `codex exec --json`).
 /// - `"mock"` -> [`MockTransport`] (in-memory channels; no child process).
 ///
 /// Unknown values fall back to `McpTransport` with a `tracing::warn`.
@@ -385,7 +385,7 @@ impl CodexTransport for JsonCodecTransport {
 pub(crate) fn make_transport(config: &AgentMcpConfig, team: &str) -> Box<dyn CodexTransport> {
     match config.transport.as_deref() {
         None | Some("mcp") => Box::new(McpTransport::new(config.clone(), team)),
-        Some("json") => Box::new(JsonCodecTransport::new(config.clone(), team)),
+        Some("cli-json") => Box::new(JsonCodecTransport::new(config.clone(), team)),
         Some("mock") => {
             // MockTransport for testing/inspection. The handle is discarded here
             // because make_transport doesn't have a way to return it. Tests that
@@ -627,9 +627,9 @@ mod tests {
     }
 
     #[test]
-    fn make_transport_returns_json_codec_for_json() {
+    fn make_transport_returns_json_codec_for_cli_json() {
         let config = AgentMcpConfig {
-            transport: Some("json".to_string()),
+            transport: Some("cli-json".to_string()),
             ..Default::default()
         };
         let _t = make_transport(&config, "test-team");

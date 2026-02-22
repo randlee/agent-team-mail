@@ -276,7 +276,7 @@ async fn test_json_atm_send() {
 
     let config = AgentMcpConfig {
         model: Some("codex-mini-latest".to_string()),
-        transport: Some("json".to_string()),
+        transport: Some("cli-json".to_string()),
         auto_mail: false,
         ..Default::default()
     };
@@ -299,7 +299,7 @@ async fn test_json_atm_read() {
 
     let config = AgentMcpConfig {
         model: Some("codex-mini-latest".to_string()),
-        transport: Some("json".to_string()),
+        transport: Some("cli-json".to_string()),
         auto_mail: false,
         ..Default::default()
     };
@@ -322,7 +322,7 @@ async fn test_json_atm_broadcast() {
 
     let config = AgentMcpConfig {
         model: Some("codex-mini-latest".to_string()),
-        transport: Some("json".to_string()),
+        transport: Some("cli-json".to_string()),
         auto_mail: false,
         ..Default::default()
     };
@@ -345,7 +345,7 @@ async fn test_json_atm_pending_count() {
 
     let config = AgentMcpConfig {
         model: Some("codex-mini-latest".to_string()),
-        transport: Some("json".to_string()),
+        transport: Some("cli-json".to_string()),
         auto_mail: false,
         ..Default::default()
     };
@@ -368,7 +368,7 @@ async fn test_json_stdin_queue_inject() {
 
     let config = AgentMcpConfig {
         model: Some("codex-mini-latest".to_string()),
-        transport: Some("json".to_string()),
+        transport: Some("cli-json".to_string()),
         auto_mail: false,
         ..Default::default()
     };

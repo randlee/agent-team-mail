@@ -1,6 +1,11 @@
-# Codex JSON Event Schema
+# Codex CLI-JSON Event Schema
 
-The `codex exec --json` command communicates via a JSONL (newline-delimited JSON) event stream on stdout. Each line is a self-contained JSON object with a `type` field indicating the event kind.
+This document describes the `cli-json` transport mode (`codex exec --json`) used by `atm-agent-mcp`.
+Each line is a self-contained JSON object with a `type` field indicating the event kind.
+
+Related docs:
+- `docs/atm-agent-mcp/codex-execution-modes.md` (all Codex execution modes)
+- `docs/atm-agent-mcp/requirements.md` (proxy transport requirements)
 
 ## Event Types
 

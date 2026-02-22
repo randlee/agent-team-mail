@@ -1787,7 +1787,7 @@ Parallel execution plan:
 ## 12. Phase A: atm-agent-mcp (MCP Stdio Proxy for Codex)
 
 **Status**: IN PROGRESS (7/8 sprints merged, A.8 PR pending)
-**Goal**: New `atm-agent-mcp` crate — a thin MCP proxy that wraps a single `codex mcp-server` child
+**Goal**: New `atm-agent-mcp` crate — a thin MCP proxy that wraps a single Codex child process (`mcp`, `cli-json`, or `app-server`)
 process, managing multiple concurrent Codex sessions with per-session identity, team context,
 ATM communication tools, and lifecycle management. Enables Claude to orchestrate Codex agents
 over the MCP protocol with native ATM messaging integration.
@@ -2087,6 +2087,8 @@ Add to **Initialization Process** section:
 **Status**: IN PROGRESS
 **Goal**: (1) Unified structured logging across all crates so every event — message delivery, tool call, daemon lifecycle — is traceable. (2) Prove that `codex exec --json` can replace the MCP stdio transport for real-time TUI streaming and non-destructive stdin-based nudging.
 
+**Mode terminology**: `transport = "mcp" | "cli-json" | "app-server"` where `cli-json` maps to `codex exec --json`. See `docs/atm-agent-mcp/codex-execution-modes.md`.
+
 **Integration branch**: `integrate/phase-C`
 
 ### Phase C Sprint Summary
@@ -2095,7 +2097,7 @@ Add to **Initialization Process** section:
 |--------|------|--------|-----|
 | C.1 | Unified logging infrastructure | ✅ | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
 | C.2a | Transport trait + McpTransport refactor | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
-| C.2b | JsonTransport + stdin queue + integration tests | 🔄 IN PROGRESS | — |
+| C.2b | CliJsonTransport + stdin queue + integration tests | 🔄 IN PROGRESS | — |
 | C.3 | Control receiver stub (daemon endpoint + dedupe) | ⏳ PLANNED | — |
 
 **Execution model**: C.2b scrum-master launches as soon as C.2a QA approves — does not wait for C.2a CI/merge. C.2b branches off C.2a feature branch. C.3 starts after C.2b merges to `integrate/phase-C`.
@@ -2149,7 +2151,7 @@ Structured, JSONL-friendly logging built on `tracing` + `tracing-subscriber`:
 
 #### Problem
 
-`atm-agent-mcp` proxy is tightly coupled to `codex mcp-server` with no transport abstraction. Adding JSON mode requires a clean seam.
+`atm-agent-mcp` proxy is tightly coupled to `codex mcp-server` with no transport abstraction. Adding cli-json mode requires a clean seam.
 
 #### Solution
 
@@ -2175,7 +2177,7 @@ pub trait CodexTransport: Send {
 
 ---
 
-### Sprint C.2b — JsonTransport + Stdin Queue + Integration Tests
+### Sprint C.2b — CliJsonTransport + Stdin Queue + Integration Tests
 
 **Branch**: `feature/pC-s2b-json-transport` (branches off `feature/pC-s2a-transport-trait`)
 **Crate(s)**: `crates/atm-agent-mcp`
@@ -2193,7 +2195,7 @@ pub trait CodexTransport: Send {
 
 #### Solution
 
-`JsonTransport` implementation + stdin queue for message injection.
+`CliJsonTransport` implementation + stdin queue for message injection.
 
 **Stdin queue for message injection**:
 - Queue: `~/.config/atm/agent-sessions/<team>/<agent>/stdin_queue/`
@@ -2220,9 +2222,9 @@ pub trait CodexTransport: Send {
 
 #### Exit Criteria
 
-**JsonTransport:**
-- [ ] `JsonTransport` spawns `codex exec --json`, reads JSONL stream, parses all event types
-- [ ] Transport selected via config: `transport = "mcp" | "json"` in `.atm.toml`
+**CliJsonTransport:**
+- [ ] `CliJsonTransport` spawns `codex exec --json`, reads JSONL stream, parses all event types
+- [ ] Transport selected via config: `transport = "mcp" | "cli-json" | "app-server"` in `.atm.toml`
 - [ ] Idle detection fires within 2s of Codex entering wait state
 
 **Stdin queue:**
@@ -2239,7 +2241,7 @@ pub trait CodexTransport: Send {
 **Local integration tests** (`#[ignore]`, not run in CI):
 - [ ] Both transport modes tested with `codex-mini-latest`
 - [ ] `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` verified in MCP mode
-- [ ] `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` verified in JSON mode
+- [ ] `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count` verified in cli-json mode
 - [ ] Run with: `cargo test --test mcp_integration -- --ignored`
 
 **Docs:**
@@ -2336,7 +2338,7 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 **Branch**: `feature/pD-s1-tui-stream`
 **Crate(s)**: `crates/atm-tui` (new binary crate)
-**Depends on**: C.2b merged (JsonTransport + session log infrastructure)
+**Depends on**: C.2b merged (CliJsonTransport + session log infrastructure)
 
 #### Scope
 
@@ -3102,6 +3104,193 @@ Phase F must address the gap between "ATM hooks are installed globally" and "thi
 - [ ] `cargo test --workspace` passes
 
 ---
+## 16.6 Phase G: Codex Multi-Transport Runtime Hardening
+
+**Status**: PLANNED (next phase after E/F stabilization)
+
+**Goal**: Stabilize and productionize all three `atm-agent-mcp` downstream execution modes:
+
+- `mcp` (`codex mcp-server`)
+- `cli-json` (`codex exec --json`)
+- `app-server` (`codex app-server`)
+
+with one lifecycle model, one mail-injection model, and one TUI streaming/control surface.
+
+Design references:
+
+- `docs/atm-agent-mcp/requirements.md`
+- `docs/atm-agent-mcp/codex-mcp-crate-design.md`
+- `docs/atm-agent-mcp/codex-execution-modes.md`
+- `docs/atm-agent-mcp/app-server-protocol-reference.md`
+- `docs/codex-json-schema.md`
+- `docs/tui-control-protocol.md`
+
+### Phase G Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| G.1 | Mode baseline docs + naming cleanup (`json` -> `cli-json`) | Phase E | 🔄 IN PROGRESS (mostly complete in branch) |
+| G.2 | CLI-JSON streaming verification + idle detection hardening | G.1 | ⏳ PLANNED |
+| G.3 | App-server transport adapter (`CodexTransport` impl) | G.1, G.2 | ⏳ PLANNED |
+| G.4 | Unified turn control + daemon turn-state reporting across all transports | G.3 | ⏳ PLANNED |
+| G.5 | Approval/elicitation bridging parity for app-server | G.4 | ⏳ PLANNED |
+| G.6 | Mail injection parity (`mcp`, `cli-json`, `app-server`) + queue semantics | G.4 | ⏳ PLANNED |
+| G.7 | TUI streaming normalization + daemon pubsub/UDP fanout architecture | G.4, G.6 | ⏳ PLANNED |
+| G.8 | Cross-platform reliability + soak testing (Linux/macOS/Windows) | G.5, G.6, G.7 | ⏳ PLANNED |
+| G.9 | Docs finalization, migration notes, and release gate | G.8 | ⏳ PLANNED |
+
+**Execution model**: G.1 is largely complete in current docs branch. G.2 is a dedicated validation sprint for existing `cli-json` behavior before adding more transport complexity. G.3 enables app-server runtime. G.4 sets cross-transport control and daemon state contracts. G.5 and G.6 run in parallel after G.4. G.7-G.8 harden observability/runtime reliability. G.9 is release readiness.
+
+---
+
+### Sprint G.1 — Mode Baseline Docs + Naming Cleanup (`json` -> `cli-json`)
+
+**Branch**: `feature/pG-s1-cli-json-rename`
+**Crate(s)**: `crates/atm-agent-mcp`, docs updates
+**Depends on**: Phase E
+
+#### Exit Criteria
+
+- [ ] `transport = "json"` removed from code and docs as active value
+- [ ] `transport = "cli-json"` is the canonical non-MCP streaming mode name
+- [ ] Tests updated to use `cli-json`
+- [ ] Config/help text reflects `mcp | cli-json | app-server`
+- [ ] App-server protocol reference doc exists and is linked from mode docs/requirements
+- [ ] `cargo test -p agent-team-mail-mcp` passes
+
+---
+
+### Sprint G.2 — CLI-JSON Streaming Verification + Idle Detection Hardening
+
+**Branch**: `feature/pG-s2-cli-json-verification`
+**Crate(s)**: `crates/atm-agent-mcp`, docs
+**Depends on**: G.1
+
+#### Exit Criteria
+
+- [ ] Validate `cli-json` parser against current Codex event stream samples (real run fixtures)
+- [ ] Validate `cli-json` bidirectional runtime behavior: streamed output is received continuously and mid-turn steering can be injected and observed in the same in-flight turn
+- [ ] Verify idle detection behavior against actual Codex transitions; document fallback behavior
+- [ ] Verify mail injection timing/ordering under long-running turns and repeated idle windows
+- [ ] Add regression tests for event ordering and no-double-delivery under concurrent queue drains
+- [ ] Update `docs/codex-json-schema.md` with any discovered event-shape drift and compatibility handling
+
+---
+
+### Sprint G.3 — App-Server Transport Adapter
+
+**Branch**: `feature/pG-s3-app-server-transport`
+**Crate(s)**: `crates/atm-agent-mcp`
+**Depends on**: G.1, G.2
+
+#### Exit Criteria
+
+- [ ] `AppServerTransport` implements `CodexTransport` abstraction
+- [ ] Stdio JSONL framing handles request/response/notification safely
+- [ ] `initialize` -> `initialized` handshake implemented and validated before thread/turn calls
+- [ ] Runtime protocol/version capability detection is captured at startup; incompatibility is surfaced explicitly (no silent downgrade/failure)
+- [ ] Thread/turn IDs mapped into existing session registry model
+- [ ] `thread/fork` supported and covered by integration tests (forked thread identity/session semantics documented)
+- [ ] Child process crash path implemented: mark affected sessions, clear in-flight turn state, release/repair transport state, and allow clean reconnect/restart by caller
+- [ ] Backpressure handling for app-server overload (`-32001`) implemented with bounded retry/backoff and clear terminal error reporting when retries exhaust
+- [ ] Unknown notifications are non-fatal and logged with schema version context
+- [ ] Integration tests validate startup, turn creation, and graceful shutdown
+
+---
+
+### Sprint G.4 — Unified Turn Control + Daemon Turn-State Reporting Across Transports
+
+**Branch**: `feature/pG-s4-unified-turn-control`
+**Crate(s)**: `crates/atm-agent-mcp`, `crates/atm-daemon`
+**Depends on**: G.3
+
+#### Exit Criteria
+
+- [ ] Common control API for `start_turn`, `steer_turn`, `interrupt_turn`
+- [ ] Active `turn_id` tracking is consistent across `mcp`, `cli-json`, and `app-server`
+- [ ] Turn state (`busy`/`idle`/terminal) is emitted to daemon for all modes via one normalized event path
+- [ ] `turn/steer` stale-turn handling covered by tests
+- [ ] Queue ordering rules (Claude > auto-mail) enforced transport-independently
+
+---
+
+### Sprint G.5 — Approval/Elicitation Bridging Parity (App-Server)
+
+**Branch**: `feature/pG-s5-approval-bridge`
+**Crate(s)**: `crates/atm-agent-mcp`
+**Depends on**: G.4
+
+#### Exit Criteria
+
+- [ ] Approval request events from app-server bridge to MCP-facing flow
+- [ ] Approve/reject path parity with existing MCP transport behavior
+- [ ] Timeout/cancellation semantics consistent across transports
+- [ ] Security review confirms no unsafe default escalation in approvals
+
+---
+
+### Sprint G.6 — Mail Injection Parity + Queue Semantics
+
+**Branch**: `feature/pG-s6-mail-injection-parity`
+**Crate(s)**: `crates/atm-agent-mcp`, `crates/atm-core` (if envelope updates needed)
+**Depends on**: G.4
+
+#### Exit Criteria
+
+- [ ] Shared mail envelope and ack semantics (`mark-read` only after request accepted)
+- [ ] Idle and post-turn injection behavior consistent for all three transports
+- [ ] App-server mail injection strategy is explicit and tested: use `turn/steer` while a turn is active; use new `turn/start` when the session is idle
+- [ ] Replay-safe delivery (`message_id` based dedup expectations) preserved
+- [ ] Burst tests verify bounded queue behavior and no starvation
+
+---
+
+### Sprint G.7 — TUI Streaming Normalization + UDP/PubSub Fanout
+
+**Branch**: `feature/pG-s7-tui-stream-normalization`
+**Crate(s)**: `crates/atm-daemon`, `crates/atm-tui`, `crates/atm-agent-mcp`
+**Depends on**: G.4, G.6
+
+#### Exit Criteria
+
+- [ ] Transport-specific event payloads normalized to one daemon stream contract
+- [ ] Architecture is explicit: `atm-agent-mcp` emits events to daemon; daemon remains the single fanout hub to TUI (pubsub + UDP if enabled); no direct `atm-agent-mcp -> atm-tui` channel
+- [ ] High-rate deltas fan out via daemon pubsub/UDP path without dropping required terminal events
+- [ ] TUI displays consistent item/turn state regardless of source transport
+- [ ] Control protocol compatibility (`control.stdin.request`, `control.interrupt.request`) preserved
+
+---
+
+### Sprint G.8 — Cross-Platform Reliability + Soak Testing
+
+**Branch**: `feature/pG-s8-cross-platform-soak`
+**Crate(s)**: test suites + CI workflows
+**Depends on**: G.5, G.6, G.7
+
+#### Exit Criteria
+
+- [ ] Linux/macOS/Windows CI coverage for all three transports
+- [ ] Windows path/process tests follow `docs/cross-platform-guidelines.md`
+- [ ] Soak tests exercise long-running sessions, repeated steer/interrupt, and reconnect paths
+- [ ] Failure-injection tests cover child crash, pipe break, overload, and timeout handling
+
+---
+
+### Sprint G.9 — Docs Finalization + Release Gate
+
+**Branch**: `feature/pG-s9-release-gate`
+**Crate(s)**: docs + release scripts/checklists
+**Depends on**: G.8
+
+#### Exit Criteria
+
+- [ ] User docs explain transport selection/tradeoffs for Codex and future non-Codex agents
+- [ ] Migration notes included for existing `mcp` and `cli-json` users
+- [ ] Release checklist includes protocol drift check against upstream Codex app-server source
+- [ ] Final integration PR targets `develop` with green CI and QA sign-off
+
+---
+
 ## 17. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
@@ -3176,7 +3365,7 @@ Additional plugins planned (each is a self-contained sprint series):
 | **B** | B.3 | Teams session stabilization | ✅ | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
 | **C** | C.1 | Unified structured JSONL logging | ✅ | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
 | **C** | C.2a | Transport trait + McpTransport refactor | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
-| **C** | C.2b | JsonTransport + stdin queue + integration tests | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
+| **C** | C.2b | CliJsonTransport + stdin queue + integration tests | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
 | **C** | C.3 | Control receiver stub (daemon endpoint + dedupe) | ✅ | [#126](https://github.com/randlee/agent-team-mail/pull/126) |
 | **D** | D.1 | TUI crate + live stream view (read-only) | ✅ | [#134](https://github.com/randlee/agent-team-mail/pull/134) |
 | **D** | D.2 | Interactive controls (stdin inject, interrupt) | ✅ | [#138](https://github.com/randlee/agent-team-mail/pull/138) |
