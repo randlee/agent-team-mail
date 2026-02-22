@@ -157,6 +157,7 @@ fn test_members_command_explicit_team() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.arg("members")
+        .arg("--team")
         .arg("explicit-team")
         .assert()
         .success();
@@ -211,6 +212,7 @@ fn test_status_command_explicit_team() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.arg("status")
+        .arg("--team")
         .arg("explicit-team")
         .assert()
         .success();

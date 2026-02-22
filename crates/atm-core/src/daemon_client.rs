@@ -37,6 +37,57 @@ use std::path::PathBuf;
 /// Protocol version for the socket JSON protocol.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Identifies the origin of a lifecycle event sent via the `hook-event` command.
+///
+/// The `source` field is optional in the hook-event payload for backward
+/// compatibility — callers that do not set it will produce payloads that
+/// deserialise successfully, defaulting to [`LifecycleSourceKind::Unknown`].
+///
+/// # Validation policy
+///
+/// | `kind`        | `session_start` / `session_end` restriction          |
+/// |---------------|------------------------------------------------------|
+/// | `claude_hook` | Team-lead only (strictest)                           |
+/// | `unknown`     | Treated as `claude_hook` (fail-closed default)       |
+/// | `atm_mcp`     | Any team member (MCP proxy manages its own sessions) |
+/// | `agent_hook`  | Any team member (same policy as `atm_mcp`)           |
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleSource {
+    /// Discriminator string identifying the lifecycle event origin.
+    pub kind: LifecycleSourceKind,
+}
+
+impl LifecycleSource {
+    /// Create a [`LifecycleSource`] with the given kind.
+    pub fn new(kind: LifecycleSourceKind) -> Self {
+        Self { kind }
+    }
+}
+
+/// Discriminator for the origin of a lifecycle event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleSourceKind {
+    /// Event originated from a Claude Code hook (e.g., `session-start.py`).
+    ///
+    /// Strictest validation: only the team-lead may emit `session_start` and
+    /// `session_end` events from this source.
+    ClaudeHook,
+    /// Event originated from the `atm-agent-mcp` proxy.
+    ///
+    /// Relaxed validation: any team member may emit lifecycle events because
+    /// the MCP proxy manages its own Codex agent sessions, not the team-lead's
+    /// Claude Code session.
+    AtmMcp,
+    /// Event originated from a non-Claude agent hook adapter (e.g., a Codex or
+    /// Gemini relay script). Same validation policy as [`AtmMcp`](Self::AtmMcp).
+    AgentHook,
+    /// Origin unknown or not set by the sender.
+    ///
+    /// Treated as [`ClaudeHook`](Self::ClaudeHook) (strictest, fail-closed default).
+    Unknown,
+}
+
 /// A request sent from CLI to daemon over the Unix socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SocketRequest {
@@ -909,6 +960,92 @@ mod tests {
         // On Linux and macOS the max PID is 4194304 or similar; i32::MAX exceeds
         // the kernel's PID range and kill() will return ESRCH (no such process).
         assert!(!pid_alive(i32::MAX));
+    }
+
+    // ── LifecycleSource / LifecycleSourceKind ────────────────────────────────
+
+    #[test]
+    fn lifecycle_source_kind_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&LifecycleSourceKind::ClaudeHook).unwrap(),
+            "\"claude_hook\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LifecycleSourceKind::AtmMcp).unwrap(),
+            "\"atm_mcp\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LifecycleSourceKind::AgentHook).unwrap(),
+            "\"agent_hook\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LifecycleSourceKind::Unknown).unwrap(),
+            "\"unknown\""
+        );
+    }
+
+    #[test]
+    fn lifecycle_source_kind_deserializes_snake_case() {
+        let kind: LifecycleSourceKind = serde_json::from_str("\"claude_hook\"").unwrap();
+        assert_eq!(kind, LifecycleSourceKind::ClaudeHook);
+
+        let kind: LifecycleSourceKind = serde_json::from_str("\"atm_mcp\"").unwrap();
+        assert_eq!(kind, LifecycleSourceKind::AtmMcp);
+
+        let kind: LifecycleSourceKind = serde_json::from_str("\"agent_hook\"").unwrap();
+        assert_eq!(kind, LifecycleSourceKind::AgentHook);
+
+        let kind: LifecycleSourceKind = serde_json::from_str("\"unknown\"").unwrap();
+        assert_eq!(kind, LifecycleSourceKind::Unknown);
+    }
+
+    #[test]
+    fn lifecycle_source_round_trip() {
+        let src = LifecycleSource::new(LifecycleSourceKind::AtmMcp);
+        let json = serde_json::to_string(&src).unwrap();
+        assert!(json.contains("\"atm_mcp\""), "serialized: {json}");
+        let decoded: LifecycleSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.kind, LifecycleSourceKind::AtmMcp);
+    }
+
+    #[test]
+    fn hook_event_payload_without_source_is_backward_compatible() {
+        // A payload without the "source" field must still parse as SocketRequest.
+        let json = r#"{
+            "version": 1,
+            "request_id": "req-test",
+            "command": "hook-event",
+            "payload": {
+                "event": "session_start",
+                "agent": "team-lead",
+                "team": "atm-dev",
+                "session_id": "abc-123"
+            }
+        }"#;
+        let req: SocketRequest = serde_json::from_str(json).unwrap();
+        // The payload's "source" field is absent — no panic, no error.
+        assert!(req.payload.get("source").is_none());
+        assert_eq!(req.command, "hook-event");
+    }
+
+    #[test]
+    fn hook_event_payload_with_atm_mcp_source_parses() {
+        let json = r#"{
+            "version": 1,
+            "request_id": "req-mcp",
+            "command": "hook-event",
+            "payload": {
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "codex:abc-123",
+                "source": {"kind": "atm_mcp"}
+            }
+        }"#;
+        let req: SocketRequest = serde_json::from_str(json).unwrap();
+        let source: LifecycleSource =
+            serde_json::from_value(req.payload["source"].clone()).unwrap();
+        assert_eq!(source.kind, LifecycleSourceKind::AtmMcp);
     }
 
     #[test]

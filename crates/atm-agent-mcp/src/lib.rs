@@ -14,6 +14,7 @@ pub mod elicitation;
 pub mod framing;
 pub mod inject;
 pub mod lifecycle;
+pub mod lifecycle_emit;
 pub mod lock;
 pub mod mail_inject;
 pub mod proxy;

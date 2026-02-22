@@ -2718,19 +2718,19 @@ Additionally, when an external agent reconnects with a new session/agent ID, the
 
 #### Exit Criteria
 
-- [ ] `atm teams add-member --session-id <id>` stores session ID in member record
-- [ ] `atm teams add-member --backend-type codex` stores backend type
-- [ ] `atm teams add-member --backend-type human:randlee` stores human backend with username
-- [ ] `atm teams add-member --model gpt5.3-codex` validates against registry; `--model foo` rejected; `--model custom:foo` accepted
-- [ ] Model validation only applies to `add-member` / `update-member`; Claude Code-managed member models are never overwritten or validated
-- [ ] Daemon auto-updates session-id when hook event arrives with new ID for known agent
-- [ ] MCP auto-add/join rejects active-name collisions when `agent_id` differs; idempotent on matching `agent_id`
-- [ ] `atm teams update-member <team> <agent> --session-id <new-id>` updates existing member
-- [ ] `atm teams cleanup` uses session-id for liveness checks on external agents
-- [ ] `human:<username>` backend type is never set as default — must be explicit
-- [ ] Integration tests cover: add with session-id, daemon auto-update, update-member, cleanup with external agent, human backend type parsing
-- [ ] `cargo clippy --workspace -- -D warnings` clean
-- [ ] `cargo test --workspace` passes
+- [x] `atm teams add-member --session-id <id>` stores session ID in member record
+- [x] `atm teams add-member --backend-type codex` stores backend type
+- [x] `atm teams add-member --backend-type human:randlee` stores human backend with username
+- [x] `atm teams add-member --model gpt5.3-codex` validates against registry; `--model foo` rejected; `--model custom:foo` accepted
+- [x] Model validation only applies to `add-member` / `update-member`; Claude Code-managed member models are never overwritten or validated
+- [x] Daemon auto-updates session-id when hook event arrives with new ID for known agent
+- [x] MCP auto-add/join rejects active-name collisions when `agent_id` differs; idempotent on matching `agent_id`
+- [x] `atm teams update-member <team> <agent> --session-id <new-id>` updates existing member
+- [x] `atm teams cleanup` uses session-id for liveness checks on external agents (conservative: unknown = keep)
+- [x] `human:<username>` backend type is never set as default — must be explicit
+- [x] Integration tests cover: add with session-id, daemon auto-update, update-member, cleanup with external agent, human backend type parsing
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo test --workspace` passes (1511 tests)
 
 ---
 
@@ -2775,13 +2775,13 @@ explicit MCP lifecycle emission coverage.
 
 #### Exit Criteria
 
-- [ ] Lifecycle payload supports expandable `source.kind` with backward-compatible handling
-- [ ] Daemon lifecycle handler performs source-aware validation in one command path
-- [ ] `atm-agent-mcp` emits start/idle/end lifecycle events to daemon
-- [ ] Tests cover: source-kind parsing, source-aware authz, MCP lifecycle emission
-- [ ] Docs updated with adapter wiring pattern for future agent hooks
-- [ ] `cargo clippy --workspace -- -D warnings` clean
-- [ ] `cargo test --workspace` passes
+- [x] Lifecycle payload supports expandable `source.kind` with backward-compatible handling
+- [x] Daemon lifecycle handler performs source-aware validation in one command path
+- [x] `atm-agent-mcp` emits start/idle/end lifecycle events to daemon
+- [x] Tests cover: source-kind parsing, source-aware authz, MCP lifecycle emission
+- [x] Docs updated with adapter wiring pattern for future agent hooks
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo test --workspace` passes
 
 ---
 
@@ -2823,8 +2823,8 @@ explicit MCP lifecycle emission coverage.
 | E.3 | Hook-to-daemon state bridge | E.1 (parallel with E.2) | ✅ MERGED (#152) |
 | E.4 | TUI reliability hardening (restart, reconnect, failure injection) | E.3 | ✅ MERGED (#158) |
 | E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ DONE (PR pending) |
-| E.6 | External agent member management and model registry | E.3 | ⏳ PLANNED |
-| E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ⏳ PLANNED |
+| E.6 | External agent member management and model registry | E.3 | ✅ DONE (PR pending) |
+| E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ✅ DONE (PR pending) |
 | E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ MERGED (#162) |
 
 **Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.6 is member management for external agents (Codex/Gemini). E.7 extends lifecycle handling to source-aware validation + MCP lifecycle emission. E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4. E.6 can run parallel to E.4/E.5. E.7 starts after E.6 interface contracts settle.

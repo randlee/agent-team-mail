@@ -361,6 +361,9 @@ impl Plugin for IssuesPlugin {
             backend_type: None,
             is_active: Some(true),
             last_active: Some(now_ms),
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
             unknown_fields: HashMap::new(),
         };
 
