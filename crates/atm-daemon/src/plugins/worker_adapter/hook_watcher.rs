@@ -932,7 +932,6 @@ mod tests {
             "Claude Code member sessionId should not be updated by auto_update_member_session_id"
         );
     }
-
     #[test]
     fn test_auto_update_member_session_id_scoped_to_target_team() {
         let dir = tempfile::tempdir().unwrap();
