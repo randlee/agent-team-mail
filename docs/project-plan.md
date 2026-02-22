@@ -3169,6 +3169,7 @@ Design references:
 #### Exit Criteria
 
 - [ ] Validate `cli-json` parser against current Codex event stream samples (real run fixtures)
+- [ ] Validate `cli-json` bidirectional runtime behavior: streamed output is received continuously and mid-turn steering can be injected and observed in the same in-flight turn
 - [ ] Verify idle detection behavior against actual Codex transitions; document fallback behavior
 - [ ] Verify mail injection timing/ordering under long-running turns and repeated idle windows
 - [ ] Add regression tests for event ordering and no-double-delivery under concurrent queue drains
@@ -3186,8 +3187,12 @@ Design references:
 
 - [ ] `AppServerTransport` implements `CodexTransport` abstraction
 - [ ] Stdio JSONL framing handles request/response/notification safely
+- [ ] `initialize` -> `initialized` handshake implemented and validated before thread/turn calls
+- [ ] Runtime protocol/version capability detection is captured at startup; incompatibility is surfaced explicitly (no silent downgrade/failure)
 - [ ] Thread/turn IDs mapped into existing session registry model
 - [ ] `thread/fork` supported and covered by integration tests (forked thread identity/session semantics documented)
+- [ ] Child process crash path implemented: mark affected sessions, clear in-flight turn state, release/repair transport state, and allow clean reconnect/restart by caller
+- [ ] Backpressure handling for app-server overload (`-32001`) implemented with bounded retry/backoff and clear terminal error reporting when retries exhaust
 - [ ] Unknown notifications are non-fatal and logged with schema version context
 - [ ] Integration tests validate startup, turn creation, and graceful shutdown
 
@@ -3234,6 +3239,7 @@ Design references:
 
 - [ ] Shared mail envelope and ack semantics (`mark-read` only after request accepted)
 - [ ] Idle and post-turn injection behavior consistent for all three transports
+- [ ] App-server mail injection strategy is explicit and tested: use `turn/steer` while a turn is active; use new `turn/start` when the session is idle
 - [ ] Replay-safe delivery (`message_id` based dedup expectations) preserved
 - [ ] Burst tests verify bounded queue behavior and no starvation
 
