@@ -20,6 +20,11 @@ use uuid::Uuid;
 
 use crate::util::settings::get_home_dir;
 
+/// Number of backups to retain per team. Older snapshots are pruned after
+/// each backup or auto-backup-on-resume. Increase if longer rollback windows
+/// are needed.
+const BACKUP_RETENTION_COUNT: usize = 5;
+
 /// List all teams on this machine
 #[derive(Args, Debug)]
 pub struct TeamsArgs {
@@ -40,6 +45,10 @@ pub enum TeamsCommand {
     Resume(ResumeArgs),
     /// Remove stale (dead) members from a team
     Cleanup(CleanupArgs),
+    /// Back up a team's config, inboxes, and tasks to a timestamped snapshot directory
+    Backup(BackupArgs),
+    /// Restore a team's members, inboxes, and tasks from a backup snapshot
+    Restore(RestoreArgs),
 }
 
 /// Add a member to a team (no agent spawn)
@@ -110,6 +119,40 @@ pub struct CleanupArgs {
     force: bool,
 }
 
+/// Back up a team's config, inboxes, and tasks
+#[derive(Args, Debug)]
+pub struct BackupArgs {
+    /// Team name
+    team: String,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+/// Restore a team from a backup snapshot (members, inboxes, and tasks)
+#[derive(Args, Debug)]
+pub struct RestoreArgs {
+    /// Team name
+    team: String,
+
+    /// Restore from a specific backup path (default: latest backup)
+    #[arg(long)]
+    from: Option<PathBuf>,
+
+    /// Show what would be restored without making changes
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Skip restoring the task list (default: restore tasks if present in backup)
+    #[arg(long)]
+    skip_tasks: bool,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
 /// Team summary information
 #[derive(Debug)]
 struct TeamSummary {
@@ -125,6 +168,8 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
             TeamsCommand::AddMember(add_args) => add_member(add_args),
             TeamsCommand::Resume(resume_args) => resume(resume_args),
             TeamsCommand::Cleanup(cleanup_args) => cleanup(cleanup_args),
+            TeamsCommand::Backup(backup_args) => backup(backup_args),
+            TeamsCommand::Restore(restore_args) => restore(restore_args),
         };
     }
 
@@ -350,6 +395,21 @@ fn resume(args: ResumeArgs) -> Result<()> {
     // Load team config
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
     let old_session_id = team_config.lead_session_id.clone();
+
+    // Auto-backup before making any state changes — provides a safety net for every resume.
+    // Non-fatal: a backup failure logs a warning but does not abort the resume.
+    match do_backup(&home_dir, &args.team, false) {
+        Ok(backup_path) => {
+            eprintln!("Auto-backup created: {}", backup_path.display());
+            // Also prune old backups after a successful auto-backup (non-fatal).
+            if let Err(e) = prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT) {
+                eprintln!("Warning: Auto-prune failed (proceeding anyway): {e}");
+            }
+        }
+        Err(e) => {
+            eprintln!("Warning: Auto-backup failed (proceeding anyway): {e}");
+        }
+    }
 
     // Check existing session liveness if there is one.
     // NOTE: query_session uses a bare agent name ("team-lead") without team qualification.
@@ -679,6 +739,360 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         count: Some(removed_names.len() as u64),
         ..Default::default()
     });
+
+    Ok(())
+}
+
+/// Core backup logic: creates a timestamped snapshot directory and returns its path.
+///
+/// Copies `config.json`, all inbox files, and the tasks directory (if present) for
+/// `team` into `~/.claude/teams/.backups/<team>/<timestamp>/`.
+///
+/// This function is extracted so that `resume()` can call it directly (auto-backup)
+/// without needing a full `BackupArgs` struct.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The team directory does not exist
+/// - `config.json` is missing from the team directory
+/// - Any filesystem I/O operation fails (directory creation, file copy)
+fn do_backup(home_dir: &Path, team: &str, json: bool) -> Result<PathBuf> {
+    let team_dir = home_dir.join(".claude/teams").join(team);
+
+    if !team_dir.exists() {
+        anyhow::bail!(
+            "Team '{}' not found (directory {} doesn't exist)",
+            team,
+            team_dir.display()
+        );
+    }
+
+    let config_path = team_dir.join("config.json");
+    if !config_path.exists() {
+        anyhow::bail!("Team config not found at {}", config_path.display());
+    }
+
+    // Build timestamped backup directory
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let backup_dir = home_dir
+        .join(".claude/teams/.backups")
+        .join(team)
+        .join(&timestamp);
+
+    let backup_inboxes_dir = backup_dir.join("inboxes");
+    fs::create_dir_all(&backup_inboxes_dir)?;
+
+    // Copy config.json
+    let backup_config = backup_dir.join("config.json");
+    fs::copy(&config_path, &backup_config)?;
+
+    // Copy all inbox files
+    let inboxes_dir = team_dir.join("inboxes");
+    let mut inbox_count = 0usize;
+    if inboxes_dir.exists() {
+        for entry in fs::read_dir(&inboxes_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file()
+                && path.extension().and_then(|e| e.to_str()) == Some("json")
+            {
+                let dest = backup_inboxes_dir.join(path.file_name().unwrap());
+                fs::copy(&path, &dest)?;
+                inbox_count += 1;
+            }
+        }
+    }
+
+    // Copy tasks directory if it exists
+    let tasks_src = home_dir.join(".claude/tasks").join(team);
+    let tasks_dst = backup_dir.join("tasks");
+    if tasks_src.exists() {
+        fs::create_dir_all(&tasks_dst)?;
+        for entry in fs::read_dir(&tasks_src)? {
+            let entry = entry?;
+            if entry.path().is_file() {
+                fs::copy(entry.path(), tasks_dst.join(entry.file_name()))?;
+            }
+        }
+    }
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "teams_backup",
+        team: Some(team.to_string()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: std::env::var("ATM_IDENTITY").ok(),
+        agent_name: std::env::var("ATM_IDENTITY").ok(),
+        result: Some("ok".to_string()),
+        count: Some(inbox_count as u64),
+        ..Default::default()
+    });
+
+    if json {
+        let output = serde_json::json!({
+            "action": "backup",
+            "team": team,
+            "backup_path": backup_dir.to_string_lossy(),
+            "inbox_count": inbox_count,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Backup created: {}", backup_dir.display());
+        println!("  config.json + {} inbox file(s) copied", inbox_count);
+    }
+
+    Ok(backup_dir)
+}
+
+/// Implement `atm teams backup <team>`
+///
+/// Creates a timestamped snapshot of the team's `config.json`, all inbox files,
+/// and the tasks directory under `~/.claude/teams/.backups/<team>/<timestamp>/`.
+/// Automatically prunes old backups keeping only the last 5.
+fn backup(args: BackupArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    do_backup(&home_dir, &args.team, args.json)?;
+    prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT)?;
+    Ok(())
+}
+
+/// Prune old backups for a team, keeping the most recent `keep` backups.
+///
+/// Backup directories are named with ISO timestamps so lexicographic sort equals
+/// chronological order.  All but the last `keep` entries are removed.
+fn prune_old_backups(home_dir: &Path, team: &str, keep: usize) -> Result<()> {
+    let backups_dir = home_dir.join(".claude/teams/.backups").join(team);
+    if !backups_dir.exists() {
+        return Ok(());
+    }
+
+    let mut entries: Vec<_> = fs::read_dir(&backups_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+
+    // Sort lexicographically by name (ISO timestamp dirs sort chronologically)
+    entries.sort_by_key(|e| e.file_name());
+
+    // Remove all but the last `keep` entries
+    let to_remove = entries.len().saturating_sub(keep);
+    for entry in entries.iter().take(to_remove) {
+        fs::remove_dir_all(entry.path())?;
+    }
+
+    Ok(())
+}
+
+/// Implement `atm teams restore <team>`
+///
+/// Restores non-team-lead members and their inbox files from a backup snapshot.
+/// The current `leadSessionId` is never overwritten.
+fn restore(args: RestoreArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let config_path = team_dir.join("config.json");
+
+    if !config_path.exists() {
+        anyhow::bail!(
+            "Team '{}' not found (directory {} doesn't exist)",
+            args.team,
+            team_dir.display()
+        );
+    }
+
+    // Locate the backup directory to restore from
+    let backup_dir: PathBuf = if let Some(ref from_path) = args.from {
+        from_path.clone()
+    } else {
+        // Find the latest backup by lexicographic sort of timestamps
+        let backups_root = home_dir
+            .join(".claude/teams/.backups")
+            .join(&args.team);
+
+        if !backups_root.exists() {
+            anyhow::bail!("No backup found for team '{}'", args.team);
+        }
+
+        let mut entries: Vec<PathBuf> = fs::read_dir(&backups_root)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+
+        entries.sort();
+        entries.into_iter().last().ok_or_else(|| {
+            anyhow::anyhow!("No backup found for team '{}'", args.team)
+        })?
+    };
+
+    if !backup_dir.exists() {
+        anyhow::bail!("Backup directory not found: {}", backup_dir.display());
+    }
+
+    let backup_config_path = backup_dir.join("config.json");
+    if !backup_config_path.exists() {
+        anyhow::bail!("Backup config not found at {}", backup_config_path.display());
+    }
+
+    // Load backup config
+    let backup_config: TeamConfig =
+        serde_json::from_str(&fs::read_to_string(&backup_config_path)?)?;
+
+    // Load current config (to preserve leadSessionId and existing members)
+    let current_config: TeamConfig =
+        serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+
+    let backup_inboxes_dir = backup_dir.join("inboxes");
+    let team_inboxes_dir = team_dir.join("inboxes");
+
+    // Determine which members to restore (skip team-lead, skip already-present)
+    let restore_members: Vec<&agent_team_mail_core::schema::AgentMember> = backup_config
+        .members
+        .iter()
+        .filter(|m| m.name != "team-lead")
+        .filter(|m| {
+            !current_config
+                .members
+                .iter()
+                .any(|cm| cm.name == m.name)
+        })
+        .collect();
+
+    // Determine which inboxes to restore
+    let restore_inboxes: Vec<PathBuf> = backup_config
+        .members
+        .iter()
+        .filter(|m| m.name != "team-lead")
+        .map(|m| backup_inboxes_dir.join(format!("{}.json", m.name)))
+        .filter(|p| p.exists())
+        .collect();
+
+    // Count tasks that would be restored for dry-run reporting
+    let tasks_backup = backup_dir.join("tasks");
+    let task_count_would_restore: usize = if !args.skip_tasks && tasks_backup.exists() {
+        fs::read_dir(&tasks_backup)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .count()
+    } else {
+        0
+    };
+
+    if args.dry_run {
+        if args.json {
+            let output = serde_json::json!({
+                "action": "restore",
+                "team": args.team,
+                "backup_path": backup_dir.to_string_lossy(),
+                "dry_run": true,
+                "would_restore_members": restore_members.iter().map(|m| &m.name).collect::<Vec<_>>(),
+                "would_restore_inboxes": restore_inboxes.iter()
+                    .filter_map(|p| p.file_name())
+                    .map(|n| n.to_string_lossy())
+                    .collect::<Vec<_>>(),
+                "would_restore_tasks": task_count_would_restore,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            println!("Dry run — would restore from: {}", backup_dir.display());
+            println!("  Members to add: {}", restore_members.len());
+            for m in &restore_members {
+                println!("    + {}", m.name);
+            }
+            println!("  Inboxes to restore: {}", restore_inboxes.len());
+            for p in &restore_inboxes {
+                if let Some(name) = p.file_name() {
+                    println!("    + {}", name.to_string_lossy());
+                }
+            }
+            println!("  Tasks to restore: {task_count_would_restore}");
+        }
+        return Ok(());
+    }
+
+    // Restore members by updating config under lock
+    let lock_path = config_path.with_extension("lock");
+    let member_count = restore_members.len();
+    {
+        let _lock = acquire_lock(&lock_path, 5)
+            .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
+
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+
+        // NEVER overwrite leadSessionId
+        for member in restore_members {
+            if !config.members.iter().any(|m| m.name == member.name) {
+                config.members.push(member.clone());
+            }
+        }
+
+        write_team_config(&config_path, &config)?;
+    }
+
+    // Restore inbox files
+    if !team_inboxes_dir.exists() {
+        fs::create_dir_all(&team_inboxes_dir)?;
+    }
+
+    let mut inbox_count = 0usize;
+    for backup_inbox in &restore_inboxes {
+        if let Some(filename) = backup_inbox.file_name() {
+            let dest = team_inboxes_dir.join(filename);
+            fs::copy(backup_inbox, &dest)?;
+            inbox_count += 1;
+        }
+    }
+
+    // Restore tasks directory unless --skip-tasks is set
+    let mut task_count = 0usize;
+    if !args.skip_tasks && tasks_backup.exists() {
+        let tasks_dst = home_dir.join(".claude/tasks").join(&args.team);
+        fs::create_dir_all(&tasks_dst)?;
+        for entry in fs::read_dir(&tasks_backup)? {
+            let entry = entry?;
+            if entry.path().is_file() {
+                fs::copy(entry.path(), tasks_dst.join(entry.file_name()))?;
+                task_count += 1;
+            }
+        }
+    }
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "teams_restore",
+        team: Some(args.team.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: std::env::var("ATM_IDENTITY").ok(),
+        agent_name: std::env::var("ATM_IDENTITY").ok(),
+        result: Some("ok".to_string()),
+        count: Some((member_count + inbox_count + task_count) as u64),
+        ..Default::default()
+    });
+
+    if args.json {
+        let output = serde_json::json!({
+            "action": "restore",
+            "team": args.team,
+            "backup_path": backup_dir.to_string_lossy(),
+            "members_restored": member_count,
+            "inboxes_restored": inbox_count,
+            "tasks_restored": task_count,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!(
+            "Restored from: {}",
+            backup_dir.display()
+        );
+        println!(
+            "  {} member(s) added, {} inbox file(s) restored, {} task file(s) restored",
+            member_count, inbox_count, task_count
+        );
+    }
 
     Ok(())
 }
@@ -1082,6 +1496,302 @@ mod tests {
             match original_session {
                 Some(v) => std::env::set_var("CLAUDE_SESSION_ID", v),
                 None => std::env::remove_var("CLAUDE_SESSION_ID"),
+            }
+        }
+    }
+
+    // ---- backup / restore unit tests ----
+
+    fn set_atm_home(temp_dir: &TempDir) -> String {
+        temp_dir.path().to_str().unwrap().to_string()
+    }
+
+    #[test]
+    #[serial]
+    fn test_backup_creates_timestamped_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        // Create an inbox file for the publisher
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        let args = BackupArgs { team: "atm-dev".to_string(), json: false };
+        let result = backup(args);
+        assert!(result.is_ok(), "backup should succeed: {result:?}");
+
+        // Verify backup root exists with a timestamped subdirectory
+        let backups_root = temp_dir
+            .path()
+            .join(".claude/teams/.backups/atm-dev");
+        assert!(backups_root.exists(), "backups root should exist");
+
+        let entries: Vec<_> = fs::read_dir(&backups_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "should have exactly one timestamped backup dir");
+
+        let backup_dir = entries[0].path();
+        assert!(backup_dir.join("config.json").exists(), "config.json should be backed up");
+        assert!(backup_dir.join("inboxes/publisher.json").exists(), "inbox should be backed up");
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_backup_no_team_returns_err() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        let args = BackupArgs { team: "nonexistent".to_string(), json: false };
+        let result = backup(args);
+        assert!(result.is_err(), "backup of nonexistent team should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("nonexistent"), "error should name the team: {msg}");
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_from_backup() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        // Create publisher inbox
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, r#"[{"from":"team-lead","text":"hello","timestamp":"2026-01-01T00:00:00Z","read":false}]"#).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        // Create a backup first
+        let backup_args = BackupArgs { team: "atm-dev".to_string(), json: false };
+        backup(backup_args).unwrap();
+
+        // Remove the publisher from the team (simulate loss)
+        {
+            let config_path = team_dir.join("config.json");
+            // Create placeholder for atomic swap
+            let placeholder = config_path.with_extension("placeholder");
+            fs::copy(&config_path, &placeholder).unwrap();
+
+            let mut config: TeamConfig =
+                serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+            config.members.retain(|m| m.name == "team-lead");
+            write_team_config(&config_path, &config).unwrap();
+            let _ = fs::remove_file(&placeholder);
+        }
+        // Remove inbox too
+        fs::remove_file(&inbox).unwrap();
+
+        // Now restore
+        let restore_args = RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            dry_run: false,
+            skip_tasks: false,
+            json: false,
+        };
+        let result = restore(restore_args);
+        assert!(result.is_ok(), "restore should succeed: {result:?}");
+
+        // Verify publisher is back in config
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            config.members.iter().any(|m| m.name == "publisher"),
+            "publisher should be restored to config"
+        );
+
+        // Verify inbox is restored
+        assert!(inbox.exists(), "publisher inbox should be restored");
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_dry_run_makes_no_changes() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        // Create backup
+        backup(BackupArgs { team: "atm-dev".to_string(), json: false }).unwrap();
+
+        // Remove publisher
+        {
+            let config_path = team_dir.join("config.json");
+            let mut config: TeamConfig =
+                serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+            config.members.retain(|m| m.name == "team-lead");
+            // Write directly (no atomic swap needed in tests)
+            fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        }
+        fs::remove_file(&inbox).unwrap();
+
+        // Dry-run restore
+        let restore_args = RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            dry_run: true,
+            skip_tasks: false,
+            json: false,
+        };
+        let result = restore(restore_args);
+        assert!(result.is_ok(), "dry-run restore should succeed: {result:?}");
+
+        // Publisher should NOT be in config after dry run
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            !config.members.iter().any(|m| m.name == "publisher"),
+            "publisher should NOT be added by dry run"
+        );
+
+        // Inbox should NOT exist after dry run
+        assert!(!inbox.exists(), "publisher inbox should NOT be restored by dry run");
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_skips_team_lead() {
+        // team-lead in a backup should never be added again as a duplicate
+        // and never replace the current team-lead entry.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        // Create a backup
+        backup(BackupArgs { team: "atm-dev".to_string(), json: false }).unwrap();
+
+        let restore_args = RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            dry_run: false,
+            skip_tasks: false,
+            json: false,
+        };
+        restore(restore_args).unwrap();
+
+        // team-lead should appear exactly once
+        let team_dir = temp_dir.path().join(".claude/teams/atm-dev");
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let lead_count = config.members.iter().filter(|m| m.name == "team-lead").count();
+        assert_eq!(lead_count, 1, "team-lead should appear exactly once after restore");
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_preserves_lead_session_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        // Backup (captures "old-session-id-1234" from create_test_team)
+        backup(BackupArgs { team: "atm-dev".to_string(), json: false }).unwrap();
+
+        // Update leadSessionId to a new value in the current config
+        let new_session_id = "new-session-after-backup";
+        {
+            let config_path = team_dir.join("config.json");
+            let mut config: TeamConfig =
+                serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+            config.lead_session_id = new_session_id.to_string();
+            fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        }
+
+        // Restore — should not overwrite leadSessionId
+        let restore_args = RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            dry_run: false,
+            skip_tasks: false,
+            json: false,
+        };
+        restore(restore_args).unwrap();
+
+        // Verify leadSessionId is still the post-backup value
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            config.lead_session_id, new_session_id,
+            "leadSessionId must not be overwritten by restore"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
             }
         }
     }
@@ -1548,5 +2258,215 @@ mod tests {
                 None => std::env::remove_var("CLAUDE_SESSION_ID"),
             }
         }
+    }
+
+    // ---- tasks backup / restore unit tests ----
+
+    /// Create a tasks directory for a team with a couple of sample task files.
+    fn create_test_tasks(temp_dir: &TempDir, team_name: &str) -> PathBuf {
+        let tasks_dir = temp_dir
+            .path()
+            .join(".claude/tasks")
+            .join(team_name);
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(tasks_dir.join("task-1.json"), r#"{"id":"task-1","status":"open"}"#).unwrap();
+        fs::write(tasks_dir.join("task-2.json"), r#"{"id":"task-2","status":"done"}"#).unwrap();
+        tasks_dir
+    }
+
+    #[test]
+    #[serial]
+    fn test_backup_includes_tasks() {
+        // Backup should copy the tasks directory into the snapshot.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+        create_test_tasks(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        let args = BackupArgs { team: "atm-dev".to_string(), json: false };
+        backup(args).unwrap();
+
+        // Find the backup directory
+        let backups_root = temp_dir.path().join(".claude/teams/.backups/atm-dev");
+        let backup_dir = fs::read_dir(&backups_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .next()
+            .expect("backup dir should exist")
+            .path();
+
+        let tasks_backup = backup_dir.join("tasks");
+        assert!(tasks_backup.exists(), "tasks/ should exist in backup");
+        assert!(
+            tasks_backup.join("task-1.json").exists(),
+            "task-1.json should be in backup"
+        );
+        assert!(
+            tasks_backup.join("task-2.json").exists(),
+            "task-2.json should be in backup"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_includes_tasks_by_default() {
+        // Restore without --skip-tasks should copy task files back.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+        let tasks_dir = create_test_tasks(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        // Create backup (includes tasks)
+        backup(BackupArgs { team: "atm-dev".to_string(), json: false }).unwrap();
+
+        // Remove the tasks directory to simulate loss
+        fs::remove_dir_all(&tasks_dir).unwrap();
+        assert!(!tasks_dir.exists(), "tasks dir should be removed before restore");
+
+        // Restore without --skip-tasks
+        let restore_args = RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            dry_run: false,
+            skip_tasks: false,
+            json: false,
+        };
+        restore(restore_args).unwrap();
+
+        assert!(
+            tasks_dir.join("task-1.json").exists(),
+            "task-1.json should be restored"
+        );
+        assert!(
+            tasks_dir.join("task-2.json").exists(),
+            "task-2.json should be restored"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_skip_tasks_flag() {
+        // When --skip-tasks is set, tasks should NOT be restored even if present in backup.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+        let tasks_dir = create_test_tasks(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        // Create backup (includes tasks)
+        backup(BackupArgs { team: "atm-dev".to_string(), json: false }).unwrap();
+
+        // Remove the tasks directory
+        fs::remove_dir_all(&tasks_dir).unwrap();
+
+        // Restore with --skip-tasks
+        let restore_args = RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            dry_run: false,
+            skip_tasks: true,
+            json: false,
+        };
+        restore(restore_args).unwrap();
+
+        // Tasks directory should remain absent
+        assert!(!tasks_dir.exists(), "tasks dir should NOT be restored when --skip-tasks is set");
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_prune_old_backups_keeps_last_5() {
+        // Create 7 backup directories, prune with keep=5, verify only last 5 remain.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        let backups_dir = temp_dir
+            .path()
+            .join(".claude/teams/.backups/my-team");
+        fs::create_dir_all(&backups_dir).unwrap();
+
+        // Create 7 fake timestamped directories (lexicographic order matters)
+        let names: Vec<&str> = vec![
+            "20260101T000000Z",
+            "20260102T000000Z",
+            "20260103T000000Z",
+            "20260104T000000Z",
+            "20260105T000000Z",
+            "20260106T000000Z",
+            "20260107T000000Z",
+        ];
+        for name in &names {
+            fs::create_dir_all(backups_dir.join(name)).unwrap();
+        }
+
+        prune_old_backups(temp_dir.path(), "my-team", 5).unwrap();
+
+        let remaining: Vec<_> = fs::read_dir(&backups_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(remaining.len(), 5, "should keep only 5 backups after prune");
+
+        // The oldest 2 should have been removed
+        assert!(!backups_dir.join("20260101T000000Z").exists(), "oldest backup should be pruned");
+        assert!(!backups_dir.join("20260102T000000Z").exists(), "second oldest should be pruned");
+        assert!(backups_dir.join("20260103T000000Z").exists(), "third oldest should remain");
+        assert!(backups_dir.join("20260107T000000Z").exists(), "newest should remain");
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_prune_no_backups_is_noop() {
+        // prune_old_backups on a nonexistent directory should return Ok without error.
+        let temp_dir = TempDir::new().unwrap();
+        // The .backups directory does not exist — this must be a clean no-op.
+        let result = prune_old_backups(temp_dir.path(), "ghost-team", 5);
+        assert!(result.is_ok(), "prune on nonexistent dir should be Ok: {result:?}");
     }
 }
