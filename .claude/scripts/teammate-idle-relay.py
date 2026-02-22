@@ -159,6 +159,7 @@ def main() -> int:
             "agent": agent,
             "team": team,
             "received_at": received_at,
+            "source": {"kind": "claude_hook"},
         })
     except Exception:
         pass  # Fail-open

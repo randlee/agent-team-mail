@@ -100,6 +100,7 @@ class TestSessionEnd(unittest.TestCase):
         self.assertEqual(request["payload"]["agent"], "team-lead")
         self.assertEqual(request["payload"]["team"], "atm-dev")
         self.assertEqual(request["payload"]["reason"], "session_exit")
+        self.assertEqual(request["payload"]["source"]["kind"], "claude_hook")
 
     def test_socket_error_exit_zero(self):
         """Socket error → still exits 0 (fail-open)."""

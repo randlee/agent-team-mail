@@ -240,6 +240,7 @@ class TestSessionStartSocketSend(unittest.TestCase):
         self.assertEqual(request["payload"]["session_id"], "unique-sess-id")
         self.assertEqual(request["payload"]["agent"], "team-lead")
         self.assertEqual(request["payload"]["team"], "atm-dev")
+        self.assertEqual(request["payload"]["source"]["kind"], "claude_hook")
 
 
 class TestSessionStartGuards(unittest.TestCase):

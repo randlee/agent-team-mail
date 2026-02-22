@@ -202,6 +202,7 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
         self.assertEqual(request["command"], "hook-event")
         self.assertEqual(request["payload"]["event"], "teammate_idle")
         self.assertEqual(request["payload"]["agent"], "arch-ctm")
+        self.assertEqual(request["payload"]["source"]["kind"], "claude_hook")
         self.assertIn("received_at", request["payload"])
         self.assertRegex(
             request["payload"]["received_at"],
