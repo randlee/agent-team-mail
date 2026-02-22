@@ -200,6 +200,12 @@ pub(crate) struct JsonCodecTransport {
     team: String,
     /// Shared idle flag: set to `true` by background task when `idle` JSONL event seen.
     idle_flag: Arc<AtomicBool>,
+    /// Turn state tracker using the shared `stream_norm` abstraction.
+    ///
+    /// `JsonCodecTransport` uses a `type` field rather than `method` for its cli-json
+    /// events, but expresses turn-lifecycle transitions as `TurnState` mutations from
+    /// `stream_norm`.  This demonstrates the shared abstraction between transports.
+    cli_json_turn_state: Arc<Mutex<crate::stream_norm::TurnState>>,
 }
 
 impl JsonCodecTransport {
@@ -220,6 +226,7 @@ impl JsonCodecTransport {
             config,
             team,
             idle_flag: Arc::new(AtomicBool::new(false)),
+            cli_json_turn_state: Arc::new(Mutex::new(crate::stream_norm::TurnState::Idle)),
         }
     }
 }
@@ -296,11 +303,14 @@ impl CodexTransport for JsonCodecTransport {
         let (mut duplex_write, duplex_read) = tokio::io::duplex(65_536);
 
         let idle_flag = Arc::clone(&self.idle_flag);
+        let cli_json_turn_state = Arc::clone(&self.cli_json_turn_state);
         let team_for_task = self.team.clone();
 
         // Background task: read lines from the real child stdout, detect idle/done
         // events, and forward everything to the duplex write half.
         tokio::spawn(async move {
+            use crate::stream_norm::{TurnState, TurnStatus};
+
             let reader = BufReader::new(child_stdout);
             let mut lines = reader.lines();
 
@@ -308,6 +318,8 @@ impl CodexTransport for JsonCodecTransport {
                 match parse_event_type(&line) {
                     TransportEventType::Idle => {
                         idle_flag.store(true, Ordering::SeqCst);
+                        // Also reflect idle via the shared stream_norm TurnState.
+                        *cli_json_turn_state.lock().await = TurnState::Idle;
                         emit_event_best_effort(EventFields {
                             level: "info",
                             source: "atm-agent-mcp",
@@ -326,8 +338,13 @@ impl CodexTransport for JsonCodecTransport {
                             result: Some("cli-json".to_string()),
                             ..Default::default()
                         });
-                        // Reset idle flag on done (session complete)
+                        // Reset idle flag on done (session complete).
                         idle_flag.store(false, Ordering::SeqCst);
+                        // Reflect terminal state via the shared stream_norm TurnState.
+                        *cli_json_turn_state.lock().await = TurnState::Terminal {
+                            turn_id: String::new(),
+                            status: TurnStatus::Completed,
+                        };
                     }
                     _ => {
                         // Reset idle flag on any other event (agent is active)
@@ -364,11 +381,763 @@ impl CodexTransport for JsonCodecTransport {
     }
 }
 
+// ─── AppServerTransport ───────────────────────────────────────────────────────
+
+/// Minimum supported app-server protocol version (string comparison; acceptable for semver at
+/// this stage).  Versions below this string cause a `warn`-level log AND return an `Err`
+/// from [`AppServerTransport::spawn`] / [`AppServerTransport::spawn_from_io`].
+/// Protocol version incompatibility is surfaced explicitly — no silent downgrade or silent
+/// failure is permitted.
+const MIN_SUPPORTED_PROTOCOL_VERSION: &str = "2.0";
+
+/// Transport that spawns `codex app-server` and communicates via the app-server
+/// JSON-RPC 2.0 JSONL protocol.
+///
+/// Unlike [`McpTransport`] and [`JsonCodecTransport`], this transport performs
+/// the MCP-style `initialize` / `initialized` handshake inside [`Self::spawn`]
+/// before returning the [`RawChildIo`].  This guarantees that downstream proxy
+/// code never sends turn or thread requests before the protocol handshake is
+/// complete.
+///
+/// # Stdout isolation
+///
+/// Child stdout is always piped (never inherited from the parent process).
+/// The `atm-agent-mcp` binary uses its own stdout for JSON-RPC with upstream
+/// (Claude).  Letting child stdout bleed into parent stdout would corrupt that
+/// channel.
+///
+/// # Turn state
+///
+/// A background task reads JSONL lines from child stdout, parses them with
+/// [`crate::stream_norm::parse_app_server_notification`], and maintains a
+/// per-thread [`crate::stream_norm::TurnState`].  The `is_idle()` trait method
+/// returns `true` only when all threads are in the `Idle` state.
+///
+/// # Crash handling
+///
+/// When child stdout closes (EOF), the background task marks all active threads
+/// as [`crate::stream_norm::TurnState::Terminal`] with
+/// [`crate::stream_norm::TurnStatus::Failed`] and clears the `initialized` flag.
+
+#[derive(Debug)]
+pub(crate) struct AppServerTransport {
+    config: AgentMcpConfig,
+    team: String,
+    /// Thread ID -> ATM session ID mapping.
+    ///
+    /// This is the transport-local thread registry. It maps Codex `threadId` values to
+    /// ATM session identifiers within this transport instance.
+    /// Integration with the shared `SessionRegistry` in `session.rs` (which carries
+    /// `SessionStatus` and `ThreadState` per ATM identity) is deferred to Sprint G.4,
+    /// which will wire this transport's turn events into the daemon-facing session model.
+    session_registry: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    /// Currently active turn state per thread_id.
+    turn_state: Arc<Mutex<std::collections::HashMap<String, crate::stream_norm::TurnState>>>,
+    /// Protocol version from initialize response.
+    protocol_version: Arc<Mutex<Option<String>>>,
+    /// Whether the initialize/initialized handshake has completed.
+    initialized: Arc<AtomicBool>,
+    /// Idle flag passed to [`RawChildIo`].
+    ///
+    /// Set to `false` when a `TurnStarted` notification is received (agent is busy),
+    /// and set to `true` when a `TurnCompleted` notification is received and all
+    /// threads are idle.  Set to `false` on child crash (EOF).
+    ///
+    /// This is distinct from `initialized` (which tracks handshake completion).
+    idle_flag: Arc<AtomicBool>,
+    /// Pending request-response correlation channels.
+    ///
+    /// When a request is sent that expects a response (e.g. `thread/fork`), a
+    /// oneshot sender is inserted under the request ID. The background task
+    /// routes incoming responses to the matching sender.
+    pending_responses: Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+}
+
+impl AppServerTransport {
+    /// Create a new `AppServerTransport` for the given config and team.
+    ///
+    /// Emits a `transport_init` structured log event.
+    pub fn new(config: AgentMcpConfig, team: impl Into<String>) -> Self {
+        let team = team.into();
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm-agent-mcp",
+            action: "transport_init",
+            team: Some(team.clone()),
+            result: Some("app-server".to_string()),
+            ..Default::default()
+        });
+        Self {
+            config,
+            team,
+            session_registry: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            turn_state: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            protocol_version: Arc::new(Mutex::new(None)),
+            initialized: Arc::new(AtomicBool::new(false)),
+            idle_flag: Arc::new(AtomicBool::new(false)),
+            pending_responses: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// Send a JSONL request to the child process stdin with bounded retry/backoff for
+    /// write-level errors.
+    ///
+    /// Retries up to `MAX_BACKPRESSURE_RETRIES` times with exponential backoff starting
+    /// at 50 ms.  Returns `Err` with a descriptive message if all retries are exhausted.
+    ///
+    /// This function handles write-level retries for stdin buffering errors only.
+    /// For application-level `-32001` overload responses, use
+    /// [`Self::send_request_with_overload_retry`] instead.
+    async fn send_with_backoff(
+        stdin: &Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
+        request: &str,
+    ) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+
+        const MAX_BACKPRESSURE_RETRIES: u32 = 3;
+        let mut delay_ms = 50u64;
+
+        for attempt in 0..=MAX_BACKPRESSURE_RETRIES {
+            let result = {
+                let mut guard = stdin.lock().await;
+                guard.write_all(request.as_bytes()).await
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < MAX_BACKPRESSURE_RETRIES => {
+                    tracing::debug!(
+                        attempt = attempt + 1,
+                        delay_ms = delay_ms,
+                        error = %e,
+                        "stdin write failed; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    delay_ms *= 2;
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "stdin write failed after {} attempts: {e}",
+                        MAX_BACKPRESSURE_RETRIES + 1
+                    ));
+                }
+            }
+        }
+        unreachable!("loop must have returned or errored above")
+    }
+
+    /// Send a JSON-RPC request and await its response, retrying on `-32001` overload.
+    ///
+    /// Registers a oneshot channel in `pending_responses`, sends the request via
+    /// `send_with_backoff`, and awaits the response from the background task.
+    /// If the response is a `-32001` overload error, retries with exponential
+    /// backoff up to `max_retries` times.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if all retries are exhausted, the response channel is
+    /// closed, or a timeout occurs waiting for the response.
+    async fn send_request_with_overload_retry(
+        stdin: &Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
+        pending_responses: &Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+        req_id: u64,
+        request: &serde_json::Value,
+        max_retries: u32,
+    ) -> anyhow::Result<serde_json::Value> {
+        let line = format!("{}\n", serde_json::to_string(request)?);
+        let mut delay_ms = 50u64;
+
+        for attempt in 0..=max_retries {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            pending_responses.lock().await.insert(req_id, tx);
+
+            Self::send_with_backoff(stdin, &line).await?;
+
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                rx,
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("timeout waiting for response to request id={req_id}"))?
+            .map_err(|_| anyhow::anyhow!("response channel closed for request id={req_id}"))?;
+
+            if crate::stream_norm::is_overload_error(&response) {
+                if attempt < max_retries {
+                    tracing::warn!(req_id, attempt, delay_ms, "app-server returned -32001 overload; retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(5000);
+                    continue;
+                }
+                anyhow::bail!("app-server overloaded after {max_retries} retries for request id={req_id}");
+            }
+
+            return Ok(response);
+        }
+        unreachable!("loop must have returned or errored above")
+    }
+
+    /// Fork a new thread by sending a `thread/fork` request to the child process.
+    ///
+    /// Sends the request and awaits the correlated response, retrying on `-32001`
+    /// overload errors. Returns the response JSON value on success.
+    ///
+    /// Registers a placeholder in `session_registry` mapping the Codex `threadId`
+    /// to a `"pending-atm-session:<threadId>"` sentinel. Sprint G.4 will replace
+    /// this with the actual ATM session ID once session correlation is established.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the child process is not running, the write fails after
+    /// retries, or a `-32001` overload persists beyond the retry budget.
+    pub(crate) async fn fork_thread(
+        &self,
+        stdin: &Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
+        thread_id: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        static FORK_COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(100);
+        let req_id = FORK_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let request = serde_json::json!({
+            "id": req_id,
+            "method": "thread/fork",
+            "params": { "threadId": thread_id }
+        });
+
+        // Register a sentinel in session_registry. G.4 will populate the real
+        // ATM session ID once session correlation is established.
+        self.session_registry
+            .lock()
+            .await
+            .insert(
+                thread_id.to_string(),
+                format!("pending-atm-session:{thread_id}"),
+            );
+
+        let response = Self::send_request_with_overload_retry(
+            stdin,
+            &self.pending_responses,
+            req_id,
+            &request,
+            3,
+        )
+        .await?;
+
+        Ok(response)
+    }
+
+    /// Spawn the transport from pre-existing I/O handles (for testing).
+    ///
+    /// Performs the `initialize` / `initialized` handshake over the provided
+    /// I/O and starts the background notification task. No real child process
+    /// is spawned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the handshake fails or the initialize response
+    /// contains an error.
+    pub(crate) async fn spawn_from_io(
+        &self,
+        stdin: Box<dyn AsyncWrite + Send + Unpin>,
+        stdout: Box<dyn AsyncRead + Send + Unpin>,
+    ) -> anyhow::Result<RawChildIo> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let mut child_stdin = stdin;
+
+        // ── Initialize handshake ────────────────────────────────────────────
+        let init_request = serde_json::json!({
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "atm-agent-mcp",
+                    "version": "0.1.0"
+                }
+            }
+        });
+        let init_line = format!("{}\n", serde_json::to_string(&init_request)?);
+        child_stdin.write_all(init_line.as_bytes()).await?;
+
+        let mut reader = BufReader::new(stdout);
+        let mut response_line = String::new();
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            reader.read_line(&mut response_line),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout waiting for initialize response"))?
+        .map_err(|e| anyhow::anyhow!("I/O error reading initialize response: {e}"))?;
+
+        if n == 0 {
+            return Err(anyhow::anyhow!(
+                "child process closed stdout before sending initialize response"
+            ));
+        }
+
+        let response: serde_json::Value = serde_json::from_str(response_line.trim())
+            .map_err(|e| anyhow::anyhow!("invalid JSON in initialize response: {e}"))?;
+
+        if response.get("error").is_some() {
+            let msg = response["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
+            return Err(anyhow::anyhow!("initialize failed: {msg}"));
+        }
+
+        if response.get("result").is_none() {
+            return Err(anyhow::anyhow!(
+                "initialize response missing 'result' field"
+            ));
+        }
+
+        let negotiated_version = response["result"]
+            .get("protocolVersion")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        if let Some(ref ver) = negotiated_version {
+            *self.protocol_version.lock().await = Some(ver.clone());
+            if ver.as_str() < MIN_SUPPORTED_PROTOCOL_VERSION {
+                tracing::warn!(
+                    version = %ver,
+                    min_required = MIN_SUPPORTED_PROTOCOL_VERSION,
+                    "app-server protocol version is below minimum supported; rejecting connection"
+                );
+                anyhow::bail!(
+                    "unsupported app-server protocol version: {ver:?}; \
+                     minimum required: {MIN_SUPPORTED_PROTOCOL_VERSION}"
+                );
+            }
+        }
+
+        // Send the initialized notification.
+        let initialized_notif = serde_json::json!({
+            "method": "initialized",
+            "params": {}
+        });
+        let notif_line = format!("{}\n", serde_json::to_string(&initialized_notif)?);
+        child_stdin.write_all(notif_line.as_bytes()).await?;
+
+        self.initialized.store(true, Ordering::SeqCst);
+
+        // ── Set up shared state and the duplex stream ───────────────────────
+        let (duplex_write, duplex_read) = tokio::io::duplex(65_536);
+
+        let task_state = NotificationTaskState {
+            turn_state: Arc::clone(&self.turn_state),
+            idle_flag: Arc::clone(&self.idle_flag),
+            initialized: Arc::clone(&self.initialized),
+            pending_responses: Arc::clone(&self.pending_responses),
+            session_registry: Arc::clone(&self.session_registry),
+            team: self.team.clone(),
+        };
+
+        tokio::spawn(drive_notification_task(
+            reader.into_inner(),
+            duplex_write,
+            task_state,
+        ));
+
+        let shared_stdin = Arc::new(Mutex::new(child_stdin));
+
+        Ok(RawChildIo {
+            stdin: shared_stdin,
+            stdout: Box::new(duplex_read) as Box<dyn AsyncRead + Send + Unpin>,
+            exit_status: Arc::new(Mutex::new(None)),
+            process: Arc::new(Mutex::new(None)),
+            idle_flag: Some(Arc::clone(&self.idle_flag)),
+        })
+    }
+}
+
+impl Drop for AppServerTransport {
+    fn drop(&mut self) {
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm-agent-mcp",
+            action: "transport_shutdown",
+            team: Some(self.team.clone()),
+            result: Some("app-server".to_string()),
+            ..Default::default()
+        });
+    }
+}
+
+/// Shared state bundle for [`drive_notification_task`].
+///
+/// Groups the `Arc`-wrapped shared state fields that the background task
+/// needs, keeping the function signature under the clippy argument limit.
+#[doc(hidden)]
+pub struct NotificationTaskState {
+    /// Per-thread turn state map.
+    pub turn_state: Arc<Mutex<std::collections::HashMap<String, crate::stream_norm::TurnState>>>,
+    /// Idle flag shared with the transport.
+    pub idle_flag: Arc<AtomicBool>,
+    /// Whether the handshake has completed.
+    pub initialized: Arc<AtomicBool>,
+    /// Pending request-response correlation channels.
+    pub pending_responses: Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+    /// Thread ID to ATM session mapping.
+    pub session_registry: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    /// Team name for structured event logging.
+    pub team: String,
+}
+
+/// Drive the app-server notification background task from an stdout reader.
+///
+/// Reads JSONL lines from `stdout`, routes responses to `pending_responses`
+/// channels, parses notifications into turn-state updates, and forwards all
+/// raw lines through `duplex_write` to the proxy reader.
+///
+/// Called from [`AppServerTransport::spawn`] with the real child stdout, and
+/// directly from integration tests with in-memory duplex pipes.
+#[doc(hidden)]
+pub async fn drive_notification_task(
+    stdout: impl AsyncRead + Unpin + Send + 'static,
+    mut duplex_write: tokio::io::DuplexStream,
+    state: NotificationTaskState,
+) {
+    let NotificationTaskState {
+        turn_state,
+        idle_flag,
+        initialized,
+        pending_responses,
+        session_registry,
+        team,
+    } = state;
+    use crate::stream_norm::{
+        AppServerNotification, TurnState, TurnStatus, parse_app_server_notification,
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let reader = BufReader::new(stdout);
+    let mut lines = reader.lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        // Check if this is a response to a pending request (has `id` and no `method`).
+        let line_val: Option<serde_json::Value> = serde_json::from_str(&line).ok();
+        if let Some(ref v) = line_val {
+            // Route responses (id present, result or error present) to pending channels.
+            if let Some(id) = v.get("id").and_then(|i| i.as_u64()) {
+                if v.get("result").is_some() || v.get("error").is_some() {
+                    let sender = pending_responses.lock().await.remove(&id);
+                    if let Some(tx) = sender {
+                        let _ = tx.send(v.clone());
+                    }
+                }
+            }
+
+            if v.get("method").is_none() && v.get("id").is_some() {
+                // This is a response (not a notification).
+                // Forward the response and continue (skip notification parsing).
+                let bytes = format!("{line}\n");
+                if duplex_write.write_all(bytes.as_bytes()).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        if let Some(notification) = parse_app_server_notification(&line) {
+            match notification {
+                AppServerNotification::TurnStarted { turn_id } => {
+                    idle_flag.store(false, Ordering::SeqCst);
+                    turn_state
+                        .lock()
+                        .await
+                        .insert(
+                            turn_id.clone(),
+                            TurnState::Busy {
+                                turn_id: turn_id.clone(),
+                            },
+                        );
+                    emit_event_best_effort(EventFields {
+                        level: "info",
+                        source: "atm-agent-mcp",
+                        action: "turn_started",
+                        team: Some(team.clone()),
+                        result: Some(turn_id),
+                        ..Default::default()
+                    });
+                }
+                AppServerNotification::TurnCompleted { turn_id, status } => {
+                    let event_result = format!("{status:?}");
+                    {
+                        let mut ts = turn_state.lock().await;
+                        ts.insert(
+                            turn_id.clone(),
+                            TurnState::Terminal {
+                                turn_id: turn_id.clone(),
+                                status,
+                            },
+                        );
+                        let all_done = ts
+                            .values()
+                            .all(|s| s.is_idle() || matches!(s, TurnState::Terminal { .. }));
+                        if all_done || ts.is_empty() {
+                            idle_flag.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    emit_event_best_effort(EventFields {
+                        level: "info",
+                        source: "atm-agent-mcp",
+                        action: "turn_completed",
+                        team: Some(team.clone()),
+                        result: Some(event_result),
+                        ..Default::default()
+                    });
+                }
+                AppServerNotification::ItemStarted { item_id } => {
+                    tracing::debug!(item_id = %item_id, "item/started");
+                }
+                AppServerNotification::ItemCompleted { item_id } => {
+                    tracing::debug!(item_id = %item_id, "item/completed");
+                }
+                AppServerNotification::ItemDelta { method, .. } => {
+                    tracing::debug!(method = %method, "item/delta");
+                }
+                AppServerNotification::Unknown { method } => {
+                    tracing::debug!(
+                        method = %method,
+                        "app-server: unknown notification (non-fatal)"
+                    );
+                }
+            }
+        }
+
+        // Forward the raw line to the duplex stream for the proxy.
+        let bytes = format!("{line}\n");
+        if duplex_write.write_all(bytes.as_bytes()).await.is_err() {
+            break;
+        }
+    }
+
+    // Child stdout closed -- mark all active threads as Terminal/Failed.
+    idle_flag.store(false, Ordering::SeqCst);
+    initialized.store(false, Ordering::SeqCst);
+    let thread_ids: Vec<String> = session_registry.lock().await.keys().cloned().collect();
+    let mut ts = turn_state.lock().await;
+    for thread_id in thread_ids {
+        let entry = ts.entry(thread_id.clone()).or_insert(TurnState::Idle);
+        if !entry.is_idle() {
+            *entry = TurnState::Terminal {
+                turn_id: thread_id.clone(),
+                status: TurnStatus::Failed,
+            };
+            emit_event_best_effort(EventFields {
+                level: "warn",
+                source: "atm-agent-mcp",
+                action: "turn_terminal_crash",
+                team: Some(team.clone()),
+                result: Some(thread_id),
+                ..Default::default()
+            });
+        }
+    }
+    // duplex_write drops here, signalling EOF to the proxy reader.
+}
+
+#[async_trait]
+impl CodexTransport for AppServerTransport {
+    async fn spawn(&self) -> anyhow::Result<RawChildIo> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::process::Command;
+
+        let mut cmd = Command::new(&self.config.codex_bin);
+        cmd.arg("app-server");
+
+        if let Some(ref model) = self.config.model {
+            cmd.arg("-m").arg(model);
+        }
+
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+
+        let mut child = cmd.spawn()?;
+
+        let mut child_stdin = child.stdin.take().expect("child stdin must be piped");
+        let child_stdout = child.stdout.take().expect("child stdout must be piped");
+
+        // ── Initialize handshake ────────────────────────────────────────────
+        // Perform the JSON-RPC initialize / initialized exchange synchronously
+        // here, before returning RawChildIo, so downstream code is guaranteed
+        // to only see a fully-initialized transport.
+        //
+        // Per the app-server protocol spec (Section 1), messages omit the
+        // `jsonrpc` field.
+
+        let init_request = serde_json::json!({
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "atm-agent-mcp",
+                    "version": "0.1.0"
+                }
+            }
+        });
+        let init_line = format!("{}\n", serde_json::to_string(&init_request)?);
+        child_stdin.write_all(init_line.as_bytes()).await?;
+
+        // Read the initialize response.
+        let mut reader = BufReader::new(child_stdout);
+        let mut response_line = String::new();
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            reader.read_line(&mut response_line),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout waiting for initialize response"))?
+        .map_err(|e| anyhow::anyhow!("I/O error reading initialize response: {e}"))?;
+
+        if n == 0 {
+            return Err(anyhow::anyhow!(
+                "child process closed stdout before sending initialize response"
+            ));
+        }
+
+        let response: serde_json::Value = serde_json::from_str(response_line.trim())
+            .map_err(|e| anyhow::anyhow!("invalid JSON in initialize response: {e}"))?;
+
+        if response.get("error").is_some() {
+            let msg = response["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
+            return Err(anyhow::anyhow!("initialize failed: {msg}"));
+        }
+
+        if response.get("result").is_none() {
+            return Err(anyhow::anyhow!(
+                "initialize response missing 'result' field"
+            ));
+        }
+
+        // Capture optional protocol version and server info.
+        let negotiated_version = response["result"]
+            .get("protocolVersion")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        if let Some(ref ver) = negotiated_version {
+            *self.protocol_version.lock().await = Some(ver.clone());
+            emit_event_best_effort(EventFields {
+                level: "info",
+                source: "atm-agent-mcp",
+                action: "protocol_version_negotiated",
+                team: Some(self.team.clone()),
+                result: Some(ver.clone()),
+                ..Default::default()
+            });
+            if ver.as_str() < MIN_SUPPORTED_PROTOCOL_VERSION {
+                tracing::warn!(
+                    version = %ver,
+                    min_required = MIN_SUPPORTED_PROTOCOL_VERSION,
+                    "app-server protocol version is below minimum supported; rejecting connection"
+                );
+                anyhow::bail!(
+                    "unsupported app-server protocol version: {ver:?}; \
+                     minimum required: {MIN_SUPPORTED_PROTOCOL_VERSION}"
+                );
+            }
+        } else {
+            tracing::warn!(
+                "app-server did not return protocolVersion; proceeding with unknown version"
+            );
+        }
+
+        // Send the initialized notification.
+        // Per the app-server protocol spec (Section 1), messages omit the `jsonrpc` field.
+        let initialized_notif = serde_json::json!({
+            "method": "initialized",
+            "params": {}
+        });
+        let notif_line = format!("{}\n", serde_json::to_string(&initialized_notif)?);
+        child_stdin.write_all(notif_line.as_bytes()).await?;
+
+        self.initialized.store(true, Ordering::SeqCst);
+
+        // ── Set up shared state and the duplex stream ───────────────────────
+
+        // Pipe remaining child stdout through a duplex stream so the proxy's
+        // background reader task gets a Box<dyn AsyncRead>.
+        let (duplex_write, duplex_read) = tokio::io::duplex(65_536);
+
+        let task_state = NotificationTaskState {
+            turn_state: Arc::clone(&self.turn_state),
+            idle_flag: Arc::clone(&self.idle_flag),
+            initialized: Arc::clone(&self.initialized),
+            pending_responses: Arc::clone(&self.pending_responses),
+            session_registry: Arc::clone(&self.session_registry),
+            team: self.team.clone(),
+        };
+
+        // Background task: read lines, parse notifications, forward to duplex.
+        tokio::spawn(drive_notification_task(
+            reader.into_inner(),
+            duplex_write,
+            task_state,
+        ));
+
+        let exit_status: Arc<Mutex<Option<ExitStatus>>> = Arc::new(Mutex::new(None));
+        let shared_stdin = Arc::new(Mutex::new(
+            Box::new(child_stdin) as Box<dyn AsyncWrite + Send + Unpin>
+        ));
+        let process: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
+
+        // Monitor the child process exit in a separate task and update exit_status.
+        {
+            let exit_status_clone = Arc::clone(&exit_status);
+            let process_clone = Arc::clone(&process);
+            tokio::spawn(async move {
+                // Wait for the child process to exit.
+                let status = {
+                    let mut guard = process_clone.lock().await;
+                    if let Some(ref mut c) = *guard {
+                        c.wait().await.ok()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(s) = status {
+                    *exit_status_clone.lock().await = Some(s);
+                }
+            });
+        }
+
+        Ok(RawChildIo {
+            stdin: shared_stdin,
+            stdout: Box::new(duplex_read) as Box<dyn AsyncRead + Send + Unpin>,
+            exit_status,
+            process,
+            // Use the dedicated idle_flag (not initialized) -- they serve different
+            // purposes: initialized tracks handshake completion, idle_flag tracks
+            // whether all threads are currently idle.
+            idle_flag: Some(Arc::clone(&self.idle_flag)),
+        })
+    }
+
+    fn is_idle(&self) -> bool {
+        // idle = initialized AND all threads are in Idle state.
+        if !self.initialized.load(Ordering::SeqCst) {
+            return false;
+        }
+        // try_lock is acceptable here; if we can't acquire, treat as not-idle
+        // (conservative, avoids blocking).
+        if let Ok(states) = self.turn_state.try_lock() {
+            states.values().all(|s| s.is_idle())
+        } else {
+            false
+        }
+    }
+}
+
 /// Select a transport based on the `transport` field in [`AgentMcpConfig`].
 ///
 /// Recognised values:
 /// - `None` / `"mcp"` -> [`McpTransport`] (spawns `codex mcp-server`).
 /// - `"cli-json"` -> [`JsonCodecTransport`] (spawns `codex exec --json`).
+/// - `"app-server"` -> [`AppServerTransport`] (spawns `codex app-server`).
 /// - `"mock"` -> [`MockTransport`] (in-memory channels; no child process).
 ///
 /// Unknown values fall back to `McpTransport` with a `tracing::warn`.
@@ -386,6 +1155,7 @@ pub(crate) fn make_transport(config: &AgentMcpConfig, team: &str) -> Box<dyn Cod
     match config.transport.as_deref() {
         None | Some("mcp") => Box::new(McpTransport::new(config.clone(), team)),
         Some("cli-json") => Box::new(JsonCodecTransport::new(config.clone(), team)),
+        Some("app-server") => Box::new(AppServerTransport::new(config.clone(), team)),
         Some("mock") => {
             // MockTransport for testing/inspection. The handle is discarded here
             // because make_transport doesn't have a way to return it. Tests that
@@ -733,5 +1503,60 @@ mod tests {
         assert!(t.is_idle());
         t.idle_flag.store(false, Ordering::SeqCst);
         assert!(!t.is_idle());
+    }
+
+    /// Verify that `is_overload_error` is not triggered by a valid initialize response.
+    /// This tests the protocol version logging path doesn't false-positive on success.
+    #[test]
+    fn test_protocol_version_logged() {
+        use crate::stream_norm::is_overload_error;
+
+        let valid_init_response = serde_json::json!({
+            "id": 0,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": { "name": "mock-app-server", "version": "0.0.1" }
+            }
+        });
+        // A valid initialize response must not trigger overload detection.
+        assert!(
+            !is_overload_error(&valid_init_response),
+            "valid initialize response must not be mistaken for overload error"
+        );
+    }
+
+    /// Verify that a mock initialize response with `protocolVersion` is parsed
+    /// without error (no panics, correct field extraction).
+    #[test]
+    fn test_initialize_response_parsing() {
+        let response: serde_json::Value = serde_json::from_str(
+            r#"{"id":0,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"s","version":"1"}}}"#,
+        )
+        .expect("should be valid JSON");
+
+        // No `error` field.
+        assert!(response.get("error").is_none());
+        // Has `result` field.
+        assert!(response.get("result").is_some());
+        // `protocolVersion` is present and correct.
+        let ver = response["result"]["protocolVersion"].as_str().unwrap();
+        assert_eq!(ver, "2024-11-05");
+    }
+
+    /// Verify that `send_with_backoff` succeeds on the first try when stdin accepts writes.
+    #[tokio::test]
+    async fn test_send_with_backoff_succeeds_on_first_try() {
+        let (duplex_write, duplex_read) = tokio::io::duplex(4096);
+        let stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> =
+            Arc::new(Mutex::new(Box::new(duplex_write) as Box<dyn AsyncWrite + Send + Unpin>));
+
+        let result = AppServerTransport::send_with_backoff(
+            &stdin,
+            r#"{"id":1,"method":"thread/fork","params":{"threadId":"t1"}}"#,
+        )
+        .await;
+        assert!(result.is_ok(), "send_with_backoff should succeed: {result:?}");
+        // Clean up the read half.
+        drop(duplex_read);
     }
 }
