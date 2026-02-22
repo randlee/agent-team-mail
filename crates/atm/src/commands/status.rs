@@ -14,6 +14,7 @@ use crate::util::settings::get_home_dir;
 #[derive(Args, Debug)]
 pub struct StatusArgs {
     /// Team name (optional, uses default team if not specified)
+    #[arg(long)]
     team: Option<String>,
 
     /// Output as JSON

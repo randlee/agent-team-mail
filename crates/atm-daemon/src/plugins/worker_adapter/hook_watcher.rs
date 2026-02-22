@@ -33,10 +33,13 @@
 
 use super::agent_state::{AgentState, AgentStateTracker};
 use crate::daemon::session_registry::SharedSessionRegistry;
+use agent_team_mail_core::io::atomic::atomic_swap;
+use agent_team_mail_core::io::lock::acquire_lock;
+use agent_team_mail_core::schema::TeamConfig;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -87,6 +90,13 @@ pub struct HookWatcher {
     state: Arc<Mutex<AgentStateTracker>>,
     /// Shared session registry for session lifecycle events.
     session_registry: Option<SharedSessionRegistry>,
+    /// Claude root directory (`.claude/` inside ATM home).
+    ///
+    /// When set, `session-start` events automatically update the matching
+    /// member's `sessionId` field in the team config files found under
+    /// `{claude_root}/teams/`.  This is best-effort: errors are logged at
+    /// `debug` level and never abort event processing.
+    claude_root: Option<PathBuf>,
 }
 
 impl HookWatcher {
@@ -97,7 +107,7 @@ impl HookWatcher {
     /// * `path` - Path to `events.jsonl`
     /// * `state` - Shared agent state tracker
     pub fn new(path: PathBuf, state: Arc<Mutex<AgentStateTracker>>) -> Self {
-        Self { path, state, session_registry: None }
+        Self { path, state, session_registry: None, claude_root: None }
     }
 
     /// Create a new hook watcher that also updates the session registry.
@@ -112,7 +122,16 @@ impl HookWatcher {
         state: Arc<Mutex<AgentStateTracker>>,
         session_registry: SharedSessionRegistry,
     ) -> Self {
-        Self { path, state, session_registry: Some(session_registry) }
+        Self { path, state, session_registry: Some(session_registry), claude_root: None }
+    }
+
+    /// Attach a claude root path for automatic `session_id` updates in team
+    /// config files on `session-start` events.
+    ///
+    /// This is the `.claude/` directory inside the ATM home directory.
+    pub fn with_claude_root(mut self, claude_root: PathBuf) -> Self {
+        self.claude_root = Some(claude_root);
+        self
     }
 
     /// Run the watcher until cancellation.
@@ -160,7 +179,13 @@ impl HookWatcher {
         let mut offset: u64 = 0;
 
         // Do an initial read in case events were written before we started watching.
-        offset = read_new_events(&self.path, offset, &self.state, self.session_registry.as_ref());
+        offset = read_new_events(
+            &self.path,
+            offset,
+            &self.state,
+            self.session_registry.as_ref(),
+            self.claude_root.as_deref(),
+        );
 
         loop {
             tokio::select! {
@@ -170,7 +195,13 @@ impl HookWatcher {
                 }
                 Some(event) = rx.recv() => {
                     if should_process_event(&event, &self.path) {
-                        offset = read_new_events(&self.path, offset, &self.state, self.session_registry.as_ref());
+                        offset = read_new_events(
+                            &self.path,
+                            offset,
+                            &self.state,
+                            self.session_registry.as_ref(),
+                            self.claude_root.as_deref(),
+                        );
                     }
                 }
             }
@@ -222,6 +253,7 @@ fn read_new_events(
     offset: u64,
     state: &Arc<Mutex<AgentStateTracker>>,
     session_registry: Option<&SharedSessionRegistry>,
+    claude_root: Option<&Path>,
 ) -> u64 {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -262,7 +294,7 @@ fn read_new_events(
                 new_offset += n as u64;
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
-                    process_hook_line(trimmed, state, session_registry);
+                    process_hook_line(trimmed, state, session_registry, claude_root);
                 }
             }
             Err(e) => {
@@ -280,6 +312,7 @@ fn process_hook_line(
     line: &str,
     state: &Arc<Mutex<AgentStateTracker>>,
     session_registry: Option<&SharedSessionRegistry>,
+    claude_root: Option<&Path>,
 ) {
     let event: HookEvent = match serde_json::from_str(line) {
         Ok(e) => e,
@@ -289,15 +322,22 @@ fn process_hook_line(
         }
     };
 
-    apply_hook_event(&event, state, session_registry);
+    apply_hook_event(&event, state, session_registry, claude_root);
 }
 
 /// Apply the semantic effect of a hook event to the state tracker and session
 /// registry.
+///
+/// When `claude_root` is provided and the event is `session-start`, this
+/// function additionally updates the matching member's `sessionId` field in
+/// all team config files found under `{claude_root}/teams/`.  The update is
+/// best-effort: any I/O errors are logged at `debug` level and never abort
+/// event processing.
 fn apply_hook_event(
     event: &HookEvent,
     state: &Arc<Mutex<AgentStateTracker>>,
     session_registry: Option<&SharedSessionRegistry>,
+    claude_root: Option<&Path>,
 ) {
     match event.event_type.as_str() {
         "agent-turn-complete" => {
@@ -346,6 +386,12 @@ fn apply_hook_event(
             if let Some(registry) = session_registry {
                 registry.lock().unwrap().upsert(&agent_id, &session_id, process_id);
             }
+
+            // Best-effort: auto-update session_id on matching external members
+            // in team config files under claude_root/teams/.
+            if let Some(root) = claude_root {
+                auto_update_member_session_id(root, &agent_id, &session_id);
+            }
         }
         "session-end" => {
             let agent_id = match &event.agent {
@@ -362,6 +408,102 @@ fn apply_hook_event(
         }
         unknown => {
             debug!("Unrecognised hook event type '{unknown}', ignoring");
+        }
+    }
+}
+
+/// Atomically write `team_config` to `config_path` using a lock file, a `.tmp`
+/// staging file, and the project's `atomic_swap` infrastructure.
+///
+/// This is the daemon-side equivalent of `write_team_config` in the CLI crate.
+/// Returns `Err` on any I/O failure so callers can log at the appropriate level.
+fn write_team_config_atomic(config_path: &Path, config: &TeamConfig) -> Result<(), anyhow::Error> {
+    let lock_path = config_path.with_extension("lock");
+    let _lock = acquire_lock(&lock_path, 5)
+        .map_err(|e| anyhow::anyhow!("failed to acquire lock: {e}"))?;
+
+    let serialized = serde_json::to_string_pretty(config)
+        .map_err(|e| anyhow::anyhow!("serialisation failed: {e}"))?;
+
+    let tmp_path = config_path.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp_path)
+        .map_err(|e| anyhow::anyhow!("cannot create tmp file: {e}"))?;
+    file.write_all(serialized.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|e| anyhow::anyhow!("write failed: {e}"))?;
+    drop(file);
+
+    atomic_swap(config_path, &tmp_path)
+        .map_err(|e| anyhow::anyhow!("atomic swap failed: {e}"))?;
+
+    Ok(())
+}
+
+/// Scan all team config files under `{claude_root}/teams/` and update the
+/// `sessionId` field of any member whose `name` matches `agent_name` (the
+/// bare agent name, without `@team` suffix) and whose stored `sessionId`
+/// differs from `new_session_id`.
+///
+/// This is a best-effort operation: all errors are logged at `debug` level
+/// and never propagated to the caller.  Only members that have
+/// `externalBackendType` set (i.e., external agents registered via
+/// `add-member`) are updated; Claude Code members are left untouched.
+fn auto_update_member_session_id(claude_root: &Path, agent_name: &str, new_session_id: &str) {
+    let teams_dir = claude_root.join("teams");
+    let entries = match std::fs::read_dir(&teams_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            debug!("auto_update_member_session_id: cannot read teams dir: {e}");
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let config_path = entry.path().join("config.json");
+        if !config_path.is_file() {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                debug!("auto_update_member_session_id: failed to read {}: {e}", config_path.display());
+                continue;
+            }
+        };
+
+        let mut team_config: TeamConfig = match serde_json::from_str(&content) {
+            Ok(tc) => tc,
+            Err(e) => {
+                debug!("auto_update_member_session_id: failed to parse {}: {e}", config_path.display());
+                continue;
+            }
+        };
+
+        let mut changed = false;
+        for member in team_config.members.iter_mut() {
+            // Only update external agents (those with externalBackendType set).
+            if member.name == agent_name
+                && member.external_backend_type.is_some()
+                && member.session_id.as_deref() != Some(new_session_id)
+            {
+                debug!(
+                    "auto_update_member_session_id: updating sessionId for '{}' in '{}'",
+                    agent_name,
+                    config_path.display()
+                );
+                member.session_id = Some(new_session_id.to_string());
+                changed = true;
+            }
+        }
+
+        if !changed {
+            continue;
+        }
+
+        // Write updated config atomically via lock + tmp file + atomic swap.
+        if let Err(e) = write_team_config_atomic(&config_path, &team_config) {
+            debug!("auto_update_member_session_id: atomic write failed: {e}");
         }
     }
 }
@@ -413,9 +555,9 @@ mod tests {
     fn test_malformed_json_does_not_panic() {
         let state = make_state();
         // Should log a warning and return without panicking.
-        process_hook_line("not json at all", &state, None);
-        process_hook_line("{broken", &state, None);
-        process_hook_line("", &state, None);
+        process_hook_line("not json at all", &state, None, None);
+        process_hook_line("{broken", &state, None, None);
+        process_hook_line("", &state, None, None);
         // State should be unchanged.
         assert!(state.lock().unwrap().all_states().is_empty());
     }
@@ -430,7 +572,7 @@ mod tests {
             .set_state("arch-ctm", AgentState::Launching);
 
         let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev"}"#;
-        process_hook_line(json, &state, None);
+        process_hook_line(json, &state, None, None);
 
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -448,7 +590,7 @@ mod tests {
             .set_state("arch-ctm", AgentState::Busy);
 
         let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev"}"#;
-        process_hook_line(json, &state, None);
+        process_hook_line(json, &state, None, None);
 
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -461,7 +603,7 @@ mod tests {
         let state = make_state();
         // Agent not pre-registered.
         let json = r#"{"type":"agent-turn-complete","agent":"new-agent","team":"atm-dev"}"#;
-        process_hook_line(json, &state, None);
+        process_hook_line(json, &state, None, None);
 
         assert_eq!(
             state.lock().unwrap().get_state("new-agent"),
@@ -474,7 +616,7 @@ mod tests {
         let state = make_state();
         // event_type present but agent field missing
         let json = r#"{"type":"agent-turn-complete","team":"atm-dev"}"#;
-        process_hook_line(json, &state, None);
+        process_hook_line(json, &state, None, None);
         // Nothing should be added to state.
         assert!(state.lock().unwrap().all_states().is_empty());
     }
@@ -483,7 +625,7 @@ mod tests {
     fn test_unknown_event_type_ignored() {
         let state = make_state();
         let json = r#"{"type":"after-tool-use","agent":"arch-ctm"}"#;
-        process_hook_line(json, &state, None);
+        process_hook_line(json, &state, None, None);
         assert!(state.lock().unwrap().all_states().is_empty());
     }
 
@@ -495,7 +637,7 @@ mod tests {
         let registry = new_session_registry();
 
         let json = r#"{"type":"session-start","agent":"arch-ctm","sessionId":"sess-abc","processId":4242}"#;
-        process_hook_line(json, &state, Some(&registry));
+        process_hook_line(json, &state, Some(&registry), None);
 
         let reg = registry.lock().unwrap();
         let record = reg.query("arch-ctm").expect("arch-ctm should be in registry");
@@ -514,7 +656,7 @@ mod tests {
         registry.lock().unwrap().upsert("arch-ctm", "sess-abc", 4242);
 
         let json = r#"{"type":"session-end","agent":"arch-ctm","sessionId":"sess-abc"}"#;
-        process_hook_line(json, &state, Some(&registry));
+        process_hook_line(json, &state, Some(&registry), None);
 
         let reg = registry.lock().unwrap();
         let record = reg.query("arch-ctm").expect("arch-ctm should be in registry");
@@ -527,7 +669,7 @@ mod tests {
         let state = make_state();
         // No registry provided — should not panic.
         let json = r#"{"type":"session-start","agent":"arch-ctm","sessionId":"sess-abc","processId":1}"#;
-        process_hook_line(json, &state, None);
+        process_hook_line(json, &state, None, None);
         // State tracker should not be affected.
         assert!(state.lock().unwrap().all_states().is_empty());
     }
@@ -537,7 +679,7 @@ mod tests {
         let state = make_state();
         let registry = new_session_registry();
         let json = r#"{"type":"session-start","agent":"arch-ctm"}"#;
-        process_hook_line(json, &state, Some(&registry));
+        process_hook_line(json, &state, Some(&registry), None);
         // Registry should remain empty because sessionId is missing.
         assert!(registry.lock().unwrap().is_empty());
     }
@@ -547,7 +689,7 @@ mod tests {
         let state = make_state();
         let registry = new_session_registry();
         let json = r#"{"type":"session-start","sessionId":"sess-abc","processId":1}"#;
-        process_hook_line(json, &state, Some(&registry));
+        process_hook_line(json, &state, Some(&registry), None);
         assert!(registry.lock().unwrap().is_empty());
     }
 
@@ -560,7 +702,7 @@ mod tests {
         let path = dir.path().join("events.jsonl");
         std::fs::write(&path, b"").unwrap();
 
-        let new_offset = read_new_events(&path, 0, &state, None);
+        let new_offset = read_new_events(&path, 0, &state, None, None);
         assert_eq!(new_offset, 0);
     }
 
@@ -574,7 +716,7 @@ mod tests {
         let line = "{\"type\":\"agent-turn-complete\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\"}\n";
         std::fs::write(&path, line.as_bytes()).unwrap();
 
-        let new_offset = read_new_events(&path, 0, &state, None);
+        let new_offset = read_new_events(&path, 0, &state, None, None);
         assert_eq!(new_offset, line.len() as u64);
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -594,7 +736,7 @@ mod tests {
         std::fs::write(&path, line1.as_bytes()).unwrap();
 
         // First read
-        let offset1 = read_new_events(&path, 0, &state, None);
+        let offset1 = read_new_events(&path, 0, &state, None, None);
         assert_eq!(offset1, line1.len() as u64);
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -611,7 +753,7 @@ mod tests {
         drop(file);
 
         // Second read should only process line2
-        let offset2 = read_new_events(&path, offset1, &state, None);
+        let offset2 = read_new_events(&path, offset1, &state, None, None);
         assert_eq!(offset2, (line1.len() + line2.len()) as u64);
         assert_eq!(
             state.lock().unwrap().get_state("agent-b"),
@@ -630,7 +772,7 @@ mod tests {
         std::fs::write(&path, line.as_bytes()).unwrap();
 
         // offset beyond file size (simulating truncation)
-        let new_offset = read_new_events(&path, 9999, &state, None);
+        let new_offset = read_new_events(&path, 9999, &state, None, None);
         // Should re-read from 0, process the line, and return correct offset
         assert_eq!(new_offset, line.len() as u64);
         assert_eq!(
@@ -643,7 +785,7 @@ mod tests {
     fn test_read_new_events_file_not_found() {
         let state = make_state();
         let path = std::path::PathBuf::from("/nonexistent/path/events.jsonl");
-        let new_offset = read_new_events(&path, 42, &state, None);
+        let new_offset = read_new_events(&path, 42, &state, None, None);
         // Should return the same offset unchanged
         assert_eq!(new_offset, 42);
     }
@@ -658,12 +800,124 @@ mod tests {
         let line = "{\"type\":\"session-start\",\"agent\":\"arch-ctm\",\"sessionId\":\"sess-xyz\",\"processId\":999}\n";
         std::fs::write(&path, line.as_bytes()).unwrap();
 
-        let new_offset = read_new_events(&path, 0, &state, Some(&registry));
+        let new_offset = read_new_events(&path, 0, &state, Some(&registry), None);
         assert_eq!(new_offset, line.len() as u64);
 
         let reg = registry.lock().unwrap();
         let record = reg.query("arch-ctm").expect("agent should be in registry");
         assert_eq!(record.session_id, "sess-xyz");
         assert_eq!(record.process_id, 999);
+    }
+
+    // ── auto_update_member_session_id unit tests ──────────────────────────
+
+    /// Verify that `auto_update_member_session_id` updates the `sessionId`
+    /// field in a team config file for a matching external agent.
+    ///
+    /// This test works entirely with the file system and does not require the
+    /// daemon to be running.
+    #[test]
+    fn test_auto_update_member_session_id_updates_external_member() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a minimal `.claude/teams/<team>/` structure.
+        let teams_dir = dir.path().join("teams");
+        let team_dir = teams_dir.join("atm-dev");
+        std::fs::create_dir_all(&team_dir).unwrap();
+
+        // Write a minimal config.json containing one external member with an old sessionId.
+        let config_json = serde_json::json!({
+            "name": "atm-dev",
+            "description": "test team",
+            "createdAt": 1739284800000i64,
+            "leadAgentId": "team-lead@atm-dev",
+            "leadSessionId": "team-session",
+            "members": [
+                {
+                    "agentId": "arch-ctm@atm-dev",
+                    "name": "arch-ctm",
+                    "agentType": "codex",
+                    "model": "gpt5.3-codex",
+                    "joinedAt": 1739284800000i64,
+                    "cwd": "/tmp",
+                    "subscriptions": [],
+                    "externalBackendType": "codex",
+                    "sessionId": "old-session-id"
+                }
+            ]
+        });
+
+        let config_path = team_dir.join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&config_json).unwrap(),
+        )
+        .unwrap();
+
+        // Call the function under test with the `.claude` directory (parent of `teams/`).
+        let claude_root = dir.path();
+        auto_update_member_session_id(claude_root, "arch-ctm", "new-session-id");
+
+        // Read back and assert the sessionId was updated.
+        let updated_content = std::fs::read_to_string(&config_path).unwrap();
+        let updated: serde_json::Value = serde_json::from_str(&updated_content).unwrap();
+
+        let session_id = updated["members"][0]["sessionId"]
+            .as_str()
+            .expect("sessionId should be present after update");
+
+        assert_eq!(
+            session_id, "new-session-id",
+            "sessionId should have been updated from 'old-session-id' to 'new-session-id'"
+        );
+    }
+
+    /// Verify that `auto_update_member_session_id` does NOT update members
+    /// that lack `externalBackendType` (i.e., standard Claude Code members).
+    #[test]
+    fn test_auto_update_member_session_id_skips_claude_code_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let teams_dir = dir.path().join("teams");
+        let team_dir = teams_dir.join("atm-dev");
+        std::fs::create_dir_all(&team_dir).unwrap();
+
+        // A member without externalBackendType — this should NOT be updated.
+        let config_json = serde_json::json!({
+            "name": "atm-dev",
+            "createdAt": 1739284800000i64,
+            "leadAgentId": "team-lead@atm-dev",
+            "leadSessionId": "team-session",
+            "members": [
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "claude-opus-4-6",
+                    "joinedAt": 1739284800000i64,
+                    "cwd": "/tmp",
+                    "subscriptions": [],
+                    "sessionId": "old-session"
+                }
+            ]
+        });
+
+        let config_path = team_dir.join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&config_json).unwrap(),
+        )
+        .unwrap();
+
+        let claude_root = dir.path();
+        auto_update_member_session_id(claude_root, "team-lead", "new-session");
+
+        // The standard member's sessionId should remain unchanged.
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let session_id = after["members"][0]["sessionId"].as_str().unwrap_or("old-session");
+        assert_eq!(
+            session_id, "old-session",
+            "Claude Code member sessionId should not be updated by auto_update_member_session_id"
+        );
     }
 }

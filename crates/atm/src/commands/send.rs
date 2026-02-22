@@ -323,7 +323,10 @@ fn get_message_text(args: &SendArgs) -> Result<String> {
         std::io::stdin().read_to_string(&mut buffer)?;
         Ok(buffer)
     } else if let Some(ref message) = args.message {
-        // Direct message argument
+        // Direct message argument — reject blank messages at CLI layer
+        if message.trim().is_empty() {
+            anyhow::bail!("Message text cannot be empty");
+        }
         Ok(message.clone())
     } else if args.file.is_some() {
         // Message is file path reference

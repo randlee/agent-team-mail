@@ -6,7 +6,9 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::io::lock::acquire_lock;
-use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::model_registry::ModelId;
+use agent_team_mail_core::schema::{BackendType, InboxMessage, TeamConfig};
+use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use clap::Args;
 use serde_json::json;
@@ -41,6 +43,8 @@ pub struct TeamsArgs {
 pub enum TeamsCommand {
     /// Add a member to a team without launching an agent
     AddMember(AddMemberArgs),
+    /// Update fields on an existing team member
+    UpdateMember(UpdateMemberArgs),
     /// Resume as team-lead for an existing team (updates leadSessionId)
     Resume(ResumeArgs),
     /// Remove stale (dead) members from a team
@@ -64,7 +68,10 @@ pub struct AddMemberArgs {
     #[arg(long, default_value = "codex")]
     agent_type: String,
 
-    /// Model identifier (defaults to "unknown")
+    /// Model identifier validated against the ATM model registry.
+    ///
+    /// Use `"custom:<id>"` for models not in the built-in list.
+    /// Defaults to `"unknown"`.
     #[arg(long, default_value = "unknown")]
     model: String,
 
@@ -79,6 +86,47 @@ pub struct AddMemberArgs {
     /// tmux pane ID for message injection (e.g. "%235")
     #[arg(long)]
     pane_id: Option<String>,
+
+    /// Session or agent ID for external agents (stored for liveness tracking)
+    #[arg(long)]
+    session_id: Option<String>,
+
+    /// Backend type for external agents.
+    ///
+    /// Valid values: `claude-code`, `codex`, `gemini`, `external`, `human:<username>`.
+    /// `human:` alone (without a username) is rejected.
+    #[arg(long)]
+    backend_type: Option<String>,
+}
+
+/// Update fields on an existing team member
+#[derive(Args, Debug)]
+pub struct UpdateMemberArgs {
+    /// Team name
+    team: String,
+
+    /// Agent name to update
+    agent: String,
+
+    /// Update session ID
+    #[arg(long)]
+    session_id: Option<String>,
+
+    /// Update model (validated against the ATM model registry)
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Update tmux pane ID
+    #[arg(long)]
+    pane_id: Option<String>,
+
+    /// Update backend type (claude-code, codex, gemini, external, human:<username>)
+    #[arg(long)]
+    backend_type: Option<String>,
+
+    /// Set active status
+    #[arg(long)]
+    active: Option<bool>,
 }
 
 /// Resume as team-lead for an existing team
@@ -166,6 +214,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
     if let Some(command) = args.command {
         return match command {
             TeamsCommand::AddMember(add_args) => add_member(add_args),
+            TeamsCommand::UpdateMember(update_args) => update_member(update_args),
             TeamsCommand::Resume(resume_args) => resume(resume_args),
             TeamsCommand::Cleanup(cleanup_args) => cleanup(cleanup_args),
             TeamsCommand::Backup(backup_args) => backup(backup_args),
@@ -263,6 +312,20 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
         anyhow::bail!("Team config not found at {}", config_path.display());
     }
 
+    // Validate model and backend_type before acquiring the lock so we fail
+    // fast on bad input without ever touching the config file.
+    let parsed_model = ModelId::from_str(&args.model)
+        .map_err(|e| anyhow::anyhow!("Invalid --model: {e}"))?;
+
+    let parsed_backend_type: Option<BackendType> = if let Some(ref bt_str) = args.backend_type {
+        Some(
+            BackendType::from_str(bt_str)
+                .map_err(|e| anyhow::anyhow!("Invalid --backend-type: {e}"))?,
+        )
+    } else {
+        None
+    };
+
     let lock_path = config_path.with_extension("lock");
     let _lock = acquire_lock(&lock_path, 5)
         .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
@@ -270,28 +333,71 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
     let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
 
     let agent_id = format!("{}@{}", args.agent, args.team);
-    let existing_idx = team_config
+
+    // Check for MCP collision or idempotent re-add.
+    if let Some(idx) = team_config
         .members
         .iter()
-        .position(|m| m.agent_id == agent_id || m.name == args.agent);
-    if let Some(idx) = existing_idx {
-        // If --pane-id provided, update it on the existing member
-        if let Some(ref pane_id) = args.pane_id {
-            team_config.members[idx].tmux_pane_id = Some(pane_id.clone());
-            let serialized = serde_json::to_string_pretty(&team_config)?;
-            let tmp_path = config_path.with_extension("tmp");
-            let mut file = std::fs::File::create(&tmp_path)?;
-            file.write_all(serialized.as_bytes())?;
-            file.sync_all()?;
-            drop(file);
-            atomic_swap(&config_path, &tmp_path)?;
-            println!("Updated tmuxPaneId for '{}' in team '{}' (paneId='{}')", args.agent, args.team, pane_id);
-        } else {
-            println!("Member '{}' already exists in team '{}'", args.agent, args.team);
+        .position(|m| m.name == args.agent)
+    {
+        let existing = &team_config.members[idx];
+
+        // Idempotent: same agent_id already present → no-op.
+        if existing.agent_id == agent_id {
+            // If --pane-id provided, update it on the existing member and return.
+            if let Some(ref pane_id) = args.pane_id {
+                team_config.members[idx].tmux_pane_id = Some(pane_id.clone());
+                write_team_config(&config_path, &team_config)?;
+                println!(
+                    "Updated tmuxPaneId for '{}' in team '{}' (paneId='{}')",
+                    args.agent, args.team, pane_id
+                );
+            } else {
+                println!("Member already registered (idempotent)");
+            }
+            return Ok(());
         }
+
+        // Collision guard: active member with a different agent_id → reject.
+        if existing.is_active == Some(true) {
+            anyhow::bail!(
+                "Member '{}' already exists and is active with a different agent_id. \
+                 Use update-member to modify existing members.",
+                args.agent
+            );
+        }
+
+        // Inactive member with same name but different agent_id → update in place.
+        let cwd = match args.cwd {
+            Some(ref path) => path.to_string_lossy().to_string(),
+            None => std::env::current_dir()
+                .unwrap_or_else(|_| Path::new(".").to_path_buf())
+                .to_string_lossy()
+                .to_string(),
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let m = &mut team_config.members[idx];
+        m.agent_id = agent_id;
+        m.agent_type = args.agent_type.clone();
+        m.model = args.model.clone();
+        m.cwd = cwd;
+        m.is_active = Some(!args.inactive);
+        m.last_active = if !args.inactive { Some(now_ms) } else { None };
+        m.session_id = args.session_id.clone();
+        m.external_backend_type = parsed_backend_type;
+        m.external_model = Some(parsed_model);
+        if let Some(ref pane_id) = args.pane_id {
+            m.tmux_pane_id = Some(pane_id.clone());
+        }
+        write_team_config(&config_path, &team_config)?;
+        println!(
+            "Updated inactive member '{}' in team '{}' (agentType='{}')",
+            args.agent, args.team, args.agent_type
+        );
         return Ok(());
     }
 
+    // Brand-new member.
     let cwd = match args.cwd {
         Some(path) => path,
         None => std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
@@ -299,12 +405,11 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
 
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
 
-    let agent_type = args.agent_type.clone();
     let member = agent_team_mail_core::schema::AgentMember {
         agent_id,
         name: args.agent.clone(),
-        agent_type,
-        model: args.model,
+        agent_type: args.agent_type.clone(),
+        model: args.model.clone(),
         prompt: None,
         color: None,
         plan_mode_required: None,
@@ -315,6 +420,9 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
         backend_type: None,
         is_active: Some(!args.inactive),
         last_active: if !args.inactive { Some(now_ms) } else { None },
+        session_id: args.session_id,
+        external_backend_type: parsed_backend_type,
+        external_model: Some(parsed_model),
         unknown_fields: std::collections::HashMap::new(),
     };
 
@@ -324,6 +432,110 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
     println!(
         "Added member '{}' to team '{}' (agentType='{}')",
         args.agent, args.team, args.agent_type
+    );
+
+    Ok(())
+}
+
+/// Implement `atm teams update-member <team> <agent> [flags]`
+///
+/// Updates selected fields on an existing team member.  Only fields whose
+/// corresponding flag is `Some` are modified; omitted flags leave the current
+/// value unchanged.
+fn update_member(args: UpdateMemberArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let config_path = team_dir.join("config.json");
+
+    if !config_path.exists() {
+        anyhow::bail!(
+            "Team '{}' not found (directory {} doesn't exist)",
+            args.team,
+            team_dir.display()
+        );
+    }
+
+    // Validate inputs before locking.
+    let parsed_model: Option<ModelId> = if let Some(ref m) = args.model {
+        Some(
+            ModelId::from_str(m)
+                .map_err(|e| anyhow::anyhow!("Invalid --model: {e}"))?,
+        )
+    } else {
+        None
+    };
+
+    let parsed_backend_type: Option<BackendType> = if let Some(ref bt) = args.backend_type {
+        Some(
+            BackendType::from_str(bt)
+                .map_err(|e| anyhow::anyhow!("Invalid --backend-type: {e}"))?,
+        )
+    } else {
+        None
+    };
+
+    let lock_path = config_path.with_extension("lock");
+    let _lock = acquire_lock(&lock_path, 5)
+        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
+
+    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+
+    let member = team_config
+        .members
+        .iter_mut()
+        .find(|m| m.name == args.agent)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Member '{}' not found in team '{}'",
+                args.agent,
+                args.team
+            )
+        })?;
+
+    let mut updated_fields: Vec<&str> = Vec::new();
+
+    if let Some(session_id) = args.session_id {
+        member.session_id = Some(session_id);
+        updated_fields.push("session_id");
+    }
+
+    if let Some(model) = parsed_model {
+        member.model = model.to_string();
+        member.external_model = Some(model);
+        updated_fields.push("model");
+    }
+
+    if let Some(pane_id) = args.pane_id {
+        member.tmux_pane_id = Some(pane_id);
+        updated_fields.push("tmux_pane_id");
+    }
+
+    if let Some(bt) = parsed_backend_type {
+        member.external_backend_type = Some(bt);
+        updated_fields.push("backend_type");
+    }
+
+    if let Some(active) = args.active {
+        member.is_active = Some(active);
+        if active {
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            member.last_active = Some(now_ms);
+        }
+        updated_fields.push("is_active");
+    }
+
+    if updated_fields.is_empty() {
+        println!("No fields to update. Specify at least one flag (--session-id, --model, --pane-id, --backend-type, --active).");
+        return Ok(());
+    }
+
+    write_team_config(&config_path, &team_config)?;
+
+    println!(
+        "Updated member '{}' in team '{}': {}",
+        args.agent,
+        args.team,
+        updated_fields.join(", ")
     );
 
     Ok(())
@@ -625,38 +837,91 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         // Safety rule: only remove a member when the daemon *explicitly* confirms
         // the session is gone.  If the daemon is unreachable we cannot determine
         // liveness, so we skip the member unless --force is given.
-        let is_dead = match agent_team_mail_core::daemon_client::query_session(&member.name) {
-            Ok(Some(ref info)) => {
-                // Daemon responded with an explicit record — trust it.
-                !info.alive
-            }
-            Ok(None) if daemon_running => {
-                // Daemon is running but has no record for this member — session is gone.
-                true
-            }
-            Ok(None) => {
-                // Daemon is not running: we cannot confirm liveness.
-                // Skip unless --force.
-                if args.force {
-                    true
-                } else {
+        //
+        // External agents (those with `external_backend_type` set) require
+        // additional conservatism: they do not use the Claude Code hook system,
+        // so the daemon may have no record for them even when they are alive.
+        // We only remove an external agent when:
+        //   1. It has a `session_id` set, AND
+        //   2. The daemon explicitly confirms that session is dead (`alive == false`).
+        // Any other outcome (no session_id, daemon unreachable, no daemon record)
+        // is treated as "unknown liveness" → the external agent is kept.
+        let is_external = member.external_backend_type.is_some();
+
+        let is_dead = if is_external {
+            // External agent: use session_id for the liveness query if available.
+            let query_key = match &member.session_id {
+                Some(sid) => sid.clone(),
+                None => {
+                    // No session_id → cannot confirm liveness; keep the member.
                     warn!(
-                        "Warning: daemon unreachable, skipping {} — use --force to override",
+                        "Warning: external agent '{}' has no session_id, skipping (unknown liveness)",
+                        member.name
+                    );
+                    skipped_names.push(member.name.clone());
+                    continue;
+                }
+            };
+
+            match agent_team_mail_core::daemon_client::query_session(&query_key) {
+                Ok(Some(ref info)) if !info.alive => {
+                    // Daemon explicitly reports the session as dead → safe to remove.
+                    true
+                }
+                Ok(_) => {
+                    // Daemon unreachable, session alive, or no record → keep the agent.
+                    warn!(
+                        "Warning: external agent '{}' liveness unknown, skipping — use --force to override",
+                        member.name
+                    );
+                    skipped_names.push(member.name.clone());
+                    continue;
+                }
+                Err(_) => {
+                    // I/O error → keep the agent to be safe.
+                    warn!(
+                        "Warning: daemon query error for external agent '{}', skipping",
                         member.name
                     );
                     skipped_names.push(member.name.clone());
                     continue;
                 }
             }
-            Err(e) => {
-                // Unexpected I/O error after connection was established — cannot
-                // determine liveness; skip the member to avoid unsafe removal.
-                warn!(
-                    "Warning: daemon query error for {}, skipping: {e}",
-                    member.name
-                );
-                skipped_names.push(member.name.clone());
-                continue;
+        } else {
+            // Standard Claude Code member: existing liveness logic unchanged.
+            match agent_team_mail_core::daemon_client::query_session(&member.name) {
+                Ok(Some(ref info)) => {
+                    // Daemon responded with an explicit record — trust it.
+                    !info.alive
+                }
+                Ok(None) if daemon_running => {
+                    // Daemon is running but has no record for this member — session is gone.
+                    true
+                }
+                Ok(None) => {
+                    // Daemon is not running: we cannot confirm liveness.
+                    // Skip unless --force.
+                    if args.force {
+                        true
+                    } else {
+                        warn!(
+                            "Warning: daemon unreachable, skipping {} — use --force to override",
+                            member.name
+                        );
+                        skipped_names.push(member.name.clone());
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    // Unexpected I/O error after connection was established — cannot
+                    // determine liveness; skip the member to avoid unsafe removal.
+                    warn!(
+                        "Warning: daemon query error for {}, skipping: {e}",
+                        member.name
+                    );
+                    skipped_names.push(member.name.clone());
+                    continue;
+                }
             }
         };
 
