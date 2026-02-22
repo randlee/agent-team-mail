@@ -41,7 +41,7 @@ use crate::inject::{build_session_context, inject_developer_instructions};
 use crate::lifecycle::{ThreadCommand, ThreadCommandQueue};
 use crate::lock::{acquire_lock, check_lock, release_lock};
 use crate::mail_inject::{
-    MailPoller, fetch_unread_mail, format_mail_turn_content, mark_messages_read,
+    InflightMailSet, MailPoller, fetch_unread_mail, format_mail_turn_content, mark_messages_read,
 };
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
@@ -516,6 +516,8 @@ impl ProxyServer {
                             &shared_stdin_bg,
                             &pending_bg,
                             &request_counter_bg,
+                            None,
+                            None,
                         )
                         .await;
                     }
@@ -1555,6 +1557,8 @@ Session ending. Write a concise summary of:\n\
                                     &shared_stdin_for_task,
                                     &pending_for_thread_map,
                                     &request_counter_for_task,
+                                    None,
+                                    None,
                                 )
                                 .await;
                             }
@@ -2428,6 +2432,8 @@ Session ending. Write a concise summary of:\n\
                                             &shared_stdin_for_reader,
                                             &pending_clone,
                                             &request_counter_for_reader,
+                                            None,
+                                            None,
                                         )
                                         .await;
                                     }
@@ -2681,6 +2687,11 @@ async fn dispatch_auto_mail_if_available(
     shared_stdin: &SharedChildStdin,
     pending: &Arc<Mutex<PendingRequests>>,
     request_counter: &Arc<AtomicU64>,
+    // Optional app-server transport routing: when Some, routes to turn/start or
+    // turn/steer instead of codex-reply.  Existing call sites pass None to
+    // preserve the MCP/cli-json path unchanged.
+    transport_ref: Option<&dyn CodexTransport>,
+    inflight: Option<&Arc<Mutex<InflightMailSet>>>,
 ) {
     // Defect 3 partial fix: check the command queue first.  If a ClaudeReply
     // was queued while the thread was Busy, dispatch it instead.
@@ -2747,6 +2758,49 @@ async fn dispatch_auto_mail_if_available(
                     }
                 }
             }
+        }
+    }
+
+    // Route to the app-server path when the transport uses turn/start or
+    // turn/steer instead of codex-reply.  The app-server dispatcher manages
+    // the single-flight reservation and mark-read boundary itself.
+    if let Some(transport) = transport_ref {
+        if transport.uses_app_server_injection() {
+            // The single-flight guard must still be taken before we call the
+            // app-server dispatcher, to prevent concurrent polls from both
+            // reaching the dispatch path simultaneously.
+            if !try_reserve_thread_for_auto_mail(agent_id, registry).await {
+                return;
+            }
+            let active_turn_id = transport.active_turn_id_for_thread(thread_id);
+            if let Some(inf) = inflight {
+                dispatch_auto_mail_app_server(
+                    agent_id,
+                    identity,
+                    thread_id,
+                    team,
+                    max_messages,
+                    max_message_length,
+                    registry,
+                    shared_stdin,
+                    request_counter,
+                    active_turn_id,
+                    inf,
+                )
+                .await;
+            } else {
+                // inflight not provided for app-server path — release guard
+                // and log a warning. Callers should always supply it.
+                registry
+                    .lock()
+                    .await
+                    .set_thread_state(agent_id, ThreadState::Idle);
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "dispatch_auto_mail_if_available: app-server transport requires inflight set"
+                );
+            }
+            return;
         }
     }
 
@@ -2826,6 +2880,172 @@ async fn dispatch_auto_mail_if_available(
             .await
             .set_thread_state(agent_id, ThreadState::Idle);
         tracing::warn!("chained auto-mail: failed to write codex-reply to child stdin");
+    }
+}
+
+/// Dispatch auto-mail to an app-server child using `turn/start` or `turn/steer`.
+///
+/// Called by [`dispatch_auto_mail_if_available`] when the active transport
+/// reports [`crate::transport::CodexTransport::uses_app_server_injection`] ==
+/// `true`.  Unlike the MCP/cli-json path (which uses the `codex-reply`
+/// `tools/call` wrapper), the app-server protocol sends mail content directly
+/// as a `turn/start` or `turn/steer` JSON-RPC request:
+///
+/// - **`turn/start`** — used when the thread is `Idle` or `Terminal`
+///   (`active_turn_id` is `None`).
+/// - **`turn/steer`** — used when the thread is `Busy` and has an active
+///   turn in progress (`active_turn_id` is `Some(id)`).  Requires
+///   `expectedTurnId` to match the active turn.
+///
+/// FR-8.12 semantics are preserved: [`mark_messages_read`] is only called
+/// **after** the write to child stdin succeeds.  If the write fails, the
+/// registry thread state is restored to `Idle` so the next poll can retry.
+///
+/// The `inflight` set is updated before `mark_messages_read` to prevent
+/// the next poll cycle from re-injecting the same messages while the current
+/// dispatch is in-progress.  On write failure the in-flight IDs are cleared
+/// so they become eligible for retry.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "all parameters are distinct concerns required by a single \
+              coordinated dispatch operation; splitting would require a \
+              context struct refactor tracked separately"
+)]
+async fn dispatch_auto_mail_app_server(
+    agent_id: &str,
+    identity: &str,
+    thread_id: &str,
+    team: &str,
+    max_messages: usize,
+    max_message_length: usize,
+    registry: &Arc<Mutex<SessionRegistry>>,
+    shared_stdin: &SharedChildStdin,
+    request_counter: &Arc<AtomicU64>,
+    active_turn_id: Option<String>,
+    inflight: &Arc<Mutex<InflightMailSet>>,
+) {
+    // 1. Fetch unread mail.
+    let all_envelopes = fetch_unread_mail(identity, team, max_messages, max_message_length);
+    if all_envelopes.is_empty() {
+        registry
+            .lock()
+            .await
+            .set_thread_state(agent_id, ThreadState::Idle);
+        return;
+    }
+
+    // 2. Filter out messages already in-flight (dedup guard).
+    let injectable_ids: Vec<String> = {
+        let inf = inflight.lock().await;
+        all_envelopes
+            .iter()
+            .filter(|e| !inf.is_inflight(&e.message_id))
+            .map(|e| e.message_id.clone())
+            .collect()
+    };
+
+    // Collect only the injectable envelopes.
+    let envelopes: Vec<_> = all_envelopes
+        .into_iter()
+        .filter(|e| injectable_ids.contains(&e.message_id))
+        .collect();
+
+    if envelopes.is_empty() {
+        registry
+            .lock()
+            .await
+            .set_thread_state(agent_id, ThreadState::Idle);
+        return;
+    }
+
+    // 3. Acquire the child stdin.
+    let child_stdin_opt = shared_stdin.lock().await.clone();
+    let Some(child_stdin) = child_stdin_opt else {
+        registry
+            .lock()
+            .await
+            .set_thread_state(agent_id, ThreadState::Idle);
+        return;
+    };
+
+    // 4. Build the JSON-RPC request (turn/start or turn/steer).
+    let content = format_mail_turn_content(&envelopes);
+    let req_id = request_counter.fetch_add(1, Ordering::Relaxed);
+    let req_id_val = serde_json::Value::Number(req_id.into());
+
+    let auto_msg = if let Some(ref turn_id) = active_turn_id {
+        // Thread is Busy — use turn/steer with expectedTurnId.
+        // Per the app-server protocol spec (Section 1), messages omit the `jsonrpc` field.
+        json!({
+            "id": req_id_val,
+            "method": "turn/steer",
+            "params": {
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "input": [{ "type": "text", "text": content }]
+            }
+        })
+    } else {
+        // Thread is Idle or Terminal — use turn/start.
+        // Per the app-server protocol spec (Section 1), messages omit the `jsonrpc` field.
+        json!({
+            "id": req_id_val,
+            "method": "turn/start",
+            "params": {
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": content }]
+            }
+        })
+    };
+
+    let Ok(serialized) = serde_json::to_string(&auto_msg) else {
+        registry
+            .lock()
+            .await
+            .set_thread_state(agent_id, ThreadState::Idle);
+        return;
+    };
+
+    // 5. Mark IDs as in-flight before writing, to prevent concurrent polls
+    //    from re-injecting the same messages.
+    let dispatched_ids: Vec<String> = envelopes.iter().map(|e| e.message_id.clone()).collect();
+    {
+        inflight.lock().await.mark_inflight(&dispatched_ids);
+    }
+
+    // 6. Write to child stdin.
+    let write_ok = {
+        let mut stdin = child_stdin.lock().await;
+        write_newline_delimited(&mut *stdin, &serialized)
+            .await
+            .is_ok()
+    };
+
+    if write_ok {
+        // FR-8.12: mark-read only after successful dispatch.
+        mark_messages_read(identity, team, &dispatched_ids);
+        tracing::info!(
+            agent_id = %agent_id,
+            req_id = req_id,
+            message_count = dispatched_ids.len(),
+            method = if active_turn_id.is_some() { "turn/steer" } else { "turn/start" },
+            "app-server auto-mail dispatched (FR-8.1)"
+        );
+        // After successful mark-read the messages are no longer unread, so
+        // clear them from the in-flight set to keep it compact.
+        inflight.lock().await.clear_inflight(&dispatched_ids);
+    } else {
+        // Write failed — restore thread to Idle and clear in-flight so the
+        // next poll cycle can retry.
+        inflight.lock().await.clear_inflight(&dispatched_ids);
+        registry
+            .lock()
+            .await
+            .set_thread_state(agent_id, ThreadState::Idle);
+        tracing::warn!(
+            agent_id = %agent_id,
+            "app-server auto-mail: failed to write to child stdin; will retry on next poll"
+        );
     }
 }
 
@@ -3836,6 +4056,136 @@ mod tests {
         assert!(
             upstream_rx.try_recv().is_err(),
             "expected no ERR_IDENTITY_CONFLICT after agent_close"
+        );
+
+        unsafe { std::env::remove_var("ATM_HOME") };
+    }
+
+    // -----------------------------------------------------------------------
+    // dispatch_auto_mail_app_server — FR-8.12 mark-read boundary test
+    // -----------------------------------------------------------------------
+
+    /// Verify that `dispatch_auto_mail_app_server` does NOT call
+    /// `mark_messages_read` when the write to child stdin fails.
+    ///
+    /// FR-8.12: mark-read must only happen after the request is accepted by
+    /// the child stdin.  If the write fails, messages must remain unread so
+    /// the next poll cycle can retry.
+    ///
+    /// Implementation note: we simulate a write failure by dropping the read
+    /// half of a duplex stream before writing, which causes `write_all` to
+    /// return a broken-pipe error on the write half.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn mark_read_only_after_successful_dispatch() {
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+
+        // Seed inbox with one unread message.
+        let team = "test-team";
+        let identity = "test-agent";
+        let inbox_dir = dir
+            .path()
+            .join(".claude/teams")
+            .join(team)
+            .join("inboxes");
+        std::fs::create_dir_all(&inbox_dir).unwrap();
+        let inbox_path = inbox_dir.join(format!("{identity}.json"));
+        let msg = agent_team_mail_core::InboxMessage {
+            from: "alice".to_string(),
+            text: "hello from alice".to_string(),
+            timestamp: "2026-02-22T10:00:00Z".to_string(),
+            read: false,
+            summary: None,
+            message_id: Some("test-msg-1".to_string()),
+            unknown_fields: HashMap::new(),
+        };
+        std::fs::write(
+            &inbox_path,
+            serde_json::to_string_pretty(&vec![&msg]).unwrap(),
+        )
+        .unwrap();
+
+        // Build a broken stdin: write half of a duplex where the read half is dropped.
+        let (write_half, _read_half_dropped) = tokio::io::duplex(256);
+        // Drop the read half immediately — writes will fail with broken pipe.
+        drop(_read_half_dropped);
+
+        let broken_stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> =
+            Arc::new(Mutex::new(Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>));
+
+        // Wrap in the SharedChildStdin type.
+        let shared_stdin: SharedChildStdin = Arc::new(Mutex::new(Some(broken_stdin)));
+
+        // Build registry with an Active/Idle session.
+        let registry = Arc::new(Mutex::new(SessionRegistry::new(8)));
+        let agent_id = {
+            let mut reg = registry.lock().await;
+            let entry = reg
+                .register(
+                    "test-agent".to_string(),
+                    identity.to_string(),
+                    ".".to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            reg.set_thread_state(&entry.agent_id, ThreadState::Idle);
+            entry.agent_id
+        };
+
+        let request_counter = Arc::new(AtomicU64::new(1));
+        let inflight = Arc::new(Mutex::new(InflightMailSet::new()));
+
+        // Reserve the thread (Idle -> Busy) as dispatch_auto_mail_app_server expects.
+        assert!(try_reserve_thread_for_auto_mail(&agent_id, &registry).await);
+
+        // Call the app-server dispatcher — this should fail to write and NOT mark read.
+        dispatch_auto_mail_app_server(
+            &agent_id,
+            identity,
+            "thread-1",
+            team,
+            10,
+            4096,
+            &registry,
+            &shared_stdin,
+            &request_counter,
+            None, // Idle: use turn/start
+            &inflight,
+        )
+        .await;
+
+        // Verify: the message must still be unread (mark-read was not called).
+        let content = std::fs::read_to_string(&inbox_path).unwrap();
+        let messages: Vec<agent_team_mail_core::InboxMessage> =
+            serde_json::from_str(&content).unwrap();
+        assert!(
+            !messages[0].read,
+            "message must remain unread when dispatch write fails (FR-8.12)"
+        );
+
+        // Verify: in-flight set was cleared on failure (retry eligible).
+        assert!(
+            !inflight.lock().await.is_inflight("test-msg-1"),
+            "in-flight set must be cleared after write failure so retry is possible"
+        );
+
+        // Verify: thread state was restored to Idle after the failure.
+        let thread_state = registry
+            .lock()
+            .await
+            .get(&agent_id)
+            .map(|e| e.thread_state.clone())
+            .unwrap();
+        assert_eq!(
+            thread_state,
+            ThreadState::Idle,
+            "thread state must be restored to Idle after failed dispatch"
         );
 
         unsafe { std::env::remove_var("ATM_HOME") };
