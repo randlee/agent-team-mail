@@ -441,4 +441,33 @@ mod tests {
             serde_json::from_value(payload["source"].clone()).unwrap();
         assert_eq!(source.kind, LifecycleSourceKind::AtmMcp);
     }
+
+    /// Guardrail: lifecycle payloads emitted by atm-agent-mcp must never use
+    /// `claude_hook` source kind.
+    #[test]
+    fn lifecycle_payloads_do_not_use_claude_hook_source() {
+        use agent_team_mail_core::daemon_client::{LifecycleSource, LifecycleSourceKind};
+
+        let payloads = [
+            serde_json::json!({
+                "event": EventKind::SessionStart.as_str(),
+                "source": LifecycleSource::new(LifecycleSourceKind::AtmMcp),
+            }),
+            serde_json::json!({
+                "event": EventKind::TeammateIdle.as_str(),
+                "source": LifecycleSource::new(LifecycleSourceKind::AtmMcp),
+            }),
+            serde_json::json!({
+                "event": EventKind::SessionEnd.as_str(),
+                "source": LifecycleSource::new(LifecycleSourceKind::AtmMcp),
+            }),
+        ];
+
+        for payload in payloads {
+            let source: LifecycleSource =
+                serde_json::from_value(payload["source"].clone()).unwrap();
+            assert_eq!(source.kind, LifecycleSourceKind::AtmMcp);
+            assert_ne!(source.kind, LifecycleSourceKind::ClaudeHook);
+        }
+    }
 }

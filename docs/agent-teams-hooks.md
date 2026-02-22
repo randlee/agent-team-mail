@@ -412,12 +412,17 @@ Personal machine settings. Applies to all Claude Code sessions regardless of pro
 
 ## Hook Payload Reference
 
-Each hook receives a JSON payload on stdin. Key fields:
+There are two payload layers:
+
+1. Claude Code hook stdin payload (raw event from Claude)
+2. ATM daemon socket payload (`command: "hook-event"`) emitted by ATM scripts/proxies
+
+### 1) Claude Hook Stdin Payload
 
 | Field | Present In | Description |
 |-------|-----------|-------------|
 | `session_id` | All hooks | UUID of the calling Claude Code session |
-| `source` | `SessionStart` | `"init"` (fresh start), `"compact"` (post-compaction), `"resume"` (--continue) |
+| `source` | `SessionStart` | Claude-native start mode: `"init"` (fresh), `"compact"` (post-compaction), `"resume"` (`--continue`) |
 | `reason` | `SessionEnd` | `"clear"`, `"logout"`, `"prompt_input_exit"`, `"bypass_permissions_disabled"`, `"other"` |
 | `transcript_path` | `SessionEnd` | Path to the session transcript JSONL file |
 | `tool_name` | `PreToolUse` | Name of the tool being called (e.g., `"Task"`) |
@@ -427,6 +432,16 @@ Each hook receives a JSON payload on stdin. Key fields:
 | `tool_input.team_name` | `PreToolUse(Task)` | Team to join (if present, adds to team) |
 | `name` | `TeammateIdle` | Name of the idle teammate |
 | `team_name` | `TeammateIdle` | Team the teammate belongs to |
+
+### 2) ATM Daemon Socket Payload (`hook-event`)
+
+| Field | Description |
+|-------|-------------|
+| `event` | `session_start` \| `teammate_idle` \| `session_end` |
+| `session_id` | Session identifier used by daemon liveness/state tracking |
+| `agent` | ATM member identity |
+| `team` | ATM team name |
+| `source.kind` | Lifecycle source discriminator (`claude_hook`, `atm_mcp`, `agent_hook`, `unknown`) |
 
 ---
 
@@ -447,4 +462,5 @@ All hook scripts follow these conventions:
 - **Project-level hooks only fire for interactive sessions.** Task-tool-spawned teammates (background agents or named teammates) do NOT trigger `PreToolUse` or `TeammateIdle` for their own Tool calls — only the parent session's hook fires when spawning them.
 - **`SessionStart` is global, not project-scoped.** All sessions on the machine get the hook output, even in unrelated projects. The hook gracefully does nothing if `.atm.toml` is absent.
 - **`leadSessionId` must be current** for Rule 2 to work correctly. If `atm teams resume` has not been run after a session restart, the gate may incorrectly block the team lead. See `atm teams resume` documentation and issue [#141](https://github.com/randlee/agent-team-mail/issues/141).
+- **Daemon session registry is currently keyed by agent name only.** Cross-team duplicate member names can collide in session tracking until the registry is migrated to a team-scoped key (`(team, name)`).
 - **Agent-teams is pre-release** as of Claude Code v2.1.39. Hook behavior may change in future versions.

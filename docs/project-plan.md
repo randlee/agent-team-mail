@@ -2525,13 +2525,15 @@ All hook scripts are Python (not bash) for cross-platform compatibility and test
 
 Socket message payloads (single `hook-event` command path):
 ```json
-{"event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": "init|compact"}
+{"event": "session_start", "session_id": "...", "agent": "...", "team": "...", "source": {"kind": "claude_hook"}}
 {"event": "teammate_idle", "session_id": "...", "agent": "...", "team": "...", "received_at": "YYYY-MM-DDTHH:MM:SSZ"}
 {"event": "session_end",   "session_id": "...", "agent": "...", "team": "...", "reason": "..."}
 ```
 
-`source` is currently a flat string sent by Claude hook scripts (`init` or `compact` on session start).
-Future lifecycle-source expansion remains planned in Sprint E.7.
+`source` shape was initially described in E.3 as a flat string (`"init"` / `"compact"`).
+Sprint E.7 supersedes that format: lifecycle source is now an object discriminator
+(`source.kind`) for unified, extensible validation (`claude_hook` / `atm_mcp` /
+`agent_hook` / `unknown`). Legacy flat-string payloads degrade to `unknown`.
 
 **Unit tests** live in `tests/hook-scripts/`:
 - `test_session_start.py` — mock socket, verify message shape, verify `.atm.toml` guard, verify fail-open on socket error
@@ -2554,6 +2556,8 @@ Add `SocketCommand::HookEvent` variant. Handler updates session registry and age
 - Global `~/.claude/settings.json` updated to add `SessionEnd` hook pointing to `session-end.py`
 - Keep one daemon lifecycle handler path (`hook-event`) with source-aware validation;
   avoid splitting lifecycle transport into multiple packet families
+- SessionRegistry is currently keyed by bare agent name (not `(team, name)`);
+  this is a known limitation and a TODO for future multi-team daemon support
 
 #### Exit Criteria
 

@@ -133,6 +133,11 @@ def main() -> int:
         os.environ.get("ATM_IDENTITY"),
     )
 
+    # Require both identity fields before any audit write/socket send.
+    # Fail-open: skip relay if required identity context cannot be resolved.
+    if not team or not agent:
+        return 0
+
     received_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     event = {

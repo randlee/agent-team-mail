@@ -584,6 +584,10 @@ async fn handle_hook_event_command(
                 );
             }
             let pid = process_id.unwrap_or(0);
+            // SessionRegistry is currently keyed by bare agent name, not team.
+            // This matches existing daemon behavior but can collide across teams
+            // that reuse member names.
+            // TODO(atm-daemon): switch registry operations to team-scoped keys.
             session_registry
                 .lock()
                 .unwrap()
@@ -3425,6 +3429,44 @@ mod tests {
         assert!(
             !payload["processed"].as_bool().unwrap(),
             "absent source must default to Unknown (strictest) and reject non-lead"
+        );
+    }
+
+    /// Legacy E.3 payloads used a flat string for `source` on session_start
+    /// (for example `"init"` / `"compact"`). The E.7 parser expects an object
+    /// (`{"kind":"..."}`), so legacy string payloads must degrade gracefully
+    /// to `unknown` and enforce strict validation.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_legacy_flat_string_source_degrades_to_unknown() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-legacy-flat-source".to_string(),
+            command: "hook-event".to_string(),
+            payload: serde_json::json!({
+                "event": "session_start",
+                "agent": "arch-ctm",
+                "team": "atm-dev",
+                "session_id": "sess-legacy-flat",
+                "source": "init",
+            }),
+        };
+        let req_str = serde_json::to_string(&req).unwrap();
+        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "legacy flat-string source must degrade to Unknown (strictest)"
+        );
+        assert!(
+            payload["reason"].as_str().unwrap().contains("only team-lead"),
+            "legacy flat-string source should follow Unknown/claude_hook restrictions"
         );
     }
 
