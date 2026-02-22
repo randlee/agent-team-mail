@@ -153,7 +153,7 @@ TeamDelete:
 - `~/.claude/tasks/{team_name}/` (entire directory tree)
 - All associated inboxes, agent state, message history, and task records
 
-**Destructive behavior**: `TeamDelete` is a full teardown — ALL team data is permanently deleted. This includes inbox files, task history, and team configuration. There is no partial cleanup or archive option. Any data not committed or copied elsewhere is lost.
+**Destructive behavior**: `TeamDelete` is a full teardown — ALL team data is permanently deleted. This includes inbox files, task history, and team configuration. There is no partial cleanup of team data via the API. For backup and restore of team state, use `atm teams backup` and `atm teams restore` (see ATM CLI documentation). Any data not committed or copied elsewhere is lost.
 
 **Constraints**:
 - Team must exist
@@ -163,6 +163,45 @@ TeamDelete:
 **When to use vs. agent shutdown**:
 - To shut down a **single agent** without destroying the team, use `SendMessage` with `type: "shutdown_request"`. The team, task list, inboxes, and remaining agents are preserved.
 - Use `TeamDelete` only when the **entire team** is no longer needed and all data has been preserved elsewhere.
+
+---
+
+### Team Backup and Restore (ATM CLI)
+
+The `atm` CLI provides a file-layer backup and restore facility that complements `TeamDelete`.
+
+#### `atm teams backup <team>`
+
+Creates a timestamped snapshot of team state at `~/.claude/teams/.backups/<team>/<timestamp>/`:
+
+```
+.backups/<team>/<timestamp>/
+├── config.json        ← copy of ~/.claude/teams/<team>/config.json
+├── inboxes/           ← copy of all inbox files
+│   └── <agent>.json
+└── tasks/             ← copy of ~/.claude/tasks/<team>/ (if present)
+    └── <task-id>.json
+```
+
+- Timestamp format: `YYYYMMDDTHHMMSSz` (ISO 8601 compact UTC)
+- Auto-prunes to the last 5 backups per team (oldest removed first)
+- Also triggered automatically at the start of `atm teams resume` (non-fatal: a backup failure does not abort the resume)
+
+#### `atm teams restore <team>`
+
+Restores team state from a backup:
+
+- **Default**: restores from the latest backup (lexicographic sort of timestamp dirs)
+- `--from <path>`: restore from a specific backup directory
+- `--dry-run`: show what would be restored without writing any files
+- `--skip-tasks`: restore config + inboxes only, skip task list restoration
+
+**Invariants**:
+- `leadSessionId` in `config.json` is **never** overwritten — the current session's lead ID is always preserved
+- `team-lead` member entry is **never** restored from backup — only non-leader members are restored
+- Restore is **idempotent**: members already present in the current config are not duplicated
+
+**Relationship to TeamDelete**: `TeamDelete` permanently destroys all team data. Creating a backup before `TeamDelete` and restoring afterward is the supported recovery path.
 
 ---
 

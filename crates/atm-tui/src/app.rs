@@ -393,8 +393,7 @@ mod tests {
 
     #[test]
     fn test_follow_mode_initialized_from_config() {
-        let mut cfg = TuiConfig::default();
-        cfg.follow_mode_default = false;
+        let cfg = TuiConfig { follow_mode_default: false, ..Default::default() };
         let app = App::new("test".to_string(), cfg);
         assert!(!app.follow_mode, "follow_mode must reflect config default");
     }
