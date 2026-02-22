@@ -447,6 +447,9 @@ impl Plugin for CiMonitorPlugin {
             backend_type: None,
             is_active: Some(true),
             last_active: Some(now_ms),
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
             unknown_fields: std::collections::HashMap::new(),
         };
 
@@ -1071,6 +1074,9 @@ notify_target = "team-lead"
                     backend_type: None,
                     is_active: None,
                     last_active: None,
+                    session_id: None,
+                    external_backend_type: None,
+                    external_model: None,
                     unknown_fields: std::collections::HashMap::new(),
                 }
             ],
@@ -1137,6 +1143,9 @@ notify_target = "nonexistent-agent"
                     backend_type: None,
                     is_active: None,
                     last_active: None,
+                    session_id: None,
+                    external_backend_type: None,
+                    external_model: None,
                     unknown_fields: std::collections::HashMap::new(),
                 },
                 AgentMember {
@@ -1154,6 +1163,9 @@ notify_target = "nonexistent-agent"
                     backend_type: None,
                     is_active: None,
                     last_active: None,
+                    session_id: None,
+                    external_backend_type: None,
+                    external_model: None,
                     unknown_fields: std::collections::HashMap::new(),
                 }
             ],

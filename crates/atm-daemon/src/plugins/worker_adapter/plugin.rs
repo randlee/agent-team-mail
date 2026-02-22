@@ -973,14 +973,17 @@ impl Plugin for WorkerAdapterPlugin {
                     warn!("Could not create hook events directory {}: {e}", parent.display());
                 }
             }
+            let claude_root = ctx.system.claude_root.clone();
             let watcher = if let Some(ref registry) = self.session_registry {
                 HookWatcher::new_with_session_registry(
                     events_path,
                     Arc::clone(&self.agent_state),
                     Arc::clone(registry),
                 )
+                .with_claude_root(claude_root)
             } else {
                 HookWatcher::new(events_path, Arc::clone(&self.agent_state))
+                    .with_claude_root(claude_root)
             };
             let watcher_cancel = cancel.clone();
             tokio::spawn(async move {
