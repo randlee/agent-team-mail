@@ -39,19 +39,37 @@ fn make_error_response(id: u64, code: i64, message: &str) -> String {
 }
 
 /// Build a `turn/started` notification (no `jsonrpc` field per app-server spec).
+///
+/// Uses `thread_id` as the thread identifier and `turn_id` as the unique turn
+/// identifier within that thread. When only one argument is passed (legacy tests),
+/// both `threadId` and `turnId` are set to the same value.
 fn make_turn_started(turn_id: &str) -> String {
+    make_turn_started_with_thread(turn_id, turn_id)
+}
+
+/// Build a `turn/started` notification with explicit `threadId` and `turnId`.
+fn make_turn_started_with_thread(thread_id: &str, turn_id: &str) -> String {
     serde_json::to_string(&json!({
         "method": "turn/started",
-        "params": { "turnId": turn_id }
+        "params": { "threadId": thread_id, "turnId": turn_id }
     }))
     .unwrap()
 }
 
 /// Build a `turn/completed` notification (no `jsonrpc` field per app-server spec).
+///
+/// Uses `thread_id` as the thread identifier and `turn_id` as the unique turn
+/// identifier within that thread. When only two arguments are passed (legacy tests),
+/// `threadId` is set to the same value as `turnId`.
 fn make_turn_completed(turn_id: &str, status: &str) -> String {
+    make_turn_completed_with_thread(turn_id, turn_id, status)
+}
+
+/// Build a `turn/completed` notification with explicit `threadId` and `turnId`.
+fn make_turn_completed_with_thread(thread_id: &str, turn_id: &str, status: &str) -> String {
     serde_json::to_string(&json!({
         "method": "turn/completed",
-        "params": { "turnId": turn_id, "status": status }
+        "params": { "threadId": thread_id, "turnId": turn_id, "status": status }
     }))
     .unwrap()
 }
@@ -186,17 +204,17 @@ fn test_turn_state_tracking() {
     // Parse started notification.
     let n = parse_app_server_notification(&started_line).expect("should parse");
     assert!(
-        matches!(n, AppServerNotification::TurnStarted { ref turn_id } if turn_id == "turn-abc"),
-        "expected TurnStarted with turn-abc"
+        matches!(&n, AppServerNotification::TurnStarted { turn_id, .. } if turn_id == "turn-abc"),
+        "expected TurnStarted with turn-abc, got: {n:?}"
     );
 
     // Simulate state update: Idle -> Busy.
     let mut state: std::collections::HashMap<String, TurnState> =
         std::collections::HashMap::new();
-    if let AppServerNotification::TurnStarted { turn_id } =
+    if let AppServerNotification::TurnStarted { thread_id, turn_id } =
         parse_app_server_notification(&started_line).unwrap()
     {
-        state.insert(turn_id.clone(), TurnState::Busy { turn_id });
+        state.insert(thread_id, TurnState::Busy { turn_id });
     }
     assert!(
         !state.values().all(|s| s.is_idle()),
@@ -207,22 +225,23 @@ fn test_turn_state_tracking() {
     let n = parse_app_server_notification(&completed_line).expect("should parse");
     assert!(
         matches!(
-            n,
+            &n,
             AppServerNotification::TurnCompleted {
-                ref turn_id,
-                status: TurnStatus::Completed
+                turn_id,
+                status: TurnStatus::Completed,
+                ..
             }
             if turn_id == "turn-abc"
         ),
-        "expected TurnCompleted with Completed status"
+        "expected TurnCompleted with Completed status, got: {n:?}"
     );
 
     // Simulate state update: Busy -> Terminal.
-    if let AppServerNotification::TurnCompleted { turn_id, status } =
+    if let AppServerNotification::TurnCompleted { thread_id, turn_id, status } =
         parse_app_server_notification(&completed_line).unwrap()
     {
         state.insert(
-            turn_id.clone(),
+            thread_id,
             TurnState::Terminal {
                 turn_id,
                 status,
@@ -516,6 +535,7 @@ async fn test_app_server_background_task_turn_lifecycle() {
         pending_responses: Arc::clone(&pending_responses),
         session_registry: Arc::clone(&session_registry),
         team: "test-team".to_string(),
+        turn_tracker: None,
     };
 
     tokio::task::spawn(drive_notification_task(
@@ -835,6 +855,7 @@ async fn test_response_correlation_via_background_task() {
         pending_responses: Arc::clone(&pending_responses),
         session_registry: Arc::clone(&session_registry),
         team: "test-team".to_string(),
+        turn_tracker: None,
     };
 
     tokio::task::spawn(drive_notification_task(

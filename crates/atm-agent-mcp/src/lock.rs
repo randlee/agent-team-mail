@@ -342,7 +342,8 @@ mod tests {
         // This test manipulates env; run it without parallelism via serial_test.
         // When ATM_HOME is set, sessions_dir() returns
         // ATM_HOME/.config/atm/agent-sessions (FR-20.1).
-        let dir = "/tmp/test-atm-home-lock";
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         // SAFETY: serialised by `#[serial]`
         unsafe { std::env::set_var("ATM_HOME", dir) };
         let path = sessions_dir();

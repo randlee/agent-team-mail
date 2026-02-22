@@ -35,6 +35,7 @@ use tokio::sync::Mutex;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 
 use crate::config::AgentMcpConfig;
+use crate::turn_control::TurnControl as _;
 
 /// Raw I/O handles produced by a successful [`CodexTransport::spawn`] call.
 ///
@@ -94,16 +95,40 @@ pub(crate) trait CodexTransport: Send + Sync + std::fmt::Debug {
     fn is_idle(&self) -> bool {
         false
     }
+
+    /// Set the session context for turn-state daemon emission.
+    ///
+    /// Called by the proxy after session registration so the transport's
+    /// [`crate::turn_control::TurnTracker`] can emit [`crate::lifecycle_emit::EventKind::TeammateIdle`]
+    /// lifecycle events to the daemon. The default implementation is a no-op;
+    /// only [`AppServerTransport`] overrides this.
+    fn set_turn_session_context(&self, _ctx: crate::turn_control::SessionContext) {}
 }
 
 /// Transport that spawns `codex mcp-server` as a child subprocess.
 ///
 /// This is the production transport for MCP mode.  It reproduces the exact
 /// spawn logic that previously lived inline in `ProxyServer::spawn_child`.
+///
+/// # Turn tracking
+///
+/// `McpTransport` holds a [`crate::turn_control::TurnTracker`] for API
+/// consistency with the other transports. MCP protocol handles turns
+/// differently (no explicit `turn/started` / `turn/completed` notifications),
+/// so active turn tracking is deferred to Sprint G.5. The tracker is present
+/// and accessible via [`McpTransport::turn_tracker`] so callers can set a
+/// session context when it becomes available.
 #[derive(Debug)]
 pub(crate) struct McpTransport {
     config: AgentMcpConfig,
     team: String,
+    /// Unified turn tracker (deferred: MCP turn tracking wired in G.5).
+    #[expect(
+        dead_code,
+        reason = "present for API consistency with other transports; \
+                  MCP turn tracking is deferred to Sprint G.5"
+    )]
+    pub(crate) turn_tracker: crate::turn_control::TurnTracker,
 }
 
 impl McpTransport {
@@ -120,7 +145,11 @@ impl McpTransport {
             result: Some("mcp".to_string()),
             ..Default::default()
         });
-        Self { config, team }
+        Self {
+            config,
+            team,
+            turn_tracker: crate::turn_control::TurnTracker::new_deferred(),
+        }
     }
 }
 
@@ -194,6 +223,14 @@ impl CodexTransport for McpTransport {
 /// The `idle_flag` is shared between the transport struct and the [`RawChildIo`]
 /// it returns.  A background task monitors child stdout for `idle` JSONL events
 /// and sets the flag when one is detected.
+///
+/// # Turn tracking
+///
+/// `JsonCodecTransport` uses a `type` field rather than `method` for its
+/// cli-json events, so there are no explicit `turn/started` / `turn/completed`
+/// method names to hook. Turn tracking via [`crate::turn_control::TurnTracker`]
+/// is deferred to a future sprint when cli-json turn notifications are added.
+/// The tracker is present for API consistency and to enable deferred wiring.
 #[derive(Debug)]
 pub(crate) struct JsonCodecTransport {
     config: AgentMcpConfig,
@@ -206,6 +243,13 @@ pub(crate) struct JsonCodecTransport {
     /// events, but expresses turn-lifecycle transitions as `TurnState` mutations from
     /// `stream_norm`.  This demonstrates the shared abstraction between transports.
     cli_json_turn_state: Arc<Mutex<crate::stream_norm::TurnState>>,
+    /// Unified turn tracker (deferred: cli-json turn tracking wired in future sprint).
+    #[expect(
+        dead_code,
+        reason = "present for API consistency with other transports; \
+                  cli-json explicit turn notifications are deferred to a future sprint"
+    )]
+    pub(crate) turn_tracker: crate::turn_control::TurnTracker,
 }
 
 impl JsonCodecTransport {
@@ -227,6 +271,7 @@ impl JsonCodecTransport {
             team,
             idle_flag: Arc::new(AtomicBool::new(false)),
             cli_json_turn_state: Arc::new(Mutex::new(crate::stream_norm::TurnState::Idle)),
+            turn_tracker: crate::turn_control::TurnTracker::new_deferred(),
         }
     }
 }
@@ -451,6 +496,13 @@ pub(crate) struct AppServerTransport {
     /// oneshot sender is inserted under the request ID. The background task
     /// routes incoming responses to the matching sender.
     pending_responses: Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+    /// Unified turn tracker for daemon lifecycle emission.
+    ///
+    /// Created with [`crate::turn_control::TurnTracker::new_deferred`] so that the
+    /// transport can be constructed before a full [`crate::turn_control::SessionContext`]
+    /// is available. Call [`Self::set_session_context`] once session information is
+    /// known to enable daemon emission.
+    pub(crate) turn_tracker: crate::turn_control::TurnTracker,
 }
 
 impl AppServerTransport {
@@ -476,7 +528,28 @@ impl AppServerTransport {
             initialized: Arc::new(AtomicBool::new(false)),
             idle_flag: Arc::new(AtomicBool::new(false)),
             pending_responses: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            turn_tracker: crate::turn_control::TurnTracker::new_deferred(),
         }
+    }
+
+    /// Bind a [`crate::turn_control::SessionContext`] to the transport's turn tracker.
+    ///
+    /// Once called, daemon lifecycle events (e.g. `teammate_idle`) will be emitted
+    /// whenever turns complete. This must be called after session identity information
+    /// (agent identity, team, session ID) is available — typically after the first
+    /// successful session registration.
+    ///
+    /// The proxy calls the synchronous [`CodexTransport::set_turn_session_context`]
+    /// trait method instead (which spawns a task to call this), so this method
+    /// is retained as a direct async API for callers that already hold an
+    /// `AppServerTransport` reference in an async context.
+    #[expect(
+        dead_code,
+        reason = "direct async API; proxy uses set_turn_session_context on the trait \
+                  to avoid requiring a concrete AppServerTransport reference"
+    )]
+    pub async fn set_session_context(&self, ctx: crate::turn_control::SessionContext) {
+        self.turn_tracker.set_session_context(ctx).await;
     }
 
     /// Send a JSONL request to the child process stdin with bounded retry/backoff for
@@ -730,6 +803,10 @@ impl AppServerTransport {
             pending_responses: Arc::clone(&self.pending_responses),
             session_registry: Arc::clone(&self.session_registry),
             team: self.team.clone(),
+            // Wire the transport's turn_tracker so that daemon lifecycle events
+            // are emitted when turns complete. The tracker may have no session
+            // context yet (deferred); set_session_context can be called later.
+            turn_tracker: Some(self.turn_tracker.clone()),
         };
 
         tokio::spawn(drive_notification_task(
@@ -781,6 +858,15 @@ pub struct NotificationTaskState {
     pub session_registry: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// Team name for structured event logging.
     pub team: String,
+    /// Optional unified turn tracker.
+    ///
+    /// When `Some`, the background task calls [`crate::turn_control::TurnTracker`]
+    /// on each `turn/started` and `turn/completed` notification so that daemon
+    /// lifecycle events are emitted via a single, transport-agnostic path.
+    ///
+    /// `None` is used for the raw `AppServerTransport::spawn` path before a
+    /// full [`crate::turn_control::SessionContext`] is available.
+    pub turn_tracker: Option<crate::turn_control::TurnTracker>,
 }
 
 /// Drive the app-server notification background task from an stdout reader.
@@ -788,6 +874,11 @@ pub struct NotificationTaskState {
 /// Reads JSONL lines from `stdout`, routes responses to `pending_responses`
 /// channels, parses notifications into turn-state updates, and forwards all
 /// raw lines through `duplex_write` to the proxy reader.
+///
+/// When `state.turn_tracker` is `Some`, the task calls into the unified
+/// [`crate::turn_control::TurnTracker`] on every `turn/started` and
+/// `turn/completed` notification so daemon lifecycle events (e.g.
+/// `teammate_idle`) are emitted via a single, transport-agnostic path.
 ///
 /// Called from [`AppServerTransport::spawn`] with the real child stdout, and
 /// directly from integration tests with in-memory duplex pipes.
@@ -804,6 +895,7 @@ pub async fn drive_notification_task(
         pending_responses,
         session_registry,
         team,
+        turn_tracker,
     } = state;
     use crate::stream_norm::{
         AppServerNotification, TurnState, TurnStatus, parse_app_server_notification,
@@ -840,17 +932,25 @@ pub async fn drive_notification_task(
 
         if let Some(notification) = parse_app_server_notification(&line) {
             match notification {
-                AppServerNotification::TurnStarted { turn_id } => {
+                AppServerNotification::TurnStarted { thread_id, turn_id } => {
                     idle_flag.store(false, Ordering::SeqCst);
                     turn_state
                         .lock()
                         .await
                         .insert(
-                            turn_id.clone(),
+                            thread_id.clone(),
                             TurnState::Busy {
                                 turn_id: turn_id.clone(),
                             },
                         );
+                    // Notify the unified turn tracker (if wired) so that
+                    // per-thread active-turn state is kept consistent across
+                    // all transports.  Pass thread_id as the first argument
+                    // (key for per-thread tracking) and turn_id as the second
+                    // (unique turn identifier within the thread).
+                    if let Some(ref tracker) = turn_tracker {
+                        tracker.start_turn(&thread_id, &turn_id).await;
+                    }
                     emit_event_best_effort(EventFields {
                         level: "info",
                         source: "atm-agent-mcp",
@@ -860,12 +960,13 @@ pub async fn drive_notification_task(
                         ..Default::default()
                     });
                 }
-                AppServerNotification::TurnCompleted { turn_id, status } => {
+                AppServerNotification::TurnCompleted { thread_id, turn_id, status } => {
                     let event_result = format!("{status:?}");
+                    let status_for_tracker = status.clone();
                     {
                         let mut ts = turn_state.lock().await;
                         ts.insert(
-                            turn_id.clone(),
+                            thread_id.clone(),
                             TurnState::Terminal {
                                 turn_id: turn_id.clone(),
                                 status,
@@ -877,6 +978,15 @@ pub async fn drive_notification_task(
                         if all_done || ts.is_empty() {
                             idle_flag.store(true, Ordering::SeqCst);
                         }
+                    }
+                    // Notify the unified turn tracker (if wired).  Pass thread_id
+                    // as the per-thread key and turn_id as the completed turn identifier.
+                    // This emits a `teammate_idle` daemon lifecycle event via the single
+                    // normalised path in `TurnTracker::on_turn_completed`.
+                    if let Some(ref tracker) = turn_tracker {
+                        tracker
+                            .on_turn_completed(&thread_id, &turn_id, status_for_tracker)
+                            .await;
                     }
                     emit_event_best_effort(EventFields {
                         level: "info",
@@ -916,22 +1026,44 @@ pub async fn drive_notification_task(
     idle_flag.store(false, Ordering::SeqCst);
     initialized.store(false, Ordering::SeqCst);
     let thread_ids: Vec<String> = session_registry.lock().await.keys().cloned().collect();
-    let mut ts = turn_state.lock().await;
-    for thread_id in thread_ids {
-        let entry = ts.entry(thread_id.clone()).or_insert(TurnState::Idle);
-        if !entry.is_idle() {
-            *entry = TurnState::Terminal {
-                turn_id: thread_id.clone(),
-                status: TurnStatus::Failed,
-            };
-            emit_event_best_effort(EventFields {
-                level: "warn",
-                source: "atm-agent-mcp",
-                action: "turn_terminal_crash",
-                team: Some(team.clone()),
-                result: Some(thread_id),
-                ..Default::default()
-            });
+    // Collect the threads that were active (non-idle) so we can call
+    // interrupt_turn on them after releasing the lock (interrupt_turn is async
+    // and must not be called while holding the turn_state mutex).
+    let mut interrupted_threads: Vec<String> = Vec::new();
+    {
+        let mut ts = turn_state.lock().await;
+        for thread_id in thread_ids {
+            let entry = ts.entry(thread_id.clone()).or_insert(TurnState::Idle);
+            if !entry.is_idle() {
+                // Use the last known turn_id from the Busy state; fall back to
+                // thread_id only when no active turn_id is recorded.
+                let terminal_turn_id = match &*entry {
+                    TurnState::Busy { turn_id } => turn_id.clone(),
+                    _ => thread_id.clone(),
+                };
+                *entry = TurnState::Terminal {
+                    turn_id: terminal_turn_id,
+                    status: TurnStatus::Failed,
+                };
+                emit_event_best_effort(EventFields {
+                    level: "warn",
+                    source: "atm-agent-mcp",
+                    action: "turn_terminal_crash",
+                    team: Some(team.clone()),
+                    result: Some(thread_id.clone()),
+                    ..Default::default()
+                });
+                interrupted_threads.push(thread_id);
+            }
+        }
+    } // turn_state lock released here
+
+    // Notify the unified turn tracker for each interrupted thread so the daemon
+    // receives a TeammateIdle event (best-effort; turn_tracker may have no
+    // session context yet if set_session_context was never called).
+    if let Some(ref tracker) = turn_tracker {
+        for thread_id in &interrupted_threads {
+            tracker.interrupt_turn(thread_id).await;
         }
     }
     // duplex_write drops here, signalling EOF to the proxy reader.
@@ -1070,6 +1202,11 @@ impl CodexTransport for AppServerTransport {
             pending_responses: Arc::clone(&self.pending_responses),
             session_registry: Arc::clone(&self.session_registry),
             team: self.team.clone(),
+            // Wire the transport's turn_tracker so that daemon lifecycle events
+            // are emitted when turns complete. The tracker may have no session
+            // context yet (deferred); call set_session_context after session
+            // registration completes to enable daemon emission.
+            turn_tracker: Some(self.turn_tracker.clone()),
         };
 
         // Background task: read lines, parse notifications, forward to duplex.
@@ -1129,6 +1266,18 @@ impl CodexTransport for AppServerTransport {
         } else {
             false
         }
+    }
+
+    fn set_turn_session_context(&self, ctx: crate::turn_control::SessionContext) {
+        // Clone the tracker handle (cheap: Arc clone) and set the context in
+        // a background task. This keeps the trait method synchronous while
+        // still allowing the async mutex inside TurnTracker to be updated.
+        // The proxy always calls this from an async context so a Tokio runtime
+        // is guaranteed to be available.
+        let tracker = self.turn_tracker.clone();
+        tokio::spawn(async move {
+            tracker.set_session_context(ctx).await;
+        });
     }
 }
 
