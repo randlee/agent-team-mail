@@ -2785,6 +2785,35 @@ explicit MCP lifecycle emission coverage.
 
 ---
 
+### Sprint E.8 — ATM Identity Role Mapping + Team Backup/Restore
+
+**Branch**: `feature/pE-s8-identity-backup`
+**Crates**: `atm-core`, `atm`
+**Depends on**: E.1 (resume command)
+
+#### Scope
+
+1. **[roles] table in .atm.toml** — Maps role names to mailbox identities. Resolution order: roles → aliases → literal fallback.
+2. **Fix send/read alias inconsistency** — `atm read <agent>` now applies the same roles/alias resolution pipeline as `atm send` (own-inbox read with no `<agent>` still uses caller identity directly).
+3. **`atm teams backup <team>`** — Snapshot config.json + all inbox files + task files to `~/.claude/teams/.backups/<team>/<timestamp>/`. Auto-prunes to last 5 backups. Print backup path.
+4. **`atm teams restore <team>`** — Smart restore from latest backup (or `--from <path>`). Skips team-lead entry, restores non-leader members + inboxes + tasks. Never overwrites `leadSessionId`. Supports `--dry-run` and `--skip-tasks` flags.
+5. **Auto-backup on resume** — `atm teams resume` automatically creates a backup before making any state changes (non-fatal).
+
+#### Exit Criteria
+
+- [x] `[roles]` table parsed from .atm.toml and applied in send/read resolution
+- [x] send and read both use same alias/role resolution pipeline
+- [x] `atm teams backup <team>` creates timestamped backup with config + inboxes + tasks
+- [x] `atm teams restore <team>` restores non-leader members + inboxes + tasks from backup
+- [x] `--dry-run` flag shows what would be restored without making changes
+- [x] `--skip-tasks` flag allows skipping task restoration
+- [x] Auto-backup on resume (non-fatal, auto-prune to last 5)
+- [x] Integration tests for role mapping, backup/restore round-trip
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo test --workspace` passes
+
+---
+
 ### Phase E Sprint Summary
 
 | Sprint | Name | Depends On | Status |
@@ -2796,6 +2825,7 @@ explicit MCP lifecycle emission coverage.
 | E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ DONE (PR pending) |
 | E.6 | External agent member management and model registry | E.3 | ⏳ PLANNED |
 | E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ⏳ PLANNED |
+| E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ MERGED (#162) |
 
 **Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.6 is member management for external agents (Codex/Gemini). E.7 extends lifecycle handling to source-aware validation + MCP lifecycle emission. E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4. E.6 can run parallel to E.4/E.5. E.7 starts after E.6 interface contracts settle.
 

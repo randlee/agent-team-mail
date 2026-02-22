@@ -327,6 +327,79 @@ fn test_read_agent_not_found() {
 }
 
 #[test]
+fn test_read_role_with_team_suffix_resolves_end_to_end() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = temp_dir.path().join(".claude/teams").join("test-team");
+    let inboxes_dir = team_dir.join("inboxes");
+    fs::create_dir_all(&inboxes_dir).unwrap();
+
+    // Team member is arch-atm (role target), not literal team-lead.
+    let config = serde_json::json!({
+        "name": "test-team",
+        "description": "Test team",
+        "createdAt": 1739284800000i64,
+        "leadAgentId": "arch-atm@test-team",
+        "leadSessionId": "test-session-id",
+        "members": [
+            {
+                "agentId": "reader@test-team",
+                "name": "reader",
+                "agentType": "general-purpose",
+                "model": "claude-opus-4-6",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": []
+            },
+            {
+                "agentId": "arch-atm@test-team",
+                "name": "arch-atm",
+                "agentType": "general-purpose",
+                "model": "claude-haiku-4-5-20251001",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": []
+            }
+        ]
+    });
+    fs::write(
+        team_dir.join("config.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    // Inbox exists only for arch-atm.
+    let messages = vec![serde_json::json!({
+        "from": "reader",
+        "text": "Role routed read",
+        "timestamp": "2026-02-11T10:00:00Z",
+        "read": false,
+        "message_id": "msg-role-001"
+    })];
+    create_test_inbox(&team_dir, "arch-atm", messages);
+
+    // Configure role team-lead -> arch-atm in global ATM config under ATM_HOME.
+    let global_cfg_dir = temp_dir.path().join(".config/atm");
+    fs::create_dir_all(&global_cfg_dir).unwrap();
+    fs::write(
+        global_cfg_dir.join("config.toml"),
+        "[core]\ndefault_team = \"test-team\"\nidentity = \"reader\"\n\n[roles]\nteam-lead = \"arch-atm\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("team-lead@test-team")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Role routed read"));
+}
+
+#[test]
 fn test_read_team_not_found() {
     let temp_dir = TempDir::new().unwrap();
 

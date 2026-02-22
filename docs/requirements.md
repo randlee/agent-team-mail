@@ -338,6 +338,10 @@ Commands:
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
+  teams resume <team> [message] [--force] [--kill] [--session-id <id>]
+  teams cleanup <team> [agent] [--force]
+  teams backup <team> [--json]
+  teams restore <team> [--from <path>] [--dry-run] [--skip-tasks] [--json]
 ```
 
 ### 4.2 Messaging Commands
@@ -480,6 +484,8 @@ atm read --all                   # read all messages (not just unread)
 | `--json` | Output as JSON |
 | `--from <name>` | Filter by sender |
 
+**Identity resolution**: When an explicit `<agent>` argument is provided, it is resolved through the same roles → aliases → literal pipeline as `atm send`. When reading your own inbox (no agent argument), the caller's identity from config is used directly without alias/role resolution.
+
 #### `atm inbox`
 
 Show inbox summary without reading full messages.
@@ -560,7 +566,18 @@ offline_action = "PENDING ACTION - execute when online"  # call-to-action prepen
 format = "text"                     # text | json
 color = true
 timestamps = "relative"             # relative | absolute | iso8601
+
+[aliases]
+arch-atm = "team-lead"   # alias-name → inbox-identity mapping
+                         # used as shorthand when the actual identity name is long or changes
+
+[roles]
+team-lead = "arch-atm"   # role-name → inbox-identity mapping
+                         # roles take precedence over aliases in resolution order
+                         # resolution order: roles → aliases → literal fallback
 ```
+
+**Identity resolution**: The `[aliases]` and `[roles]` tables allow symbolic names to route to actual inbox identities. Resolution order: `[roles]` first (for semantic role names), then `[aliases]` (for stable shorthand), then literal fallback. Resolution is non-recursive and case-sensitive.
 
 #### Environment Variables
 
