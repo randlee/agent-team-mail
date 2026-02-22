@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -130,7 +130,7 @@ pub async fn watch_inboxes(
 /// * `event` - File system event
 /// * `hostname_registry` - Optional hostname registry for parsing per-origin files
 fn parse_event(
-    teams_root: &PathBuf,
+    teams_root: &Path,
     event: Event,
     hostname_registry: Option<&agent_team_mail_core::config::HostnameRegistry>,
 ) -> Option<Vec<InboxEvent>> {

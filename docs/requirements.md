@@ -338,6 +338,10 @@ Commands:
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
+  teams resume <team> [message] [--force] [--kill] [--session-id <id>]
+  teams cleanup <team> [agent] [--force]
+  teams backup <team> [--json]
+  teams restore <team> [--from <path>] [--dry-run] [--skip-tasks] [--json]
 ```
 
 ### 4.2 Messaging Commands
@@ -480,6 +484,8 @@ atm read --all                   # read all messages (not just unread)
 | `--json` | Output as JSON |
 | `--from <name>` | Filter by sender |
 
+**Identity resolution**: When an explicit `<agent>` argument is provided, it is resolved through the same roles → aliases → literal pipeline as `atm send`. When reading your own inbox (no agent argument), the caller's identity from config is used directly without alias/role resolution.
+
 #### `atm inbox`
 
 Show inbox summary without reading full messages.
@@ -560,7 +566,18 @@ offline_action = "PENDING ACTION - execute when online"  # call-to-action prepen
 format = "text"                     # text | json
 color = true
 timestamps = "relative"             # relative | absolute | iso8601
+
+[aliases]
+arch-atm = "team-lead"   # alias-name → inbox-identity mapping
+                         # used as shorthand when the actual identity name is long or changes
+
+[roles]
+team-lead = "arch-atm"   # role-name → inbox-identity mapping
+                         # roles take precedence over aliases in resolution order
+                         # resolution order: roles → aliases → literal fallback
 ```
+
+**Identity resolution**: The `[aliases]` and `[roles]` tables allow symbolic names to route to actual inbox identities. Resolution order: `[roles]` first (for semantic role names), then `[aliases]` (for stable shorthand), then literal fallback. Resolution is non-recursive and case-sensitive.
 
 #### Environment Variables
 
@@ -600,6 +617,32 @@ Recommended policy:
 
 Rationale:
 - Provides low-latency state transitions (`Busy` → `Idle`) without expensive polling.
+
+#### Unified Lifecycle Event Envelope (Claude + MCP + Future Adapters)
+
+Lifecycle tracking must use one daemon command path (`hook-event`) with a single
+extensible payload shape, not separate packet types per integration.
+
+Required baseline fields:
+- `event`: `session_start` | `teammate_idle` | `session_end`
+- `team`
+- `agent` (or canonical `agent_id` where available)
+- `source`: source-kind enum
+
+`source` should be expandable and include at least:
+- `claude_hook` — Claude Code lifecycle hooks
+- `atm_mcp` — lifecycle events emitted by `atm-agent-mcp`
+- `agent_hook` — future external agent hooks/adapters (e.g. Codex/Gemini when supported)
+- `unknown` — reserved fallback
+
+Expected producer coverage:
+- Claude hooks emit `session_start`, `teammate_idle`, `session_end`
+- `atm-agent-mcp` should emit equivalent lifecycle events for MCP-managed agents
+- Future adapters should map provider lifecycle callbacks into the same envelope
+  and daemon command path
+
+AuthZ and validation should be source-aware in one handler, not split across
+multiple transport packet types.
 
 #### `TaskCompleted`
 

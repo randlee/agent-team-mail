@@ -46,6 +46,9 @@ fn create_lead_member(team_name: &str) -> AgentMember {
         backend_type: None,
         is_active: Some(true),
         last_active: Some(1770765919076),
+        session_id: None,
+        external_backend_type: None,
+        external_model: None,
         unknown_fields: HashMap::new(),
     }
 }
@@ -67,6 +70,9 @@ fn create_synthetic_member(plugin_name: &str, function_name: &str, team_name: &s
         backend_type: None,
         is_active: Some(true),
         last_active: Some(now_ms),
+        session_id: None,
+        external_backend_type: None,
+        external_model: None,
         unknown_fields: HashMap::new(),
     }
 }
@@ -328,6 +334,9 @@ fn test_concurrent_add_remove() {
                 backend_type: None,
                 is_active: Some(true),
                 last_active: Some(1770765919076),
+                session_id: None,
+                external_backend_type: None,
+                external_model: None,
                 unknown_fields: HashMap::new(),
             };
 
