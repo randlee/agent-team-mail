@@ -46,7 +46,7 @@
 - Agent team execution: Scrum Master → Dev(s) + QA(s), Opus Architect on escalation
 - All work on dedicated worktrees via `sc-git-worktree`
 
-**Current Status**: Phase E (ATM Core Bug Fixes) — Sprint E.1 in progress
+**Current Status**: Phase E complete (v0.15.0) — integration PR pending
 
 ---
 

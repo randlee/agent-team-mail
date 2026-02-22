@@ -2418,7 +2418,7 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 ## 16. Phase E: ATM Core Bug Fixes (Priority)
 
-**Status**: IN PROGRESS
+**Status**: COMPLETE
 **Goal**: Fix two known bugs in ATM core that require manual workarounds every session, and wire Claude Code hooks to daemon state.
 **Integration branch**: `integrate/phase-E`
 
@@ -2426,11 +2426,17 @@ C.3 is a single sprint (one SM, one dev agent). The three components are natural
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| E.1 | Fix `atm teams resume` session ID reliability | Phase D | ✅ MERGED |
-| E.2 | Fix inbox read marking other agents' messages as read | — | ✅ MERGED |
-| E.3 | Hook-to-daemon state bridge | E.1 | ✅ PR #152 |
+| E.1 | Fix `atm teams resume` session ID reliability | Phase D | ✅ MERGED (#147) |
+| E.2 | Fix inbox read marking other agents' messages as read | — | ✅ MERGED (#149) |
+| E.3 | Hook-to-daemon state bridge | E.1 | ✅ MERGED (#152) |
+| E.4 | TUI reliability hardening | E.3 | ✅ MERGED (#158) |
+| E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ MERGED (#161) |
+| E.6 | External agent member management and model registry | E.3 | ✅ MERGED (#164) |
+| E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ✅ MERGED (#165) |
+| E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ MERGED (#162) |
+| — | Daemon hook-event auth validation | E.3 | ✅ MERGED (#163) |
 
-**Execution model**: E.1 is priority (unblocks session startup). E.2 and E.3 can run in parallel after E.1 merges.
+**Execution model**: E.1 is priority (unblocks session startup). E.2 and E.3 can run in parallel after E.1 merges. E.4–E.5 are TUI hardening. E.6–E.7 are external agent support. E.8 is identity/backup infrastructure.
 
 ---
 
@@ -2826,9 +2832,9 @@ explicit MCP lifecycle emission coverage.
 | E.2 | Inbox read scoping | E.1 (or parallel) | ✅ MERGED (#149) |
 | E.3 | Hook-to-daemon state bridge | E.1 (parallel with E.2) | ✅ MERGED (#152) |
 | E.4 | TUI reliability hardening (restart, reconnect, failure injection) | E.3 | ✅ MERGED (#158) |
-| E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ DONE (PR pending) |
-| E.6 | External agent member management and model registry | E.3 | ✅ DONE (PR pending) |
-| E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ✅ DONE (PR pending) |
+| E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ MERGED (#161) |
+| E.6 | External agent member management and model registry | E.3 | ✅ MERGED (#164) |
+| E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ✅ MERGED (#165) |
 | E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ MERGED (#162) |
 
 **Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.6 is member management for external agents (Codex/Gemini). E.7 extends lifecycle handling to source-aware validation + MCP lifecycle emission. E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4. E.6 can run parallel to E.4/E.5. E.7 starts after E.6 interface contracts settle.
@@ -3170,15 +3176,24 @@ Additional plugins planned (each is a self-contained sprint series):
 | **B** | B.3 | Teams session stabilization | ✅ | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
 | **C** | C.1 | Unified structured JSONL logging | ✅ | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
 | **C** | C.2a | Transport trait + McpTransport refactor | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
-| **C** | C.2b | JsonTransport + stdin queue + integration tests | 🔄 | — |
-| **C** | C.3 | Control receiver stub (daemon endpoint + dedupe) | ⏳ | — |
-| **D** | D.1 | TUI crate + live stream view (read-only) | ⏳ | — |
-| **D** | D.2 | Interactive controls (stdin inject, interrupt) | ⏳ | — |
-| **D** | D.3 | Identifier cleanup + user demo | ⏳ | — |
+| **C** | C.2b | JsonTransport + stdin queue + integration tests | ✅ | [#127](https://github.com/randlee/agent-team-mail/pull/127) |
+| **C** | C.3 | Control receiver stub (daemon endpoint + dedupe) | ✅ | [#126](https://github.com/randlee/agent-team-mail/pull/126) |
+| **D** | D.1 | TUI crate + live stream view (read-only) | ✅ | [#134](https://github.com/randlee/agent-team-mail/pull/134) |
+| **D** | D.2 | Interactive controls (stdin inject, interrupt) | ✅ | [#138](https://github.com/randlee/agent-team-mail/pull/138) |
+| **D** | D.3 | Identifier cleanup + user demo | ✅ | [#140](https://github.com/randlee/agent-team-mail/pull/140) |
+| **E** | E.1 | `atm teams resume` session ID reliability | ✅ | [#147](https://github.com/randlee/agent-team-mail/pull/147) |
+| **E** | E.2 | Inbox read scoping | ✅ | [#149](https://github.com/randlee/agent-team-mail/pull/149) |
+| **E** | E.3 | Hook-to-daemon state bridge | ✅ | [#152](https://github.com/randlee/agent-team-mail/pull/152) |
+| **E** | E.4 | TUI reliability hardening | ✅ | [#158](https://github.com/randlee/agent-team-mail/pull/158) |
+| **E** | E.5 | TUI performance, UX polish, and operational validation | ✅ | [#161](https://github.com/randlee/agent-team-mail/pull/161) |
+| **E** | E.6 | External agent member management and model registry | ✅ | [#164](https://github.com/randlee/agent-team-mail/pull/164) |
+| **E** | E.7 | Unified lifecycle source model + MCP lifecycle emission | ✅ | [#165](https://github.com/randlee/agent-team-mail/pull/165) |
+| **E** | E.8 | ATM Identity Role Mapping + Team Backup/Restore | ✅ | [#162](https://github.com/randlee/agent-team-mail/pull/162) |
+| **E** | — | Daemon hook-event auth validation | ✅ | [#163](https://github.com/randlee/agent-team-mail/pull/163) |
 
-**Completed**: 65 sprints across 13 phases (CI green)
-**Current version**: v0.13.0
-**Next**: C.2b QA → merge → C.3 → integrate/phase-C → develop; then Phase D (D.1 ∥ D.2)
+**Completed**: 79 sprints across 15 phases (CI green)
+**Current version**: v0.15.0
+**Next**: Phase E integration PR → develop; then Phase F planning
 
 **Sprint PRs (Phase 9)**:
 | Sprint | PR | Description |
@@ -3203,7 +3218,9 @@ Additional plugins planned (each is a self-contained sprint series):
 | Phase 10 | [#93](https://github.com/randlee/agent-team-mail/pull/93) | ✅ Merged |
 | Phase A | [#103](https://github.com/randlee/agent-team-mail/pull/103) | ✅ Merged |
 | Phase B | [#121](https://github.com/randlee/agent-team-mail/pull/121) | ✅ Merged |
-| Phase C | TBD | 🔄 IN PROGRESS |
+| Phase C | [#126](https://github.com/randlee/agent-team-mail/pull/126) | ✅ Merged |
+| Phase D | [#140](https://github.com/randlee/agent-team-mail/pull/140) | ✅ Merged |
+| Phase E | TBD | 🔄 Pending |
 
 ---
 
