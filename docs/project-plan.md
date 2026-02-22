@@ -2794,7 +2794,7 @@ explicit MCP lifecycle emission coverage.
 #### Scope
 
 1. **[roles] table in .atm.toml** — Maps role names to mailbox identities. Resolution order: roles → aliases → literal fallback.
-2. **Fix send/read alias inconsistency** — `atm read` now applies the same roles/alias resolution pipeline as `atm send`.
+2. **Fix send/read alias inconsistency** — `atm read <agent>` now applies the same roles/alias resolution pipeline as `atm send` (own-inbox read with no `<agent>` still uses caller identity directly).
 3. **`atm teams backup <team>`** — Snapshot config.json + all inbox files + task files to `~/.claude/teams/.backups/<team>/<timestamp>/`. Auto-prunes to last 5 backups. Print backup path.
 4. **`atm teams restore <team>`** — Smart restore from latest backup (or `--from <path>`). Skips team-lead entry, restores non-leader members + inboxes + tasks. Never overwrites `leadSessionId`. Supports `--dry-run` and `--skip-tasks` flags.
 5. **Auto-backup on resume** — `atm teams resume` automatically creates a backup before making any state changes (non-fatal).

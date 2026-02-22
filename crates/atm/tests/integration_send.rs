@@ -168,6 +168,79 @@ fn test_send_alias_with_team_suffix_resolves_end_to_end() {
 }
 
 #[test]
+fn test_send_role_with_team_suffix_resolves_end_to_end() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = temp_dir.path().join(".claude/teams").join("test-team");
+    let inboxes_dir = team_dir.join("inboxes");
+    fs::create_dir_all(&inboxes_dir).unwrap();
+
+    // Team member is arch-atm (role target), not literal team-lead.
+    let config = serde_json::json!({
+        "name": "test-team",
+        "description": "Test team",
+        "createdAt": 1739284800000i64,
+        "leadAgentId": "arch-atm@test-team",
+        "leadSessionId": "test-session-id",
+        "members": [
+            {
+                "agentId": "sender@test-team",
+                "name": "sender",
+                "agentType": "general-purpose",
+                "model": "claude-opus-4-6",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": []
+            },
+            {
+                "agentId": "arch-atm@test-team",
+                "name": "arch-atm",
+                "agentType": "general-purpose",
+                "model": "claude-haiku-4-5-20251001",
+                "joinedAt": 1739284800000i64,
+                "tmuxPaneId": "",
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": []
+            }
+        ]
+    });
+    fs::write(
+        team_dir.join("config.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    // Configure role in global ATM config under ATM_HOME so send command
+    // resolves team-lead -> arch-atm while preserving explicit @team suffix.
+    let global_cfg_dir = temp_dir.path().join(".config/atm");
+    fs::create_dir_all(&global_cfg_dir).unwrap();
+    fs::write(
+        global_cfg_dir.join("config.toml"),
+        "[core]\ndefault_team = \"test-team\"\nidentity = \"sender\"\n\n[roles]\nteam-lead = \"arch-atm\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("send")
+        .arg("team-lead@test-team")
+        .arg("Role routed message")
+        .assert()
+        .success();
+
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/arch-atm.json");
+    assert!(inbox_path.exists());
+
+    let inbox_content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&inbox_content).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["text"], "Role routed message");
+}
+
+#[test]
 fn test_send_with_team_flag() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "override-team");

@@ -773,8 +773,14 @@ fn do_backup(home_dir: &Path, team: &str, json: bool) -> Result<PathBuf> {
         anyhow::bail!("Team config not found at {}", config_path.display());
     }
 
-    // Build timestamped backup directory
-    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    // Build timestamped backup directory with nanosecond precision to avoid
+    // collisions when multiple backups are created within the same second.
+    let now = chrono::Utc::now();
+    let timestamp = format!(
+        "{}{:09}Z",
+        now.format("%Y%m%dT%H%M%S"),
+        now.timestamp_subsec_nanos()
+    );
     let backup_dir = home_dir
         .join(".claude/teams/.backups")
         .join(team)
@@ -1540,6 +1546,42 @@ mod tests {
         let backup_dir = entries[0].path();
         assert!(backup_dir.join("config.json").exists(), "config.json should be backed up");
         assert!(backup_dir.join("inboxes/publisher.json").exists(), "inbox should be backed up");
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_backup_twice_creates_distinct_dirs() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe { std::env::set_var("ATM_HOME", &home_env); }
+
+        backup(BackupArgs { team: "atm-dev".to_string(), json: false }).unwrap();
+        backup(BackupArgs { team: "atm-dev".to_string(), json: false }).unwrap();
+
+        let backups_root = temp_dir
+            .path()
+            .join(".claude/teams/.backups/atm-dev");
+        let entries: Vec<_> = fs::read_dir(&backups_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            2,
+            "two immediate backups should create two distinct snapshot dirs"
+        );
 
         // SAFETY: test-only cleanup
         unsafe {
