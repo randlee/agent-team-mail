@@ -2825,7 +2825,7 @@ explicit MCP lifecycle emission coverage.
 | E.5 | TUI performance, UX polish, and operational validation | E.4 | ✅ DONE (PR pending) |
 | E.6 | External agent member management and model registry | E.3 | ⏳ PLANNED |
 | E.7 | Unified lifecycle source model + MCP lifecycle emission | E.3, E.6 | ⏳ PLANNED |
-| E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ DONE (PR pending) |
+| E.8 | ATM Identity Role Mapping + Team Backup/Restore | E.1 | ✅ MERGED (#162) |
 
 **Execution model**: E.1–E.3 are bug fixes / infrastructure. E.4–E.5 are TUI hardening deferred from Phase D design docs (`tui-mvp-architecture.md` §14, `tui-control-protocol.md` §11). E.6 is member management for external agents (Codex/Gemini). E.7 extends lifecycle handling to source-aware validation + MCP lifecycle emission. E.2 ∥ E.3 after E.1. E.4 after E.3. E.5 after E.4. E.6 can run parallel to E.4/E.5. E.7 starts after E.6 interface contracts settle.
 
