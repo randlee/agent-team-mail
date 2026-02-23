@@ -3135,11 +3135,11 @@ Design references:
 | G.5 | Approval/elicitation bridging parity for app-server | G.4 | ✅ COMPLETE (PR #172) |
 | G.6 | Mail injection parity (`mcp`, `cli-json`, `app-server`) + queue semantics | G.4 | ✅ COMPLETE (PR #173) |
 | G.7 | TUI streaming normalization + daemon pubsub/UDP fanout architecture | G.4, G.6 | ✅ COMPLETE (PR #174) |
-| G.2 | CLI-JSON streaming verification + idle detection hardening | G.7 | ⏳ DEFERRED (moved after G.7, parallel with G.8) |
-| G.8 | Cross-platform reliability + soak testing (Linux/macOS/Windows) | G.5, G.6, G.7 | 🔄 IN PROGRESS |
+| G.2 | CLI-JSON streaming verification + idle detection hardening | G.7 | ✅ COMPLETE (PR #175) |
+| G.8 | Cross-platform reliability + soak testing (Linux/macOS/Windows) | G.5, G.6, G.7 | ✅ COMPLETE (PR #177) |
 | G.9 | Docs finalization, migration notes, and release gate | G.2, G.8 | ⏳ PLANNED |
 
-**Execution model**: G.1–G.6 complete (PRs #168–#173). G.5 and G.6 ran in parallel after G.4. G.7 (TUI streaming/fanout) is in progress. After G.7, G.2 (CLI-JSON verification) and G.8 (cross-platform soak) run in parallel — G.8 tests app-server/MCP paths while G.2 validates CLI-JSON uses shared streaming abstractions. G.9 (release gate) runs after both complete.
+**Execution model**: G.1–G.7 complete (PRs #168–#174). G.5 and G.6 ran in parallel after G.4. G.7 (TUI streaming/fanout) completed as PR #174. G.2 (CLI-JSON verification) and G.8 (cross-platform soak) now run in parallel — G.8 tests app-server/MCP paths while G.2 validates CLI-JSON uses shared streaming abstractions. G.9 (release gate) runs after both complete.
 
 **Design principle**: App-server and CLI-JSON streaming MUST share common code paths (event normalization, turn-state tracking, daemon emission). G.3/G.4 should build these abstractions; G.2 then verifies CLI-JSON uses them correctly.
 

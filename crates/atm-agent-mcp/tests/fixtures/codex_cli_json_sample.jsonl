@@ -1,0 +1,9 @@
+{"type":"_fixture_metadata","version":"codex-0.1.x","description":"Representative codex exec --json output for cli-json parser validation. Unknown type tests fallback handling."}
+{"type":"agent_message","content":"I'll analyze the code and make the necessary changes.","role":"assistant"}
+{"type":"tool_call","name":"write_file","call_id":"call-001","arguments":{"path":"/tmp/example.rs","content":"fn main() {}"}}
+{"type":"tool_result","call_id":"call-001","output":"File written successfully","error":null}
+{"type":"file_change","path":"/tmp/example.rs","action":"write"}
+{"type":"idle"}
+{"type":"done"}
+{"type":"unknown_future_event","data":"forward-compat test: unknown types must not panic the parser"}
+
