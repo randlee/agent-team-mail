@@ -45,7 +45,7 @@ use crate::mail_inject::{
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
 use crate::transport::{CodexTransport, make_transport};
-use crate::watch_stream::{SourceEnvelope, WatchAttachError, WatchStreamHub, WatchSubscription};
+use crate::watch_stream::{SourceEnvelope, WatchStreamHub, WatchSubscription};
 
 /// Type alias for the shared child stdin writer.
 ///
@@ -363,7 +363,7 @@ impl ProxyServer {
     pub async fn subscribe_watch_stream(
         &self,
         agent_id: &str,
-    ) -> Result<WatchSubscription, WatchAttachError> {
+    ) -> WatchSubscription {
         self.watch_stream_hub.lock().await.subscribe(agent_id)
     }
 
@@ -2274,57 +2274,27 @@ Session ending. Write a concise summary of:\n\
                     );
                 };
 
-                match self.subscribe_watch_stream(agent_id).await {
-                    Ok(sub) => {
-                        self.watch_subscriptions
-                            .lock()
-                            .await
-                            .insert(agent_id.to_string(), sub.rx);
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "content": [{
-                                    "type": "text",
-                                    "text": json!({
-                                        "agent_id": agent_id,
-                                        "attached": true,
-                                        "replay": sub.replay,
-                                    }).to_string()
-                                }]
-                            }
-                        })
+                let sub = self.subscribe_watch_stream(agent_id).await;
+                self.watch_subscriptions
+                    .lock()
+                    .await
+                    .insert(agent_id.to_string(), sub.rx);
+                let watcher_count = self.watch_stream_hub.lock().await.watcher_count(agent_id);
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "agent_id": agent_id,
+                                "attached": true,
+                                "watcher_count": watcher_count,
+                                "replay": sub.replay,
+                            }).to_string()
+                        }]
                     }
-                    Err(WatchAttachError::AlreadyAttached) => {
-                        let already_owned = self
-                            .watch_subscriptions
-                            .lock()
-                            .await
-                            .contains_key(agent_id);
-                        if already_owned {
-                            json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": {
-                                    "content": [{
-                                        "type": "text",
-                                        "text": json!({
-                                            "agent_id": agent_id,
-                                            "attached": true,
-                                            "already_attached": true,
-                                            "replay": [],
-                                        }).to_string()
-                                    }]
-                                }
-                            })
-                        } else {
-                            atm_tools::make_mcp_error_result(
-                                id,
-                                &format!("agent_watch_attach: watcher already attached for '{agent_id}'"),
-                            )
-                        }
-                    }
-                }
+                })
             }
             "agent_watch_poll" => {
                 let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
@@ -2356,6 +2326,7 @@ Session ending. Write a concise summary of:\n\
                         Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
                     }
                 }
+                let rendered: Vec<String> = events.iter().map(format_watch_frame).collect();
 
                 json!({
                     "jsonrpc": "2.0",
@@ -2366,6 +2337,7 @@ Session ending. Write a concise summary of:\n\
                             "text": json!({
                                 "agent_id": agent_id,
                                 "events": events,
+                                "rendered": rendered,
                             }).to_string()
                         }]
                     }
@@ -2378,8 +2350,9 @@ Session ending. Write a concise summary of:\n\
                         "agent_watch_detach: 'agent_id' is required",
                     );
                 };
-                self.watch_subscriptions.lock().await.remove(agent_id);
-                let detached = self.detach_watch_stream(agent_id).await;
+                let detached = self.watch_subscriptions.lock().await.remove(agent_id).is_some();
+                let _ = self.detach_watch_stream(agent_id).await;
+                let watcher_count = self.watch_stream_hub.lock().await.watcher_count(agent_id);
                 json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -2389,6 +2362,7 @@ Session ending. Write a concise summary of:\n\
                             "text": json!({
                                 "agent_id": agent_id,
                                 "detached": detached,
+                                "watcher_count": watcher_count,
                             }).to_string()
                         }]
                     }
@@ -2823,15 +2797,77 @@ fn should_publish_watch_event(event: &Value) -> bool {
             | "task_complete"
             | "agent_message_delta"
             | "agent_message"
+            | "agent_message_completed"
+            | "agent_message_chunk"
             | "reasoning_content_delta"
             | "agent_reasoning_delta"
+            | "reasoning_content"
             | "exec_command_output_delta"
+            | "exec_command_started"
+            | "exec_command_completed"
+            | "exec_command_error"
             | "item_started"
             | "item_completed"
+            | "thread_status_changed"
+            | "turn_started"
+            | "turn_completed"
             | "idle"
             | "done"
             | "stream_error"
     )
+}
+
+fn format_watch_frame(frame: &Value) -> String {
+    let source = frame
+        .pointer("/source/kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("client_prompt");
+    let event = frame.get("event").unwrap_or(frame);
+    let kind = event
+        .pointer("/params/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let text = event
+        .pointer("/params/delta")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/text").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/output").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/message").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let text = if text.len() > 200 {
+        format!("{}...", &text[..197])
+    } else {
+        text.to_string()
+    };
+
+    let mut base = match kind {
+        "agent_message_delta" | "agent_message" | "agent_message_chunk" => {
+            format!("[{source}] assistant: {text}")
+        }
+        "exec_command_output_delta" | "exec_command_completed" | "exec_command_error" => {
+            format!("[{source}] cmd: {text}")
+        }
+        "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
+            format!("[{source}] reasoning: {text}")
+        }
+        "item_started" | "item_completed" | "turn_started" | "turn_completed" => {
+            format!("[{source}] {kind}")
+        }
+        "task_started" | "task_complete" | "idle" | "done" | "stream_error" => {
+            format!("[{source}] {kind}")
+        }
+        _ => format!("[{source}] {kind}"),
+    };
+
+    if let Some(pct) = event
+        .pointer("/params/usage/context_window_pct")
+        .and_then(|v| v.as_f64())
+        .or_else(|| event.pointer("/params/contextWindowPct").and_then(|v| v.as_f64()))
+    {
+        base.push_str(&format!(" | ctx {:.0}%", pct));
+    }
+    base
 }
 
 /// Infer source attribution for watch-stream frames (FR-22 baseline).
@@ -3676,6 +3712,7 @@ mod tests {
         let attach_json: Value = serde_json::from_str(attach_text).expect("valid attach payload");
         assert_eq!(attach_json["attached"], true);
         assert_eq!(attach_json["replay"].as_array().map(|a| a.len()), Some(1));
+        assert!(attach_json["watcher_count"].as_u64().unwrap_or(0) >= 1);
 
         let attach_again = proxy
             .handle_synthetic_tool(
@@ -3695,7 +3732,8 @@ mod tests {
             .expect("attach_again text");
         let attach_again_json: Value =
             serde_json::from_str(attach_again_text).expect("valid attach_again payload");
-        assert_eq!(attach_again_json["already_attached"], true);
+        assert_eq!(attach_again_json["attached"], true);
+        assert!(attach_again_json["watcher_count"].as_u64().unwrap_or(0) >= 1);
 
         proxy.watch_stream_hub.lock().await.publish_frame(
             agent_id,
@@ -3718,6 +3756,7 @@ mod tests {
             .expect("poll text");
         let poll_json: Value = serde_json::from_str(poll_text).expect("valid poll payload");
         assert_eq!(poll_json["events"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(poll_json["rendered"].as_array().map(|a| a.len()), Some(1));
 
         let detach = proxy
             .handle_synthetic_tool(
@@ -3737,6 +3776,7 @@ mod tests {
             .expect("detach text");
         let detach_json: Value = serde_json::from_str(detach_text).expect("valid detach payload");
         assert_eq!(detach_json["detached"], true);
+        assert_eq!(detach_json["watcher_count"], 0);
     }
 
     #[tokio::test]
@@ -3768,6 +3808,48 @@ mod tests {
             Some(true),
             "attach without agent_id must return isError=true"
         );
+    }
+
+    #[test]
+    fn test_should_publish_watch_event_protocol_drift_matrix() {
+        let cases = vec![
+            ("agent_message_delta", true),
+            ("agent_message_chunk", true),
+            ("exec_command_completed", true),
+            ("thread_status_changed", true),
+            ("unknown_new_event_kind", false),
+        ];
+        for (kind, expected) in cases {
+            let event = json!({"params":{"type":kind}});
+            assert_eq!(
+                should_publish_watch_event(&event),
+                expected,
+                "kind={kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_publish_watch_event_missing_params_graceful() {
+        assert!(!should_publish_watch_event(&json!({})));
+        assert!(!should_publish_watch_event(&json!({"params":{}})));
+    }
+
+    #[test]
+    fn test_format_watch_frame_graceful_on_partial_payloads() {
+        let frame = json!({
+            "source": {"kind":"atm_mail"},
+            "event": {"params":{"type":"agent_message_delta","delta":"hello world"}}
+        });
+        let rendered = format_watch_frame(&frame);
+        assert!(rendered.contains("[atm_mail]"));
+        assert!(rendered.contains("assistant"));
+
+        // Drift case: missing source and missing params text fields.
+        let drift = json!({"event":{"params":{"type":"exec_command_completed"}}});
+        let rendered2 = format_watch_frame(&drift);
+        assert!(rendered2.contains("client_prompt"));
+        assert!(rendered2.contains("cmd:"));
     }
 
     #[test]
@@ -3856,8 +3938,7 @@ mod tests {
         let sub = watch_stream_hub
             .lock()
             .await
-            .subscribe("codex:abc-agent")
-            .expect("attach");
+            .subscribe("codex:abc-agent");
         assert_eq!(sub.replay.len(), 1, "watch hub should retain replay event");
     }
 
@@ -3900,8 +3981,7 @@ mod tests {
         let sub = watch_stream_hub
             .lock()
             .await
-            .subscribe("codex:abc-agent")
-            .expect("attach");
+            .subscribe("codex:abc-agent");
         let replay0 = sub.replay.first().expect("replay event");
         assert_eq!(
             replay0.pointer("/source/kind").and_then(|v| v.as_str()),
@@ -3952,8 +4032,7 @@ mod tests {
         let sub = watch_stream_hub
             .lock()
             .await
-            .subscribe("codex:abc-agent")
-            .expect("attach");
+            .subscribe("codex:abc-agent");
         let replay0 = sub.replay.first().expect("replay event");
         assert_eq!(
             replay0.pointer("/source/kind").and_then(|v| v.as_str()),
