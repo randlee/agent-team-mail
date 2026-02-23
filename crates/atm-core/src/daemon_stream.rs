@@ -178,6 +178,19 @@ impl AgentStreamState {
     }
 }
 
+// ── From conversions ─────────────────────────────────────────────────────────
+
+impl DaemonStreamEvent {
+    /// Return the agent name this event is about.
+    pub fn agent(&self) -> &str {
+        match self {
+            Self::TurnStarted { agent, .. } => agent,
+            Self::TurnCompleted { agent, .. } => agent,
+            Self::TurnIdle { agent, .. } => agent,
+        }
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

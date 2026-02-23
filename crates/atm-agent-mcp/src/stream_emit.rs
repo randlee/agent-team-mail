@@ -131,9 +131,11 @@ fn new_request_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     /// Emitting with no daemon running must not panic or return an error.
     #[tokio::test]
+    #[serial]
     async fn emit_stream_event_no_daemon_is_noop() {
         let dir = tempfile::tempdir().expect("temp dir");
         // SAFETY: test-only env mutation; single-threaded tokio test.

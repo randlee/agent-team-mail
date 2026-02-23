@@ -76,6 +76,9 @@ pub fn new_dedup_store(home_dir: &std::path::Path) -> Result<SharedDedupeStore> 
 /// * `session_registry` - Shared session registry for `session-query` requests
 /// * `dedup_store` - Shared durable dedupe store for idempotency across restarts.
 ///   Create with [`new_dedup_store()`].
+/// * `stream_state_store` - Shared per-agent stream turn state store.
+/// * `stream_event_sender` - Broadcast sender for push-based stream event fanout.
+///   Create with [`new_stream_event_sender()`].
 /// * `cancel` - Cancellation token; server stops accepting when cancelled
 ///
 /// # Platform Behaviour
@@ -93,6 +96,7 @@ pub async fn start_socket_server(
     session_registry: SharedSessionRegistry,
     dedup_store: SharedDedupeStore,
     stream_state_store: SharedStreamStateStore,
+    stream_event_sender: SharedStreamEventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
@@ -105,6 +109,7 @@ pub async fn start_socket_server(
             session_registry,
             dedup_store,
             stream_state_store,
+            stream_event_sender,
             cancel,
         )
         .await
@@ -196,6 +201,32 @@ pub fn new_stream_state_store() -> SharedStreamStateStore {
     std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+// ── Stream event broadcast channel ───────────────────────────────────────────
+
+/// Sender half of the daemon's stream-event broadcast channel.
+///
+/// `atm-agent-mcp` transports send [`DaemonStreamEvent`](agent_team_mail_core::daemon_stream::DaemonStreamEvent)
+/// to the daemon via the `"stream-event"` socket command. The daemon publishes
+/// each received event on this channel so that any in-process subscriber
+/// (e.g. `atm-tui` via a `"stream-subscribe"` connection) receives events
+/// with low latency.
+///
+/// Capacity of 256 events: lagged subscribers receive an error and must
+/// re-sync via `agent-stream-state`.
+pub type SharedStreamEventSender = std::sync::Arc<
+    tokio::sync::broadcast::Sender<agent_team_mail_core::daemon_stream::DaemonStreamEvent>,
+>;
+
+/// Create a new broadcast channel for stream events.
+///
+/// Returns an [`SharedStreamEventSender`] backed by a channel with capacity
+/// 256.  Dropping the last [`tokio::sync::broadcast::Receiver`] does not
+/// close the sender; the sender is kept alive by the `Arc`.
+pub fn new_stream_event_sender() -> SharedStreamEventSender {
+    let (tx, _rx) = tokio::sync::broadcast::channel(256);
+    std::sync::Arc::new(tx)
+}
+
 // ── Launch channel types ──────────────────────────────────────────────────────
 
 /// A request to launch a new agent, sent from the socket handler to the
@@ -239,6 +270,7 @@ async fn start_unix_socket_server(
     session_registry: SharedSessionRegistry,
     dedup_store: SharedDedupeStore,
     stream_state_store: SharedStreamStateStore,
+    stream_event_sender: SharedStreamEventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -278,6 +310,7 @@ async fn start_unix_socket_server(
             session_registry,
             dedup_store,
             stream_state_store,
+            stream_event_sender,
             cancel,
             &accept_socket_path,
             &accept_pid_path,
@@ -305,6 +338,7 @@ async fn run_accept_loop(
     session_registry: SharedSessionRegistry,
     dedup_store: SharedDedupeStore,
     stream_state_store: SharedStreamStateStore,
+    stream_event_sender: SharedStreamEventSender,
     cancel: tokio_util::sync::CancellationToken,
     socket_path: &std::path::Path,
     _pid_path: &std::path::Path,
@@ -327,8 +361,9 @@ async fn run_accept_loop(
                         let sr = session_registry.clone();
                         let dd = dedup_store.clone();
                         let ss = stream_state_store.clone();
+                        let ses = stream_event_sender.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, home, store, ps, tx, sr, dd, ss).await {
+                            if let Err(e) = handle_connection(stream, home, store, ps, tx, sr, dd, ss, ses).await {
                                 error!("Socket connection handler error: {e}");
                             }
                         });
@@ -360,6 +395,7 @@ async fn handle_connection(
     session_registry: SharedSessionRegistry,
     dedup_store: SharedDedupeStore,
     stream_state_store: SharedStreamStateStore,
+    stream_event_sender: SharedStreamEventSender,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -383,6 +419,14 @@ async fn handle_connection(
 
     let request_str = request_line.trim();
 
+    // Long-lived "stream-subscribe" connections are handled before the normal
+    // one-shot request/response path.
+    if is_stream_subscribe_command(request_str) {
+        let mut stream = reader.into_inner();
+        handle_stream_subscribe(&mut stream, request_str, &stream_event_sender).await;
+        return Ok(());
+    }
+
     // Check whether this is a launch command before sync dispatch so we can
     // use async channel communication with the WorkerAdapterPlugin.
     let response = if is_launch_command(request_str) {
@@ -393,7 +437,7 @@ async fn handle_connection(
     } else if is_hook_event_command(request_str) {
         handle_hook_event_command(request_str, &state_store, &session_registry).await
     } else if is_stream_event_command(request_str) {
-        handle_stream_event_command(request_str, &stream_state_store).await
+        handle_stream_event_command(request_str, &stream_state_store, &stream_event_sender).await
     } else {
         match parse_and_dispatch(request_str, &state_store, &pubsub_store, &session_registry, &stream_state_store) {
             Ok(resp) => resp,
@@ -454,12 +498,101 @@ fn is_stream_event_command(request_str: &str) -> bool {
         || request_str.contains(r#""command": "stream-event""#)
 }
 
+/// Quickly determine if a raw JSON line is a `"stream-subscribe"` command.
+#[cfg(unix)]
+fn is_stream_subscribe_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"stream-subscribe""#)
+        || request_str.contains(r#""command": "stream-subscribe""#)
+}
+
+/// Handle a `"stream-subscribe"` command: long-lived connection that streams
+/// [`DaemonStreamEvent`]s to the caller via the broadcast channel.
+///
+/// Sends an initial ACK line `{"version":1,"status":"ok","streaming":true}`,
+/// then writes one JSON line per received event until the client disconnects
+/// or the broadcast sender is closed.
+///
+/// An optional `agent` field in the request payload filters events to a single
+/// agent; when absent all events are forwarded.
+///
+/// Lagged subscribers (more than 256 unconsumed events) receive a warning log
+/// and continue — they will miss events but the connection stays open.
+#[cfg(unix)]
+async fn handle_stream_subscribe(
+    stream: &mut tokio::net::UnixStream,
+    request_str: &str,
+    stream_event_sender: &SharedStreamEventSender,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    // Parse optional agent filter from payload.
+    let agent_filter: Option<String> = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|v| {
+            v.get("payload")
+                .and_then(|p| p.get("agent"))
+                .and_then(|a| a.as_str().map(str::to_string))
+        });
+
+    // Send initial ACK so the subscriber knows the channel is live.
+    let ack = serde_json::json!({"version": 1, "status": "ok", "streaming": true});
+    let ack_line = format!("{ack}\n");
+    if stream.write_all(ack_line.as_bytes()).await.is_err() {
+        return; // Client already gone.
+    }
+    if stream.flush().await.is_err() {
+        return;
+    }
+
+    // Subscribe to the broadcast channel.
+    let mut rx = stream_event_sender.subscribe();
+
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                // Apply optional agent filter.
+                let matches = match &agent_filter {
+                    Some(filter) => event.agent() == filter,
+                    None => true,
+                };
+                if !matches {
+                    continue;
+                }
+                match serde_json::to_string(&event) {
+                    Ok(line) => {
+                        let line = format!("{line}\n");
+                        if stream.write_all(line.as_bytes()).await.is_err() {
+                            break; // Client disconnected.
+                        }
+                        if stream.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("stream-subscribe: failed to serialize event: {e}");
+                    }
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                debug!("stream-subscribe: broadcast channel closed");
+                break;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                warn!("stream-subscribe: lagged by {n} events; subscriber must re-sync via agent-stream-state");
+                // Continue — subscriber misses events but stays connected.
+            }
+        }
+    }
+}
+
 /// Handle a `"stream-event"` command: parse the [`DaemonStreamEvent`], update
-/// the per-agent stream state store, and return an `{ok: true}` response.
+/// the per-agent stream state store, publish to the broadcast channel, and
+/// return an `{ok: true}` response.
 #[cfg(unix)]
 async fn handle_stream_event_command(
     request_str: &str,
     stream_state_store: &SharedStreamStateStore,
+    stream_event_sender: &SharedStreamEventSender,
 ) -> SocketResponse {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
     use agent_team_mail_core::daemon_stream::{AgentStreamState, DaemonStreamEvent};
@@ -504,6 +637,10 @@ async fn handle_stream_event_command(
         let state = store.entry(agent).or_default();
         state.apply(&event);
     }
+
+    // Publish to the broadcast channel for push-based subscribers.
+    // Ignore send errors — no active subscribers is the normal steady state.
+    let _ = stream_event_sender.send(event.clone());
 
     debug!("stream-event processed: {event:?}");
 
@@ -2389,6 +2526,7 @@ mod tests {
             make_sr(),
             dd,
             new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2457,6 +2595,7 @@ mod tests {
             make_sr(),
             dd,
             new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2516,6 +2655,7 @@ mod tests {
             make_sr(),
             dd,
             new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2597,6 +2737,7 @@ mod tests {
             sr,
             dd,
             new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2663,6 +2804,7 @@ mod tests {
             make_sr(),
             dd,
             new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2944,6 +3086,7 @@ mod tests {
             session_registry.clone(),
             dd,
             new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -3064,6 +3207,7 @@ mod tests {
             session_registry.clone(),
             dd,
             new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -3193,6 +3337,7 @@ mod tests {
                 make_sr(),
                 dd,
                 new_stream_state_store(),
+                new_stream_event_sender(),
                 cancel.clone(),
             )
             .await
@@ -3725,7 +3870,7 @@ mod tests {
         });
         let req_str = serde_json::to_string(&req_json).unwrap();
 
-        let resp = handle_stream_event_command(&req_str, &store).await;
+        let resp = handle_stream_event_command(&req_str, &store, &new_stream_event_sender()).await;
         assert_eq!(resp.status, "ok", "stream-event should succeed");
         assert!(
             resp.payload.unwrap()["ok"].as_bool().unwrap(),
@@ -3764,6 +3909,7 @@ mod tests {
         let resp = handle_stream_event_command(
             &serde_json::to_string(&started).unwrap(),
             &store,
+            &new_stream_event_sender(),
         )
         .await;
         assert_eq!(resp.status, "ok");
@@ -3785,6 +3931,7 @@ mod tests {
         let resp = handle_stream_event_command(
             &serde_json::to_string(&completed).unwrap(),
             &store,
+            &new_stream_event_sender(),
         )
         .await;
         assert_eq!(resp.status, "ok");
@@ -3805,7 +3952,7 @@ mod tests {
             "payload": {"invalid": true}
         });
         let req_str = serde_json::to_string(&req_json).unwrap();
-        let resp = handle_stream_event_command(&req_str, &store).await;
+        let resp = handle_stream_event_command(&req_str, &store, &new_stream_event_sender()).await;
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INVALID_PAYLOAD");
     }
@@ -3891,5 +4038,56 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert_eq!(payload["turn_status"].as_str(), Some("idle"));
+    }
+
+    // ── Broadcast channel tests ───────────────────────────────────────────────
+
+    /// Creating a sender should produce a valid channel that accepts subscribers.
+    #[test]
+    fn test_new_stream_event_sender_creates_valid_channel() {
+        let sender = new_stream_event_sender();
+        // subscribing must not panic
+        let _rx = sender.subscribe();
+        // receiver count is at least 1 (the one we just created)
+        // This confirms the channel is alive.
+    }
+
+    /// Sending a stream-event command publishes the event to broadcast subscribers.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_stream_event_broadcast_received_by_subscriber() {
+        use agent_team_mail_core::daemon_stream::DaemonStreamEvent;
+
+        let store = new_stream_state_store();
+        let sender = new_stream_event_sender();
+        let mut rx = sender.subscribe();
+
+        let req_json = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "request_id": "bcast-1",
+            "command": "stream-event",
+            "payload": {
+                "kind": "turn_started",
+                "agent": "arch-ctm",
+                "thread_id": "th-bcast",
+                "turn_id": "turn-bcast-1",
+                "transport": "mcp"
+            }
+        });
+        let req_str = serde_json::to_string(&req_json).unwrap();
+
+        let resp = handle_stream_event_command(&req_str, &store, &sender).await;
+        assert_eq!(resp.status, "ok");
+
+        // The subscriber should receive the event without blocking.
+        let event = rx.try_recv().expect("event should be immediately available");
+        assert!(
+            matches!(
+                &event,
+                DaemonStreamEvent::TurnStarted { agent, turn_id, .. }
+                if agent == "arch-ctm" && turn_id == "turn-bcast-1"
+            ),
+            "unexpected event: {event:?}"
+        );
     }
 }

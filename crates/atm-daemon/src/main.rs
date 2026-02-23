@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging;
 use agent_team_mail_daemon::daemon;
-use agent_team_mail_daemon::daemon::{new_dedup_store, new_launch_sender, new_pubsub_store, new_session_registry, new_state_store, new_stream_state_store, StatusWriter};
+use agent_team_mail_daemon::daemon::{new_dedup_store, new_launch_sender, new_pubsub_store, new_session_registry, new_state_store, new_stream_event_sender, new_stream_state_store, StatusWriter};
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
 use agent_team_mail_daemon::roster::RosterService;
 use clap::Parser;
@@ -269,6 +269,9 @@ async fn main() -> Result<()> {
     // Create the per-agent stream state store for normalised turn events.
     let stream_state_store = new_stream_state_store();
 
+    // Create the broadcast sender for push-based stream event fanout.
+    let stream_event_sender = new_stream_event_sender();
+
     // Run the daemon event loop
     let run_result = daemon::run(
         &mut registry,
@@ -281,6 +284,7 @@ async fn main() -> Result<()> {
         session_registry,
         dedup_store,
         stream_state_store,
+        stream_event_sender,
     )
     .await;
     match &run_result {

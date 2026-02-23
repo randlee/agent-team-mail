@@ -11,7 +11,7 @@ use agent_team_mail_core::config::Config;
 use agent_team_mail_daemon::daemon::session_registry::new_session_registry;
 use agent_team_mail_daemon::daemon::socket::{
     new_dedup_store, new_launch_sender, new_pubsub_store, new_state_store,
-    new_stream_state_store, start_socket_server,
+    new_stream_event_sender, new_stream_state_store, start_socket_server,
 };
 use agent_team_mail_daemon::plugins::worker_adapter::{AgentState, AgentStateTracker, PubSub};
 use std::collections::HashMap;
@@ -111,6 +111,7 @@ async fn test_socket_query_agent_state() {
         new_session_registry(),
         new_dedup_store(&home_dir).unwrap(),
         new_stream_state_store(),
+        new_stream_event_sender(),
         cancel.clone(),
     )
     .await
@@ -164,6 +165,7 @@ async fn test_socket_query_agent_not_found() {
         new_session_registry(),
         new_dedup_store(&home_dir).unwrap(),
         new_stream_state_store(),
+        new_stream_event_sender(),
         cancel.clone(),
     )
     .await
@@ -219,6 +221,7 @@ async fn test_pubsub_subscription_roundtrip() {
         new_session_registry(),
         new_dedup_store(&home_dir).unwrap(),
         new_stream_state_store(),
+        new_stream_event_sender(),
         cancel.clone(),
     )
     .await
