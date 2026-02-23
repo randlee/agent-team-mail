@@ -2224,6 +2224,12 @@ Session ending. Write a concise summary of:\n\
     ) -> anyhow::Result<()> {
         let raw = self.transport.spawn().await?;
 
+        // Wire the upstream write channel into the transport for approval-gate
+        // bridging (G.5). This is a no-op for McpTransport and JsonCodecTransport;
+        // AppServerTransport uses it to forward item/enteredReviewMode notifications
+        // upstream as elicitation/create requests.
+        self.transport.set_approval_upstream_tx(upstream_tx.clone());
+
         tracing::debug!(
             is_idle = self.transport.is_idle(),
             "child spawned via transport"
@@ -3115,8 +3121,16 @@ async fn route_child_message(
                 }
             };
 
-            // Keep a per-request channel in the registry so close/timeout paths
-            // can reject pending elicitations.
+            // NOTE: `_response_rx` is intentionally dropped here. Delivery of the approval
+            // decision back to the child happens via a *different* mechanism for the MCP path:
+            // `resolve_for_downstream()` returns the rewritten response (with downstream id
+            // restored), and the upstream response handler at the top of this function writes
+            // it directly to child.stdin. The `response_tx` registered in the registry is kept
+            // so that `ElicitationRegistry::cancel_for_agent` and `expire_timeouts` can call
+            // `send()` on it (those sends will fail silently when the receiver is already
+            // dropped, which is acceptable — the session close also terminates the child).
+            // Compare with `bridge_entered_review_mode` in transport.rs, which uses the oneshot
+            // channel for delivery because the app-server path has no equivalent direct-write hook.
             let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<Value>();
 
             // Register in the elicitation registry
