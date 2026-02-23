@@ -346,3 +346,321 @@ async fn idle_followed_by_done_reaches_terminal() {
         "turn_state must be Terminal(Completed) after done: {state:?}"
     );
 }
+
+// ─── ATM-QA-002: Mid-turn steering injection ──────────────────────────────────
+
+/// Verifies that a message enqueued while a turn is active (idle_flag=false)
+/// is retained in the queue and is delivered on the subsequent idle cycle.
+///
+/// This exercises the "mid-turn steering" path: the proxy must not drain while
+/// the agent is busy.  The drain happens only when the idle event fires.
+#[tokio::test]
+#[serial]
+async fn mid_turn_steering_injection() {
+    let tmp = tempdir().unwrap();
+    // SAFETY: test-only env mutation, serialised by #[serial].
+    unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+    let team = "test-team-steer";
+    let agent = "test-agent-steer";
+
+    // Simulate a busy turn: idle_flag=false, turn_state=Idle (cli-json has no Busy state).
+    let idle_flag = AtomicBool::new(false);
+    let turn_state = tokio::sync::Mutex::new(TurnState::Idle);
+
+    // Apply an activity event to put the agent into "busy" (idle_flag=false).
+    apply_event(
+        r#"{"type":"agent_message","content":"working..."}"#,
+        &idle_flag,
+        &turn_state,
+    )
+    .await;
+    assert!(
+        !idle_flag.load(Ordering::SeqCst),
+        "idle_flag must be false while agent is busy"
+    );
+
+    // Enqueue a steering message while the turn is active.
+    stdin_queue::enqueue(team, agent, r#"{"type":"tool_result","content":"steer this"}"#)
+        .await
+        .unwrap();
+
+    // At this point, the proxy would NOT drain (idle_flag is false).
+    // We assert the message is still queued.
+    let dir = atm_agent_mcp::stdin_queue::queue_dir(team, agent).unwrap();
+    let mut entries = tokio::fs::read_dir(&dir).await.unwrap();
+    let mut count = 0usize;
+    while let Ok(Some(_)) = entries.next_entry().await {
+        count += 1;
+    }
+    assert_eq!(count, 1, "message must still be in queue while agent is busy");
+
+    // Simulate idle event firing (the drain trigger).
+    apply_event(r#"{"type":"idle"}"#, &idle_flag, &turn_state).await;
+    assert!(
+        idle_flag.load(Ordering::SeqCst),
+        "idle_flag must be true after idle event"
+    );
+
+    // Now drain (simulating the proxy's idle handler).
+    let (writer, captured) = CapWriter::new();
+    let stdin: Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>> =
+        Arc::new(tokio::sync::Mutex::new(Box::new(writer)));
+
+    let drained = stdin_queue::drain(team, agent, &stdin, Duration::from_secs(600))
+        .await
+        .unwrap();
+
+    unsafe { std::env::remove_var("ATM_HOME") };
+
+    assert_eq!(drained, 1, "steering message must be drained on idle event");
+    let output = captured.lock().unwrap().clone();
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("steer this"),
+        "drained content must contain the steering payload: {text}"
+    );
+}
+
+// ─── ATM-QA-003: Fixture-based parser test ───────────────────────────────────
+
+/// Parses every line of the representative Codex JSONL fixture file and
+/// asserts the expected event classification for each line.
+///
+/// The fixture at `tests/fixtures/codex_cli_json_sample.jsonl` contains one
+/// event of every documented type plus an unknown-type line and an empty line.
+/// This test validates that `classify_event` handles the full event surface.
+#[test]
+fn fixture_file_all_events_parse_correctly() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/codex_cli_json_sample.jsonl");
+
+    let content = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("failed to read fixture {}: {e}", fixture_path.display()));
+
+    // Expected classification sequence (in fixture file line order, skipping
+    // blank lines as the parser returns Unknown for them which is acceptable).
+    use atm_agent_mcp::cli_json_test::CliJsonEventKind;
+
+    let non_empty_lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+
+    // Line 0: metadata object → Unknown (unrecognised _fixture_metadata type)
+    assert_eq!(
+        classify_event(non_empty_lines[0]),
+        CliJsonEventKind::Unknown,
+        "line 0 (metadata) must classify as Unknown"
+    );
+
+    // Line 1: agent_message → AgentMessage
+    assert_eq!(
+        classify_event(non_empty_lines[1]),
+        CliJsonEventKind::AgentMessage,
+        "line 1 must be AgentMessage"
+    );
+
+    // Line 2: tool_call → ToolCall
+    assert_eq!(
+        classify_event(non_empty_lines[2]),
+        CliJsonEventKind::ToolCall,
+        "line 2 must be ToolCall"
+    );
+
+    // Line 3: tool_result → ToolResult
+    assert_eq!(
+        classify_event(non_empty_lines[3]),
+        CliJsonEventKind::ToolResult,
+        "line 3 must be ToolResult"
+    );
+
+    // Line 4: file_change → FileChange
+    assert_eq!(
+        classify_event(non_empty_lines[4]),
+        CliJsonEventKind::FileChange,
+        "line 4 must be FileChange"
+    );
+
+    // Line 5: idle → Idle
+    assert_eq!(
+        classify_event(non_empty_lines[5]),
+        CliJsonEventKind::Idle,
+        "line 5 must be Idle"
+    );
+
+    // Line 6: done → Done
+    assert_eq!(
+        classify_event(non_empty_lines[6]),
+        CliJsonEventKind::Done,
+        "line 6 must be Done"
+    );
+
+    // Line 7: unknown type → Unknown
+    assert_eq!(
+        classify_event(non_empty_lines[7]),
+        CliJsonEventKind::Unknown,
+        "line 7 (unknown type) must classify as Unknown"
+    );
+
+    // All 8 non-empty lines are accounted for.
+    assert_eq!(
+        non_empty_lines.len(),
+        8,
+        "fixture must have exactly 8 non-empty lines (got {})",
+        non_empty_lines.len()
+    );
+}
+
+// ─── ATM-QA-004: Fallback drain without idle event ───────────────────────────
+
+/// Verifies that `stdin_queue::drain` delivers messages independently of the
+/// idle event trigger mechanism.
+///
+/// The 30-second fallback timer in `proxy.rs` calls the same `drain` function
+/// as the idle-event handler.  This test confirms that calling `drain` directly
+/// (bypassing the idle trigger) still delivers all enqueued messages.  It
+/// demonstrates the fallback path is achievable even without the 30-second
+/// timer firing — the timer just calls the same drain function.
+#[tokio::test]
+#[serial]
+async fn no_idle_event_queue_can_be_drained_after_timeout() {
+    let tmp = tempdir().unwrap();
+    // SAFETY: test-only env mutation, serialised by #[serial].
+    unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+    let team = "test-team-fallback";
+    let agent = "test-agent-fallback";
+
+    // Enqueue messages without ever firing an idle event.
+    for i in 0..3usize {
+        stdin_queue::enqueue(team, agent, &format!(r#"{{"seq":{i},"type":"tool_result"}}"#))
+            .await
+            .unwrap();
+    }
+
+    // Drain directly, simulating the 30-second fallback timer firing.
+    let (writer, captured) = CapWriter::new();
+    let stdin: Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>> =
+        Arc::new(tokio::sync::Mutex::new(Box::new(writer)));
+
+    let drained = stdin_queue::drain(team, agent, &stdin, Duration::from_secs(600))
+        .await
+        .unwrap();
+
+    unsafe { std::env::remove_var("ATM_HOME") };
+
+    assert_eq!(
+        drained, 3,
+        "all 3 messages must be drained without an idle event (fallback path)"
+    );
+
+    let output = captured.lock().unwrap().clone();
+    let text = String::from_utf8_lossy(&output);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 3, "exactly 3 lines must be written to stdin");
+    for line in &lines {
+        assert!(
+            line.contains("tool_result"),
+            "each line must contain tool_result: {line}"
+        );
+    }
+}
+
+// ─── ATM-QA-007: TurnState::Busy is unreachable for cli-json ─────────────────
+
+/// Verifies that none of the cli-json event types produce a `TurnState::Busy`
+/// transition via the state machine in this test module.
+///
+/// The `cli-json` protocol does not emit `turn/started` notifications, so
+/// `TurnState::Busy` is never reached.  Only `idle` → `Idle` and `done` →
+/// `Terminal` are valid TurnState transitions.  All other events reset
+/// `idle_flag` but leave `turn_state` unchanged (not Busy).
+#[tokio::test]
+async fn no_cli_json_event_produces_busy_turn_state() {
+    let events: &[(&str, bool)] = &[
+        (r#"{"type":"agent_message","content":"hi"}"#, false),
+        (r#"{"type":"tool_call","name":"bash","call_id":"c1"}"#, false),
+        (r#"{"type":"tool_result","call_id":"c1","output":"ok"}"#, false),
+        (r#"{"type":"file_change","path":"/tmp/x","action":"write"}"#, false),
+        // idle and done are valid state-changing events but never produce Busy.
+        (r#"{"type":"idle"}"#, false),
+        (r#"{"type":"done"}"#, false),
+    ];
+
+    for (line, _) in events {
+        let idle_flag = AtomicBool::new(false);
+        let turn_state = tokio::sync::Mutex::new(TurnState::Idle);
+
+        apply_event(line, &idle_flag, &turn_state).await;
+
+        let state = turn_state.lock().await.clone();
+        assert!(
+            !matches!(state, TurnState::Busy { .. }),
+            "cli-json event {line:?} must not produce TurnState::Busy (got {state:?})"
+        );
+    }
+}
+
+// ─── ATM-QA-008: Multi-cycle idle windows ────────────────────────────────────
+
+/// Verifies that repeated idle drain cycles do not cross-contaminate: messages
+/// from idle cycle N are not re-delivered in idle cycle N+1.
+#[tokio::test]
+#[serial]
+async fn multi_cycle_idle_windows_no_cross_contamination() {
+    let tmp = tempdir().unwrap();
+    // SAFETY: test-only env mutation, serialised by #[serial].
+    unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+    let team = "test-team-multicycle";
+    let agent = "test-agent-multicycle";
+
+    // --- Idle cycle 1: enqueue A and B, drain, assert count==2 ---
+    stdin_queue::enqueue(team, agent, r#"{"seq":"A","type":"tool_result"}"#)
+        .await
+        .unwrap();
+    stdin_queue::enqueue(team, agent, r#"{"seq":"B","type":"tool_result"}"#)
+        .await
+        .unwrap();
+
+    let (w1, cap1) = CapWriter::new();
+    let stdin1: Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>> =
+        Arc::new(tokio::sync::Mutex::new(Box::new(w1)));
+
+    let count1 = stdin_queue::drain(team, agent, &stdin1, Duration::from_secs(600))
+        .await
+        .unwrap();
+    assert_eq!(count1, 2, "idle cycle 1 must drain exactly 2 messages (A and B)");
+
+    let out1 = cap1.lock().unwrap().clone();
+    let text1 = String::from_utf8_lossy(&out1);
+    assert!(text1.contains(r#""A""#), "cycle-1 output must contain A: {text1}");
+    assert!(text1.contains(r#""B""#), "cycle-1 output must contain B: {text1}");
+
+    // --- Idle cycle 2: enqueue C, drain, assert count==1 and no A/B ---
+    stdin_queue::enqueue(team, agent, r#"{"seq":"C","type":"tool_result"}"#)
+        .await
+        .unwrap();
+
+    let (w2, cap2) = CapWriter::new();
+    let stdin2: Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>> =
+        Arc::new(tokio::sync::Mutex::new(Box::new(w2)));
+
+    let count2 = stdin_queue::drain(team, agent, &stdin2, Duration::from_secs(600))
+        .await
+        .unwrap();
+
+    unsafe { std::env::remove_var("ATM_HOME") };
+
+    assert_eq!(count2, 1, "idle cycle 2 must drain exactly 1 message (C only)");
+
+    let out2 = cap2.lock().unwrap().clone();
+    let text2 = String::from_utf8_lossy(&out2);
+    assert!(text2.contains(r#""C""#), "cycle-2 output must contain C: {text2}");
+    assert!(
+        !text2.contains(r#""A""#),
+        "cycle-2 output must NOT contain A (cross-contamination): {text2}"
+    );
+    assert!(
+        !text2.contains(r#""B""#),
+        "cycle-2 output must NOT contain B (cross-contamination): {text2}"
+    );
+}

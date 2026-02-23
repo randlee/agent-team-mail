@@ -29,7 +29,7 @@ In current terminology, this mode is named `cli-json`.
 
 3. **Duplex stream forwarding**: Rather than giving the proxy direct access to the real child stdout, the background task reads from the child and forwards all lines to a `tokio::io::duplex` stream. This allows the background task to intercept `idle` events without disrupting the proxy's line-by-line reading.
 
-4. **Stdin queue**: A file-based message injection queue (`stdin_queue.rs`) enables external processes to enqueue messages for delivery to the Codex child. Messages are atomically claimed via rename (`{uuid}.json` -> `{uuid}.claimed`) to prevent double-delivery. The queue is drained on idle events and on a 30-second periodic timer.
+4. **Stdin queue**: A file-based message injection queue (`stdin_queue.rs`) enables external processes to enqueue messages for delivery to the Codex child. Messages are atomically claimed via `create_new(true)` / `O_CREAT|O_EXCL` lock files (`{uuid}.lock`) to prevent double-delivery. On both POSIX and Windows this is a single atomic kernel operation — exactly one concurrent drainer will succeed in creating the lock. On success the drainer reads `{uuid}.json`, writes it to stdin, then removes both `{uuid}.json` and `{uuid}.lock`. On write failure only the lock file is removed, leaving `{uuid}.json` for a retry on the next drain cycle. The rename-based approach (`{uuid}.json` → `{uuid}.claimed`) used previously was replaced because `MoveFileEx` without `MOVEFILE_REPLACE_EXISTING` still races under concurrent `spawn_blocking` on Windows, whereas `O_CREAT|O_EXCL` provides true atomicity on all platforms. The queue is drained on idle events and on a 30-second periodic timer.
 
 5. **Renamed test double**: The original `JsonTransport` (in-memory channel-based test double) was renamed to `MockTransport` to avoid confusion with the production `JsonCodecTransport`.
 
@@ -39,7 +39,7 @@ In current terminology, this mode is named `cli-json`.
 
 - Three production transport modes are planned (`mcp`, `cli-json`, `app-server`), selectable via configuration
 - Idle detection enables non-blocking message injection mid-session
-- File-based stdin queue is safe for concurrent writers (atomic rename claim)
+- File-based stdin queue is safe for concurrent writers (atomic `O_CREAT|O_EXCL` claim)
 - Clean separation: `MockTransport` for tests, `JsonCodecTransport` for production cli-json mode
 
 ### Negative

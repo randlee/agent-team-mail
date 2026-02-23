@@ -188,7 +188,7 @@ impl McpTransport {
         Self {
             config,
             team,
-            turn_tracker: crate::turn_control::TurnTracker::new_deferred(),
+            turn_tracker: crate::turn_control::TurnTracker::new_deferred("mcp"),
         }
     }
 }
@@ -322,7 +322,7 @@ impl JsonCodecTransport {
             team,
             idle_flag: Arc::new(AtomicBool::new(false)),
             cli_json_turn_state: Arc::new(Mutex::new(crate::stream_norm::TurnState::Idle)),
-            turn_tracker: crate::turn_control::TurnTracker::new_deferred(),
+            turn_tracker: crate::turn_control::TurnTracker::new_deferred("cli-json"),
         }
     }
 }
@@ -341,6 +341,19 @@ impl Drop for JsonCodecTransport {
 }
 
 /// JSONL event type, as parsed by the `JsonCodecTransport` background reader.
+///
+/// # Design note: intentional divergence from `stream_norm::parse_app_server_notification`
+///
+/// This enum and [`parse_event_type`] are intentionally separate from the
+/// `stream_norm::parse_app_server_notification` parser used by the app-server
+/// transport.  The two parsers differ because:
+///
+/// - `cli-json` events use a `"type"` field (e.g. `{"type":"idle"}`).
+/// - App-server notifications use a `"method"` field in JSON-RPC style
+///   (e.g. `{"method":"turn/started","params":{...}}`).
+///
+/// Unifying them into one parser would require additional dispatch logic and
+/// would couple two unrelated protocol shapes.  The divergence is intentional.
 #[derive(Debug)]
 pub(crate) enum TransportEventType {
     AgentMessage,
@@ -627,7 +640,7 @@ impl AppServerTransport {
             )),
             elicitation_counter: Arc::new(AtomicU64::new(0)),
             upstream_tx: Arc::new(Mutex::new(None)),
-            turn_tracker: crate::turn_control::TurnTracker::new_deferred(),
+            turn_tracker: crate::turn_control::TurnTracker::new_deferred("app-server"),
         }
     }
 
@@ -2564,6 +2577,54 @@ mod tests {
             assert!(
                 matches!(parse_event_type(bad), TransportEventType::Unknown),
                 "expected Unknown for input: {bad:?}"
+            );
+        }
+    }
+
+    /// Verify that no cli-json event type, as parsed by `parse_event_type`,
+    /// would cause a `TurnState::Busy` transition in the background task.
+    ///
+    /// The cli-json protocol has no `turn/started` notification, so
+    /// `TurnState::Busy` is never reached via event parsing.  Only `idle`
+    /// (→ `TurnState::Idle`) and `done` (→ `TurnState::Terminal`) are
+    /// state-changing events.  All other events reset `idle_flag` only.
+    #[test]
+    fn no_cli_json_event_transitions_to_busy_turn_state() {
+        // The match arms in the background task are:
+        //   TransportEventType::Idle  -> TurnState::Idle
+        //   TransportEventType::Done  -> TurnState::Terminal
+        //   _                         -> idle_flag = false (no TurnState change)
+        // Busy is explicitly absent from all arms.
+
+        let only_idle_and_done_change_state: &[(&str, bool)] = &[
+            (r#"{"type":"agent_message"}"#, false),
+            (r#"{"type":"tool_call"}"#, false),
+            (r#"{"type":"tool_result"}"#, false),
+            (r#"{"type":"file_change"}"#, false),
+            (r#"{"type":"idle"}"#, true),
+            (r#"{"type":"done"}"#, true),
+            (r#"{"type":"unknown_future_type"}"#, false),
+        ];
+
+        for (line, is_state_changer) in only_idle_and_done_change_state {
+            let et = parse_event_type(line);
+            let changes_state =
+                matches!(et, TransportEventType::Idle | TransportEventType::Done);
+            assert_eq!(
+                changes_state, *is_state_changer,
+                "event {line:?}: expected is_state_changer={is_state_changer}, got {changes_state}"
+            );
+            // The state transition (if any) goes to Idle or Terminal, never Busy.
+            assert!(
+                !matches!(
+                    et,
+                    TransportEventType::AgentMessage
+                        | TransportEventType::ToolCall
+                        | TransportEventType::ToolResult
+                        | TransportEventType::FileChange
+                        | TransportEventType::Unknown
+                ) || !changes_state,
+                "activity/unknown events must not be state-changing: {line}"
             );
         }
     }

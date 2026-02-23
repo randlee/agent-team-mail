@@ -138,6 +138,28 @@ In addition to idle-triggered drains, the proxy drains the stdin queue every
 when the agent does not reach an idle state (e.g. because of a long-running
 tool call).
 
+The timer is implemented in `proxy.rs` inside `spawn_child_from_io` (search for
+`periodic_drain_task`).  A `tokio::time::interval(Duration::from_secs(30))` is
+spawned as a background task when the transport provides an `idle_flag` (i.e.
+only for `JsonCodecTransport`).  The task calls the same `drain_queue_all_agents`
+helper that the idle-event handler calls — the two paths are identical.
+
+**Important**: The timer lives in the proxy run loop, not in the transport
+implementation, so it applies to `cli-json` mode regardless of which transport
+variant is active.  The 30-second tick fires when `is_idle()` has not returned
+`true` for the entire prior poll interval, ensuring at least one drain even when
+the agent never produces an `idle` event.
+
+### Note on `TurnState::Busy`
+
+The `cli-json` protocol does not emit `turn/started` notifications, so
+`cli_json_turn_state` can only reach `TurnState::Idle` (via `idle` event) or
+`TurnState::Terminal` (via `done` event).  The `Busy` variant is reserved for
+future protocol extensions when explicit turn start notifications are added.
+Activity events (`agent_message`, `tool_call`, `tool_result`, `file_change`)
+reset `idle_flag` to `false` but do **not** transition `cli_json_turn_state` to
+`Busy` — they only clear the idle signal.
+
 ### `done` event shape
 
 The `done` event has no required additional fields beyond `"type":"done"`.  The

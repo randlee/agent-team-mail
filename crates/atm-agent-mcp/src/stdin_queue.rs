@@ -61,6 +61,10 @@ pub fn queue_dir(team: &str, agent_id: &str) -> anyhow::Result<PathBuf> {
 ///
 /// Creates the queue directory if it does not exist.
 ///
+/// Callers are responsible for providing properly formatted JSON matching the
+/// Codex stdin input schema (e.g., `{"type":"tool_result",...}`) before
+/// enqueueing. The queue stores and drains raw content without validation.
+///
 /// # Errors
 ///
 /// Returns an error if the home directory cannot be determined or if file I/O fails.
