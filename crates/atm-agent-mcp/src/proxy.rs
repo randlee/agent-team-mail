@@ -33,7 +33,6 @@ use tracing::Instrument;
 
 use crate::audit::AuditLog;
 use crate::config::AgentMcpConfig;
-use crate::transport::{CodexTransport, make_transport};
 use crate::context::detect_context;
 use crate::elicitation::ElicitationRegistry;
 use crate::framing::{UpstreamReader, write_newline_delimited};
@@ -45,6 +44,7 @@ use crate::mail_inject::{
 };
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
+use crate::transport::{CodexTransport, make_transport};
 use crate::watch_stream::{SourceEnvelope, WatchAttachError, WatchStreamHub, WatchSubscription};
 
 /// Type alias for the shared child stdin writer.
@@ -203,7 +203,10 @@ impl std::fmt::Debug for ChildHandle {
             .field("response_rx", &"<Receiver>")
             .field("exit_status", &"<Mutex<Option<ExitStatus>>>")
             .field("process", &"<Mutex<Option<Child>>>")
-            .field("drain_task", &self.drain_task.as_ref().map(|_| "<JoinHandle>"))
+            .field(
+                "drain_task",
+                &self.drain_task.as_ref().map(|_| "<JoinHandle>"),
+            )
             .finish()
     }
 }
@@ -221,6 +224,11 @@ pub(crate) struct PendingRequests {
     /// map to resolve the agent_id, transition the thread Busy -> Idle, and
     /// trigger the next post-turn mail check (FR-8.1 chaining).
     auto_mail_pending: HashMap<Value, String>,
+    /// Request IDs mapped to source envelopes for watch-stream attribution.
+    request_sources: HashMap<Value, SourceEnvelope>,
+    /// Last-known source envelope for each agent_id, used as fallback when
+    /// child events do not carry a request-id correlation token.
+    last_agent_source: HashMap<String, SourceEnvelope>,
 }
 
 impl PendingRequests {
@@ -230,6 +238,8 @@ impl PendingRequests {
             tools_list_ids: std::collections::HashSet::new(),
             codex_create_ids: HashMap::new(),
             auto_mail_pending: HashMap::new(),
+            request_sources: HashMap::new(),
+            last_agent_source: HashMap::new(),
         }
     }
 
@@ -247,6 +257,7 @@ impl PendingRequests {
 
     fn complete(&mut self, id: &Value) -> Option<oneshot::Sender<Value>> {
         self.tools_list_ids.remove(id);
+        self.request_sources.remove(id);
         self.map.remove(id)
     }
 
@@ -270,6 +281,22 @@ impl PendingRequests {
     /// Take the agent_id for a completed auto-mail turn, removing it from the map.
     fn take_auto_mail(&mut self, id: &Value) -> Option<String> {
         self.auto_mail_pending.remove(id)
+    }
+
+    fn mark_request_source(&mut self, id: Value, source: SourceEnvelope) {
+        self.request_sources.insert(id, source);
+    }
+
+    fn source_for_request(&self, id: &Value) -> Option<SourceEnvelope> {
+        self.request_sources.get(id).cloned()
+    }
+
+    fn set_last_agent_source(&mut self, agent_id: String, source: SourceEnvelope) {
+        self.last_agent_source.insert(agent_id, source);
+    }
+
+    fn last_source_for_agent(&self, agent_id: &str) -> Option<SourceEnvelope> {
+        self.last_agent_source.get(agent_id).cloned()
     }
 }
 
@@ -1439,6 +1466,14 @@ Session ending. Write a concise summary of:\n\
             if let Some(aid) = expected_agent_id.clone() {
                 p.mark_codex_create(id.clone(), aid);
             }
+            if effective_tool_name == "codex" || effective_tool_name == "codex-reply" {
+                let actor_fallback = self.config.identity.as_deref().unwrap_or("upstream-client");
+                let source = infer_upstream_request_source(&msg_to_forward, actor_fallback);
+                p.mark_request_source(id.clone(), source.clone());
+                if let Some(ref aid) = state_agent_id {
+                    p.set_last_agent_source(aid.clone(), source);
+                }
+            }
         }
 
         // Mark the session as Busy while the codex/codex-reply turn is in progress.
@@ -1813,11 +1848,8 @@ Session ending. Write a concise summary of:\n\
         // events to the daemon. McpTransport and JsonCodecTransport use the
         // default no-op implementation of set_turn_session_context.
         {
-            let turn_ctx = crate::turn_control::SessionContext::new(
-                &identity,
-                &team,
-                &entry.agent_id,
-            );
+            let turn_ctx =
+                crate::turn_control::SessionContext::new(&identity, &team, &entry.agent_id);
             self.transport.set_turn_session_context(turn_ctx);
         }
 
@@ -2534,6 +2566,8 @@ Session ending. Write a concise summary of:\n\
             guard.map.clear();
             guard.codex_create_ids.clear();
             guard.auto_mail_pending.clear();
+            guard.request_sources.clear();
+            guard.last_agent_source.clear();
         });
 
         // Populate the shared child stdin reference for the idle poller.
@@ -2560,6 +2594,22 @@ enum PrepareResult {
     },
     /// Validation failed; an error response has already been sent upstream.
     Error,
+}
+
+fn infer_upstream_request_source(msg: &Value, actor_fallback: &str) -> SourceEnvelope {
+    let kind = msg
+        .pointer("/params/source/kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("client_prompt");
+    let actor = msg
+        .pointer("/params/source/actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or(actor_fallback);
+    let channel = msg
+        .pointer("/params/source/channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mcp_primary");
+    SourceEnvelope::new(kind, actor, channel)
 }
 
 /// Forward a `codex/event` notification upstream, injecting `agent_id` into params.
@@ -2610,7 +2660,7 @@ async fn forward_event(
     }
     // Publish to direct watch-stream hub using MVP subset + source envelope.
     if should_publish_watch_event(event) {
-        let source = infer_source_envelope(event, &agent_id);
+        let source = infer_source_envelope(event, &agent_id, pending).await;
         watch_stream_hub
             .lock()
             .await
@@ -2649,7 +2699,11 @@ fn should_publish_watch_event(event: &Value) -> bool {
 }
 
 /// Infer source attribution for watch-stream frames (FR-22 baseline).
-fn infer_source_envelope(event: &Value, agent_id: &str) -> SourceEnvelope {
+async fn infer_source_envelope(
+    event: &Value,
+    agent_id: &str,
+    pending: &Arc<Mutex<PendingRequests>>,
+) -> SourceEnvelope {
     let src_kind = event
         .pointer("/params/source/kind")
         .and_then(|v| v.as_str())
@@ -2669,6 +2723,24 @@ fn infer_source_envelope(event: &Value, agent_id: &str) -> SourceEnvelope {
         "user_steer" => "tui_user",
         _ => "mcp_primary",
     };
+    if !src_kind.is_empty() {
+        return SourceEnvelope::new(kind, actor, channel);
+    }
+
+    // Fall back to per-request source attribution when child events include a
+    // correlating request id in `_meta.requestId`.
+    if let Some(req_id) = event.pointer("/params/_meta/requestId") {
+        if let Some(src) = pending.lock().await.source_for_request(req_id) {
+            return src;
+        }
+    }
+
+    // If request-id correlation is missing, use the latest source seen for the
+    // current agent session.
+    if let Some(src) = pending.lock().await.last_source_for_agent(agent_id) {
+        return src;
+    }
+
     SourceEnvelope::new(kind, actor, channel)
 }
 
@@ -2700,7 +2772,11 @@ enum JsonlEventType {
 fn parse_jsonl_event_type(line: &str) -> JsonlEventType {
     serde_json::from_str::<serde_json::Value>(line)
         .ok()
-        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .and_then(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
         .map(|t| match t.as_str() {
             "agent_message" => JsonlEventType::AgentMessage,
             "tool_call" => JsonlEventType::ToolCall,
@@ -2950,6 +3026,13 @@ async fn dispatch_auto_mail_if_available(
             let mut p = pending.lock().await;
             p.insert(auto_req_id_val.clone(), tx);
             p.mark_auto_mail(auto_req_id_val, agent_id.to_string());
+            let source =
+                SourceEnvelope::new("atm_mail", format!("{identity}@{team}"), "mail_injector");
+            p.mark_request_source(
+                serde_json::Value::Number(auto_req_id.into()),
+                source.clone(),
+            );
+            p.set_last_agent_source(agent_id.to_string(), source);
         }
         // FR-8.12: mark read only after successful dispatch.
         let ids: Vec<String> = envelopes.iter().map(|e| e.message_id.clone()).collect();
@@ -3500,6 +3583,110 @@ mod tests {
             .subscribe("codex:abc-agent")
             .expect("attach");
         assert_eq!(sub.replay.len(), 1, "watch hub should retain replay event");
+    }
+
+    #[tokio::test]
+    async fn test_forward_event_source_from_request_id_correlation() {
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert("thread-123".to_string(), "codex:abc-agent".to_string());
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+
+        {
+            let mut p = pending.lock().await;
+            p.mark_request_source(
+                json!(99),
+                SourceEnvelope::new("atm_mail", "arch-atm@atm-dev", "mail_injector"),
+            );
+        }
+
+        let mut event = json!({
+            "jsonrpc": "2.0",
+            "method": "codex/event",
+            "params": {"type": "task_started", "threadId": "thread-123", "_meta": {"requestId": 99}}
+        });
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should be forwarded");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        let sub = watch_stream_hub
+            .lock()
+            .await
+            .subscribe("codex:abc-agent")
+            .expect("attach");
+        let replay0 = sub.replay.first().expect("replay event");
+        assert_eq!(
+            replay0.pointer("/source/kind").and_then(|v| v.as_str()),
+            Some("atm_mail")
+        );
+        assert_eq!(
+            replay0.pointer("/source/channel").and_then(|v| v.as_str()),
+            Some("mail_injector")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forward_event_source_falls_back_to_last_agent_source() {
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert("thread-123".to_string(), "codex:abc-agent".to_string());
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+
+        {
+            let mut p = pending.lock().await;
+            p.set_last_agent_source(
+                "codex:abc-agent".to_string(),
+                SourceEnvelope::new("user_steer", "randlee", "tui_user"),
+            );
+        }
+
+        let mut event = json!({
+            "jsonrpc": "2.0",
+            "method": "codex/event",
+            "params": {"type": "task_started", "threadId": "thread-123"}
+        });
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should be forwarded");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        let sub = watch_stream_hub
+            .lock()
+            .await
+            .subscribe("codex:abc-agent")
+            .expect("attach");
+        let replay0 = sub.replay.first().expect("replay event");
+        assert_eq!(
+            replay0.pointer("/source/kind").and_then(|v| v.as_str()),
+            Some("user_steer")
+        );
+        assert_eq!(
+            replay0.pointer("/source/actor").and_then(|v| v.as_str()),
+            Some("randlee")
+        );
     }
 
     #[tokio::test]
@@ -4228,11 +4415,7 @@ mod tests {
         // Seed inbox with one unread message.
         let team = "test-team";
         let identity = "test-agent";
-        let inbox_dir = dir
-            .path()
-            .join(".claude/teams")
-            .join(team)
-            .join("inboxes");
+        let inbox_dir = dir.path().join(".claude/teams").join(team).join("inboxes");
         std::fs::create_dir_all(&inbox_dir).unwrap();
         let inbox_path = inbox_dir.join(format!("{identity}.json"));
         let msg = agent_team_mail_core::InboxMessage {
@@ -4255,8 +4438,9 @@ mod tests {
         // Drop the read half immediately — writes will fail with broken pipe.
         drop(_read_half_dropped);
 
-        let broken_stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> =
-            Arc::new(Mutex::new(Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>));
+        let broken_stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> = Arc::new(Mutex::new(
+            Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+        ));
 
         // Wrap in the SharedChildStdin type.
         let shared_stdin: SharedChildStdin = Arc::new(Mutex::new(Some(broken_stdin)));
