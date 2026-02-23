@@ -1,6 +1,6 @@
 # Live Stream and Log Viewing MVP
 
-Status: Draft (implementation guidance)
+Status: Implemented (Phase L.5 complete)
 Owner: `arch-ctm`
 Scope: `atm-agent-mcp` + `atm-tui` UX integration for session watching and structured log viewing
 
@@ -36,10 +36,11 @@ Rationale:
   - switches to live streaming.
 - `watch.detach(agent_id)`:
   - removes watcher sink,
+  - evicts per-agent watcher state when receiver count drops to zero,
   - proxy resumes drop-on-no-watcher behavior for view-only deltas.
 
-MVP constraint:
-- one watcher sink per session.
+MVP implementation:
+- multiple concurrent watcher sinks per session are supported (fanout via bounded broadcast channel).
 
 ### 3.2 Replay buffer
 
@@ -57,17 +58,16 @@ Notes:
 
 Use a minimal, stable subset from Codex stream notifications:
 
-- `turn/started`
-- `item/agentMessage/delta`
-- `item/reasoning/textDelta` (optional if reasoning panel enabled)
-- `item/commandExecution/outputDelta`
-- `item/completed`
-- `turn/completed`
-- `thread/status/changed`
+- `turn_started`
+- `item_started`
+- `item_delta`
+- `item_completed`
+- `turn_completed`
+- `turn_idle`
 
 Unknown events:
 - ignore for rendering,
-- count + log as debug telemetry.
+- increment unknown-event counters and emit periodic diagnostics.
 
 ## 4. Source Attribution Model
 
@@ -97,7 +97,7 @@ Send to daemon:
 - session start/end,
 - turn start/completion/idle transitions,
 - stream error summaries,
-- dropped-event counters (periodic).
+- dropped/unknown counters (periodic aggregate flush).
 
 Do not send to daemon:
 - token/message delta streams,
@@ -138,14 +138,13 @@ Operational model:
 ### Phase 2 (hardening)
 
 - Expand event coverage and rich formatting (code blocks, context usage display).
-- Add optional multi-watcher fanout.
 - Add stronger compatibility tests against Codex protocol drift.
 
-## 8. Open Design Questions
+## 8. Design Question Closure (Resolved)
 
-1. Should replay buffer be line-based, event-based, or dual-mode?
-2. Do we expose context-window usage in MVP if not uniformly available across transports?
-3. Should `atm-tui` retain a local ephemeral buffer per viewed session in addition to proxy replay?
+1. Replay buffer mode: **event-based** in proxy with bounded line rendering for UI.
+2. Context-window usage in MVP: **not required** unless transport provides it reliably.
+3. Additional TUI buffer: **not required** for MVP; proxy replay is the source for session switch continuity.
 
 ## 9. References
 
