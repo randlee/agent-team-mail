@@ -32,6 +32,7 @@
 
 mod agent_terminal;
 mod app;
+mod codex_watch;
 mod config;
 mod dashboard;
 mod events;
@@ -58,13 +59,13 @@ use agent_team_mail_core::{
         AgentSummary, daemon_is_running, daemon_socket_path, query_agent_stream_state,
         query_list_agents, send_control, subscribe_stream_events,
     },
-    daemon_stream::{DaemonStreamEvent, TurnStatusWire},
     event_log::{EventFields, emit_event_best_effort},
     home::get_home_dir,
     logging,
 };
 
 use app::{App, MemberRow, PendingControl};
+use codex_watch::format_daemon_event_line;
 use config::{TuiConfig, load_tui_config};
 use dashboard::{get_inbox_count, read_inbox_preview, read_team_members, session_log_path};
 
@@ -257,14 +258,15 @@ async fn run_app<B: ratatui::backend::Backend>(
         }
 
         // ── Live daemon stream drain (100 ms) ─────────────────────────────────
-        if let (Some(agent), Some(sub)) = (&app.streaming_agent, &app.daemon_stream_rx) {
-            let mut lines = Vec::new();
+        let current_agent = app.streaming_agent.clone();
+        if let (Some(agent), Some(sub)) = (current_agent, app.daemon_stream_rx.as_ref()) {
+            let mut events_for_agent = Vec::new();
             let mut disconnected = false;
             loop {
                 match sub.rx.try_recv() {
                     Ok(event) => {
-                        if event.agent() == agent {
-                            lines.push(format_stream_event_line(&event));
+                        if event.agent() == agent.as_str() {
+                            events_for_agent.push(event);
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -273,6 +275,13 @@ async fn run_app<B: ratatui::backend::Backend>(
                         break;
                     }
                 }
+            }
+            let lines: Vec<String> = events_for_agent
+                .iter()
+                .map(format_daemon_event_line)
+                .collect();
+            for event in &events_for_agent {
+                app.apply_watch_event(event);
             }
             if !lines.is_empty() {
                 app.append_stream_lines(lines);
@@ -560,42 +569,6 @@ fn emit_stream_detach_event(team: &str, agent: &str) {
     });
 }
 
-fn format_stream_event_line(event: &DaemonStreamEvent) -> String {
-    match event {
-        DaemonStreamEvent::TurnStarted {
-            turn_id, transport, ..
-        } => {
-            format!("[live] turn started ({transport}) id={turn_id}")
-        }
-        DaemonStreamEvent::TurnCompleted {
-            turn_id,
-            transport,
-            status,
-            ..
-        } => {
-            let status_s = match status {
-                TurnStatusWire::Completed => "completed",
-                TurnStatusWire::Interrupted => "interrupted",
-                TurnStatusWire::Failed => "failed",
-            };
-            format!("[live] turn {status_s} ({transport}) id={turn_id}")
-        }
-        DaemonStreamEvent::TurnIdle {
-            turn_id, transport, ..
-        } => {
-            format!("[live] turn idle ({transport}) id={turn_id}")
-        }
-        DaemonStreamEvent::StreamError {
-            session_id,
-            error_summary,
-            ..
-        } => format!("[live] stream error session={session_id}: {error_summary}"),
-        DaemonStreamEvent::DroppedCounters {
-            dropped, unknown, ..
-        } => format!("[live] dropped counters dropped={dropped} unknown={unknown}"),
-    }
-}
-
 // ── Control dispatch ──────────────────────────────────────────────────────────
 
 /// Build and dispatch a control request, returning a human-readable result string.
@@ -732,6 +705,7 @@ fn format_ack_result(ack: &ControlAck) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex_watch::format_daemon_event_line;
     use agent_team_mail_core::control::{ControlAck, ControlResult};
     use agent_team_mail_core::daemon_stream::{DaemonStreamEvent, TurnStatusWire};
 
@@ -800,20 +774,20 @@ mod tests {
     }
 
     #[test]
-    fn test_format_stream_event_line_started() {
+    fn test_format_daemon_event_line_started() {
         let e = DaemonStreamEvent::TurnStarted {
             agent: "arch-ctm".to_string(),
             thread_id: "th-1".to_string(),
             turn_id: "turn-1".to_string(),
             transport: "app-server".to_string(),
         };
-        let line = format_stream_event_line(&e);
-        assert!(line.contains("turn started"));
+        let line = format_daemon_event_line(&e);
+        assert!(line.contains("turn.started"));
         assert!(line.contains("app-server"));
     }
 
     #[test]
-    fn test_format_stream_event_line_completed() {
+    fn test_format_daemon_event_line_completed() {
         let e = DaemonStreamEvent::TurnCompleted {
             agent: "arch-ctm".to_string(),
             thread_id: "th-1".to_string(),
@@ -821,8 +795,8 @@ mod tests {
             status: TurnStatusWire::Completed,
             transport: "cli-json".to_string(),
         };
-        let line = format_stream_event_line(&e);
-        assert!(line.contains("completed"));
+        let line = format_daemon_event_line(&e);
+        assert!(line.contains("turn.completed"));
         assert!(line.contains("cli-json"));
     }
 

@@ -4,6 +4,7 @@
 //! from it; the refresh loop writes to it. No I/O is performed in this module.
 
 use agent_team_mail_core::daemon_client::AgentSummary;
+use agent_team_mail_core::daemon_stream::{DaemonStreamEvent, TurnStatusWire};
 use std::path::PathBuf;
 
 use crate::config::TuiConfig;
@@ -132,6 +133,22 @@ pub struct App {
     pub daemon_turn_state: Option<agent_team_mail_core::daemon_stream::AgentStreamState>,
     /// Long-lived daemon stream subscription used for live turn/event updates.
     pub daemon_stream_rx: Option<agent_team_mail_core::daemon_client::StreamSubscription>,
+    /// Last transport observed from live daemon stream events.
+    pub watch_transport: Option<String>,
+    /// Last turn id observed from live daemon stream events.
+    pub watch_turn_id: Option<String>,
+    /// Count of `turn_started` events observed in this watch session.
+    pub watch_turn_started: u64,
+    /// Count of `turn_completed(status=completed)` events observed.
+    pub watch_turn_completed: u64,
+    /// Count of `turn_completed(status=interrupted)` events observed.
+    pub watch_turn_interrupted: u64,
+    /// Count of `turn_completed(status=failed)` events observed.
+    pub watch_turn_failed: u64,
+    /// Latest dropped-event counter value from stream telemetry.
+    pub watch_dropped: u64,
+    /// Latest unknown-event counter value from stream telemetry.
+    pub watch_unknown: u64,
 }
 
 impl App {
@@ -163,6 +180,14 @@ impl App {
             stream_scroll_offset: 0,
             daemon_turn_state: None,
             daemon_stream_rx: None,
+            watch_transport: None,
+            watch_turn_id: None,
+            watch_turn_started: 0,
+            watch_turn_completed: 0,
+            watch_turn_interrupted: 0,
+            watch_turn_failed: 0,
+            watch_dropped: 0,
+            watch_unknown: 0,
             log_viewer_visible: false,
             log_events: Vec::new(),
             log_scroll_offset: 0,
@@ -239,6 +264,60 @@ impl App {
         self.stream_source_error = None;
         self.stream_scroll_offset = 0;
         self.daemon_stream_rx = None;
+        self.watch_transport = None;
+        self.watch_turn_id = None;
+        self.watch_turn_started = 0;
+        self.watch_turn_completed = 0;
+        self.watch_turn_interrupted = 0;
+        self.watch_turn_failed = 0;
+        self.watch_dropped = 0;
+        self.watch_unknown = 0;
+    }
+
+    /// Apply one live daemon stream event to watch metrics used by the watch pane.
+    pub fn apply_watch_event(&mut self, event: &DaemonStreamEvent) {
+        match event {
+            DaemonStreamEvent::TurnStarted {
+                turn_id, transport, ..
+            } => {
+                self.watch_transport = Some(transport.clone());
+                self.watch_turn_id = Some(turn_id.clone());
+                self.watch_turn_started = self.watch_turn_started.saturating_add(1);
+            }
+            DaemonStreamEvent::TurnCompleted {
+                turn_id,
+                transport,
+                status,
+                ..
+            } => {
+                self.watch_transport = Some(transport.clone());
+                self.watch_turn_id = Some(turn_id.clone());
+                match status {
+                    TurnStatusWire::Completed => {
+                        self.watch_turn_completed = self.watch_turn_completed.saturating_add(1);
+                    }
+                    TurnStatusWire::Interrupted => {
+                        self.watch_turn_interrupted = self.watch_turn_interrupted.saturating_add(1);
+                    }
+                    TurnStatusWire::Failed => {
+                        self.watch_turn_failed = self.watch_turn_failed.saturating_add(1);
+                    }
+                }
+            }
+            DaemonStreamEvent::TurnIdle {
+                turn_id, transport, ..
+            } => {
+                self.watch_transport = Some(transport.clone());
+                self.watch_turn_id = Some(turn_id.clone());
+            }
+            DaemonStreamEvent::StreamError { .. } => {}
+            DaemonStreamEvent::DroppedCounters {
+                dropped, unknown, ..
+            } => {
+                self.watch_dropped = *dropped;
+                self.watch_unknown = *unknown;
+            }
+        }
     }
 
     /// Append new structured log events to [`log_events`](Self::log_events), keeping
