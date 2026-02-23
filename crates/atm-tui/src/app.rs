@@ -4,8 +4,10 @@
 //! from it; the refresh loop writes to it. No I/O is performed in this module.
 
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 
 use agent_team_mail_core::daemon_client::AgentSummary;
+use agent_team_mail_core::daemon_stream::DaemonStreamEvent;
 
 use crate::config::TuiConfig;
 
@@ -110,6 +112,8 @@ pub struct App {
     /// `"agent-stream-state"` socket command. `None` when the daemon has no
     /// stream state recorded for the agent.
     pub daemon_turn_state: Option<agent_team_mail_core::daemon_stream::AgentStreamState>,
+    /// Long-lived daemon stream subscription used for live turn/event updates.
+    pub daemon_stream_rx: Option<Receiver<DaemonStreamEvent>>,
 }
 
 impl App {
@@ -139,6 +143,7 @@ impl App {
             follow_mode,
             stream_scroll_offset: 0,
             daemon_turn_state: None,
+            daemon_stream_rx: None,
         }
     }
 
@@ -204,6 +209,7 @@ impl App {
         self.session_log_path = None;
         self.stream_source_error = None;
         self.stream_scroll_offset = 0;
+        self.daemon_stream_rx = None;
     }
 
     /// Returns `true` if the selected agent is "live" (control input is available).

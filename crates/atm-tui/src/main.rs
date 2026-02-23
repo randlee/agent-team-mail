@@ -53,7 +53,11 @@ use tokio::time::interval;
 
 use agent_team_mail_core::{
     control::{ControlAck, ControlAction, ControlRequest, ControlResult, CONTROL_SCHEMA_VERSION},
-    daemon_client::{AgentSummary, query_agent_stream_state, query_list_agents, send_control},
+    daemon_client::{
+        AgentSummary, query_agent_stream_state, query_list_agents, send_control,
+        subscribe_stream_events,
+    },
+    daemon_stream::{DaemonStreamEvent, TurnStatusWire},
     event_log::{EventFields, emit_event_best_effort},
     home::get_home_dir,
     logging,
@@ -193,6 +197,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                 app.reset_stream();
                 app.streaming_agent = Some(agent_name.clone());
                 app.session_log_path = Some(session_log_path(&team, &agent_name));
+                app.daemon_stream_rx = subscribe_stream_events().ok().flatten();
 
                 emit_event_best_effort(EventFields {
                     level: "info",
@@ -214,8 +219,36 @@ async fn run_app<B: ratatui::backend::Backend>(
             }
         }
 
+        // ── Live daemon stream drain (100 ms) ─────────────────────────────────
+        if let (Some(agent), Some(rx)) = (&app.streaming_agent, &app.daemon_stream_rx) {
+            let mut lines = Vec::new();
+            let mut disconnected = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(event) => {
+                        if event.agent() == agent {
+                            lines.push(format_stream_event_line(&event));
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+            if !lines.is_empty() {
+                app.append_stream_lines(lines);
+            }
+            if disconnected {
+                app.stream_source_error = Some("live stream disconnected; using log replay".to_string());
+                app.daemon_stream_rx = None;
+            }
+        }
+
         // ── Session log tail (100 ms) ─────────────────────────────────────────
-        if let Some(ref log_path) = app.session_log_path.clone() {
+        if app.daemon_stream_rx.is_none() && let Some(ref log_path) = app.session_log_path.clone()
+        {
             match tail_log_file(log_path, app.stream_pos).await {
                 Ok((new_lines, new_pos)) => {
                     if new_pos == 0 && app.stream_pos > 0 {
@@ -368,6 +401,32 @@ fn emit_stream_detach_event(team: &str, agent: &str) {
     });
 }
 
+fn format_stream_event_line(event: &DaemonStreamEvent) -> String {
+    match event {
+        DaemonStreamEvent::TurnStarted {
+            turn_id, transport, ..
+        } => {
+            format!("[live] turn started ({transport}) id={turn_id}")
+        }
+        DaemonStreamEvent::TurnCompleted {
+            turn_id,
+            transport,
+            status,
+            ..
+        } => {
+            let status_s = match status {
+                TurnStatusWire::Completed => "completed",
+                TurnStatusWire::Interrupted => "interrupted",
+                TurnStatusWire::Failed => "failed",
+            };
+            format!("[live] turn {status_s} ({transport}) id={turn_id}")
+        }
+        DaemonStreamEvent::TurnIdle { turn_id, transport, .. } => {
+            format!("[live] turn idle ({transport}) id={turn_id}")
+        }
+    }
+}
+
 // ── Control dispatch ──────────────────────────────────────────────────────────
 
 /// Build and dispatch a control request, returning a human-readable result string.
@@ -502,6 +561,7 @@ fn format_ack_result(ack: &ControlAck) -> String {
 mod tests {
     use super::*;
     use agent_team_mail_core::control::{ControlAck, ControlResult};
+    use agent_team_mail_core::daemon_stream::{DaemonStreamEvent, TurnStatusWire};
 
     fn make_ack(result: ControlResult, duplicate: bool, detail: Option<&str>) -> ControlAck {
         ControlAck {
@@ -565,6 +625,33 @@ mod tests {
     fn test_format_ack_internal_error() {
         let ack = make_ack(ControlResult::InternalError, false, None);
         assert_eq!(format_ack_result(&ack), "internal error");
+    }
+
+    #[test]
+    fn test_format_stream_event_line_started() {
+        let e = DaemonStreamEvent::TurnStarted {
+            agent: "arch-ctm".to_string(),
+            thread_id: "th-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            transport: "app-server".to_string(),
+        };
+        let line = format_stream_event_line(&e);
+        assert!(line.contains("turn started"));
+        assert!(line.contains("app-server"));
+    }
+
+    #[test]
+    fn test_format_stream_event_line_completed() {
+        let e = DaemonStreamEvent::TurnCompleted {
+            agent: "arch-ctm".to_string(),
+            thread_id: "th-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            status: TurnStatusWire::Completed,
+            transport: "cli-json".to_string(),
+        };
+        let line = format_stream_event_line(&e);
+        assert!(line.contains("completed"));
+        assert!(line.contains("cli-json"));
     }
 
     #[tokio::test]
