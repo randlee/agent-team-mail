@@ -133,7 +133,13 @@ fn resolve_log_path(args: &LogsArgs) -> Result<PathBuf> {
     if let Some(path) = &args.file {
         return Ok(path.clone());
     }
-    if let Ok(p) = std::env::var("ATM_LOG_FILE").or_else(|_| std::env::var("ATM_LOG_PATH")) {
+    if let Ok(p) = std::env::var("ATM_LOG_FILE") {
+        if !p.trim().is_empty() {
+            return Ok(PathBuf::from(p.trim()));
+        }
+    }
+    if let Ok(p) = std::env::var("ATM_LOG_PATH") {
+        eprintln!("atm: warning: ATM_LOG_PATH is deprecated; use ATM_LOG_FILE instead");
         if !p.trim().is_empty() {
             return Ok(PathBuf::from(p.trim()));
         }

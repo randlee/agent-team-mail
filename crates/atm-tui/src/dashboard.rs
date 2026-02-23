@@ -38,7 +38,12 @@ pub fn get_inbox_count(home: &Path, team: &str, agent: &str) -> usize {
     }
 }
 
-/// Construct the expected path for an agent's session log file.
+/// Construct the expected path for an agent's raw Claude Code session transcript.
+///
+/// This path is consumed by the **Agent Terminal** panel to display the raw
+/// session output of a running Claude Code agent.  It is **not** the unified
+/// structured log — for structured [`LogEventV1`] events (shown in the Log
+/// Viewer panel) see `~/.config/atm/atm.log.jsonl`.
 ///
 /// Path pattern:
 /// ```text
@@ -52,6 +57,8 @@ pub fn get_inbox_count(home: &Path, team: &str, agent: &str) -> usize {
 ///
 /// * `team`  - Team name.
 /// * `agent` - Agent identifier.
+///
+/// [`LogEventV1`]: agent_team_mail_core::logging_event::LogEventV1
 pub fn session_log_path(team: &str, agent: &str) -> PathBuf {
     let base = get_home_dir().unwrap_or_default();
     base.join(".config/atm/agent-sessions")
