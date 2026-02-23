@@ -111,7 +111,7 @@ fn create_test_context(teams_root: std::path::PathBuf) -> PluginContext {
     let system = Arc::new(SystemContext::new(
         "test-host".to_string(),
         agent_team_mail_core::context::Platform::Linux,
-        std::path::PathBuf::from("/tmp/.claude"),
+        std::env::temp_dir().join(".claude"),
         "2.1.39".to_string(),
         "test-team".to_string(),
     ));

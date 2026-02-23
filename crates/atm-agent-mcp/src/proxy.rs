@@ -3681,7 +3681,7 @@ mod tests {
                 "identity": "arch-ctm",
                 "team": team,
                 "thread_id": null,
-                "cwd": "/tmp",
+                "cwd": ".",
                 "repo_root": null,
                 "repo_name": null,
                 "branch": null,
@@ -3779,7 +3779,7 @@ mod tests {
             reg.register(
                 "resume-test-identity".to_string(),
                 "default".to_string(),
-                "/tmp".to_string(),
+                ".".to_string(),
                 None,
                 None,
                 None,
@@ -3943,7 +3943,7 @@ mod tests {
             reg.register(
                 "conflicting-identity".to_string(),
                 "default".to_string(),
-                "/tmp".to_string(),
+                ".".to_string(),
                 None,
                 None,
                 None,

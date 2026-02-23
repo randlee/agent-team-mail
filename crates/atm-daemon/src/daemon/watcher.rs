@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_parse_event_inbox_create() {
-        let teams_root = PathBuf::from("/tmp/teams");
+        let teams_root = std::env::temp_dir().join("teams");
         let inbox_path = teams_root.join("my-team/inboxes/agent-1.json");
 
         let event = Event {
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_parse_event_inbox_modify() {
-        let teams_root = PathBuf::from("/tmp/teams");
+        let teams_root = std::env::temp_dir().join("teams");
         let inbox_path = teams_root.join("team-2/inboxes/agent-x.json");
 
         let event = Event {
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_parse_event_inbox_remove() {
-        let teams_root = PathBuf::from("/tmp/teams");
+        let teams_root = std::env::temp_dir().join("teams");
         let inbox_path = teams_root.join("team-3/inboxes/agent-y.json");
 
         let event = Event {
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_parse_event_non_inbox_file() {
-        let teams_root = PathBuf::from("/tmp/teams");
+        let teams_root = std::env::temp_dir().join("teams");
         let config_path = teams_root.join("my-team/config.json");
 
         let event = Event {
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_parse_event_non_json_file() {
-        let teams_root = PathBuf::from("/tmp/teams");
+        let teams_root = std::env::temp_dir().join("teams");
         let txt_path = teams_root.join("my-team/inboxes/agent-1.txt");
 
         let event = Event {
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_parse_event_multiple_paths() {
-        let teams_root = PathBuf::from("/tmp/teams");
+        let teams_root = std::env::temp_dir().join("teams");
         let inbox_path1 = teams_root.join("team-1/inboxes/agent-a.json");
         let inbox_path2 = teams_root.join("team-1/inboxes/agent-b.json");
 
@@ -371,7 +371,7 @@ mod tests {
     fn test_parse_event_per_origin_file() {
         use agent_team_mail_core::config::{HostnameRegistry, RemoteConfig};
 
-        let teams_root = PathBuf::from("/tmp/teams");
+        let teams_root = std::env::temp_dir().join("teams");
         let origin_path = teams_root.join("my-team/inboxes/agent-1.mac-studio.json");
 
         // Create hostname registry
@@ -407,7 +407,7 @@ mod tests {
     fn test_parse_event_per_origin_file_with_dotted_agent() {
         use agent_team_mail_core::config::{HostnameRegistry, RemoteConfig};
 
-        let teams_root = PathBuf::from("/tmp/teams");
+        let teams_root = std::env::temp_dir().join("teams");
         let origin_path = teams_root.join("my-team/inboxes/dev.agent.mac-studio.json");
 
         // Create hostname registry
@@ -443,7 +443,7 @@ mod tests {
     fn test_parse_event_unknown_hostname_treated_as_local() {
         use agent_team_mail_core::config::{HostnameRegistry, RemoteConfig};
 
-        let teams_root = PathBuf::from("/tmp/teams");
+        let teams_root = std::env::temp_dir().join("teams");
         let unknown_path = teams_root.join("my-team/inboxes/agent-1.unknown-host.json");
 
         // Create hostname registry without unknown-host

@@ -333,17 +333,19 @@ mod tests {
 
     #[test]
     fn test_roster_service_new() {
-        let service = RosterService::new(PathBuf::from("/tmp/teams"));
-        assert_eq!(service.teams_root, PathBuf::from("/tmp/teams"));
+        let teams_root = std::env::temp_dir().join("test-atm-teams");
+        let service = RosterService::new(teams_root.clone());
+        assert_eq!(service.teams_root, teams_root);
     }
 
     #[test]
     fn test_config_path() {
-        let service = RosterService::new(PathBuf::from("/tmp/teams"));
+        let teams_root = std::env::temp_dir().join("test-atm-teams");
+        let service = RosterService::new(teams_root.clone());
         let path = service.config_path("test-team");
         assert_eq!(
             path,
-            PathBuf::from("/tmp/teams").join("test-team").join("config.json")
+            teams_root.join("test-team").join("config.json")
         );
     }
 }

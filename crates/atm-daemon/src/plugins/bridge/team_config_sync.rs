@@ -205,7 +205,7 @@ mod tests {
             plan_mode_required: None,
             joined_at: 1000000,
             tmux_pane_id: None,
-            cwd: "/tmp".to_string(),
+            cwd: ".".to_string(),
             subscriptions: Vec::new(),
             backend_type: None,
             is_active: Some(false),
