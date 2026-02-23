@@ -1010,14 +1010,14 @@ notify_target = "team-lead"
 
         let repo = RepoContext::new(
             "test-repo".to_string(),
-            PathBuf::from("/tmp/test-repo"),
+            std::env::temp_dir().join("test-repo"),
         )
         .with_remote("git@github.com:test/repo.git".to_string());
 
         let system = SystemContext::new(
             "test-host".to_string(),
             Platform::Linux,
-            PathBuf::from("/tmp/.claude"),
+            std::env::temp_dir().join(".claude"),
             "2.1.39".to_string(),
             "default-team".to_string(),
         )
@@ -1069,7 +1069,7 @@ notify_target = "team-lead"
                     plan_mode_required: None,
                     joined_at: 1234567890,
                     tmux_pane_id: None,
-                    cwd: "/tmp".to_string(),
+                    cwd: ".".to_string(),
                     subscriptions: Vec::new(),
                     backend_type: None,
                     is_active: None,
@@ -1138,7 +1138,7 @@ notify_target = "nonexistent-agent"
                     plan_mode_required: None,
                     joined_at: 1234567890,
                     tmux_pane_id: None,
-                    cwd: "/tmp".to_string(),
+                    cwd: ".".to_string(),
                     subscriptions: Vec::new(),
                     backend_type: None,
                     is_active: None,
@@ -1158,7 +1158,7 @@ notify_target = "nonexistent-agent"
                     plan_mode_required: None,
                     joined_at: 1234567890,
                     tmux_pane_id: None,
-                    cwd: "/tmp".to_string(),
+                    cwd: ".".to_string(),
                     subscriptions: Vec::new(),
                     backend_type: None,
                     is_active: None,

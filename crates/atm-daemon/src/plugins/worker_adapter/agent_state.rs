@@ -271,7 +271,7 @@ mod tests {
     fn test_unregister_removes_pane_info() {
         let mut tracker = AgentStateTracker::new();
         tracker.register_agent("arch-ctm");
-        tracker.set_pane_info("arch-ctm", "%42", std::path::Path::new("/tmp/arch-ctm.log"));
+        tracker.set_pane_info("arch-ctm", "%42", &std::env::temp_dir().join("arch-ctm.log"));
         assert!(tracker.get_pane_info("arch-ctm").is_some());
         tracker.unregister_agent("arch-ctm");
         assert!(tracker.get_pane_info("arch-ctm").is_none());
@@ -335,11 +335,12 @@ mod tests {
     fn test_pane_info_set_and_get() {
         let mut tracker = AgentStateTracker::new();
         tracker.register_agent("arch-ctm");
-        tracker.set_pane_info("arch-ctm", "%42", std::path::Path::new("/tmp/arch-ctm.log"));
+        let log_path = std::env::temp_dir().join("arch-ctm.log");
+        tracker.set_pane_info("arch-ctm", "%42", &log_path);
 
         let info = tracker.get_pane_info("arch-ctm").expect("pane info should be set");
         assert_eq!(info.pane_id, "%42");
-        assert_eq!(info.log_path, std::path::PathBuf::from("/tmp/arch-ctm.log"));
+        assert_eq!(info.log_path, log_path);
     }
 
     #[test]
@@ -352,11 +353,13 @@ mod tests {
     fn test_pane_info_overwrite() {
         let mut tracker = AgentStateTracker::new();
         tracker.register_agent("arch-ctm");
-        tracker.set_pane_info("arch-ctm", "%10", std::path::Path::new("/tmp/old.log"));
-        tracker.set_pane_info("arch-ctm", "%20", std::path::Path::new("/tmp/new.log"));
+        let old_log = std::env::temp_dir().join("old.log");
+        let new_log = std::env::temp_dir().join("new.log");
+        tracker.set_pane_info("arch-ctm", "%10", &old_log);
+        tracker.set_pane_info("arch-ctm", "%20", &new_log);
 
         let info = tracker.get_pane_info("arch-ctm").unwrap();
         assert_eq!(info.pane_id, "%20");
-        assert_eq!(info.log_path, std::path::PathBuf::from("/tmp/new.log"));
+        assert_eq!(info.log_path, new_log);
     }
 }

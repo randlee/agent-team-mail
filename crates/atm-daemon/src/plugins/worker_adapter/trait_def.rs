@@ -177,7 +177,7 @@ mod tests {
         let handle = WorkerHandle {
             agent_id: "test-agent".to_string(),
             backend_id: "backend-1".to_string(),
-            log_file_path: PathBuf::from("/tmp/test.log"),
+            log_file_path: std::env::temp_dir().join("test.log"),
             payload: Some(Arc::new(payload)),
         };
 
@@ -197,7 +197,7 @@ mod tests {
         let handle = WorkerHandle {
             agent_id: "test-agent".to_string(),
             backend_id: "backend-1".to_string(),
-            log_file_path: PathBuf::from("/tmp/test.log"),
+            log_file_path: std::env::temp_dir().join("test.log"),
             payload: Some(Arc::new(payload)),
         };
 
@@ -211,7 +211,7 @@ mod tests {
         let handle = WorkerHandle {
             agent_id: "test-agent".to_string(),
             backend_id: "backend-1".to_string(),
-            log_file_path: PathBuf::from("/tmp/test.log"),
+            log_file_path: std::env::temp_dir().join("test.log"),
             payload: None,
         };
 
@@ -229,7 +229,7 @@ mod tests {
         let handle = WorkerHandle {
             agent_id: "test-agent".to_string(),
             backend_id: "backend-1".to_string(),
-            log_file_path: PathBuf::from("/tmp/test.log"),
+            log_file_path: std::env::temp_dir().join("test.log"),
             payload: Some(Arc::new(payload)),
         };
 
@@ -248,6 +248,6 @@ mod tests {
         // Other fields are cloned
         assert_eq!(cloned.agent_id, "test-agent");
         assert_eq!(cloned.backend_id, "backend-1");
-        assert_eq!(cloned.log_file_path, PathBuf::from("/tmp/test.log"));
+        assert_eq!(cloned.log_file_path, std::env::temp_dir().join("test.log"));
     }
 }

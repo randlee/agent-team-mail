@@ -373,16 +373,17 @@ mod tests {
 
     #[test]
     fn test_log_path_generation() {
+        let log_dir = std::env::temp_dir().join("logs");
         let backend = CodexTmuxBackend::new(
             "test-session".to_string(),
-            PathBuf::from("/tmp/logs"),
+            log_dir.clone(),
         );
 
         let path = backend.log_path("arch-ctm@atm-planning");
-        assert_eq!(path, PathBuf::from("/tmp/logs/arch-ctm_atm-planning.log"));
+        assert_eq!(path, log_dir.join("arch-ctm_atm-planning.log"));
 
         let path = backend.log_path("agent/with/slashes");
-        assert_eq!(path, PathBuf::from("/tmp/logs/agent_with_slashes.log"));
+        assert_eq!(path, log_dir.join("agent_with_slashes.log"));
     }
 
     #[test]
@@ -394,12 +395,13 @@ mod tests {
 
     #[test]
     fn test_backend_creation() {
+        let log_dir = std::env::temp_dir().join("logs");
         let backend = CodexTmuxBackend::new(
             "test-session".to_string(),
-            PathBuf::from("/tmp/logs"),
+            log_dir.clone(),
         );
         assert_eq!(backend.tmux_session, "test-session");
-        assert_eq!(backend.log_dir, PathBuf::from("/tmp/logs"));
+        assert_eq!(backend.log_dir, log_dir);
     }
 
     #[test]

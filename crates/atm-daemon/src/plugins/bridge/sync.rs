@@ -858,7 +858,7 @@ mod tests {
                 "model": "claude-opus-4-6",
                 "joinedAt": 1234567890,
                 "tmuxPaneId": null,
-                "cwd": "/tmp",
+                "cwd": ".",
                 "subscriptions": []
             }));
         }

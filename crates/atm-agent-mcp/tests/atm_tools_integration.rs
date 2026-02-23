@@ -121,7 +121,7 @@ fn write_team_config(home: &std::path::Path, team: &str, member_names: &[&str]) 
                 "agentType": "general-purpose",
                 "model": "claude-sonnet-4-6",
                 "joinedAt": 1_000_000_u64,
-                "cwd": "/tmp"
+                "cwd": "."
             })
         })
         .collect();

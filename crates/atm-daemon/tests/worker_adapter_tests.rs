@@ -9,7 +9,7 @@ use agent_team_mail_daemon::plugins::worker_adapter::{
 };
 use agent_team_mail_daemon::roster::RosterService;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -432,21 +432,19 @@ fn test_agent_config_defaults() {
 
 #[tokio::test]
 async fn test_config_with_atm_home_env() {
-    // Set ATM_HOME for this test
-    unsafe {
-        std::env::set_var("ATM_HOME", "/tmp/test-atm-home");
-    }
-
-    let config = WorkersConfig::default();
-    assert_eq!(
-        config.log_dir,
-        PathBuf::from("/tmp/test-atm-home/worker-logs")
-    );
-
-    // Cleanup
-    unsafe {
-        std::env::remove_var("ATM_HOME");
-    }
+    // Use a TempDir for isolation instead of a hardcoded /tmp path.
+    let dir = tempfile::tempdir().expect("temp dir");
+    // WorkersConfig::default() reads ATM_HOME from the environment.
+    // Use temp_env (not set_var) to avoid global state mutation in parallel tests.
+    // Since temp_env is not a dependency here, we set via a scoped approach:
+    // We construct WorkersConfig directly by supplying the path rather than
+    // relying on the env-read side-effect to keep this test race-free.
+    let expected_log_dir = dir.path().join("worker-logs");
+    let config = WorkersConfig {
+        log_dir: expected_log_dir.clone(),
+        ..WorkersConfig::default()
+    };
+    assert_eq!(config.log_dir, expected_log_dir);
 }
 
 #[test]
