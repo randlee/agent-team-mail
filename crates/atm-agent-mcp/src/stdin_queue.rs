@@ -43,7 +43,6 @@ use std::time::{Duration, SystemTime};
 use tokio::io::AsyncWrite;
 use tokio::sync::Mutex;
 
-use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 
 /// Returns the queue directory for the given team and agent.
 ///
@@ -75,15 +74,6 @@ pub async fn enqueue(team: &str, agent_id: &str, content: &str) -> anyhow::Resul
     let id = uuid::Uuid::new_v4();
     let path = dir.join(format!("{id}.json"));
     tokio::fs::write(&path, content.as_bytes()).await?;
-
-    emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-        level: "info",
-        source: "atm-agent-mcp",
-        action: "stdin_queue_enqueue",
-        team: Some(team.to_string()),
-        result: Some(format!("agent:{agent_id}")),
-        ..Default::default()
-    });
 
     Ok(())
 }
@@ -221,15 +211,6 @@ pub async fn drain(
             }
         }
     }
-
-    emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-        level: "info",
-        source: "atm-agent-mcp",
-        action: "stdin_queue_drain",
-        team: Some(team.to_string()),
-        result: Some(format!("drained:{drained}")),
-        ..Default::default()
-    });
 
     Ok(drained)
 }

@@ -16,9 +16,8 @@
 //!    and wait loop because they are deeply coupled with `PendingRequests` and
 //!    the shared state.
 //!
-//! C.1 structured events are emitted on `transport_init` and
-//! `transport_shutdown` via
-//! [`agent_team_mail_core::event_log::emit_event_best_effort`].
+//! Transport lifecycle (init/shutdown) no longer emits legacy bridge events;
+//! structured observability is handled by the unified log pipeline.
 
 use std::io;
 use std::pin::Pin;
@@ -33,7 +32,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
-use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 
 use crate::config::AgentMcpConfig;
 use crate::turn_control::TurnControl as _;
@@ -159,7 +157,6 @@ pub(crate) trait CodexTransport: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub(crate) struct McpTransport {
     config: AgentMcpConfig,
-    team: String,
     /// Unified turn tracker for daemon lifecycle emission.
     ///
     /// Wired in Sprint G.5: [`Self::set_turn_session_context`] calls
@@ -175,37 +172,16 @@ impl McpTransport {
     /// Create a new `McpTransport` for the given config and team.
     ///
     /// Emits a `transport_init` structured log event.
-    pub fn new(config: AgentMcpConfig, team: impl Into<String>) -> Self {
-        let team = team.into();
-        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-            level: "info",
-            source: "atm-agent-mcp",
-            action: "transport_init",
-            team: Some(team.clone()),
-            result: Some("mcp".to_string()),
-            ..Default::default()
-        });
+    pub fn new(config: AgentMcpConfig, _team: impl Into<String>) -> Self {
         Self {
             config,
-            team,
             turn_tracker: crate::turn_control::TurnTracker::new_deferred("mcp"),
         }
     }
 }
 
 impl Drop for McpTransport {
-    /// Emits a `transport_shutdown` structured log event when the transport
-    /// is dropped (i.e. when the proxy shuts down).
-    fn drop(&mut self) {
-        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-            level: "info",
-            source: "atm-agent-mcp",
-            action: "transport_shutdown",
-            team: Some(self.team.clone()),
-            result: Some("mcp".to_string()),
-            ..Default::default()
-        });
-    }
+    fn drop(&mut self) {}
 }
 
 #[async_trait]
@@ -293,7 +269,6 @@ impl CodexTransport for McpTransport {
 #[derive(Debug)]
 pub(crate) struct JsonCodecTransport {
     config: AgentMcpConfig,
-    team: String,
     /// Shared idle flag: set to `true` by background task when `idle` JSONL event seen.
     idle_flag: Arc<AtomicBool>,
     /// Turn state tracker using the shared `stream_norm` abstraction.
@@ -313,21 +288,9 @@ pub(crate) struct JsonCodecTransport {
 
 impl JsonCodecTransport {
     /// Create a new `JsonCodecTransport` for the given config and team.
-    ///
-    /// Emits a `transport_init` structured log event.
-    pub fn new(config: AgentMcpConfig, team: impl Into<String>) -> Self {
-        let team = team.into();
-        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-            level: "info",
-            source: "atm-agent-mcp",
-            action: "transport_init",
-            team: Some(team.clone()),
-            result: Some("cli-json".to_string()),
-            ..Default::default()
-        });
+    pub fn new(config: AgentMcpConfig, _team: impl Into<String>) -> Self {
         Self {
             config,
-            team,
             idle_flag: Arc::new(AtomicBool::new(false)),
             cli_json_turn_state: Arc::new(Mutex::new(crate::stream_norm::TurnState::Idle)),
             turn_tracker: crate::turn_control::TurnTracker::new_deferred("cli-json"),
@@ -336,16 +299,7 @@ impl JsonCodecTransport {
 }
 
 impl Drop for JsonCodecTransport {
-    fn drop(&mut self) {
-        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-            level: "info",
-            source: "atm-agent-mcp",
-            action: "transport_shutdown",
-            team: Some(self.team.clone()),
-            result: Some("cli-json".to_string()),
-            ..Default::default()
-        });
-    }
+    fn drop(&mut self) {}
 }
 
 /// JSONL event type, as parsed by the `JsonCodecTransport` background reader.
@@ -425,7 +379,6 @@ impl CodexTransport for JsonCodecTransport {
 
         let idle_flag = Arc::clone(&self.idle_flag);
         let cli_json_turn_state = Arc::clone(&self.cli_json_turn_state);
-        let team_for_task = self.team.clone();
         let cli_json_agent_identity = self
             .config
             .identity
@@ -458,24 +411,8 @@ impl CodexTransport for JsonCodecTransport {
                                 crate::stream_emit::emit_stream_event(&event).await;
                             });
                         }
-                        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-                            level: "info",
-                            source: "atm-agent-mcp",
-                            action: "idle_detected",
-                            team: Some(team_for_task.clone()),
-                            result: Some("cli-json".to_string()),
-                            ..Default::default()
-                        });
                     }
                     TransportEventType::Done => {
-                        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-                            level: "info",
-                            source: "atm-agent-mcp",
-                            action: "codex_done",
-                            team: Some(team_for_task.clone()),
-                            result: Some("cli-json".to_string()),
-                            ..Default::default()
-                        });
                         // Reset idle flag on done (session complete).
                         idle_flag.store(false, Ordering::SeqCst);
                         // Reflect terminal state via the shared stream_norm TurnState.
@@ -666,18 +603,8 @@ pub(crate) struct AppServerTransport {
 
 impl AppServerTransport {
     /// Create a new `AppServerTransport` for the given config and team.
-    ///
-    /// Emits a `transport_init` structured log event.
     pub fn new(config: AgentMcpConfig, team: impl Into<String>) -> Self {
         let team = team.into();
-        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-            level: "info",
-            source: "atm-agent-mcp",
-            action: "transport_init",
-            team: Some(team.clone()),
-            result: Some("app-server".to_string()),
-            ..Default::default()
-        });
         Self {
             config,
             team,
@@ -1006,16 +933,7 @@ impl AppServerTransport {
 }
 
 impl Drop for AppServerTransport {
-    fn drop(&mut self) {
-        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-            level: "info",
-            source: "atm-agent-mcp",
-            action: "transport_shutdown",
-            team: Some(self.team.clone()),
-            result: Some("app-server".to_string()),
-            ..Default::default()
-        });
-    }
+    fn drop(&mut self) {}
 }
 
 /// Shared state bundle for [`drive_notification_task`].
@@ -1349,21 +1267,12 @@ pub async fn drive_notification_task(
                             crate::stream_emit::emit_stream_event(&event).await;
                         });
                     }
-                    emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-                        level: "info",
-                        source: "atm-agent-mcp",
-                        action: "turn_started",
-                        team: Some(team.clone()),
-                        result: Some(turn_id),
-                        ..Default::default()
-                    });
                 }
                 AppServerNotification::TurnCompleted {
                     thread_id,
                     turn_id,
                     status,
                 } => {
-                    let event_result = format!("{status:?}");
                     let status_for_tracker = status.clone();
                     let wire_status = match &status {
                         TurnStatus::Completed => TurnStatusWire::Completed,
@@ -1426,14 +1335,6 @@ pub async fn drive_notification_task(
                             crate::stream_emit::emit_stream_event(&idle_event).await;
                         });
                     }
-                    emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-                        level: "info",
-                        source: "atm-agent-mcp",
-                        action: "turn_completed",
-                        team: Some(team.clone()),
-                        result: Some(event_result),
-                        ..Default::default()
-                    });
                 }
                 AppServerNotification::ItemStarted { item_id } => {
                     tracing::debug!(item_id = %item_id, "item/started");
@@ -1503,14 +1404,6 @@ pub async fn drive_notification_task(
                     turn_id: terminal_turn_id,
                     status: TurnStatus::Failed,
                 };
-                emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-                    level: "warn",
-                    source: "atm-agent-mcp",
-                    action: "turn_terminal_crash",
-                    team: Some(team.clone()),
-                    result: Some(thread_id.clone()),
-                    ..Default::default()
-                });
                 interrupted_threads.push(thread_id);
             }
         }
@@ -1611,14 +1504,6 @@ impl CodexTransport for AppServerTransport {
 
         if let Some(ref ver) = negotiated_version {
             *self.protocol_version.lock().await = Some(ver.clone());
-            emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
-                level: "info",
-                source: "atm-agent-mcp",
-                action: "protocol_version_negotiated",
-                team: Some(self.team.clone()),
-                result: Some(ver.clone()),
-                ..Default::default()
-            });
             if !version_gte(ver.as_str(), MIN_SUPPORTED_PROTOCOL_VERSION) {
                 tracing::warn!(
                     version = %ver,

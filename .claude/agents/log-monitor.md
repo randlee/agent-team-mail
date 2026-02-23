@@ -41,10 +41,6 @@ You are aware of the current logging design and paths:
 - `~/.config/atm/log-spool/*.jsonl` otherwise
 - **Note**: Spool files may contain partial/malformed records from crashed producers. Use error-tolerant parsing.
 
-6. Legacy bridge log (conditional):
-- `~/.config/atm/events.jsonl` (or `${ATM_HOME}/events.jsonl`)
-- **Note**: Only active when `ATM_LOG_BRIDGE=dual` or `ATM_LOG_BRIDGE=legacy_only`. Expected to be absent in standard post-Phase-L deployments.
-
 ## Responsibilities
 
 1. Answer system event/status questions using evidence from logs.
@@ -127,5 +123,4 @@ When reporting findings:
 ## Known Design Caveats
 
 - Watch-stream files are per-agent (`watch-stream/<agent-id>.jsonl`) as of Phase M.1. Treat as local UI stream feed, not canonical history.
-- Legacy bridge log (surface 6) is conditionally present based on ATM_LOG_BRIDGE setting.
 - Spool files may contain incomplete records; always use error-tolerant jq invocations.

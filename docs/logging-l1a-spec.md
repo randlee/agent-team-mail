@@ -153,21 +153,11 @@ Behavior:
 - daemon mode adds JSON file writer layer and rotation,
 - any initialization failure degrades to `StderrOnly` (fail-open).
 
-## Migration Bridge (`emit_event_best_effort`)
+## Migration Bridge (`emit_event_best_effort`) — REMOVED (Phase M.1b)
 
-During L.1/L.2 migration:
-
-- bridge maps legacy `EventFields` to `LogEventV1`,
-- emits unified event path,
-- and also writes legacy `events.jsonl` until sunset.
-
-Bridge control:
-
-- `ATM_LOG_BRIDGE=dual` (default during migration),
-- `ATM_LOG_BRIDGE=unified_only`,
-- `ATM_LOG_BRIDGE=legacy_only` (rollback switch).
-
-Sunset target: remove legacy writes in L.4 after parity + soak.
+The dual-write bridge and legacy `events.jsonl` sink were removed in Phase M.1b.
+`emit_event_best_effort` now routes exclusively through the unified producer channel.
+`ATM_LOG_BRIDGE` is no longer a recognized environment variable.
 
 ## Fallback When Daemon Is Unavailable
 
@@ -209,7 +199,7 @@ Daemon-only.
 ### L.1b
 
 - Add `init_unified()` and `UnifiedLogMode` wiring in all 4 binaries.
-- Implement dual-write bridge in `emit_event_best_effort`.
+- ~~Implement dual-write bridge in `emit_event_best_effort`~~ (removed in Phase M.1b)
 - Add daemon startup spool merge path (claim + append + cleanup).
 - Add integration tests for fan-in, fallback, merge, and rotation.
 
