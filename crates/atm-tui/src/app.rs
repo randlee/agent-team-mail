@@ -428,6 +428,37 @@ impl App {
             _ => Some("Not live"),
         }
     }
+
+    /// Resolve transport for status surfaces with explicit precedence:
+    /// direct watch-stream fields are authoritative when present; daemon state
+    /// is only a coarse fallback when watch metadata is absent.
+    pub fn resolved_watch_transport(&self) -> Option<&str> {
+        self.watch_transport.as_deref().or_else(|| {
+            self.daemon_turn_state
+                .as_ref()
+                .and_then(|s| s.transport.as_deref())
+        })
+    }
+
+    /// Resolve turn id for status surfaces using the same precedence as
+    /// [`resolved_watch_transport`](Self::resolved_watch_transport).
+    pub fn resolved_watch_turn_id(&self) -> Option<&str> {
+        self.watch_turn_id.as_deref().or_else(|| {
+            self.daemon_turn_state
+                .as_ref()
+                .and_then(|s| s.turn_id.as_deref())
+        })
+    }
+
+    /// Resolve session/thread id for status surfaces using the same precedence
+    /// as [`resolved_watch_transport`](Self::resolved_watch_transport).
+    pub fn resolved_watch_session_id(&self) -> Option<&str> {
+        self.watch_session_id.as_deref().or_else(|| {
+            self.daemon_turn_state
+                .as_ref()
+                .and_then(|s| s.thread_id.as_deref())
+        })
+    }
 }
 
 fn first_string(value: &serde_json::Value, paths: &[&str]) -> Option<String> {
@@ -762,6 +793,94 @@ mod tests {
         assert!(app.watch_context_window_pct.is_none());
         assert!(app.watch_transport.is_none());
         assert!(app.watch_turn_id.is_none());
+    }
+
+    #[test]
+    fn test_watch_status_precedence_prefers_direct_stream_values() {
+        use agent_team_mail_core::daemon_stream::{AgentStreamState, StreamTurnStatus};
+        let mut app = new_app("test");
+        app.watch_transport = Some("mcp".to_string());
+        app.watch_turn_id = Some("turn-watch".to_string());
+        app.watch_session_id = Some("thread-watch".to_string());
+        app.daemon_turn_state = Some(AgentStreamState {
+            transport: Some("app-server".to_string()),
+            turn_id: Some("turn-daemon".to_string()),
+            thread_id: Some("thread-daemon".to_string()),
+            turn_status: StreamTurnStatus::Busy,
+        });
+        assert_eq!(app.resolved_watch_transport(), Some("mcp"));
+        assert_eq!(app.resolved_watch_turn_id(), Some("turn-watch"));
+        assert_eq!(app.resolved_watch_session_id(), Some("thread-watch"));
+    }
+
+    #[test]
+    fn test_watch_status_falls_back_to_daemon_when_watch_missing() {
+        use agent_team_mail_core::daemon_stream::{AgentStreamState, StreamTurnStatus};
+        let mut app = new_app("test");
+        app.daemon_turn_state = Some(AgentStreamState {
+            transport: Some("app-server".to_string()),
+            turn_id: Some("turn-daemon".to_string()),
+            thread_id: Some("thread-daemon".to_string()),
+            turn_status: StreamTurnStatus::Busy,
+        });
+        assert_eq!(app.resolved_watch_transport(), Some("app-server"));
+        assert_eq!(app.resolved_watch_turn_id(), Some("turn-daemon"));
+        assert_eq!(app.resolved_watch_session_id(), Some("thread-daemon"));
+    }
+
+    #[test]
+    fn test_reset_and_replay_restore_watch_status_coherently() {
+        let mut app = new_app("test");
+        let replay_frame = serde_json::json!({
+            "event": {
+                "params": {
+                    "type": "turn_started",
+                    "transport": "mcp",
+                    "turnId": "turn-attach",
+                    "_meta": { "threadId": "thread-attach" },
+                    "model": "gpt-5-codex",
+                    "usage": { "contextWindowPct": 64.0 }
+                }
+            }
+        });
+        app.apply_watch_frame(&replay_frame);
+        let before = (
+            app.watch_transport.clone(),
+            app.watch_turn_id.clone(),
+            app.watch_session_id.clone(),
+            app.watch_model.clone(),
+            app.watch_context_window_pct,
+        );
+
+        app.reset_stream();
+        app.apply_watch_frame(&replay_frame);
+        let after = (
+            app.watch_transport.clone(),
+            app.watch_turn_id.clone(),
+            app.watch_session_id.clone(),
+            app.watch_model.clone(),
+            app.watch_context_window_pct,
+        );
+
+        assert_eq!(
+            before, after,
+            "re-attach replay must restore watch status surfaces after detach/reset"
+        );
+    }
+
+    #[test]
+    fn test_transport_mode_switch_does_not_leave_stale_transport_after_reset() {
+        let mut app = new_app("test");
+        app.watch_transport = Some("mcp".to_string());
+        app.reset_stream();
+        let transportless = serde_json::json!({
+            "event": { "params": { "type": "item_delta", "delta": "hello" } }
+        });
+        app.apply_watch_frame(&transportless);
+        assert!(
+            app.watch_transport.is_none(),
+            "transport-less events after reset must not retain stale transport"
+        );
     }
 
     /// Stress test: append 10,000 lines in rapid succession.

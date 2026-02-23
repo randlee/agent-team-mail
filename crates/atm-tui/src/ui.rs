@@ -284,33 +284,11 @@ fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
         .as_ref()
         .map(|s| s.turn_status.to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    let transport = app
-        .watch_transport
-        .as_deref()
-        .or_else(|| {
-            app.daemon_turn_state
-                .as_ref()
-                .and_then(|s| s.transport.as_deref())
-        })
-        .unwrap_or("n/a");
-    let turn_id = app
-        .watch_turn_id
-        .as_deref()
-        .or_else(|| {
-            app.daemon_turn_state
-                .as_ref()
-                .and_then(|s| s.turn_id.as_deref())
-        })
-        .unwrap_or("n/a");
-    let session_id = app
-        .watch_session_id
-        .as_deref()
-        .or_else(|| {
-            app.daemon_turn_state
-                .as_ref()
-                .and_then(|s| s.thread_id.as_deref())
-        })
-        .unwrap_or("n/a");
+    // Status precedence rule (M.5): direct watch stream is authoritative.
+    // Daemon values are fallback only when watch metadata is absent.
+    let transport = app.resolved_watch_transport().unwrap_or("n/a");
+    let turn_id = app.resolved_watch_turn_id().unwrap_or("n/a");
+    let session_id = app.resolved_watch_session_id().unwrap_or("n/a");
     let model = app.watch_model.as_deref().unwrap_or("n/a");
     let context = app
         .watch_context_window_pct
