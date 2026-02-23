@@ -457,6 +457,50 @@ pub fn spool_dir(home_dir: &Path) -> PathBuf {
     home_dir.join(".config/atm/log-spool")
 }
 
+/// Return the default spool directory by resolving the home directory via
+/// [`crate::home::get_home_dir`].
+///
+/// # Errors
+///
+/// Returns an error if the home directory cannot be determined.
+pub fn default_spool_dir() -> anyhow::Result<PathBuf> {
+    let home = crate::home::get_home_dir()?;
+    Ok(spool_dir(&home))
+}
+
+/// Write `event` to an explicit spool `dir` (does not resolve home directory).
+///
+/// Spool files are written to:
+/// `{dir}/{source_binary}-{pid}-{unix_millis}.jsonl`
+///
+/// Any error during directory creation or file writing is silently ignored
+/// (fail-open). This function is intentionally infallible.
+pub fn write_to_spool_dir(event: &LogEventV1, dir: &Path) {
+    use std::fs::{OpenOptions, create_dir_all};
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let _ = create_dir_all(dir);
+
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+
+    let filename = format!("{}-{}-{}.jsonl", event.source_binary, event.pid, millis);
+    let path = dir.join(filename);
+
+    let Ok(line) = serde_json::to_string(event) else {
+        return;
+    };
+
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
+        return;
+    };
+
+    let _ = writeln!(file, "{line}");
+}
+
 /// Write `event` to the fallback spool directory as a best-effort operation.
 ///
 /// Spool files are written to:

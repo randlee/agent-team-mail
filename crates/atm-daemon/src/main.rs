@@ -45,7 +45,22 @@ async fn main() -> Result<()> {
         // SAFETY: process-local env mutation during startup before worker tasks spawn.
         unsafe { std::env::set_var("ATM_LOG", "debug") };
     }
-    logging::init();
+
+    // Determine home dir early so we can set up DaemonWriter logging.
+    // We do a quick best-effort resolution here; the full home_dir call below
+    // will produce the canonical error if it fails.
+    let log_file = agent_team_mail_core::home::get_home_dir()
+        .map(|h| h.join(".config/atm/atm-daemon.jsonl"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("atm-daemon.jsonl"));
+
+    let _log_guards = logging::init_unified(
+        "atm-daemon",
+        logging::UnifiedLogMode::DaemonWriter {
+            file_path: log_file.clone(),
+            rotation: logging::RotationConfig::default(),
+        },
+    )
+    .unwrap_or_else(|_| logging::init_stderr_only());
 
     info!("ATM Daemon starting...");
 
@@ -56,6 +71,25 @@ async fn main() -> Result<()> {
     // Determine home and current directories for config resolution
     let home_dir = agent_team_mail_core::home::get_home_dir()
         .context("Failed to determine home directory")?;
+
+    // Merge any spool files written by producers while the daemon was offline.
+    // This runs before the socket server starts so no new spool files can arrive
+    // from this daemon instance during the merge window.
+    {
+        let spool_dir = agent_team_mail_core::logging_event::spool_dir(&home_dir);
+        match agent_team_mail_daemon::daemon::spool_merge::merge_spool_on_startup(
+            &spool_dir,
+            &log_file,
+        ) {
+            Ok(count) if count > 0 => {
+                info!(count, "Merged spool events into canonical log");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Spool merge failed (non-fatal): {e}");
+            }
+        }
+    }
 
     let current_dir = std::env::current_dir()
         .context("Failed to get current directory")?;

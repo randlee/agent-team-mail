@@ -4,6 +4,7 @@ pub mod log_writer;
 pub mod session_registry;
 pub mod shutdown;
 pub mod socket;
+pub mod spool_merge;
 pub mod spool_task;
 pub mod status;
 pub mod watcher;

@@ -189,21 +189,112 @@ fn write_header_if_empty(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Bridge mode that controls whether events are written to the legacy sink,
+/// the unified channel, or both.
+///
+/// Controlled by the `ATM_LOG_BRIDGE` environment variable:
+/// - `"dual"` (default): write legacy `events.jsonl` AND forward to unified channel.
+/// - `"unified_only"`: skip legacy write, only forward to unified channel.
+/// - `"legacy_only"`: write legacy only, skip unified channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BridgeMode {
+    Dual,
+    UnifiedOnly,
+    LegacyOnly,
+}
+
+impl BridgeMode {
+    fn from_env() -> Self {
+        match std::env::var("ATM_LOG_BRIDGE")
+            .unwrap_or_else(|_| "dual".to_string())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "unified_only" => Self::UnifiedOnly,
+            "legacy_only" => Self::LegacyOnly,
+            _ => Self::Dual,
+        }
+    }
+}
+
+/// Forward `event` to the unified producer channel if a sender is registered.
+fn forward_to_unified(event: crate::logging_event::LogEventV1) {
+    if let Some(tx) = crate::logging::producer_sender() {
+        // send returns Err if full or disconnected; we silently drop.
+        let _ = tx.try_send(event);
+    }
+}
+
+/// Map [`EventFields`] to a [`LogEventV1`] for the unified pipeline.
+fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1 {
+    use crate::logging_event::LogEventV1;
+    use chrono::Utc;
+
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    LogEventV1 {
+        v: 1,
+        ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        level: fields.level.to_string(),
+        source_binary: fields.source.to_string(),
+        hostname,
+        pid: std::process::id(),
+        target: fields.target.clone().unwrap_or_default(),
+        action: fields.action.to_string(),
+        team: fields.team.clone(),
+        agent: fields.agent_id.clone().or_else(|| fields.agent_name.clone()),
+        session_id: fields.session_id.clone(),
+        request_id: fields.request_id.clone(),
+        correlation_id: None,
+        outcome: fields.result.clone(),
+        error: fields.error.clone(),
+        fields: {
+            let mut map = serde_json::Map::new();
+            if let Some(mid) = &fields.message_id {
+                map.insert("message_id".to_string(), serde_json::Value::String(mid.clone()));
+            }
+            if let Some(cnt) = fields.count {
+                map.insert("count".to_string(), serde_json::Value::Number(cnt.into()));
+            }
+            map
+        },
+        spans: vec![],
+    }
+}
+
 /// Emit a single structured event to the shared sink.
 ///
 /// This function is intentionally fail-open: any error is swallowed.
+///
+/// The bridge mode (see [`BridgeMode`]) controls whether events are written to
+/// the legacy JSONL file, forwarded to the unified daemon channel, or both.
+/// The default mode is `dual` — both paths are used.
 pub fn emit_event_best_effort(mut fields: EventFields) {
     if fields.level.is_empty() || fields.source.is_empty() || fields.action.is_empty() {
         return;
     }
 
     let cfg = EventLogConfig::from_env();
+    let bridge_mode = BridgeMode::from_env();
 
     if fields.session_id.is_none() {
         fields.session_id = std::env::var("CLAUDE_SESSION_ID").ok();
     }
     if fields.session_id.is_none() {
         fields.session_id = Some("unknown".to_string());
+    }
+
+    // Forward to unified pipeline if enabled.
+    if bridge_mode == BridgeMode::Dual || bridge_mode == BridgeMode::UnifiedOnly {
+        let event = fields_to_log_event(&fields);
+        forward_to_unified(event);
+    }
+
+    // Write legacy JSONL if enabled.
+    if bridge_mode == BridgeMode::UnifiedOnly {
+        return;
     }
 
     let _ = (|| -> std::io::Result<()> {
