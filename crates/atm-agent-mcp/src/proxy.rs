@@ -3739,6 +3739,37 @@ mod tests {
         assert_eq!(detach_json["detached"], true);
     }
 
+    #[tokio::test]
+    async fn test_watch_poll_without_attach_returns_error_result() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let resp = proxy
+            .handle_synthetic_tool(
+                &json!(1),
+                "agent_watch_poll",
+                &json!({"agent_id": "codex:not-attached"}),
+                None,
+            )
+            .await;
+        assert_eq!(
+            resp.pointer("/result/isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "poll without attach must return isError=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watch_attach_requires_agent_id() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let resp = proxy
+            .handle_synthetic_tool(&json!(1), "agent_watch_attach", &json!({}), None)
+            .await;
+        assert_eq!(
+            resp.pointer("/result/isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "attach without agent_id must return isError=true"
+        );
+    }
+
     #[test]
     fn test_make_error_response_structure() {
         let resp = make_error_response(
@@ -4462,8 +4493,8 @@ mod tests {
         intercept_tools_list(&mut response);
         let tools = response["result"]["tools"].as_array().unwrap();
 
-        // 2 original (codex replaced + codex-reply) + 7 synthetic
-        assert_eq!(tools.len(), 9);
+        // 2 original (codex replaced + codex-reply) + synthetic ATM tools
+        assert_eq!(tools.len(), 2 + crate::tools::SYNTHETIC_TOOL_COUNT);
 
         // The codex entry should now have the extended schema with identity property
         let codex_tool = tools

@@ -319,8 +319,12 @@ async fn test_multiple_synthetic_tools_count() {
     let resp = read_response(&mut reader).await.expect("tools/list response");
     let tools = resp["result"]["tools"].as_array().expect("tools array");
 
-    // 2 from echo server + 7 synthetic = 9
-    assert_eq!(tools.len(), 9, "expected 2 native + 7 synthetic tools");
+    // 2 from echo server + synthetic tools
+    assert_eq!(
+        tools.len(),
+        2 + atm_agent_mcp::tools::SYNTHETIC_TOOL_COUNT,
+        "expected 2 native + synthetic tools"
+    );
 
     drop(writer);
     let _ = handle.await;
@@ -922,8 +926,9 @@ async fn test_tools_list_before_child_spawn_returns_synthetic_tools() {
         .expect("tools should be array");
     assert_eq!(
         tools.len(),
-        7,
-        "expected 7 synthetic tools, got {}",
+        atm_agent_mcp::tools::SYNTHETIC_TOOL_COUNT,
+        "expected synthetic tool count {}, got {}",
+        atm_agent_mcp::tools::SYNTHETIC_TOOL_COUNT,
         tools.len()
     );
     let names: Vec<&str> = tools
@@ -938,6 +943,9 @@ async fn test_tools_list_before_child_spawn_returns_synthetic_tools() {
         "agent_sessions",
         "agent_status",
         "agent_close",
+        "agent_watch_attach",
+        "agent_watch_poll",
+        "agent_watch_detach",
     ] {
         assert!(
             names.contains(expected),
