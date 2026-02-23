@@ -1,6 +1,6 @@
 # Codex CLI Parity Test Plan (M.3 + M.7)
 
-Status: Draft for implementation
+Status: Approved baseline for M.3/M.7 implementation
 Owner: `arch-ctm`
 Scope: `atm-agent-mcp` + `atm-tui` Codex watch parity validation
 
@@ -109,7 +109,7 @@ Event record requirements:
 4. Approval requested -> approved -> tool executes.
 5. Approval requested -> rejected -> fallback response.
 6. Interrupt/cancel mid-stream.
-7. Child process transient error -> surfaced terminal state.
+7. Child process fatal error (no auto-restart per FR-11.2) -> surfaced terminal state.
 8. Unknown event type encountered (count + continue).
 
 ### ATM-specific integration

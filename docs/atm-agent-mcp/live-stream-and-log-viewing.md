@@ -148,7 +148,7 @@ Operational model:
 
 ## 9. References
 
-- `docs/project-plan.md` (Phase L / Sprint L.5 direct watch-stream implementation slot)
+- `docs/project-plan.md` (Phase L complete; this document captures the L.5 implementation baseline and Phase M follow-up plan)
 - `docs/tui-mvp-architecture.md` (approved exception language)
 - `docs/atm-agent-mcp/requirements.md` (FR-21, FR-22)
 - `docs/atm-agent-mcp/codex-parity-test-plan.md` (M.3/M.7 contract, golden, and renderer parity gates)
@@ -171,7 +171,7 @@ Implementation principle:
 
 ### M.2 UI import baseline
 
-- Import/adapt Codex rendering modules required for transcript rendering, status rows, progress, and terminal layout.
+- Copy and adapt Codex rendering modules required for transcript rendering, status rows, progress, and terminal layout.
 - Keep ATM ownership of window orchestration and session selection.
 - Exit criteria:
   - no regressions in existing TUI panes,
