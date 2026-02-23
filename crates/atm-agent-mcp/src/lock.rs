@@ -35,7 +35,7 @@
 //! process).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use agent_team_mail_core::home::get_home_dir;
@@ -82,8 +82,8 @@ pub fn sessions_dir() -> PathBuf {
 }
 
 /// Compute the lock file path for `(team, identity)`.
-fn lock_path(team: &str, identity: &str) -> PathBuf {
-    sessions_dir().join(team).join(format!("{identity}.lock"))
+fn lock_path_for_root(sessions_root: &Path, team: &str, identity: &str) -> PathBuf {
+    sessions_root.join(team).join(format!("{identity}.lock"))
 }
 
 /// Acquire a lock file for `identity` in `team`.
@@ -99,7 +99,17 @@ fn lock_path(team: &str, identity: &str) -> PathBuf {
 /// - A live process (including this one) already holds the lock.
 /// - Filesystem I/O fails (permissions, disk full, etc.).
 pub async fn acquire_lock(team: &str, identity: &str, agent_id: &str) -> anyhow::Result<()> {
-    let path = lock_path(team, identity);
+    let sessions_root = sessions_dir();
+    acquire_lock_at(&sessions_root, team, identity, agent_id).await
+}
+
+async fn acquire_lock_at(
+    sessions_root: &Path,
+    team: &str,
+    identity: &str,
+    agent_id: &str,
+) -> anyhow::Result<()> {
+    let path = lock_path_for_root(sessions_root, team, identity);
     let key = lock_key(team, identity);
 
     // Check in-process lock first (same-process conflict detection)
@@ -149,7 +159,8 @@ pub async fn acquire_lock(team: &str, identity: &str, agent_id: &str) -> anyhow:
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if let Some((pid, existing_id)) = check_lock(team, identity).await {
+                if let Some((pid, existing_id)) = check_lock_at(sessions_root, team, identity).await
+                {
                     anyhow::bail!(
                         "identity '{}' already locked by PID {} (agent_id: {})",
                         identity,
@@ -173,10 +184,15 @@ pub async fn acquire_lock(team: &str, identity: &str, agent_id: &str) -> anyhow:
 /// Also removes the entry from the in-process lock set.
 /// Silently ignores `NotFound` errors (lock already removed).
 pub async fn release_lock(team: &str, identity: &str) -> anyhow::Result<()> {
+    let sessions_root = sessions_dir();
+    release_lock_at(&sessions_root, team, identity).await
+}
+
+async fn release_lock_at(sessions_root: &Path, team: &str, identity: &str) -> anyhow::Result<()> {
     let key = lock_key(team, identity);
     in_process_locks().lock().unwrap().remove(&key);
 
-    let path = lock_path(team, identity);
+    let path = lock_path_for_root(sessions_root, team, identity);
     match fs::remove_file(&path).await {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -197,7 +213,12 @@ pub async fn release_lock(team: &str, identity: &str) -> anyhow::Result<()> {
 /// key is absent (left from a prior `ProxyServer` that didn't release cleanly)
 /// the lock is stale and is automatically cleaned up.
 pub async fn check_lock(team: &str, identity: &str) -> Option<(u32, String)> {
-    let path = lock_path(team, identity);
+    let sessions_root = sessions_dir();
+    check_lock_at(&sessions_root, team, identity).await
+}
+
+async fn check_lock_at(sessions_root: &Path, team: &str, identity: &str) -> Option<(u32, String)> {
+    let path = lock_path_for_root(sessions_root, team, identity);
 
     let contents = fs::read_to_string(&path).await.ok()?;
     let payload: LockPayload = serde_json::from_str(&contents).ok()?;
@@ -250,44 +271,37 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    /// Run a test with an isolated ATM_HOME temp directory, cleaning up after.
-    async fn with_temp_atm_home<F, Fut>(f: F)
+    /// Run a test with an isolated sessions root directory.
+    async fn with_temp_sessions_root<F, Fut>(f: F)
     where
-        F: FnOnce(tempfile::TempDir) -> Fut,
+        F: FnOnce(PathBuf) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().to_string_lossy().to_string();
-        // SAFETY: Tests are serialised; no concurrent env-var mutation.
-        unsafe { std::env::set_var("ATM_HOME", &path) };
-        f(dir).await;
-        unsafe { std::env::remove_var("ATM_HOME") };
+        let sessions_root = dir.path().join("agent-sessions");
+        f(sessions_root).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn acquire_and_release_lock() {
-        with_temp_atm_home(|_dir| async {
-            acquire_lock("test-team", "agent-x", "codex:abc-123")
+        with_temp_sessions_root(|sessions_root| async move {
+            acquire_lock_at(&sessions_root, "test-team", "agent-x", "codex:abc-123")
                 .await
                 .unwrap();
-            // CI can observe a brief delay between file write completion and
-            // immediate re-open on some platforms/filesystems. Retry a few
-            // times before declaring failure.
-            let mut info = None;
-            for _ in 0..5 {
-                info = check_lock("test-team", "agent-x").await;
-                if info.is_some() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
+            let info = check_lock_at(&sessions_root, "test-team", "agent-x").await;
             assert!(info.is_some(), "lock should be observable after acquire");
             let (_, agent_id) = info.unwrap();
             assert_eq!(agent_id, "codex:abc-123");
 
-            release_lock("test-team", "agent-x").await.unwrap();
-            assert!(check_lock("test-team", "agent-x").await.is_none());
+            release_lock_at(&sessions_root, "test-team", "agent-x")
+                .await
+                .unwrap();
+            assert!(
+                check_lock_at(&sessions_root, "test-team", "agent-x")
+                    .await
+                    .is_none()
+            );
         })
         .await;
     }
@@ -295,8 +309,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn check_lock_returns_none_for_missing_lock() {
-        with_temp_atm_home(|_dir| async {
-            let result = check_lock("team-none", "nobody").await;
+        with_temp_sessions_root(|sessions_root| async move {
+            let result = check_lock_at(&sessions_root, "team-none", "nobody").await;
             assert!(result.is_none());
         })
         .await;
@@ -305,11 +319,11 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn check_lock_reclaims_dead_pid_lock() {
-        with_temp_atm_home(|_dir| async {
+        with_temp_sessions_root(|sessions_root| async move {
             // Write a lock file with a definitely-dead PID (PID 0 is never a
             // user process; on Unix kill(0, 0) checks the whole process group
             // which may succeed, so we use a high bogus PID instead).
-            let path = lock_path("dead-team", "ghost");
+            let path = lock_path_for_root(&sessions_root, "dead-team", "ghost");
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).await.unwrap();
             }
@@ -317,7 +331,7 @@ mod tests {
             let payload = serde_json::json!({"pid": 4_194_304u32, "agent_id": "codex:dead"});
             fs::write(&path, payload.to_string()).await.unwrap();
 
-            let result = check_lock("dead-team", "ghost").await;
+            let result = check_lock_at(&sessions_root, "dead-team", "ghost").await;
             // Should be None (stale, cleaned up)
             assert!(result.is_none());
             // Lock file should be removed
@@ -329,14 +343,17 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn acquire_live_lock_fails() {
-        with_temp_atm_home(|_dir| async {
-            acquire_lock("team-live", "live-agent", "codex:first")
+        with_temp_sessions_root(|sessions_root| async move {
+            acquire_lock_at(&sessions_root, "team-live", "live-agent", "codex:first")
                 .await
                 .unwrap();
             // Second acquire on same identity should fail
-            let result = acquire_lock("team-live", "live-agent", "codex:second").await;
+            let result =
+                acquire_lock_at(&sessions_root, "team-live", "live-agent", "codex:second").await;
             assert!(result.is_err());
-            release_lock("team-live", "live-agent").await.unwrap();
+            release_lock_at(&sessions_root, "team-live", "live-agent")
+                .await
+                .unwrap();
         })
         .await;
     }
@@ -344,9 +361,11 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn release_nonexistent_lock_is_ok() {
-        with_temp_atm_home(|_dir| async {
+        with_temp_sessions_root(|sessions_root| async move {
             // Should not error
-            release_lock("ghost-team", "ghost-agent").await.unwrap();
+            release_lock_at(&sessions_root, "ghost-team", "ghost-agent")
+                .await
+                .unwrap();
         })
         .await;
     }
