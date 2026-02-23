@@ -45,7 +45,7 @@ use crate::mail_inject::{
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
 use crate::transport::{CodexTransport, make_transport};
-use crate::watch_stream::{SourceEnvelope, WatchAttachError, WatchStreamHub, WatchSubscription};
+use crate::watch_stream::{SourceEnvelope, WatchStreamHub, WatchSubscription, build_watch_frame};
 
 /// Type alias for the shared child stdin writer.
 ///
@@ -62,6 +62,14 @@ const UPSTREAM_CHANNEL_CAPACITY: usize = 256;
 
 /// Grace period in ms after dropping child stdin before force-kill, giving child time to flush output.
 const CHILD_DRAIN_GRACE_MS: u64 = 100;
+/// Maximum rendered watch line length retained in TUI feed records.
+const WATCH_RENDER_MAX_CHARS: usize = 200;
+/// Truncated prefix length before appending ellipsis (`...`).
+const WATCH_RENDER_TRUNCATE_AT: usize = WATCH_RENDER_MAX_CHARS - 3;
+/// Hard cap for `~/.config/atm/watch-stream/events.jsonl` before rotation.
+const WATCH_FEED_MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// Counter for unknown watch event kinds skipped by the MVP publisher gate.
+static WATCH_UNKNOWN_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// JSON-RPC error code: child process has died.
 pub const ERR_CHILD_DEAD: i64 = -32005;
@@ -360,10 +368,7 @@ impl ProxyServer {
     /// Subscribe to an agent's direct watch stream.
     ///
     /// Returns a bounded replay snapshot plus a live receiver.
-    pub async fn subscribe_watch_stream(
-        &self,
-        agent_id: &str,
-    ) -> Result<WatchSubscription, WatchAttachError> {
+    pub async fn subscribe_watch_stream(&self, agent_id: &str) -> WatchSubscription {
         self.watch_stream_hub.lock().await.subscribe(agent_id)
     }
 
@@ -2274,57 +2279,27 @@ Session ending. Write a concise summary of:\n\
                     );
                 };
 
-                match self.subscribe_watch_stream(agent_id).await {
-                    Ok(sub) => {
-                        self.watch_subscriptions
-                            .lock()
-                            .await
-                            .insert(agent_id.to_string(), sub.rx);
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "content": [{
-                                    "type": "text",
-                                    "text": json!({
-                                        "agent_id": agent_id,
-                                        "attached": true,
-                                        "replay": sub.replay,
-                                    }).to_string()
-                                }]
-                            }
-                        })
+                let sub = self.subscribe_watch_stream(agent_id).await;
+                self.watch_subscriptions
+                    .lock()
+                    .await
+                    .insert(agent_id.to_string(), sub.rx);
+                let watcher_count = self.watch_stream_hub.lock().await.watcher_count(agent_id);
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "agent_id": agent_id,
+                                "attached": true,
+                                "watcher_count": watcher_count,
+                                "replay": sub.replay,
+                            }).to_string()
+                        }]
                     }
-                    Err(WatchAttachError::AlreadyAttached) => {
-                        let already_owned = self
-                            .watch_subscriptions
-                            .lock()
-                            .await
-                            .contains_key(agent_id);
-                        if already_owned {
-                            json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": {
-                                    "content": [{
-                                        "type": "text",
-                                        "text": json!({
-                                            "agent_id": agent_id,
-                                            "attached": true,
-                                            "already_attached": true,
-                                            "replay": [],
-                                        }).to_string()
-                                    }]
-                                }
-                            })
-                        } else {
-                            atm_tools::make_mcp_error_result(
-                                id,
-                                &format!("agent_watch_attach: watcher already attached for '{agent_id}'"),
-                            )
-                        }
-                    }
-                }
+                })
             }
             "agent_watch_poll" => {
                 let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
@@ -2356,6 +2331,7 @@ Session ending. Write a concise summary of:\n\
                         Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
                     }
                 }
+                let rendered: Vec<String> = events.iter().map(format_watch_frame).collect();
 
                 json!({
                     "jsonrpc": "2.0",
@@ -2366,6 +2342,7 @@ Session ending. Write a concise summary of:\n\
                             "text": json!({
                                 "agent_id": agent_id,
                                 "events": events,
+                                "rendered": rendered,
                             }).to_string()
                         }]
                     }
@@ -2378,8 +2355,14 @@ Session ending. Write a concise summary of:\n\
                         "agent_watch_detach: 'agent_id' is required",
                     );
                 };
-                self.watch_subscriptions.lock().await.remove(agent_id);
-                let detached = self.detach_watch_stream(agent_id).await;
+                let detached = self
+                    .watch_subscriptions
+                    .lock()
+                    .await
+                    .remove(agent_id)
+                    .is_some();
+                let _ = self.detach_watch_stream(agent_id).await;
+                let watcher_count = self.watch_stream_hub.lock().await.watcher_count(agent_id);
                 json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -2389,6 +2372,7 @@ Session ending. Write a concise summary of:\n\
                             "text": json!({
                                 "agent_id": agent_id,
                                 "detached": detached,
+                                "watcher_count": watcher_count,
                             }).to_string()
                         }]
                     }
@@ -2797,10 +2781,25 @@ async fn forward_event(
     // Publish to direct watch-stream hub using MVP subset + source envelope.
     if should_publish_watch_event(event) {
         let source = infer_source_envelope(event, &agent_id, pending).await;
+        let frame = build_watch_frame(&agent_id, &source, event.clone());
         watch_stream_hub
             .lock()
             .await
-            .publish_frame(&agent_id, source, event.clone());
+            .publish(&agent_id, frame.clone());
+        append_watch_frame_for_tui(&frame);
+    } else if let Some(kind) = event.pointer("/params/type").and_then(|v| v.as_str())
+        && !kind.is_empty()
+    {
+        WATCH_UNKNOWN_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
+        agent_team_mail_core::event_log::emit_event_best_effort(
+            agent_team_mail_core::event_log::EventFields {
+                level: "debug",
+                source: "atm-agent-mcp",
+                action: "watch_event_ignored_unknown",
+                result: Some(kind.to_string()),
+                ..Default::default()
+            },
+        );
     }
 
     match upstream_tx.try_send(event.clone()) {
@@ -2823,15 +2822,144 @@ fn should_publish_watch_event(event: &Value) -> bool {
             | "task_complete"
             | "agent_message_delta"
             | "agent_message"
+            | "agent_message_completed"
+            | "agent_message_chunk"
             | "reasoning_content_delta"
             | "agent_reasoning_delta"
+            | "reasoning_content"
             | "exec_command_output_delta"
+            | "exec_command_started"
+            | "exec_command_completed"
+            | "exec_command_error"
             | "item_started"
             | "item_completed"
+            | "thread_status_changed"
+            | "turn_started"
+            | "turn_completed"
             | "idle"
             | "done"
             | "stream_error"
     )
+}
+
+fn format_watch_frame(frame: &Value) -> String {
+    let source = frame
+        .pointer("/source/kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("client_prompt");
+    let event = frame.get("event").unwrap_or(frame);
+    let kind = event
+        .pointer("/params/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let text = event
+        .pointer("/params/delta")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/text").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/output").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/message").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let text = if text.len() > WATCH_RENDER_MAX_CHARS {
+        format!("{}...", &text[..WATCH_RENDER_TRUNCATE_AT])
+    } else {
+        text.to_string()
+    };
+    let text = text.replace('\n', "\\n");
+    let has_code_fence = text.contains("```");
+
+    let mut base = match kind {
+        "agent_message_delta" | "agent_message" | "agent_message_chunk" => {
+            if has_code_fence {
+                format!("[{source}] assistant(code): {text}")
+            } else {
+                format!("[{source}] assistant: {text}")
+            }
+        }
+        "exec_command_output_delta" | "exec_command_completed" | "exec_command_error" => {
+            format!("[{source}] cmd: {text}")
+        }
+        "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
+            format!("[{source}] reasoning: {text}")
+        }
+        "item_started" | "item_completed" | "turn_started" | "turn_completed" => {
+            format!("[{source}] {kind}")
+        }
+        "task_started" | "task_complete" | "idle" | "done" | "stream_error" => {
+            format!("[{source}] {kind}")
+        }
+        _ => format!("[{source}] {kind}"),
+    };
+
+    if let Some(pct) = event
+        .pointer("/params/usage/context_window_pct")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            event
+                .pointer("/params/contextWindowPct")
+                .and_then(|v| v.as_f64())
+        })
+        .or_else(|| {
+            event
+                .pointer("/params/usage/contextWindowPct")
+                .and_then(|v| v.as_f64())
+        })
+        .or_else(|| {
+            event
+                .pointer("/params/context_window_pct")
+                .and_then(|v| v.as_f64())
+        })
+    {
+        base.push_str(&format!(" | ctx {:.0}%", pct));
+    }
+    base
+}
+
+fn watch_feed_path() -> Option<std::path::PathBuf> {
+    let home = agent_team_mail_core::home::get_home_dir().ok()?;
+    Some(home.join(".config/atm/watch-stream/events.jsonl"))
+}
+
+fn append_watch_frame_for_tui(frame: &Value) {
+    append_watch_frame_for_tui_with_cap(frame, WATCH_FEED_MAX_BYTES);
+}
+
+fn append_watch_frame_for_tui_with_cap(frame: &Value, max_bytes: u64) {
+    let Some(path) = watch_feed_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        // Best-effort: streaming still functions without local file fanout.
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if max_bytes > 0
+        && let Ok(meta) = std::fs::metadata(&path)
+        && meta.len() >= max_bytes
+    {
+        let rotated_path = path.with_extension("jsonl.1");
+        // Best-effort rotation: failures should not break live stream publishing.
+        let _ = std::fs::remove_file(&rotated_path);
+        let _ = std::fs::rename(&path, rotated_path);
+    }
+    let rendered = format_watch_frame(frame);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let record = json!({
+        "ts_unix": ts,
+        "frame": frame,
+        "rendered": rendered,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        // Best-effort append: watcher UX is non-critical compared to proxy traffic.
+        let _ = writeln!(file, "{}", record);
+    }
 }
 
 /// Infer source attribution for watch-stream frames (FR-22 baseline).
@@ -3676,6 +3804,7 @@ mod tests {
         let attach_json: Value = serde_json::from_str(attach_text).expect("valid attach payload");
         assert_eq!(attach_json["attached"], true);
         assert_eq!(attach_json["replay"].as_array().map(|a| a.len()), Some(1));
+        assert!(attach_json["watcher_count"].as_u64().unwrap_or(0) >= 1);
 
         let attach_again = proxy
             .handle_synthetic_tool(
@@ -3695,7 +3824,8 @@ mod tests {
             .expect("attach_again text");
         let attach_again_json: Value =
             serde_json::from_str(attach_again_text).expect("valid attach_again payload");
-        assert_eq!(attach_again_json["already_attached"], true);
+        assert_eq!(attach_again_json["attached"], true);
+        assert!(attach_again_json["watcher_count"].as_u64().unwrap_or(0) >= 1);
 
         proxy.watch_stream_hub.lock().await.publish_frame(
             agent_id,
@@ -3718,6 +3848,7 @@ mod tests {
             .expect("poll text");
         let poll_json: Value = serde_json::from_str(poll_text).expect("valid poll payload");
         assert_eq!(poll_json["events"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(poll_json["rendered"].as_array().map(|a| a.len()), Some(1));
 
         let detach = proxy
             .handle_synthetic_tool(
@@ -3737,6 +3868,7 @@ mod tests {
             .expect("detach text");
         let detach_json: Value = serde_json::from_str(detach_text).expect("valid detach payload");
         assert_eq!(detach_json["detached"], true);
+        assert_eq!(detach_json["watcher_count"], 0);
     }
 
     #[tokio::test]
@@ -3767,6 +3899,168 @@ mod tests {
             resp.pointer("/result/isError").and_then(|v| v.as_bool()),
             Some(true),
             "attach without agent_id must return isError=true"
+        );
+    }
+
+    #[test]
+    fn test_should_publish_watch_event_protocol_drift_matrix() {
+        let canonical_kinds = vec![
+            "task_started",
+            "task_complete",
+            "agent_message_delta",
+            "agent_message",
+            "agent_message_completed",
+            "agent_message_chunk",
+            "reasoning_content_delta",
+            "agent_reasoning_delta",
+            "reasoning_content",
+            "exec_command_output_delta",
+            "exec_command_started",
+            "exec_command_completed",
+            "exec_command_error",
+            "item_started",
+            "item_completed",
+            "thread_status_changed",
+            "turn_started",
+            "turn_completed",
+            "idle",
+            "done",
+            "stream_error",
+        ];
+        for kind in canonical_kinds {
+            let event = json!({"params":{"type":kind}});
+            assert!(should_publish_watch_event(&event), "kind={kind}");
+        }
+        assert!(!should_publish_watch_event(
+            &json!({"params":{"type":"unknown_new_event_kind"}})
+        ));
+    }
+
+    #[test]
+    fn test_should_publish_watch_event_missing_params_graceful() {
+        assert!(!should_publish_watch_event(&json!({})));
+        assert!(!should_publish_watch_event(&json!({"params":{}})));
+    }
+
+    #[test]
+    fn test_format_watch_frame_graceful_on_partial_payloads() {
+        let frame = json!({
+            "source": {"kind":"atm_mail"},
+            "event": {"params":{"type":"agent_message_delta","delta":"hello world"}}
+        });
+        let rendered = format_watch_frame(&frame);
+        assert!(rendered.contains("[atm_mail]"));
+        assert!(rendered.contains("assistant"));
+
+        // Drift case: missing source and missing params text fields.
+        let drift = json!({"event":{"params":{"type":"exec_command_completed"}}});
+        let rendered2 = format_watch_frame(&drift);
+        assert!(rendered2.contains("client_prompt"));
+        assert!(rendered2.contains("cmd:"));
+    }
+
+    #[test]
+    fn test_format_watch_frame_code_fence_and_context_usage() {
+        let frame = json!({
+            "source": {"kind":"client_prompt"},
+            "event": {
+                "params": {
+                    "type":"agent_message_delta",
+                    "delta":"```rust\\nfn main(){}\\n```",
+                    "usage": {"contextWindowPct": 72.4}
+                }
+            }
+        });
+        let rendered = format_watch_frame(&frame);
+        assert!(rendered.contains("assistant(code):"));
+        assert!(rendered.contains("```rust"));
+        assert!(rendered.contains("ctx 72%"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_append_watch_frame_for_tui_with_cap_rotates_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: serial test isolates process env mutation.
+        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+
+        let watch_path = dir.path().join(".config/atm/watch-stream/events.jsonl");
+        std::fs::create_dir_all(
+            watch_path
+                .parent()
+                .expect("watch feed path should have parent directory"),
+        )
+        .unwrap();
+        std::fs::write(&watch_path, "x".repeat(256)).unwrap();
+
+        let frame = json!({
+            "source": {"kind": "client_prompt"},
+            "event": {"params": {"type": "agent_message_delta", "delta": "hello"}}
+        });
+        append_watch_frame_for_tui_with_cap(&frame, 64);
+
+        let rotated_path = watch_path.with_extension("jsonl.1");
+        assert!(rotated_path.exists(), "rotation should create .jsonl.1");
+        let content = std::fs::read_to_string(&watch_path).expect("new feed file should exist");
+        assert!(
+            content.contains("\"rendered\""),
+            "new feed file should contain appended rendered record"
+        );
+        assert!(
+            content.contains("assistant"),
+            "rendered line should include formatted message class"
+        );
+
+        // SAFETY: restore process env after test.
+        unsafe { std::env::remove_var("ATM_HOME") };
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_forward_event_unknown_watch_kind_records_telemetry() {
+        let before = WATCH_UNKNOWN_EVENT_COUNT.load(Ordering::Relaxed);
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert(
+            "thread-unknown".to_string(),
+            "codex:unknown-agent".to_string(),
+        );
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+        let mut event = json!({
+            "jsonrpc": "2.0",
+            "method": "codex/event",
+            "params": {"type": "brand_new_kind", "threadId": "thread-unknown"}
+        });
+
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should still forward upstream");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        let after = WATCH_UNKNOWN_EVENT_COUNT.load(Ordering::Relaxed);
+        assert_eq!(
+            after,
+            before + 1,
+            "unknown kind should bump telemetry counter"
+        );
+
+        let sub = watch_stream_hub
+            .lock()
+            .await
+            .subscribe("codex:unknown-agent");
+        assert!(
+            sub.replay.is_empty(),
+            "unknown watch events should not be published to replay"
         );
     }
 
@@ -3853,11 +4147,7 @@ mod tests {
         assert_eq!(received["params"]["agent_id"], "codex:abc-agent");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
 
-        let sub = watch_stream_hub
-            .lock()
-            .await
-            .subscribe("codex:abc-agent")
-            .expect("attach");
+        let sub = watch_stream_hub.lock().await.subscribe("codex:abc-agent");
         assert_eq!(sub.replay.len(), 1, "watch hub should retain replay event");
     }
 
@@ -3897,11 +4187,7 @@ mod tests {
         let _ = rx.try_recv().expect("event should be forwarded");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
 
-        let sub = watch_stream_hub
-            .lock()
-            .await
-            .subscribe("codex:abc-agent")
-            .expect("attach");
+        let sub = watch_stream_hub.lock().await.subscribe("codex:abc-agent");
         let replay0 = sub.replay.first().expect("replay event");
         assert_eq!(
             replay0.pointer("/source/kind").and_then(|v| v.as_str()),
@@ -3949,11 +4235,7 @@ mod tests {
         let _ = rx.try_recv().expect("event should be forwarded");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
 
-        let sub = watch_stream_hub
-            .lock()
-            .await
-            .subscribe("codex:abc-agent")
-            .expect("attach");
+        let sub = watch_stream_hub.lock().await.subscribe("codex:abc-agent");
         let replay0 = sub.replay.first().expect("replay event");
         assert_eq!(
             replay0.pointer("/source/kind").and_then(|v| v.as_str()),

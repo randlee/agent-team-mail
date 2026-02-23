@@ -24,13 +24,6 @@ pub struct WatchSubscription {
     pub rx: broadcast::Receiver<Value>,
 }
 
-/// Attach failure for one-watcher-per-session MVP policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WatchAttachError {
-    /// A watcher is already attached for this session.
-    AlreadyAttached,
-}
-
 /// Source envelope for published watch frames (FR-22).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEnvelope {
@@ -53,7 +46,6 @@ impl SourceEnvelope {
 struct AgentWatchState {
     replay: VecDeque<Value>,
     tx: broadcast::Sender<Value>,
-    watcher_attached: bool,
 }
 
 impl AgentWatchState {
@@ -63,7 +55,6 @@ impl AgentWatchState {
         Self {
             replay: VecDeque::with_capacity(replay_capacity.max(1)),
             tx,
-            watcher_attached: false,
         }
     }
 
@@ -102,56 +93,62 @@ impl WatchStreamHub {
             .or_insert_with(|| AgentWatchState::new(self.replay_capacity));
 
         state.push_replay(self.replay_capacity, event.clone());
-        // FR-21.2 optimization: if no watcher is attached, skip live fanout.
-        if state.watcher_attached {
+        // Optimization: skip fanout work when there are no active receivers.
+        if state.tx.receiver_count() > 0 {
             let _ = state.tx.send(event);
         }
     }
 
     /// Publish one event wrapped with source attribution.
     pub fn publish_frame(&mut self, agent_id: &str, source: SourceEnvelope, event: Value) {
-        let frame = json!({
-            "agent_id": agent_id,
-            "source": {
-                "kind": source.kind,
-                "actor": source.actor,
-                "channel": source.channel,
-            },
-            "event": event,
-        });
+        let frame = build_watch_frame(agent_id, &source, event);
         self.publish(agent_id, frame);
     }
 
     /// Attach a watcher for an agent stream.
     ///
     /// Returns a replay snapshot plus a live broadcast receiver.
-    pub fn subscribe(&mut self, agent_id: &str) -> Result<WatchSubscription, WatchAttachError> {
+    pub fn subscribe(&mut self, agent_id: &str) -> WatchSubscription {
         let state = self
             .by_agent
             .entry(agent_id.to_string())
             .or_insert_with(|| AgentWatchState::new(self.replay_capacity));
-        if state.watcher_attached {
-            return Err(WatchAttachError::AlreadyAttached);
-        }
-        state.watcher_attached = true;
-
-        Ok(WatchSubscription {
+        WatchSubscription {
             replay: state.replay.iter().cloned().collect(),
             rx: state.tx.subscribe(),
-        })
+        }
     }
 
-    /// Detach an attached watcher for an agent stream.
-    ///
-    /// Returns `true` when an attached watcher was present and is now detached.
-    pub fn detach(&mut self, agent_id: &str) -> bool {
-        if let Some(state) = self.by_agent.get_mut(agent_id) {
-            let had = state.watcher_attached;
-            state.watcher_attached = false;
-            return had;
-        }
-        false
+    /// Number of currently attached live watchers for one agent.
+    pub fn watcher_count(&mut self, agent_id: &str) -> usize {
+        self.by_agent
+            .entry(agent_id.to_string())
+            .or_insert_with(|| AgentWatchState::new(self.replay_capacity))
+            .tx
+            .receiver_count()
     }
+
+    /// Detach bookkeeping for compatibility with existing call sites.
+    ///
+    /// In multi-watcher mode subscriptions are detached by dropping the
+    /// corresponding receiver. This method returns whether the agent stream
+    /// exists in the hub.
+    pub fn detach(&mut self, agent_id: &str) -> bool {
+        self.by_agent.contains_key(agent_id)
+    }
+}
+
+/// Build a structured watch frame shared by live fanout and direct TUI feed.
+pub fn build_watch_frame(agent_id: &str, source: &SourceEnvelope, event: Value) -> Value {
+    json!({
+        "agent_id": agent_id,
+        "source": {
+            "kind": source.kind,
+            "actor": source.actor,
+            "channel": source.channel,
+        },
+        "event": event,
+    })
 }
 
 impl Default for WatchStreamHub {
@@ -173,7 +170,7 @@ mod tests {
         hub.publish("a1", json!({"n": 3}));
         hub.publish("a1", json!({"n": 4}));
 
-        let sub = hub.subscribe("a1").expect("first attach");
+        let sub = hub.subscribe("a1");
         let nums: Vec<i64> = sub
             .replay
             .into_iter()
@@ -187,7 +184,7 @@ mod tests {
         let mut hub = WatchStreamHub::new(2);
         hub.publish("a1", json!({"n": 1}));
         hub.publish("a1", json!({"n": 2}));
-        let mut sub = hub.subscribe("a1").expect("attach");
+        let mut sub = hub.subscribe("a1");
         assert_eq!(sub.replay.len(), 2);
 
         hub.publish("a1", json!({"n": 3}));
@@ -196,19 +193,22 @@ mod tests {
     }
 
     #[test]
-    fn enforces_one_watcher_per_session_and_detach() {
+    fn supports_multi_watcher_fanout() {
         let mut hub = WatchStreamHub::default();
-        let _first = hub.subscribe("a1").expect("first attach");
-        let second = hub.subscribe("a1");
-        assert!(matches!(second, Err(WatchAttachError::AlreadyAttached)));
-        assert!(hub.detach("a1"));
-        assert!(hub.subscribe("a1").is_ok(), "attach must succeed after detach");
+        let mut first = hub.subscribe("a1");
+        let mut second = hub.subscribe("a1");
+        assert_eq!(hub.watcher_count("a1"), 2);
+        hub.publish("a1", json!({"n": 1}));
+        let live1 = first.rx.try_recv().expect("first receives");
+        let live2 = second.rx.try_recv().expect("second receives");
+        assert_eq!(live1["n"], 1);
+        assert_eq!(live2["n"], 1);
     }
 
     #[tokio::test]
     async fn publish_frame_wraps_source_envelope() {
         let mut hub = WatchStreamHub::default();
-        let mut sub = hub.subscribe("a1").expect("attach");
+        let mut sub = hub.subscribe("a1");
         hub.publish_frame(
             "a1",
             SourceEnvelope::new("client_prompt", "arch-atm", "mcp_primary"),
