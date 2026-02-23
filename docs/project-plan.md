@@ -492,12 +492,14 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
 | M.1 | Watch-stream file naming/scoping cleanup | L.5 | PLANNED |
-| M.2 | Codex watch-pane UI import baseline (copy-first) | M.1 | PLANNED |
+| M.2 | Codex watch-pane UI import baseline (copy-first) | L.5 | PLANNED |
 | M.3 | Event adapter parity (`CodexAdapter`) | M.2 | PLANNED |
 | M.4 | Input/approval/interrupt parity | M.3 | PLANNED |
 | M.5 | Session/status surface parity | M.4 | PLANNED |
 | M.6 | Replay/reconnect hardening | M.5 | PLANNED |
 | M.7 | Golden parity test harness + rollout gate | M.6 | PLANNED |
+
+**Parallel tracks**: M.1 and M.2 can execute concurrently (both depend only on L.5). M.3+ is sequential after M.2.
 
 **M.1 scope**:
 - Replace shared `~/.config/atm/watch-stream/events.jsonl` with per-agent or per-session files (for example `watch-stream/<agent-id>.jsonl`).
