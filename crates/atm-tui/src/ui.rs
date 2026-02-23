@@ -273,7 +273,7 @@ fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // status rows
+            Constraint::Length(3), // status rows
             Constraint::Length(1), // progress row
             Constraint::Min(0),    // transcript
         ])
@@ -284,8 +284,38 @@ fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
         .as_ref()
         .map(|s| s.turn_status.to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    let transport = app.watch_transport.as_deref().unwrap_or("n/a");
-    let turn_id = app.watch_turn_id.as_deref().unwrap_or("n/a");
+    let transport = app
+        .watch_transport
+        .as_deref()
+        .or_else(|| {
+            app.daemon_turn_state
+                .as_ref()
+                .and_then(|s| s.transport.as_deref())
+        })
+        .unwrap_or("n/a");
+    let turn_id = app
+        .watch_turn_id
+        .as_deref()
+        .or_else(|| {
+            app.daemon_turn_state
+                .as_ref()
+                .and_then(|s| s.turn_id.as_deref())
+        })
+        .unwrap_or("n/a");
+    let session_id = app
+        .watch_session_id
+        .as_deref()
+        .or_else(|| {
+            app.daemon_turn_state
+                .as_ref()
+                .and_then(|s| s.thread_id.as_deref())
+        })
+        .unwrap_or("n/a");
+    let model = app.watch_model.as_deref().unwrap_or("n/a");
+    let context = app
+        .watch_context_window_pct
+        .map(|pct| format!("{pct:.0}%"))
+        .unwrap_or_else(|| "n/a".to_string());
     let completed_total =
         app.watch_turn_completed + app.watch_turn_interrupted + app.watch_turn_failed;
     let summary_lines = vec![
@@ -298,6 +328,16 @@ fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
             Span::raw("  "),
             Span::styled("turn ", Style::default().fg(Color::Blue)),
             Span::raw(turn_id),
+        ]),
+        Line::from(vec![
+            Span::styled("session ", Style::default().fg(Color::Blue)),
+            Span::raw(session_id),
+            Span::raw("  "),
+            Span::styled("model ", Style::default().fg(Color::Blue)),
+            Span::raw(model),
+            Span::raw("  "),
+            Span::styled("context ", Style::default().fg(Color::Blue)),
+            Span::raw(context),
         ]),
         Line::from(vec![
             Span::styled("events ", Style::default().fg(Color::Blue)),

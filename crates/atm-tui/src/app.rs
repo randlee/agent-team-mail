@@ -134,6 +134,12 @@ pub struct App {
     pub watch_stream_path: Option<PathBuf>,
     /// File-read byte position for incremental watch-stream tailing.
     pub watch_stream_pos: u64,
+    /// Last session/thread identifier seen in watch frames.
+    pub watch_session_id: Option<String>,
+    /// Last model identifier seen in watch frames.
+    pub watch_model: Option<String>,
+    /// Last context window usage percent seen in watch frames.
+    pub watch_context_window_pct: Option<f64>,
     /// Last transport observed from live daemon stream events.
     pub watch_transport: Option<String>,
     /// Last turn id observed from live daemon stream events.
@@ -182,6 +188,9 @@ impl App {
             daemon_turn_state: None,
             watch_stream_path: None,
             watch_stream_pos: 0,
+            watch_session_id: None,
+            watch_model: None,
+            watch_context_window_pct: None,
             watch_transport: None,
             watch_turn_id: None,
             watch_turn_started: 0,
@@ -267,6 +276,9 @@ impl App {
         self.stream_scroll_offset = 0;
         self.watch_stream_path = None;
         self.watch_stream_pos = 0;
+        self.watch_session_id = None;
+        self.watch_model = None;
+        self.watch_context_window_pct = None;
         self.watch_transport = None;
         self.watch_turn_id = None;
         self.watch_turn_started = 0;
@@ -284,18 +296,46 @@ impl App {
             .pointer("/params/type")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let transport = event
-            .pointer("/params/transport")
-            .and_then(|v| v.as_str())
-            .unwrap_or("watch");
-        let turn_id = event
-            .pointer("/params/turn_id")
-            .and_then(|v| v.as_str())
-            .or_else(|| event.pointer("/params/turnId").and_then(|v| v.as_str()))
-            .unwrap_or("n/a");
-
-        self.watch_transport = Some(transport.to_string());
-        self.watch_turn_id = Some(turn_id.to_string());
+        if let Some(transport) = first_string(event, &["/params/transport"]) {
+            self.watch_transport = Some(transport);
+        }
+        if let Some(turn_id) = first_string(event, &["/params/turn_id", "/params/turnId"]) {
+            self.watch_turn_id = Some(turn_id);
+        }
+        if let Some(session_id) = first_string(
+            event,
+            &[
+                "/params/_meta/threadId",
+                "/params/threadId",
+                "/params/thread_id",
+                "/params/session_id",
+                "/params/sessionId",
+            ],
+        ) {
+            self.watch_session_id = Some(session_id);
+        }
+        if let Some(model) = first_string(
+            event,
+            &[
+                "/params/model",
+                "/params/model_name",
+                "/params/modelName",
+                "/params/usage/model",
+            ],
+        ) {
+            self.watch_model = Some(model);
+        }
+        if let Some(pct) = first_f64(
+            event,
+            &[
+                "/params/usage/context_window_pct",
+                "/params/usage/contextWindowPct",
+                "/params/context_window_pct",
+                "/params/contextWindowPct",
+            ],
+        ) {
+            self.watch_context_window_pct = Some(pct);
+        }
 
         match kind {
             "turn_started" => {
@@ -388,6 +428,21 @@ impl App {
             _ => Some("Not live"),
         }
     }
+}
+
+fn first_string(value: &serde_json::Value, paths: &[&str]) -> Option<String> {
+    paths.iter().find_map(|path| {
+        value
+            .pointer(path)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn first_f64(value: &serde_json::Value, paths: &[&str]) -> Option<f64> {
+    paths.iter().find_map(|path| value.pointer(path).and_then(|v| v.as_f64()))
 }
 
 #[cfg(test)]
@@ -646,6 +701,67 @@ mod tests {
             app.stream_scroll_offset, 0,
             "reset_stream must clear scroll offset"
         );
+    }
+
+    #[test]
+    fn test_apply_watch_frame_updates_status_surfaces() {
+        let mut app = new_app("test");
+        let frame = serde_json::json!({
+            "event": {
+                "params": {
+                    "type": "turn_started",
+                    "transport": "app-server",
+                    "turnId": "turn-7",
+                    "_meta": { "threadId": "thread-123" },
+                    "model": "gpt-5-codex",
+                    "usage": { "contextWindowPct": 72.4 }
+                }
+            }
+        });
+        app.apply_watch_frame(&frame);
+        assert_eq!(app.watch_transport.as_deref(), Some("app-server"));
+        assert_eq!(app.watch_turn_id.as_deref(), Some("turn-7"));
+        assert_eq!(app.watch_session_id.as_deref(), Some("thread-123"));
+        assert_eq!(app.watch_model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(app.watch_context_window_pct, Some(72.4));
+        assert_eq!(app.watch_turn_started, 1);
+    }
+
+    #[test]
+    fn test_apply_watch_frame_preserves_transport_when_event_omits_it() {
+        let mut app = new_app("test");
+        app.watch_transport = Some("mcp".to_string());
+        app.watch_turn_id = Some("old-turn".to_string());
+        let frame = serde_json::json!({
+            "event": { "params": { "type": "item_delta", "delta": "hello" } }
+        });
+        app.apply_watch_frame(&frame);
+        assert_eq!(
+            app.watch_transport.as_deref(),
+            Some("mcp"),
+            "transport must remain stable when omitted by partial events"
+        );
+        assert_eq!(
+            app.watch_turn_id.as_deref(),
+            Some("old-turn"),
+            "turn id must remain stable when omitted by partial events"
+        );
+    }
+
+    #[test]
+    fn test_reset_stream_clears_watch_status_surfaces() {
+        let mut app = new_app("test");
+        app.watch_session_id = Some("thread-1".to_string());
+        app.watch_model = Some("gpt-5".to_string());
+        app.watch_context_window_pct = Some(66.0);
+        app.watch_transport = Some("mcp".to_string());
+        app.watch_turn_id = Some("turn-1".to_string());
+        app.reset_stream();
+        assert!(app.watch_session_id.is_none());
+        assert!(app.watch_model.is_none());
+        assert!(app.watch_context_window_pct.is_none());
+        assert!(app.watch_transport.is_none());
+        assert!(app.watch_turn_id.is_none());
     }
 
     /// Stress test: append 10,000 lines in rapid succession.
