@@ -3010,13 +3010,13 @@ fn append_watch_frame_for_tui_at_path(frame: &Value, max_bytes: u64, path: &std:
         let _ = std::fs::create_dir_all(parent);
     }
     if max_bytes > 0
-        && let Ok(meta) = std::fs::metadata(&path)
+        && let Ok(meta) = std::fs::metadata(path)
         && meta.len() >= max_bytes
     {
         let rotated_path = path.with_extension("jsonl.1");
         // Best-effort rotation: failures should not break live stream publishing.
         let _ = std::fs::remove_file(&rotated_path);
-        let _ = std::fs::rename(&path, rotated_path);
+        let _ = std::fs::rename(path, rotated_path);
     }
     let rendered = format_watch_frame(frame);
     let ts = std::time::SystemTime::now()
