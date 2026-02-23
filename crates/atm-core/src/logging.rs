@@ -367,10 +367,16 @@ fn setup_daemon_writer(
     file_path: std::path::PathBuf,
     rotation: RotationConfig,
 ) -> anyhow::Result<LoggingGuards> {
-    // The daemon uses its async log_writer task for structured events.
-    // Here we just ensure the log directory exists and note the config.
-    // The DaemonWriter mode primarily signals that this process IS the daemon
-    // and should not forward events to itself via socket.
+    // `DaemonWriter` mode is used exclusively by `atm-daemon`.
+    //
+    // In this mode the daemon's structured events flow directly to its internal
+    // `log_writer` async task (not via socket).  Because `PRODUCER_TX` is never
+    // set in `DaemonWriter` mode, [`producer_sender()`] returns `None`, which
+    // ensures the daemon does NOT attempt to forward events to itself via the
+    // Unix socket (which would create a feedback loop).
+    //
+    // This function's only responsibility is to ensure the log directory exists
+    // so the `log_writer` task can open its JSONL file on the first write.
     if let Some(parent) = file_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
