@@ -91,8 +91,7 @@ async fn mock_transport_captures_stdin_writes() {
         .expect("MockTransport::spawn should succeed");
 
     // Write a JSON-RPC request to "child stdin".
-    let request =
-        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
+    let request = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
     {
         let mut stdin = raw.stdin.lock().await;
         let json_str = format!("{}\n", serde_json::to_string(&request).unwrap());

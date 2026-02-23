@@ -161,8 +161,7 @@ impl AuditLog {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let mut line = serde_json::to_string(entry)
-            .map_err(std::io::Error::other)?;
+        let mut line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
         line.push('\n');
 
         let mut file = tokio::fs::OpenOptions::new()
@@ -257,8 +256,14 @@ mod tests {
         setup_atm_home(&dir);
 
         let log = AuditLog::new("test-team");
-        log.log_atm_call("atm_send", Some("codex:abc"), Some("dev"), Some("arch-ctm"), Some("hello"))
-            .await;
+        log.log_atm_call(
+            "atm_send",
+            Some("codex:abc"),
+            Some("dev"),
+            Some("arch-ctm"),
+            Some("hello"),
+        )
+        .await;
 
         teardown_atm_home();
 
@@ -384,7 +389,8 @@ mod tests {
     async fn test_audit_log_swallows_write_error() {
         // Use a path under /dev/null (or a non-writable location) to trigger an error.
         // On all platforms, writing to a directory path will fail.
-        let log = AuditLog::new_with_path(std::path::PathBuf::from("/dev/null/impossible/audit.jsonl"));
+        let log =
+            AuditLog::new_with_path(std::path::PathBuf::from("/dev/null/impossible/audit.jsonl"));
         // Must not panic
         log.log_atm_call("atm_send", None, None, None, None).await;
     }

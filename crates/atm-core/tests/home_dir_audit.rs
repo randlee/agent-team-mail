@@ -101,7 +101,10 @@ fn audit_no_raw_home_dir_calls() {
         panic!("No Rust files found in crates directory");
     }
 
-    println!("Auditing {} Rust files for raw home directory calls...", rust_files.len());
+    println!(
+        "Auditing {} Rust files for raw home directory calls...",
+        rust_files.len()
+    );
 
     // Check each file
     let mut all_violations = Vec::new();
@@ -118,10 +121,18 @@ fn audit_no_raw_home_dir_calls() {
         for violation in &all_violations {
             eprintln!("  {}", violation);
         }
-        eprintln!("\nAll home directory resolution must use `agent_team_mail_core::home::get_home_dir()`");
+        eprintln!(
+            "\nAll home directory resolution must use `agent_team_mail_core::home::get_home_dir()`"
+        );
         eprintln!("This ensures consistent behavior across platforms and respect for ATM_HOME.\n");
-        panic!("Home directory audit failed with {} violations", all_violations.len());
+        panic!(
+            "Home directory audit failed with {} violations",
+            all_violations.len()
+        );
     }
 
-    println!("✓ Home directory audit passed - all {} files use canonical get_home_dir()", rust_files.len());
+    println!(
+        "✓ Home directory audit passed - all {} files use canonical get_home_dir()",
+        rust_files.len()
+    );
 }

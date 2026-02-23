@@ -10,6 +10,7 @@ mod config_cmd;
 mod daemon;
 mod inbox;
 pub mod launch;
+mod logs;
 mod members;
 mod read;
 mod request;
@@ -82,6 +83,9 @@ enum Commands {
 
     /// Launch a new Codex agent via the daemon
     Launch(launch::LaunchArgs),
+
+    /// View and follow the unified ATM daemon log
+    Logs(logs::LogsArgs),
 }
 
 impl Cli {
@@ -104,6 +108,7 @@ impl Cli {
             Commands::Unsubscribe(args) => subscribe::execute_unsubscribe(args),
             Commands::Tail(args) => tail::execute(args),
             Commands::Launch(args) => launch::execute(args),
+            Commands::Logs(args) => logs::execute(args),
         }
     }
 }

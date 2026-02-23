@@ -134,7 +134,8 @@ impl AgentStateTracker {
 
     fn set_state_inner(&mut self, agent_id: &str, state: AgentState) {
         self.states.insert(agent_id.to_string(), state);
-        self.last_transition.insert(agent_id.to_string(), Instant::now());
+        self.last_transition
+            .insert(agent_id.to_string(), Instant::now());
     }
 
     /// Get the current state of an agent.
@@ -170,7 +171,10 @@ impl AgentStateTracker {
                 log_path: log_path.to_path_buf(),
             },
         );
-        debug!("Agent {agent_id} pane info stored: pane={pane_id} log={}", log_path.display());
+        debug!(
+            "Agent {agent_id} pane info stored: pane={pane_id} log={}",
+            log_path.display()
+        );
     }
 
     /// Retrieve pane and log file information for an agent.
@@ -271,7 +275,11 @@ mod tests {
     fn test_unregister_removes_pane_info() {
         let mut tracker = AgentStateTracker::new();
         tracker.register_agent("arch-ctm");
-        tracker.set_pane_info("arch-ctm", "%42", &std::env::temp_dir().join("arch-ctm.log"));
+        tracker.set_pane_info(
+            "arch-ctm",
+            "%42",
+            &std::env::temp_dir().join("arch-ctm.log"),
+        );
         assert!(tracker.get_pane_info("arch-ctm").is_some());
         tracker.unregister_agent("arch-ctm");
         assert!(tracker.get_pane_info("arch-ctm").is_none());
@@ -338,7 +346,9 @@ mod tests {
         let log_path = std::env::temp_dir().join("arch-ctm.log");
         tracker.set_pane_info("arch-ctm", "%42", &log_path);
 
-        let info = tracker.get_pane_info("arch-ctm").expect("pane info should be set");
+        let info = tracker
+            .get_pane_info("arch-ctm")
+            .expect("pane info should be set");
         assert_eq!(info.pane_id, "%42");
         assert_eq!(info.log_path, log_path);
     }

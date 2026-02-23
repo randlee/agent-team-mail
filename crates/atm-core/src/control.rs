@@ -145,7 +145,10 @@ mod tests {
     #[test]
     fn content_ref_round_trip() {
         let cref = ContentRef {
-            path: std::env::temp_dir().join("input.txt").to_string_lossy().into_owned(),
+            path: std::env::temp_dir()
+                .join("input.txt")
+                .to_string_lossy()
+                .into_owned(),
             size_bytes: 12,
             sha256: "abc123".to_string(),
             mime: "text/plain".to_string(),

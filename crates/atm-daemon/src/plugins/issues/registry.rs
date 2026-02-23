@@ -7,9 +7,7 @@ use std::sync::Arc;
 
 /// A factory function that creates an issue provider instance
 pub type FactoryFn = Arc<
-    dyn Fn(Option<&toml::Table>) -> Result<Box<dyn ErasedIssueProvider>, PluginError>
-        + Send
-        + Sync,
+    dyn Fn(Option<&toml::Table>) -> Result<Box<dyn ErasedIssueProvider>, PluginError> + Send + Sync,
 >;
 
 /// A factory that can create an issue provider instance
@@ -72,12 +70,13 @@ impl ProviderRegistry {
         name: &str,
         config: Option<&toml::Table>,
     ) -> Result<Box<dyn ErasedIssueProvider>, PluginError> {
-        let factory = self.factories.get(name).ok_or_else(|| {
-            PluginError::Provider {
+        let factory = self
+            .factories
+            .get(name)
+            .ok_or_else(|| PluginError::Provider {
                 message: format!("Provider '{name}' not registered"),
                 source: None,
-            }
-        })?;
+            })?;
 
         (factory.create)(config)
     }
@@ -162,10 +161,7 @@ mod tests {
         let registry = ProviderRegistry::new();
         let result = registry.create_provider("missing-provider", None);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not registered"));
+        assert!(result.unwrap_err().to_string().contains("not registered"));
     }
 
     #[test]

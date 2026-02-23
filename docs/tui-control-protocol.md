@@ -2,7 +2,7 @@
 
 **Version**: 0.2  
 **Date**: 2026-02-21  
-**Status**: Draft
+**Status**: Implemented for L.5 stream-subscribe contract; control action sections remain design reference.
 
 ---
 
@@ -77,6 +77,33 @@ Transport rule:
 
 - TUI must use daemon socket `command = "control"` for control actions
 - ATM mailbox commands are out of scope for this protocol and must not be used as control fallback
+
+### 2.1 Stream Subscription Extension (`stream-subscribe`)
+
+For live turn-state streaming (Phase L.5), the daemon socket also supports a
+long-lived subscription command:
+
+- `command = "stream-subscribe"`
+- request payload: `{}` (reserved for future filters)
+
+Connection behavior:
+
+1. Client sends one newline-delimited socket request envelope.
+2. Daemon replies with ACK line: `{"version":1,"status":"ok","streaming":true}`.
+3. Daemon keeps the socket open and emits newline-delimited
+   `DaemonStreamEvent` JSON objects.
+4. Client disconnect ends the subscription.
+
+Event contract:
+
+- Events use `agent_team_mail_core::daemon_stream::DaemonStreamEvent`.
+- Current variants:
+  - `turn_started`
+  - `turn_completed`
+  - `turn_idle`
+  - `stream_error`
+  - `dropped_counters`
+- Continuous content deltas are intentionally out of scope for daemon fanout.
 
 ---
 

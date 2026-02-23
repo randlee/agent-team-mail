@@ -141,7 +141,10 @@ impl HostnameRegistry {
         // Check if it's an alias first
         if let Some(canonical_lower) = self.aliases.get(&name_lower) {
             // Return the original hostname from the RemoteConfig (preserves case)
-            return self.remotes.get(canonical_lower).map(|r| r.hostname.as_str());
+            return self
+                .remotes
+                .get(canonical_lower)
+                .map(|r| r.hostname.as_str());
         }
 
         // Check if it's a canonical hostname
@@ -264,7 +267,10 @@ address = "user@server.example.com:2222"
         let remote1 = &config.remotes[0];
         assert_eq!(remote1.hostname, "desktop");
         assert_eq!(remote1.address, "user@desktop.local");
-        assert_eq!(remote1.ssh_key_path, Some("/home/user/.ssh/id_rsa".to_string()));
+        assert_eq!(
+            remote1.ssh_key_path,
+            Some("/home/user/.ssh/id_rsa".to_string())
+        );
         assert_eq!(remote1.aliases, vec!["desk", "main-desktop"]);
 
         let remote2 = &config.remotes[1];
@@ -358,7 +364,11 @@ address = "user@server.example.com:2222"
         assert!(registry.register(remote1).is_ok());
         let result = registry.register(remote2);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("collides with existing hostname"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("collides with existing hostname")
+        );
     }
 
     #[test]
@@ -379,7 +389,10 @@ address = "user@server.example.com:2222"
         assert_eq!(registry.resolve_alias("alias2"), Some("canonical-name"));
 
         // Canonical name resolves to itself
-        assert_eq!(registry.resolve_alias("canonical-name"), Some("canonical-name"));
+        assert_eq!(
+            registry.resolve_alias("canonical-name"),
+            Some("canonical-name")
+        );
 
         // Unknown name returns None
         assert_eq!(registry.resolve_alias("unknown"), None);

@@ -429,7 +429,7 @@ fn test_broadcast_read_all_inboxes_verify() {
         cmd.env("ATM_TEAM", "test-team")
             .env("ATM_IDENTITY", agent)
             .arg("read")
-        .arg("--no-since-last-seen")
+            .arg("--no-since-last-seen")
             .arg(agent)
             .assert()
             .success();
@@ -478,7 +478,7 @@ fn test_broadcast_cross_team_verify() {
         cmd.env("ATM_TEAM", "team-b")
             .env("ATM_IDENTITY", agent)
             .arg("read")
-        .arg("--no-since-last-seen")
+            .arg("--no-since-last-seen")
             .arg(agent)
             .assert()
             .success();
@@ -524,7 +524,7 @@ fn test_broadcast_multiple_times_verify_all_received() {
         cmd.env("ATM_TEAM", "test-team")
             .env("ATM_IDENTITY", agent)
             .arg("read")
-        .arg("--no-since-last-seen")
+            .arg("--no-since-last-seen")
             .arg(agent)
             .assert()
             .success();
@@ -601,7 +601,9 @@ fn test_config_default_team() {
         .success();
 
     // Verify message is in default-team
-    let inbox_path = temp_dir.path().join(".claude/teams/default-team/inboxes/agent-a.json");
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/default-team/inboxes/agent-a.json");
     assert!(inbox_path.exists());
 }
 
@@ -626,7 +628,9 @@ fn test_config_env_override() {
         .success();
 
     // Verify message is in env-team, not default-team
-    let inbox_path = temp_dir.path().join(".claude/teams/env-team/inboxes/agent-a.json");
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/env-team/inboxes/agent-a.json");
     assert!(inbox_path.exists());
 }
 
@@ -649,7 +653,9 @@ fn test_config_cli_flag_override() {
         .success();
 
     // Verify message is in flag-team, not env-team
-    let inbox_path = temp_dir.path().join(".claude/teams/flag-team/inboxes/agent-a.json");
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/flag-team/inboxes/agent-a.json");
     assert!(inbox_path.exists());
 }
 
@@ -702,12 +708,18 @@ fn test_config_precedence_chain() {
         .success();
 
     // Verify message is in flag-team (highest precedence)
-    let inbox_path = temp_dir.path().join(".claude/teams/flag-team/inboxes/agent-a.json");
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/flag-team/inboxes/agent-a.json");
     assert!(inbox_path.exists());
 
     // Verify NOT in other teams
-    let default_path = temp_dir.path().join(".claude/teams/default-team/inboxes/agent-a.json");
-    let env_path = temp_dir.path().join(".claude/teams/env-team/inboxes/agent-a.json");
+    let default_path = temp_dir
+        .path()
+        .join(".claude/teams/default-team/inboxes/agent-a.json");
+    let env_path = temp_dir
+        .path()
+        .join(".claude/teams/env-team/inboxes/agent-a.json");
     assert!(!default_path.exists());
     assert!(!env_path.exists());
 }
@@ -801,7 +813,7 @@ fn test_team_discussion_workflow() {
         set_home_env(&mut cmd, &temp_dir);
         cmd.env("ATM_TEAM", "test-team")
             .arg("read")
-        .arg("--no-since-last-seen")
+            .arg("--no-since-last-seen")
             .arg(agent)
             .assert()
             .success();

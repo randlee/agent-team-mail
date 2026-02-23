@@ -88,7 +88,11 @@ pub enum AppServerNotification {
     ///
     /// `thread_id` identifies the thread on which the turn ran.
     /// `turn_id` is the unique identifier for the completed turn.
-    TurnCompleted { thread_id: String, turn_id: String, status: TurnStatus },
+    TurnCompleted {
+        thread_id: String,
+        turn_id: String,
+        status: TurnStatus,
+    },
     /// A content item within a turn has started (`item/started`).
     ItemStarted { item_id: String },
     /// A content item within a turn has completed (`item/completed`).
@@ -186,7 +190,11 @@ pub fn parse_app_server_notification(line: &str) -> Option<AppServerNotification
                 "failed" => TurnStatus::Failed,
                 _ => TurnStatus::Completed,
             };
-            AppServerNotification::TurnCompleted { thread_id, turn_id, status }
+            AppServerNotification::TurnCompleted {
+                thread_id,
+                turn_id,
+                status,
+            }
         }
         "item/started" => {
             let item_id = params
@@ -247,7 +255,10 @@ pub fn parse_app_server_notification(line: &str) -> Option<AppServerNotification
                 || m.ends_with("TextDelta")
                 || m.ends_with("PartAdded")) =>
         {
-            AppServerNotification::ItemDelta { method: m.to_string(), params }
+            AppServerNotification::ItemDelta {
+                method: m.to_string(),
+                params,
+            }
         }
         _ => AppServerNotification::Unknown { method },
     };
@@ -346,7 +357,10 @@ mod tests {
         let n = parse_app_server_notification(line).unwrap();
         assert!(matches!(
             n,
-            AppServerNotification::TurnCompleted { status: TurnStatus::Interrupted, .. }
+            AppServerNotification::TurnCompleted {
+                status: TurnStatus::Interrupted,
+                ..
+            }
         ));
     }
 
@@ -421,9 +435,9 @@ mod tests {
 
     #[test]
     fn parse_entered_review_mode_camel_case_item_id() {
-        let line = r#"{"method":"item/enteredReviewMode","params":{"itemId":"item-1","toolName":"bash"}}"#;
-        let n = parse_app_server_notification(line)
-            .expect("item/enteredReviewMode should parse");
+        let line =
+            r#"{"method":"item/enteredReviewMode","params":{"itemId":"item-1","toolName":"bash"}}"#;
+        let n = parse_app_server_notification(line).expect("item/enteredReviewMode should parse");
         assert!(
             matches!(
                 &n,
@@ -468,8 +482,7 @@ mod tests {
     #[test]
     fn parse_exited_review_mode() {
         let line = r#"{"method":"item/exitedReviewMode","params":{"itemId":"item-1"}}"#;
-        let n = parse_app_server_notification(line)
-            .expect("item/exitedReviewMode should parse");
+        let n = parse_app_server_notification(line).expect("item/exitedReviewMode should parse");
         assert!(
             matches!(
                 &n,
@@ -549,11 +562,18 @@ mod tests {
     #[test]
     fn turn_state_is_idle_only_for_idle_variant() {
         assert!(TurnState::Idle.is_idle());
-        assert!(!TurnState::Busy { turn_id: "t1".into() }.is_idle());
-        assert!(!TurnState::Terminal {
-            turn_id: "t1".into(),
-            status: TurnStatus::Completed
-        }
-        .is_idle());
+        assert!(
+            !TurnState::Busy {
+                turn_id: "t1".into()
+            }
+            .is_idle()
+        );
+        assert!(
+            !TurnState::Terminal {
+                turn_id: "t1".into(),
+                status: TurnStatus::Completed
+            }
+            .is_idle()
+        );
     }
 }

@@ -44,7 +44,6 @@ impl WorkerHandle {
     pub fn payload_ref<T: 'static>(&self) -> Option<&T> {
         self.payload.as_ref()?.downcast_ref::<T>()
     }
-
 }
 
 impl Clone for WorkerHandle {

@@ -1,8 +1,8 @@
 //! Inbox command implementation - show inbox summaries
 
-use anyhow::Result;
-use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::schema::TeamConfig;
+use anyhow::Result;
 use chrono::DateTime;
 use clap::{ArgAction, Args};
 use std::path::Path;
@@ -113,7 +113,8 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
         return Ok(());
     }
 
-    let team_config: TeamConfig = serde_json::from_str(&std::fs::read_to_string(&team_config_path)?)?;
+    let team_config: TeamConfig =
+        serde_json::from_str(&std::fs::read_to_string(&team_config_path)?)?;
 
     // Load config to extract hostname registry (if bridge is configured)
     let config = agent_team_mail_core::config::resolve_config(
@@ -125,9 +126,15 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
 
     println!("Team: {team_name}\n");
     if use_since_last_seen {
-        println!("  {:<20} {:>8} {:>8} {:>12}", "Agent", "New", "Total", "Latest");
+        println!(
+            "  {:<20} {:>8} {:>8} {:>12}",
+            "Agent", "New", "Total", "Latest"
+        );
     } else {
-        println!("  {:<20} {:>8} {:>8} {:>12}", "Agent", "Unread", "Total", "Latest");
+        println!(
+            "  {:<20} {:>8} {:>8} {:>12}",
+            "Agent", "Unread", "Total", "Latest"
+        );
     }
     println!("  {}", "─".repeat(52));
 
@@ -142,7 +149,6 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
         )?;
 
         let (unread, total, latest) = if !messages.is_empty() {
-
             let unread_count = if use_since_last_seen {
                 let state = load_seen_state().unwrap_or_default();
                 let last_seen = get_last_seen(&state, team_name, &member.name);
@@ -301,7 +307,11 @@ fn watch_inboxes(
                         message_states.insert(key, state);
                     }
 
-                    InboxSnapshot { unread, total, latest }
+                    InboxSnapshot {
+                        unread,
+                        total,
+                        latest,
+                    }
                 } else {
                     InboxSnapshot {
                         unread: 0,
@@ -311,7 +321,9 @@ fn watch_inboxes(
                 };
 
                 let key = (team_name.clone(), member.name.clone());
-                if let Some(prev) = previous.get(&key) && prev != &snapshot {
+                if let Some(prev) = previous.get(&key)
+                    && prev != &snapshot
+                {
                     println!(
                         "[{}] {}@{} unread {}->{} total {}->{} latest {}",
                         chrono::Utc::now().to_rfc3339(),
@@ -358,7 +370,9 @@ fn format_relative_time(timestamp_str: &str) -> String {
 /// Extract hostname registry from bridge plugin config
 ///
 /// Returns None if bridge plugin is not configured or not enabled.
-fn extract_hostname_registry(config: &agent_team_mail_core::config::Config) -> Option<agent_team_mail_core::config::HostnameRegistry> {
+fn extract_hostname_registry(
+    config: &agent_team_mail_core::config::Config,
+) -> Option<agent_team_mail_core::config::HostnameRegistry> {
     use agent_team_mail_core::config::BridgeConfig;
 
     // Check if bridge plugin config exists

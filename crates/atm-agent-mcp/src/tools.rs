@@ -17,7 +17,7 @@
 use serde_json::{Value, json};
 
 /// Number of synthetic tools that the proxy appends to `tools/list` responses.
-pub const SYNTHETIC_TOOL_COUNT: usize = 7;
+pub const SYNTHETIC_TOOL_COUNT: usize = 10;
 
 /// Extended `codex` tool parameter schema accepted by the proxy layer (FR-16.4).
 ///
@@ -74,6 +74,9 @@ pub fn synthetic_tools() -> Vec<Value> {
         agent_sessions_schema(),
         agent_status_schema(),
         agent_close_schema(),
+        agent_watch_attach_schema(),
+        agent_watch_poll_schema(),
+        agent_watch_detach_schema(),
     ]
 }
 
@@ -180,6 +183,49 @@ fn agent_close_schema() -> Value {
     })
 }
 
+fn agent_watch_attach_schema() -> Value {
+    json!({
+        "name": "agent_watch_attach",
+        "description": "Attach watch stream to an active agent session and return replay events",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Agent ID to watch"}
+            },
+            "required": ["agent_id"]
+        }
+    })
+}
+
+fn agent_watch_poll_schema() -> Value {
+    json!({
+        "name": "agent_watch_poll",
+        "description": "Poll buffered live watch events for an attached agent watcher",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Agent ID being watched"},
+                "limit": {"type": "integer", "description": "Maximum events to drain (default: 50, max: 200)"}
+            },
+            "required": ["agent_id"]
+        }
+    })
+}
+
+fn agent_watch_detach_schema() -> Value {
+    json!({
+        "name": "agent_watch_detach",
+        "description": "Detach an active watch stream from an agent session",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Agent ID to stop watching"}
+            },
+            "required": ["agent_id"]
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,7 +239,10 @@ mod tests {
     fn test_all_tools_have_name_and_schema() {
         for tool in synthetic_tools() {
             assert!(tool.get("name").is_some(), "tool missing name");
-            assert!(tool.get("description").is_some(), "tool missing description");
+            assert!(
+                tool.get("description").is_some(),
+                "tool missing description"
+            );
             let schema = tool.get("inputSchema").expect("tool missing inputSchema");
             assert_eq!(
                 schema.get("type").and_then(|v| v.as_str()),

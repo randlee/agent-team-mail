@@ -670,7 +670,10 @@ fn test_offline_recipient_empty_string_opt_out() {
     let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
 
     let text = messages[0]["text"].as_str().unwrap();
-    assert_eq!(text, "No prefix please", "Empty opt-out should skip prepend");
+    assert_eq!(
+        text, "No prefix please",
+        "Empty opt-out should skip prepend"
+    );
 }
 
 #[test]

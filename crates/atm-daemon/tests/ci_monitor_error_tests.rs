@@ -89,11 +89,19 @@ async fn test_api_failure_continues_polling() {
     // Add minimal plugin config
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("ci-monitor".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -141,16 +149,25 @@ async fn test_auth_failure_simulation() {
     create_team_config(ctx.mail.teams_root(), "test-team");
 
     // Simulate authentication failure
-    let mock_provider = MockCiProvider::new().with_error("Authentication failed: invalid token".to_string());
+    let mock_provider =
+        MockCiProvider::new().with_error("Authentication failed: invalid token".to_string());
 
     // Add minimal plugin config
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("ci-monitor".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -212,15 +229,23 @@ async fn test_invalid_config_provider() {
     // Configure with non-existent provider (must include required fields)
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("ci-monitor".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
     plugin_config.insert(
         "provider".to_string(),
         toml::Value::String("nonexistent-provider".to_string()),
     );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -255,11 +280,19 @@ async fn test_empty_config_uses_defaults() {
     // Create plugin with minimal config (enabled, team, agent required)
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("ci-monitor".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -289,19 +322,24 @@ async fn test_invalid_config_values_use_defaults() {
     // Create config with invalid types (will fall back to defaults)
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("ci-monitor".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
     plugin_config.insert(
         "poll_interval_secs".to_string(),
         toml::Value::String("not-a-number".to_string()),
     );
-    plugin_config.insert(
-        "watched_branches".to_string(),
-        toml::Value::Integer(123),
-    ); // Should be array
+    plugin_config.insert("watched_branches".to_string(), toml::Value::Integer(123)); // Should be array
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -339,11 +377,19 @@ async fn test_timeout_error_simulation() {
     // Add minimal plugin config
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("ci-monitor".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -398,11 +444,19 @@ async fn test_network_error_simulation() {
     // Add minimal plugin config
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("ci-monitor".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -457,7 +511,9 @@ async fn test_get_run_failure_continues() {
     );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -478,5 +534,8 @@ async fn test_get_run_failure_continues() {
 
     // Should handle get_run failures and continue polling
     let result = plugin.run(cancel).await;
-    assert!(result.is_ok(), "Plugin should continue despite get_run failures");
+    assert!(
+        result.is_ok(),
+        "Plugin should continue despite get_run failures"
+    );
 }

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 /// In-memory state for mock transport
 #[derive(Debug, Clone, Default)]
@@ -70,7 +70,8 @@ impl SharedFilesystem {
     /// List files in a directory
     fn list(&self, dir: &Path) -> Vec<PathBuf> {
         let files = self.files.lock().unwrap();
-        files.keys()
+        files
+            .keys()
             .filter(|p| p.parent() == Some(dir))
             .cloned()
             .collect()
@@ -241,11 +242,13 @@ impl Transport for MockTransport {
             }
 
             // Get file from mock filesystem
-            state.files.get(remote_path).ok_or_else(|| {
-                TransportError::RemoteError {
+            state
+                .files
+                .get(remote_path)
+                .ok_or_else(|| TransportError::RemoteError {
                     message: format!("File not found: {}", remote_path.display()),
-                }
-            })?.clone()
+                })?
+                .clone()
         }; // Lock is dropped here
 
         // Write to local file
@@ -298,11 +301,12 @@ impl Transport for MockTransport {
         }
 
         // Get the content
-        let content = state.files.remove(from).ok_or_else(|| {
-            TransportError::RemoteError {
+        let content = state
+            .files
+            .remove(from)
+            .ok_or_else(|| TransportError::RemoteError {
                 message: format!("Source file not found: {}", from.display()),
-            }
-        })?;
+            })?;
 
         // Insert with new path
         state.files.insert(to.to_path_buf(), content);
@@ -470,11 +474,11 @@ impl Transport for SharedMockTransport {
             }
 
             // Get file from shared filesystem
-            self.filesystem.get(remote_path).ok_or_else(|| {
-                TransportError::RemoteError {
+            self.filesystem
+                .get(remote_path)
+                .ok_or_else(|| TransportError::RemoteError {
                     message: format!("File not found: {}", remote_path.display()),
-                }
-            })?
+                })?
         }; // Lock is dropped here
 
         // Write to local file
@@ -525,11 +529,12 @@ impl Transport for SharedMockTransport {
         }
 
         // Get the content
-        let content = self.filesystem.remove(from).ok_or_else(|| {
-            TransportError::RemoteError {
+        let content = self
+            .filesystem
+            .remove(from)
+            .ok_or_else(|| TransportError::RemoteError {
                 message: format!("Source file not found: {}", from.display()),
-            }
-        })?;
+            })?;
 
         // Insert with new path
         self.filesystem.put(to.to_path_buf(), content);
@@ -664,10 +669,7 @@ mod tests {
         let result = transport.upload(&local_file, remote_path).await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Not connected"));
+        assert!(result.unwrap_err().to_string().contains("Not connected"));
     }
 
     #[tokio::test]
@@ -684,10 +686,12 @@ mod tests {
 
         let result = transport.upload(&local_file, remote_path).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Simulated upload failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Simulated upload failure")
+        );
     }
 
     #[tokio::test]
@@ -716,10 +720,12 @@ mod tests {
 
         let result = transport.download(remote_path, &local_file).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Simulated download failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Simulated download failure")
+        );
     }
 
     #[tokio::test]
@@ -732,12 +738,8 @@ mod tests {
         // Manually populate mock filesystem
         {
             let mut state = transport.state.lock().unwrap();
-            state
-                .files
-                .insert(remote_dir.join("agent1.json"), vec![]);
-            state
-                .files
-                .insert(remote_dir.join("agent2.json"), vec![]);
+            state.files.insert(remote_dir.join("agent1.json"), vec![]);
+            state.files.insert(remote_dir.join("agent2.json"), vec![]);
             state
                 .files
                 .insert(remote_dir.join("agent1.laptop.json"), vec![]);
@@ -794,10 +796,12 @@ mod tests {
 
         let result = transport.rename(from_path, to_path).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Source file not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Source file not found")
+        );
     }
 
     #[tokio::test]

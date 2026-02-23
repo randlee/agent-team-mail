@@ -3,9 +3,8 @@
 //! [`App`] is the single source of mutable state for the TUI. All panels read
 //! from it; the refresh loop writes to it. No I/O is performed in this module.
 
-use std::path::PathBuf;
-
 use agent_team_mail_core::daemon_client::AgentSummary;
+use std::path::PathBuf;
 
 use crate::config::TuiConfig;
 
@@ -28,6 +27,8 @@ pub enum FocusPanel {
     Dashboard,
     /// Right panel — agent terminal stream.
     AgentTerminal,
+    /// Right panel — structured log viewer (toggled with `L`).
+    LogViewer,
 }
 
 /// A pending control action to dispatch on the next main-loop iteration.
@@ -51,6 +52,8 @@ pub struct App {
     pub team: String,
     /// Member rows shown in the dashboard left panel.
     pub members: Vec<MemberRow>,
+    /// Recent inbox message previews for the selected agent.
+    pub inbox_preview: Vec<String>,
     /// Index into [`members`](Self::members) of the currently selected agent.
     pub selected_index: usize,
     /// Raw agent list returned by the daemon `list-agents` command.
@@ -73,7 +76,10 @@ pub struct App {
     ///
     /// Reserved for future use — the D.2 implementation does not yet differentiate
     /// between panel focus and explicit input activation within the Agent Terminal.
-    #[expect(dead_code, reason = "Reserved for D.3 input-activation UX; not yet wired to render")]
+    #[expect(
+        dead_code,
+        reason = "Reserved for D.3 input-activation UX; not yet wired to render"
+    )]
     pub control_input_active: bool,
     /// Message shown in the status bar (replaced on the next control result).
     pub status_message: Option<String>,
@@ -84,6 +90,20 @@ pub struct App {
     ///
     /// The UI renders a `[FROZEN]` indicator in the stream pane when this is set.
     pub stream_source_error: Option<String>,
+    /// Whether the log viewer panel is currently shown (toggled with `L`).
+    pub log_viewer_visible: bool,
+    /// Structured log events loaded into the log viewer buffer (bounded to 500).
+    pub log_events: Vec<agent_team_mail_core::logging_event::LogEventV1>,
+    /// Log viewer scroll offset.
+    pub log_scroll_offset: usize,
+    /// Whether log viewer auto-follows new events.
+    pub log_follow_mode: bool,
+    /// Active log level filter (`None` = all levels).
+    pub log_level_filter: Option<String>,
+    /// Byte position for incremental log file reading.
+    pub log_viewer_pos: u64,
+    /// Active agent filter for the log viewer (`None` = all agents).
+    pub log_agent_filter: Option<String>,
     /// User preferences loaded from `~/.config/atm/tui.toml` at startup.
     pub config: TuiConfig,
     /// When `true`, a `Ctrl-I` was pressed while [`InterruptPolicy::Confirm`] is
@@ -110,6 +130,8 @@ pub struct App {
     /// `"agent-stream-state"` socket command. `None` when the daemon has no
     /// stream state recorded for the agent.
     pub daemon_turn_state: Option<agent_team_mail_core::daemon_stream::AgentStreamState>,
+    /// Long-lived daemon stream subscription used for live turn/event updates.
+    pub daemon_stream_rx: Option<agent_team_mail_core::daemon_client::StreamSubscription>,
 }
 
 impl App {
@@ -121,6 +143,7 @@ impl App {
         Self {
             team,
             members: Vec::new(),
+            inbox_preview: Vec::new(),
             selected_index: 0,
             agent_list: Vec::new(),
             stream_lines: Vec::new(),
@@ -139,12 +162,22 @@ impl App {
             follow_mode,
             stream_scroll_offset: 0,
             daemon_turn_state: None,
+            daemon_stream_rx: None,
+            log_viewer_visible: false,
+            log_events: Vec::new(),
+            log_scroll_offset: 0,
+            log_follow_mode: true,
+            log_level_filter: None,
+            log_viewer_pos: 0,
+            log_agent_filter: None,
         }
     }
 
     /// Return the agent name at the currently selected index, if any.
     pub fn selected_agent(&self) -> Option<&str> {
-        self.members.get(self.selected_index).map(|r| r.agent.as_str())
+        self.members
+            .get(self.selected_index)
+            .map(|r| r.agent.as_str())
     }
 
     /// Move selection up one row (wraps).
@@ -167,11 +200,12 @@ impl App {
         self.selected_index = (self.selected_index + 1) % self.members.len();
     }
 
-    /// Cycle focus between Dashboard and AgentTerminal panels.
+    /// Cycle focus: Dashboard → AgentTerminal → LogViewer → Dashboard.
     pub fn cycle_focus(&mut self) {
         self.focus = match self.focus {
             FocusPanel::Dashboard => FocusPanel::AgentTerminal,
-            FocusPanel::AgentTerminal => FocusPanel::Dashboard,
+            FocusPanel::AgentTerminal => FocusPanel::LogViewer,
+            FocusPanel::LogViewer => FocusPanel::Dashboard,
         };
     }
 
@@ -204,6 +238,51 @@ impl App {
         self.session_log_path = None;
         self.stream_source_error = None;
         self.stream_scroll_offset = 0;
+        self.daemon_stream_rx = None;
+    }
+
+    /// Append new structured log events to [`log_events`](Self::log_events), keeping
+    /// the buffer bounded to the last 500 events.
+    ///
+    /// When [`log_follow_mode`](Self::log_follow_mode) is `true`,
+    /// [`log_scroll_offset`](Self::log_scroll_offset) is updated so the log viewer
+    /// remains pinned to the bottom of the buffer.
+    pub fn append_log_events(
+        &mut self,
+        new_events: Vec<agent_team_mail_core::logging_event::LogEventV1>,
+    ) {
+        self.log_events.extend(new_events);
+        const MAX_EVENTS: usize = 500;
+        if self.log_events.len() > MAX_EVENTS {
+            let drain_count = self.log_events.len() - MAX_EVENTS;
+            self.log_events.drain(..drain_count);
+        }
+        if self.log_follow_mode {
+            self.log_scroll_offset = self.log_events.len();
+        }
+    }
+
+    /// Reset log viewer state: clear events, reset byte position and offsets.
+    ///
+    /// Reserved for future log viewer reset UX; currently exercised in tests.
+    #[allow(dead_code)]
+    pub fn reset_log_viewer(&mut self) {
+        self.log_events.clear();
+        self.log_viewer_pos = 0;
+        self.log_scroll_offset = 0;
+    }
+
+    /// Cycle the active log level filter.
+    ///
+    /// Rotation: `None` → `"error"` → `"warn"` → `"info"` → `"debug"` → `None`.
+    pub fn cycle_log_level_filter(&mut self) {
+        self.log_level_filter = match self.log_level_filter.as_deref() {
+            None => Some("error".to_string()),
+            Some("error") => Some("warn".to_string()),
+            Some("warn") => Some("info".to_string()),
+            Some("info") => Some("debug".to_string()),
+            _ => None,
+        };
     }
 
     /// Returns `true` if the selected agent is "live" (control input is available).
@@ -249,8 +328,16 @@ mod tests {
     fn test_select_next_wraps() {
         let mut app = new_app("atm-dev");
         app.members = vec![
-            MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 },
-            MemberRow { agent: "b".into(), state: "idle".into(), inbox_count: 0 },
+            MemberRow {
+                agent: "a".into(),
+                state: "idle".into(),
+                inbox_count: 0,
+            },
+            MemberRow {
+                agent: "b".into(),
+                state: "idle".into(),
+                inbox_count: 0,
+            },
         ];
         app.selected_index = 1;
         app.select_next();
@@ -261,8 +348,16 @@ mod tests {
     fn test_select_previous_wraps() {
         let mut app = new_app("atm-dev");
         app.members = vec![
-            MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 },
-            MemberRow { agent: "b".into(), state: "idle".into(), inbox_count: 0 },
+            MemberRow {
+                agent: "a".into(),
+                state: "idle".into(),
+                inbox_count: 0,
+            },
+            MemberRow {
+                agent: "b".into(),
+                state: "idle".into(),
+                inbox_count: 0,
+            },
         ];
         app.selected_index = 0;
         app.select_previous();
@@ -288,30 +383,41 @@ mod tests {
         app.cycle_focus();
         assert_eq!(app.focus, FocusPanel::AgentTerminal);
         app.cycle_focus();
+        assert_eq!(app.focus, FocusPanel::LogViewer);
+        app.cycle_focus();
         assert_eq!(app.focus, FocusPanel::Dashboard);
     }
 
     #[test]
     fn test_is_live_idle() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "idle".into(),
+            inbox_count: 0,
+        }];
         assert!(app.is_live());
     }
 
     #[test]
     fn test_is_live_busy() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "busy".into(),
+            inbox_count: 0,
+        }];
         assert!(app.is_live());
     }
 
     #[test]
     fn test_not_live_launching() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "launching".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "launching".into(),
+            inbox_count: 0,
+        }];
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Launching"));
     }
@@ -319,8 +425,11 @@ mod tests {
     #[test]
     fn test_not_live_killed() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "killed".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "killed".into(),
+            inbox_count: 0,
+        }];
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Killed"));
     }
@@ -328,8 +437,11 @@ mod tests {
     #[test]
     fn test_not_live_stale() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "stale".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "stale".into(),
+            inbox_count: 0,
+        }];
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Stale"));
     }
@@ -337,8 +449,11 @@ mod tests {
     #[test]
     fn test_not_live_closed() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "closed".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "closed".into(),
+            inbox_count: 0,
+        }];
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Closed"));
     }
@@ -353,8 +468,11 @@ mod tests {
     #[test]
     fn test_not_live_unknown_state() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "unknown-state".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "unknown-state".into(),
+            inbox_count: 0,
+        }];
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Not live"));
     }
@@ -362,16 +480,22 @@ mod tests {
     #[test]
     fn test_live_reason_is_none_for_idle() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "idle".into(),
+            inbox_count: 0,
+        }];
         assert_eq!(app.not_live_reason(), None);
     }
 
     #[test]
     fn test_live_reason_is_none_for_busy() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "busy".into(),
+            inbox_count: 0,
+        }];
         assert_eq!(app.not_live_reason(), None);
     }
 
@@ -379,9 +503,11 @@ mod tests {
     #[test]
     fn test_is_live_returns_false_for_stale_state() {
         let mut app = new_app("atm-dev");
-        app.members = vec![
-            MemberRow { agent: "arch-ctm".into(), state: "stale".into(), inbox_count: 0 },
-        ];
+        app.members = vec![MemberRow {
+            agent: "arch-ctm".into(),
+            state: "stale".into(),
+            inbox_count: 0,
+        }];
         app.selected_index = 0;
         assert!(!app.is_live(), "stale agent must not be live");
     }
@@ -390,9 +516,11 @@ mod tests {
     #[test]
     fn test_is_live_returns_false_for_closed_state() {
         let mut app = new_app("atm-dev");
-        app.members = vec![
-            MemberRow { agent: "arch-ctm".into(), state: "closed".into(), inbox_count: 0 },
-        ];
+        app.members = vec![MemberRow {
+            agent: "arch-ctm".into(),
+            state: "closed".into(),
+            inbox_count: 0,
+        }];
         app.selected_index = 0;
         assert!(!app.is_live(), "closed agent must not be live");
     }
@@ -401,7 +529,10 @@ mod tests {
 
     #[test]
     fn test_follow_mode_initialized_from_config() {
-        let cfg = TuiConfig { follow_mode_default: false, ..Default::default() };
+        let cfg = TuiConfig {
+            follow_mode_default: false,
+            ..Default::default()
+        };
         let app = App::new("test".to_string(), cfg);
         assert!(!app.follow_mode, "follow_mode must reflect config default");
     }
@@ -436,7 +567,10 @@ mod tests {
         let mut app = new_app("test");
         app.stream_scroll_offset = 42;
         app.reset_stream();
-        assert_eq!(app.stream_scroll_offset, 0, "reset_stream must clear scroll offset");
+        assert_eq!(
+            app.stream_scroll_offset, 0,
+            "reset_stream must clear scroll offset"
+        );
     }
 
     /// Stress test: append 10,000 lines in rapid succession.
@@ -452,7 +586,11 @@ mod tests {
             app.append_stream_lines(chunk.to_vec());
         }
         let elapsed = start.elapsed();
-        assert_eq!(app.stream_lines.len(), 1000, "buffer must stay bounded at 1000");
+        assert_eq!(
+            app.stream_lines.len(),
+            1000,
+            "buffer must stay bounded at 1000"
+        );
         assert!(
             elapsed.as_millis() < 200,
             "10k line stress append must complete in <200ms, took {elapsed:?}"
@@ -511,5 +649,121 @@ mod tests {
         let state = app.daemon_turn_state.as_ref().unwrap();
         assert_eq!(state.turn_status, StreamTurnStatus::Idle);
         assert_eq!(format!("{}", state.turn_status), "idle");
+    }
+
+    // ── Log viewer state tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_log_viewer_visible_defaults_false() {
+        let app = new_app("test");
+        assert!(
+            !app.log_viewer_visible,
+            "log_viewer_visible must default to false"
+        );
+    }
+
+    #[test]
+    fn test_append_log_events_bounded_to_500() {
+        use agent_team_mail_core::logging_event::new_log_event;
+        let mut app = new_app("test");
+        let events: Vec<_> = (0..600)
+            .map(|i| new_log_event("atm", &format!("action_{i}"), "atm::test", "info"))
+            .collect();
+        app.append_log_events(events);
+        assert_eq!(
+            app.log_events.len(),
+            500,
+            "log_events must be bounded to 500"
+        );
+        // Should keep the last 500 (indices 100..=599 → actions 100..=599).
+        assert_eq!(app.log_events[0].action, "action_100");
+        assert_eq!(app.log_events[499].action, "action_599");
+    }
+
+    #[test]
+    fn test_cycle_log_level_filter_cycles() {
+        let mut app = new_app("test");
+        assert!(
+            app.log_level_filter.is_none(),
+            "initial filter must be None"
+        );
+        app.cycle_log_level_filter();
+        assert_eq!(app.log_level_filter.as_deref(), Some("error"));
+        app.cycle_log_level_filter();
+        assert_eq!(app.log_level_filter.as_deref(), Some("warn"));
+        app.cycle_log_level_filter();
+        assert_eq!(app.log_level_filter.as_deref(), Some("info"));
+        app.cycle_log_level_filter();
+        assert_eq!(app.log_level_filter.as_deref(), Some("debug"));
+        app.cycle_log_level_filter();
+        assert!(
+            app.log_level_filter.is_none(),
+            "filter must wrap back to None"
+        );
+    }
+
+    #[test]
+    fn test_log_follow_mode_updates_scroll_offset() {
+        use agent_team_mail_core::logging_event::new_log_event;
+        let mut app = new_app("test");
+        app.log_follow_mode = true;
+        let events: Vec<_> = (0..30)
+            .map(|i| new_log_event("atm", &format!("act_{i}"), "atm::test", "info"))
+            .collect();
+        app.append_log_events(events);
+        assert_eq!(
+            app.log_scroll_offset, 30,
+            "scroll offset must equal event count when log_follow_mode is on"
+        );
+    }
+
+    #[test]
+    fn test_log_follow_mode_off_preserves_offset() {
+        use agent_team_mail_core::logging_event::new_log_event;
+        let mut app = new_app("test");
+        app.log_follow_mode = false;
+        app.log_scroll_offset = 5;
+        let events: Vec<_> = (0..10)
+            .map(|i| new_log_event("atm", &format!("act_{i}"), "atm::test", "info"))
+            .collect();
+        app.append_log_events(events);
+        assert_eq!(
+            app.log_scroll_offset, 5,
+            "scroll offset must not change when log_follow_mode is off"
+        );
+    }
+
+    #[test]
+    fn test_reset_log_viewer_clears_state() {
+        use agent_team_mail_core::logging_event::new_log_event;
+        let mut app = new_app("test");
+        app.log_events
+            .push(new_log_event("atm", "act", "atm::test", "info"));
+        app.log_viewer_pos = 42;
+        app.log_scroll_offset = 7;
+        app.reset_log_viewer();
+        assert!(app.log_events.is_empty(), "reset must clear log_events");
+        assert_eq!(app.log_viewer_pos, 0, "reset must clear log_viewer_pos");
+        assert_eq!(
+            app.log_scroll_offset, 0,
+            "reset must clear log_scroll_offset"
+        );
+    }
+
+    #[test]
+    fn test_cycle_focus_includes_log_viewer() {
+        let mut app = new_app("test");
+        // Full cycle: Dashboard → AgentTerminal → LogViewer → Dashboard
+        assert_eq!(app.focus, FocusPanel::Dashboard);
+        app.cycle_focus();
+        assert_eq!(app.focus, FocusPanel::AgentTerminal);
+        app.cycle_focus();
+        assert_eq!(app.focus, FocusPanel::LogViewer);
+        app.cycle_focus();
+        assert_eq!(
+            app.focus,
+            FocusPanel::Dashboard,
+            "must wrap back to Dashboard"
+        );
     }
 }

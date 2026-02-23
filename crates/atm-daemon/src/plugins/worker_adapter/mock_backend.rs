@@ -158,7 +158,9 @@ impl WorkerAdapter for MockTmuxBackend {
 
         // Create mock payload with test data
         // Use a simple hash of agent_id for deterministic process_id
-        let process_id = agent_id.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32));
+        let process_id = agent_id
+            .bytes()
+            .fold(0u32, |acc, b| acc.wrapping_add(b as u32));
         let mock_payload = MockPayload {
             process_id,
             metadata: format!("mock-worker-{agent_id}"),
@@ -171,7 +173,9 @@ impl WorkerAdapter for MockTmuxBackend {
             payload: Some(Arc::new(mock_payload)),
         };
 
-        state.spawned_workers.insert(agent_id.to_string(), handle.clone());
+        state
+            .spawned_workers
+            .insert(agent_id.to_string(), handle.clone());
 
         debug!("Mock backend spawned worker for {agent_id}");
         Ok(handle)
@@ -299,20 +303,35 @@ mod tests {
         backend.set_spawn_error(Some("Mock spawn failure".to_string()));
         let result = backend.spawn("test-agent", "{}").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Mock spawn failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Mock spawn failure")
+        );
 
         // Test send_message error
         let handle = backend.spawn("test-agent", "{}").await.unwrap();
         backend.set_send_message_error(Some("Mock send failure".to_string()));
         let result = backend.send_message(&handle, "test").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Mock send failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Mock send failure")
+        );
 
         // Test shutdown error
         backend.set_shutdown_error(Some("Mock shutdown failure".to_string()));
         let result = backend.shutdown(&handle).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Mock shutdown failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Mock shutdown failure")
+        );
     }
 
     #[tokio::test]

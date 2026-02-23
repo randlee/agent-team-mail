@@ -74,11 +74,7 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
     });
 
     let config_path = team_dir.join("config.json");
-    fs::write(
-        &config_path,
-        serde_json::to_string_pretty(&config).unwrap(),
-    )
-    .unwrap();
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
     team_dir
 }
@@ -308,10 +304,12 @@ fn test_spool_drain_delivery_cycle() {
         unknown_fields: HashMap::new(),
     };
 
-    let outcome =
-        inbox_append(&inbox_path, &message, "test-team", "agent-a").unwrap();
+    let outcome = inbox_append(&inbox_path, &message, "test-team", "agent-a").unwrap();
     assert!(
-        matches!(outcome, agent_team_mail_core::io::WriteOutcome::Queued { .. }),
+        matches!(
+            outcome,
+            agent_team_mail_core::io::WriteOutcome::Queued { .. }
+        ),
         "Expected Queued outcome when lock held"
     );
 
@@ -332,9 +330,7 @@ fn test_spool_drain_delivery_cycle() {
     let content = fs::read_to_string(&inbox_path).unwrap();
     let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
     assert!(
-        messages
-            .iter()
-            .any(|m| m["text"] == "Spooled message"),
+        messages.iter().any(|m| m["text"] == "Spooled message"),
         "Delivered message should be in inbox"
     );
 
@@ -450,11 +446,7 @@ fn test_large_inbox_10k_messages() {
             "summary": format!("Message {i}")
         }));
     }
-    fs::write(
-        &inbox_path,
-        serde_json::to_string(&messages).unwrap(),
-    )
-    .unwrap();
+    fs::write(&inbox_path, serde_json::to_string(&messages).unwrap()).unwrap();
 
     // Timed send: appending to 10K inbox should complete in reasonable time
     let start = Instant::now();
@@ -663,9 +655,7 @@ fn test_permission_denied_inboxes_dir() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
 
-    let inboxes_dir = temp_dir
-        .path()
-        .join(".claude/teams/test-team/inboxes");
+    let inboxes_dir = temp_dir.path().join(".claude/teams/test-team/inboxes");
 
     // Make inboxes directory read-only
     fs::set_permissions(&inboxes_dir, std::fs::Permissions::from_mode(0o555)).unwrap();

@@ -67,8 +67,7 @@ pub fn expand_keys(line: &str) -> String {
         expanded.insert(display_key.to_string(), v.clone());
     }
 
-    serde_json::to_string(&serde_json::Value::Object(expanded))
-        .unwrap_or_else(|_| line.to_string())
+    serde_json::to_string(&serde_json::Value::Object(expanded)).unwrap_or_else(|_| line.to_string())
 }
 
 #[cfg(test)]
@@ -81,10 +80,19 @@ mod tests {
         let result = expand_keys(input);
 
         // All known compact keys must be replaced.
-        assert!(result.contains("\"Timestamp\""), "expected Timestamp in: {result}");
+        assert!(
+            result.contains("\"Timestamp\""),
+            "expected Timestamp in: {result}"
+        );
         assert!(result.contains("\"Level\""), "expected Level in: {result}");
-        assert!(result.contains("\"Source\""), "expected Source in: {result}");
-        assert!(result.contains("\"Action\""), "expected Action in: {result}");
+        assert!(
+            result.contains("\"Source\""),
+            "expected Source in: {result}"
+        );
+        assert!(
+            result.contains("\"Action\""),
+            "expected Action in: {result}"
+        );
         assert!(result.contains("\"Team\""), "expected Team in: {result}");
 
         // Original compact keys must not appear as keys.
@@ -94,7 +102,10 @@ mod tests {
         assert!(!obj.contains_key("lv"), "compact key 'lv' should be gone");
         assert!(!obj.contains_key("src"), "compact key 'src' should be gone");
         assert!(!obj.contains_key("act"), "compact key 'act' should be gone");
-        assert!(!obj.contains_key("team"), "compact key 'team' should be gone");
+        assert!(
+            !obj.contains_key("team"),
+            "compact key 'team' should be gone"
+        );
     }
 
     #[test]

@@ -267,9 +267,7 @@ async fn test_mail_service_send_and_read() {
     assert!(outcome.is_ok());
 
     // Read the inbox
-    let messages = mail_service
-        .read_inbox("test-team", "test-agent")
-        .unwrap();
+    let messages = mail_service.read_inbox("test-team", "test-agent").unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].from, "team-lead");
     assert_eq!(messages[0].text, "Test message for plugin");

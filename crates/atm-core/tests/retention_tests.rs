@@ -75,8 +75,16 @@ fn test_retention_by_max_age() {
     // Verify inbox file contains only recent messages
     let remaining = read_inbox(&inbox_path);
     assert_eq!(remaining.len(), 2);
-    assert!(remaining.iter().any(|m| m.message_id == Some("msg-004".to_string())));
-    assert!(remaining.iter().any(|m| m.message_id == Some("msg-005".to_string())));
+    assert!(
+        remaining
+            .iter()
+            .any(|m| m.message_id == Some("msg-004".to_string()))
+    );
+    assert!(
+        remaining
+            .iter()
+            .any(|m| m.message_id == Some("msg-005".to_string()))
+    );
 }
 
 #[test]
@@ -86,7 +94,14 @@ fn test_retention_by_max_count() {
 
     // Create 10 messages, all recent
     let messages: Vec<InboxMessage> = (1..=10)
-        .map(|i| create_test_message(&format!("user{i}"), &format!("Message {i}"), 1, Some(format!("msg-{i:03}"))))
+        .map(|i| {
+            create_test_message(
+                &format!("user{i}"),
+                &format!("Message {i}"),
+                1,
+                Some(format!("msg-{i:03}")),
+            )
+        })
         .collect();
 
     write_inbox(&inbox_path, &messages);
@@ -121,10 +136,20 @@ fn test_retention_combined_age_and_count() {
     // Create messages: 5 old (10 days), 5 recent (3 days)
     let mut messages = Vec::new();
     for i in 1..=5 {
-        messages.push(create_test_message(&format!("old-user{i}"), &format!("Old {i}"), 10, Some(format!("msg-old-{i:03}"))));
+        messages.push(create_test_message(
+            &format!("old-user{i}"),
+            &format!("Old {i}"),
+            10,
+            Some(format!("msg-old-{i:03}")),
+        ));
     }
     for i in 1..=5 {
-        messages.push(create_test_message(&format!("new-user{i}"), &format!("Recent {i}"), 3, Some(format!("msg-new-{i:03}"))));
+        messages.push(create_test_message(
+            &format!("new-user{i}"),
+            &format!("Recent {i}"),
+            3,
+            Some(format!("msg-new-{i:03}")),
+        ));
     }
 
     write_inbox(&inbox_path, &messages);
@@ -144,7 +169,10 @@ fn test_retention_combined_age_and_count() {
     // All old messages removed by age (5), then count limit applies to recent messages (keep 3, remove 2)
     // Total: keep 3, remove 7
     assert_eq!(result.kept, 3, "Should keep 3 messages (count limit)");
-    assert_eq!(result.removed, 7, "Should remove 7 messages (5 by age, 2 by count)");
+    assert_eq!(
+        result.removed, 7,
+        "Should remove 7 messages (5 by age, 2 by count)"
+    );
 
     // Verify inbox file
     let remaining = read_inbox(&inbox_path);
@@ -204,8 +232,13 @@ fn test_archive_strategy() {
     assert_eq!(archive_files.len(), 1, "Should have one archive file");
 
     let archive_file = &archive_files[0].path();
-    let archived_messages: Vec<InboxMessage> = serde_json::from_str(&fs::read_to_string(archive_file).unwrap()).unwrap();
-    assert_eq!(archived_messages.len(), 3, "Archive should contain 3 messages");
+    let archived_messages: Vec<InboxMessage> =
+        serde_json::from_str(&fs::read_to_string(archive_file).unwrap()).unwrap();
+    assert_eq!(
+        archived_messages.len(),
+        3,
+        "Archive should contain 3 messages"
+    );
 
     // Verify archived messages are the old ones
     for msg in &archived_messages {
@@ -248,7 +281,10 @@ fn test_delete_strategy() {
     assert_eq!(result.archived, 0, "No archiving with delete strategy");
 
     // Verify no archive directory created (delete strategy)
-    assert!(!archive_dir.exists(), "Archive directory should not exist with delete strategy");
+    assert!(
+        !archive_dir.exists(),
+        "Archive directory should not exist with delete strategy"
+    );
 }
 
 #[test]
@@ -281,7 +317,10 @@ fn test_dry_run() {
 
     // Verify result counts reflect what would happen
     assert_eq!(result.kept, 2, "Should report 2 messages would be kept");
-    assert_eq!(result.removed, 3, "Should report 3 messages would be removed");
+    assert_eq!(
+        result.removed, 3,
+        "Should report 3 messages would be removed"
+    );
     assert_eq!(result.archived, 0, "No archiving with delete strategy");
 
     // Verify inbox file is UNCHANGED
@@ -459,7 +498,10 @@ fn test_no_retention_policy_keeps_all() {
     let result = apply_retention(&inbox_path, "test-team", "test-agent", &policy, false).unwrap();
 
     // Verify all messages kept
-    assert_eq!(result.kept, 3, "Should keep all messages when no policy set");
+    assert_eq!(
+        result.kept, 3,
+        "Should keep all messages when no policy set"
+    );
     assert_eq!(result.removed, 0);
     assert_eq!(result.archived, 0);
 }

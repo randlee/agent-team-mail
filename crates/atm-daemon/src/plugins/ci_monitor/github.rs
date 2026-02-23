@@ -24,23 +24,20 @@ impl GitHubActionsProvider {
         // Run gh command in a blocking task
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         tokio::task::spawn_blocking(move || {
-            let output = Command::new("gh")
-                .args(&args_owned)
-                .output()
-                .map_err(|e| {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        PluginError::Provider {
-                            message: "gh CLI not found. Install from https://cli.github.com/"
-                                .to_string(),
-                            source: Some(Box::new(e)),
-                        }
-                    } else {
-                        PluginError::Provider {
-                            message: format!("Failed to execute gh: {e}"),
-                            source: Some(Box::new(e)),
-                        }
+            let output = Command::new("gh").args(&args_owned).output().map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    PluginError::Provider {
+                        message: "gh CLI not found. Install from https://cli.github.com/"
+                            .to_string(),
+                        source: Some(Box::new(e)),
                     }
-                })?;
+                } else {
+                    PluginError::Provider {
+                        message: format!("Failed to execute gh: {e}"),
+                        source: Some(Box::new(e)),
+                    }
+                }
+            })?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -105,11 +102,10 @@ impl GitHubActionsProvider {
             created_at: gh_run.created_at.clone(),
             updated_at: gh_run.updated_at.clone(),
             jobs: if include_jobs {
-                gh_run.jobs.as_ref().map(|jobs| {
-                    jobs.iter()
-                        .map(|gh_job| self.parse_job(gh_job))
-                        .collect()
-                })
+                gh_run
+                    .jobs
+                    .as_ref()
+                    .map(|jobs| jobs.iter().map(|gh_job| self.parse_job(gh_job)).collect())
             } else {
                 None
             },
@@ -225,11 +221,10 @@ impl CiProvider for GitHubActionsProvider {
 
         let output = self.run_gh(&args).await?;
 
-        let gh_run: GhRun =
-            serde_json::from_str(&output).map_err(|e| PluginError::Provider {
-                message: format!("Failed to parse gh JSON: {e}"),
-                source: Some(Box::new(e)),
-            })?;
+        let gh_run: GhRun = serde_json::from_str(&output).map_err(|e| PluginError::Provider {
+            message: format!("Failed to parse gh JSON: {e}"),
+            source: Some(Box::new(e)),
+        })?;
 
         Ok(self.parse_run(&gh_run, true))
     }
@@ -237,7 +232,15 @@ impl CiProvider for GitHubActionsProvider {
     async fn get_job_log(&self, job_id: u64) -> Result<String, PluginError> {
         let job_id_arg = job_id.to_string();
         let repo_arg = format!("{}/{}", self.owner, self.repo);
-        let args = ["run", "view", "--repo", &repo_arg, "--job", &job_id_arg, "--log"];
+        let args = [
+            "run",
+            "view",
+            "--repo",
+            &repo_arg,
+            "--job",
+            &job_id_arg,
+            "--log",
+        ];
 
         self.run_gh(&args).await
     }

@@ -104,7 +104,11 @@ async fn git_toplevel(cwd: &str) -> Option<String> {
 
     let s = String::from_utf8(output.stdout).ok()?;
     let trimmed = s.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 /// Run `git branch --show-current` in `cwd`, falling back to
@@ -150,7 +154,11 @@ async fn git_branch(cwd: &str) -> Option<String> {
 
     let s = String::from_utf8(output.stdout).ok()?;
     let trimmed = s.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 /// Derive a human-readable repository name.

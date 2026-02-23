@@ -4,7 +4,7 @@
 
 use agent_team_mail_daemon::plugins::worker_adapter::{AgentState, AgentStateTracker, HookWatcher};
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
 /// Helper: write a hook event line to the given file, appending.
@@ -194,7 +194,14 @@ async fn test_hook_watcher_full_lifecycle() {
         state.lock().unwrap().get_state("arch-ctm"),
         Some(AgentState::Killed)
     );
-    assert!(state.lock().unwrap().get_state("arch-ctm").unwrap().is_terminal());
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .get_state("arch-ctm")
+            .unwrap()
+            .is_terminal()
+    );
 
     cancel.cancel();
 }

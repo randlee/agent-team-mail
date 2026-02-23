@@ -89,7 +89,13 @@ pub fn apply_retention(
     let mut to_remove = Vec::new();
 
     for message in messages {
-        let should_remove = should_remove_message(&message, &max_age_duration, now, policy.max_count, to_keep.len());
+        let should_remove = should_remove_message(
+            &message,
+            &max_age_duration,
+            now,
+            policy.max_count,
+            to_keep.len(),
+        );
 
         if should_remove {
             to_remove.push(message);
@@ -110,7 +116,11 @@ pub fn apply_retention(
         } else {
             0
         };
-        return Ok(RetentionResult::new(to_keep.len(), to_remove.len(), archived));
+        return Ok(RetentionResult::new(
+            to_keep.len(),
+            to_remove.len(),
+            archived,
+        ));
     }
 
     // Archive messages if configured
@@ -128,7 +138,11 @@ pub fn apply_retention(
         messages.extend(to_keep.clone());
     })?;
 
-    Ok(RetentionResult::new(to_keep.len(), to_remove.len(), archived))
+    Ok(RetentionResult::new(
+        to_keep.len(),
+        to_remove.len(),
+        archived,
+    ))
 }
 
 /// Determine if a message should be removed based on retention policy
@@ -191,7 +205,8 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
         None => anyhow::bail!("Duration must have a unit (h or d): {s}"),
     };
 
-    let num: i64 = num_part.parse()
+    let num: i64 = num_part
+        .parse()
         .with_context(|| format!("Invalid number in duration: {s}"))?;
 
     match unit {
@@ -227,8 +242,12 @@ fn archive_messages(
 ) -> Result<()> {
     // Create archive directory structure
     let team_agent_dir = archive_dir.join(team).join(agent);
-    fs::create_dir_all(&team_agent_dir)
-        .with_context(|| format!("Failed to create archive directory: {}", team_agent_dir.display()))?;
+    fs::create_dir_all(&team_agent_dir).with_context(|| {
+        format!(
+            "Failed to create archive directory: {}",
+            team_agent_dir.display()
+        )
+    })?;
 
     // Create timestamped archive file
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
@@ -419,9 +438,9 @@ mod tests {
 
     #[test]
     fn test_clean_report_files_deletes_old_files() {
-        use tempfile::TempDir;
         use std::fs::File;
         use std::io::Write;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let report_dir = temp_dir.path().join("reports");
@@ -431,7 +450,10 @@ mod tests {
         let old_json = report_dir.join("old.json");
         let old_md = report_dir.join("old.md");
         File::create(&old_json).unwrap().write_all(b"{}").unwrap();
-        File::create(&old_md).unwrap().write_all(b"# Report").unwrap();
+        File::create(&old_md)
+            .unwrap()
+            .write_all(b"# Report")
+            .unwrap();
 
         // Wait a bit to ensure files have a measurable age
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -448,9 +470,9 @@ mod tests {
 
     #[test]
     fn test_clean_report_files_skips_recent_files() {
-        use tempfile::TempDir;
         use std::fs::File;
         use std::io::Write;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let report_dir = temp_dir.path().join("reports");
@@ -459,8 +481,14 @@ mod tests {
         // Create recent report files
         let recent_json = report_dir.join("recent.json");
         let recent_md = report_dir.join("recent.md");
-        File::create(&recent_json).unwrap().write_all(b"{}").unwrap();
-        File::create(&recent_md).unwrap().write_all(b"# Report").unwrap();
+        File::create(&recent_json)
+            .unwrap()
+            .write_all(b"{}")
+            .unwrap();
+        File::create(&recent_md)
+            .unwrap()
+            .write_all(b"# Report")
+            .unwrap();
 
         // Clean files older than 1 hour (both should be skipped)
         let max_age = Duration::hours(1);
@@ -503,9 +531,9 @@ mod tests {
 
     #[test]
     fn test_clean_report_files_only_targets_json_and_md() {
-        use tempfile::TempDir;
         use std::fs::File;
         use std::io::Write;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let report_dir = temp_dir.path().join("reports");
@@ -518,7 +546,10 @@ mod tests {
         let log_file = report_dir.join("report.log");
 
         File::create(&json_file).unwrap().write_all(b"{}").unwrap();
-        File::create(&md_file).unwrap().write_all(b"# Report").unwrap();
+        File::create(&md_file)
+            .unwrap()
+            .write_all(b"# Report")
+            .unwrap();
         File::create(&txt_file).unwrap().write_all(b"text").unwrap();
         File::create(&log_file).unwrap().write_all(b"log").unwrap();
 
@@ -581,9 +612,9 @@ mod tests {
 
     #[test]
     fn test_retention_only_scans_inboxes_subdirectory() {
-        use tempfile::TempDir;
         use std::fs::File;
         use std::io::Write;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let team_dir = temp_dir.path().join("test-team");

@@ -304,11 +304,11 @@ Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-view
 
 > **Design Decision**: High-volume Codex stream deltas MUST flow directly from `atm-agent-mcp` to active watchers. `atm-daemon` receives lifecycle/state summaries, not continuous token streams.
 
-- **FR-21.1**: Proxy MUST support watcher attach/detach per active session (`agent_id`), with at most one active watcher sink per session in MVP.
+- **FR-21.1**: Proxy MUST support watcher attach/detach per active session (`agent_id`) with multi-watcher fanout (multiple concurrent watcher sinks per session).
 - **FR-21.2**: When no watcher is attached, proxy MAY drop render-stream deltas after normal upstream forwarding.
 - **FR-21.3**: Proxy MUST maintain a bounded per-session replay buffer (default: last `50` rendered lines/events) for fast context fill when a watcher attaches or switches sessions.
 - **FR-21.4**: On watcher attach, proxy MUST replay buffered lines/events in order, then switch to live streaming.
-- **FR-21.5**: Proxy MUST emit only coarse lifecycle summaries to daemon (`session_start`, `turn_started`, `turn_idle/turn_completed`, `session_end`, stream error summaries). Continuous stream deltas MUST NOT be forwarded to daemon.
+- **FR-21.5**: Proxy MUST emit only coarse lifecycle/observability summaries to daemon (`session_start`, `turn_started`, `turn_idle/turn_completed`, `session_end`, `stream_error`, dropped/unknown counters). Continuous stream deltas MUST NOT be forwarded to daemon.
 
 ### FR-22: Stream Source Attribution and Input Provenance
 

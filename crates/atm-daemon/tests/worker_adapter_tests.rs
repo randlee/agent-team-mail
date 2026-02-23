@@ -128,7 +128,8 @@ fn test_config_validation_invalid_backend() {
 enabled = true
 backend = "unsupported-backend"
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -143,7 +144,8 @@ enabled = true
 backend = "codex-tmux"
 tmux_session = "invalid:session"
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -158,7 +160,8 @@ enabled = true
 backend = "codex-tmux"
 tmux_session = ""
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -176,7 +179,8 @@ team_name = "test-team"
 member_name = "test-member"
 concurrency_policy = "invalid-policy"
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -200,7 +204,8 @@ member_name = "arch-ctm"
 enabled = true
 concurrency_policy = "reject"
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_ok());
@@ -512,7 +517,8 @@ backend = "codex-tmux"
 [agents."test-agent"]
 member_name = "test-member"
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -529,7 +535,8 @@ team_name = "test-team"
 [agents."test-agent"]
 enabled = true
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -548,7 +555,8 @@ member_name = "duplicate"
 [agents."agent2"]
 member_name = "duplicate"
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_err());
@@ -569,7 +577,8 @@ member_name = "dev-1"
 [agents."qa"]
 member_name = "qa-1"
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let config = WorkersConfig::from_toml(&table).unwrap();
 
     assert_eq!(config.get_member_name("architect"), Some("arch-ctm"));
@@ -601,7 +610,8 @@ member_name = "qa-1"
 enabled = true
 concurrency_policy = "reject"
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let result = WorkersConfig::from_toml(&table);
 
     assert!(result.is_ok());
@@ -682,7 +692,10 @@ async fn test_handle_message_routes_to_agent() {
     );
 
     let mut agents_table = agent_team_mail_core::toml::Table::new();
-    agents_table.insert("test-agent".to_string(), agent_team_mail_core::toml::Value::Table(agent_table));
+    agents_table.insert(
+        "test-agent".to_string(),
+        agent_team_mail_core::toml::Value::Table(agent_table),
+    );
 
     worker_config.insert(
         "agents".to_string(),
@@ -692,10 +705,9 @@ async fn test_handle_message_routes_to_agent() {
     // Create config with plugin config
     let mut config = Config::default();
     config.core.default_team = "test-team".to_string();
-    config.plugins.insert(
-        "workers".to_string(),
-        worker_config.into_iter().collect(),
-    );
+    config
+        .plugins
+        .insert("workers".to_string(), worker_config.into_iter().collect());
     ctx.config = Arc::new(config);
 
     let mut plugin = WorkerAdapterPlugin::new();
@@ -750,7 +762,8 @@ tmux_session = "test-session"
 member_name = "test-member"
 enabled = true
 "#;
-    let table: agent_team_mail_core::toml::Table = agent_team_mail_core::toml::from_str(toml_str).unwrap();
+    let table: agent_team_mail_core::toml::Table =
+        agent_team_mail_core::toml::from_str(toml_str).unwrap();
     let config = WorkersConfig::from_toml(&table).unwrap();
 
     // Verify team_name is correctly parsed and stored

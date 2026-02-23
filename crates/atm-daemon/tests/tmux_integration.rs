@@ -31,7 +31,10 @@ fn unique_session_name() -> String {
 struct DaemonEnv {
     workdir: tempfile::TempDir,
     atm_home: PathBuf,
-    #[expect(dead_code, reason = "held for test environment lifetime; not read directly")]
+    #[expect(
+        dead_code,
+        reason = "held for test environment lifetime; not read directly"
+    )]
     team: String,
     agent: String,
     session: String,
@@ -72,7 +75,6 @@ impl DaemonEnv {
             log_dir,
         }
     }
-
 }
 
 struct SessionGuard {
@@ -280,10 +282,7 @@ async fn tmux_worker_receives_message() {
     };
     let mut backend = CodexTmuxBackend::new(env.session.clone(), env.log_dir.clone());
 
-    let handle = backend
-        .spawn(&env.agent, "sleep 300")
-        .await
-        .unwrap();
+    let handle = backend.spawn(&env.agent, "sleep 300").await.unwrap();
 
     assert!(
         wait_for_tmux_session(&env.session, Duration::from_secs(5)),

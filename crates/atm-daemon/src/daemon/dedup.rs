@@ -153,7 +153,12 @@ struct DurableEntry {
 
 impl DurableEntry {
     fn key(&self) -> DedupeKey {
-        DedupeKey::new(&self.team, &self.session_id, &self.agent_id, &self.request_id)
+        DedupeKey::new(
+            &self.team,
+            &self.session_id,
+            &self.agent_id,
+            &self.request_id,
+        )
     }
 }
 
@@ -306,9 +311,7 @@ impl DurableDedupeStore {
             // (keep the entry).  Only discard when the entry is demonstrably
             // older than the TTL window.
             let age = now.signed_duration_since(entry.inserted_at);
-            if age.num_seconds() >= 0
-                && age.to_std().unwrap_or(Duration::ZERO) >= self.ttl
-            {
+            if age.num_seconds() >= 0 && age.to_std().unwrap_or(Duration::ZERO) >= self.ttl {
                 continue;
             }
             let key = entry.key();
@@ -375,8 +378,7 @@ impl DurableDedupeStore {
             // treated as valid (not yet expired) rather than discarded.
             let expired = self.entries.get(&front_key).is_none_or(|&ts| {
                 let age = now.signed_duration_since(ts);
-                age.num_seconds() >= 0
-                    && age.to_std().unwrap_or(Duration::ZERO) >= self.ttl
+                age.num_seconds() >= 0 && age.to_std().unwrap_or(Duration::ZERO) >= self.ttl
             });
             if !expired {
                 break;
@@ -501,7 +503,10 @@ mod tests {
         }
         // Drop and recreate — simulates daemon restart.
         let mut store2 = make_store(&dir);
-        assert!(store2.check_and_insert(k), "should be duplicate after restart");
+        assert!(
+            store2.check_and_insert(k),
+            "should be duplicate after restart"
+        );
     }
 
     #[test]
@@ -524,8 +529,7 @@ mod tests {
         let valid = r#"{"team":"atm-dev","session_id":"sess-1","agent_id":"arch-ctm","request_id":"req-good","inserted_at":"2099-01-01T00:00:00Z"}"#;
         std::fs::write(&path, format!("not-json\n{valid}\n")).unwrap();
 
-        let mut store =
-            DurableDedupeStore::new(path, Duration::from_secs(600), 1000).unwrap();
+        let mut store = DurableDedupeStore::new(path, Duration::from_secs(600), 1000).unwrap();
         // The valid entry should have loaded (it has a future timestamp, so TTL not expired).
         let k_good = DedupeKey::new("atm-dev", "sess-1", "arch-ctm", "req-good");
         assert!(
@@ -574,10 +578,8 @@ mod tests {
         let path = dir.path().join("dedup.jsonl");
 
         // Two entries: one with ancient timestamp (expired), one with future.
-        let expired =
-            r#"{"team":"a","session_id":"s","agent_id":"x","request_id":"r-old","inserted_at":"2000-01-01T00:00:00Z"}"#;
-        let fresh =
-            r#"{"team":"a","session_id":"s","agent_id":"x","request_id":"r-new","inserted_at":"2099-01-01T00:00:00Z"}"#;
+        let expired = r#"{"team":"a","session_id":"s","agent_id":"x","request_id":"r-old","inserted_at":"2000-01-01T00:00:00Z"}"#;
+        let fresh = r#"{"team":"a","session_id":"s","agent_id":"x","request_id":"r-new","inserted_at":"2099-01-01T00:00:00Z"}"#;
         std::fs::write(&path, format!("{expired}\n{fresh}\n")).unwrap();
 
         let mut store =
@@ -585,7 +587,10 @@ mod tests {
         store.cleanup_expired().unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(!content.contains("r-old"), "expired entry should be removed");
+        assert!(
+            !content.contains("r-old"),
+            "expired entry should be removed"
+        );
         assert!(content.contains("r-new"), "fresh entry should remain");
     }
 

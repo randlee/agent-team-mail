@@ -569,10 +569,7 @@ mod tests {
         reg_entry(&mut r, "agent-1").unwrap();
         reg_entry(&mut r, "agent-2").unwrap();
         let err = reg_entry(&mut r, "agent-3").unwrap_err();
-        assert!(matches!(
-            err,
-            RegistryError::MaxSessionsExceeded { max: 2 }
-        ));
+        assert!(matches!(err, RegistryError::MaxSessionsExceeded { max: 2 }));
     }
 
     // ─── Stale / resume ──────────────────────────────────────────────────────
@@ -623,7 +620,10 @@ mod tests {
         assert!(r.find_by_identity("arch-ctm").is_none());
         // Session still exists in sessions map
         assert!(r.get(&entry.agent_id).is_some());
-        assert_eq!(r.get(&entry.agent_id).unwrap().status, SessionStatus::Closed);
+        assert_eq!(
+            r.get(&entry.agent_id).unwrap().status,
+            SessionStatus::Closed
+        );
     }
 
     // ─── thread_id ───────────────────────────────────────────────────────────
@@ -783,7 +783,10 @@ mod tests {
 
     #[test]
     fn load_from_snapshot_empty_gives_empty_registry() {
-        let snap = RegistrySnapshot { version: 1, sessions: vec![] };
+        let snap = RegistrySnapshot {
+            version: 1,
+            sessions: vec![],
+        };
         let r = SessionRegistry::load_from_snapshot(snap, 10);
         assert_eq!(r.active_count(), 0);
         assert!(r.list_all().is_empty());
@@ -902,10 +905,7 @@ mod tests {
         let mut r = make_registry(10);
         let entry = reg_entry(&mut r, "arch-ctm").unwrap();
         r.set_thread_state(&entry.agent_id, ThreadState::Idle);
-        assert_eq!(
-            r.get_thread_state(&entry.agent_id),
-            Some(ThreadState::Idle)
-        );
+        assert_eq!(r.get_thread_state(&entry.agent_id), Some(ThreadState::Idle));
     }
 
     #[test]
