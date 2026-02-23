@@ -2840,10 +2840,16 @@ fn format_watch_frame(frame: &Value) -> String {
     } else {
         text.to_string()
     };
+    let text = text.replace('\n', "\\n");
+    let has_code_fence = text.contains("```");
 
     let mut base = match kind {
         "agent_message_delta" | "agent_message" | "agent_message_chunk" => {
-            format!("[{source}] assistant: {text}")
+            if has_code_fence {
+                format!("[{source}] assistant(code): {text}")
+            } else {
+                format!("[{source}] assistant: {text}")
+            }
         }
         "exec_command_output_delta" | "exec_command_completed" | "exec_command_error" => {
             format!("[{source}] cmd: {text}")
@@ -2864,6 +2870,8 @@ fn format_watch_frame(frame: &Value) -> String {
         .pointer("/params/usage/context_window_pct")
         .and_then(|v| v.as_f64())
         .or_else(|| event.pointer("/params/contextWindowPct").and_then(|v| v.as_f64()))
+        .or_else(|| event.pointer("/params/usage/contextWindowPct").and_then(|v| v.as_f64()))
+        .or_else(|| event.pointer("/params/context_window_pct").and_then(|v| v.as_f64()))
     {
         base.push_str(&format!(" | ctx {:.0}%", pct));
     }
@@ -3850,6 +3858,24 @@ mod tests {
         let rendered2 = format_watch_frame(&drift);
         assert!(rendered2.contains("client_prompt"));
         assert!(rendered2.contains("cmd:"));
+    }
+
+    #[test]
+    fn test_format_watch_frame_code_fence_and_context_usage() {
+        let frame = json!({
+            "source": {"kind":"client_prompt"},
+            "event": {
+                "params": {
+                    "type":"agent_message_delta",
+                    "delta":"```rust\\nfn main(){}\\n```",
+                    "usage": {"contextWindowPct": 72.4}
+                }
+            }
+        });
+        let rendered = format_watch_frame(&frame);
+        assert!(rendered.contains("assistant(code):"));
+        assert!(rendered.contains("```rust"));
+        assert!(rendered.contains("ctx 72%"));
     }
 
     #[test]
