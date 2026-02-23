@@ -55,6 +55,17 @@ use crate::config::InterruptPolicy;
 ///
 /// Returns `true` if the application should quit after this event.
 pub fn handle_event(event: &Event, app: &mut App) -> bool {
+    if let Event::Resize(_, _) = event {
+        // Keep redraw deterministic across terminal size changes when follow mode is on.
+        if app.follow_mode {
+            app.stream_scroll_offset = app.stream_lines.len();
+        }
+        if app.log_follow_mode {
+            app.log_scroll_offset = app.log_events.len();
+        }
+        return false;
+    }
+
     if let Event::Key(KeyEvent {
         code, modifiers, ..
     }) = event
@@ -755,6 +766,32 @@ mod tests {
             app.log_scroll_offset, 5,
             "PageDown must clamp at log_events.len()"
         );
+    }
+
+    #[test]
+    fn test_resize_keeps_stream_follow_pinned() {
+        let mut app = new_app();
+        app.follow_mode = true;
+        app.stream_lines = vec!["a".into(), "b".into(), "c".into()];
+        app.stream_scroll_offset = 0;
+        let quit = handle_event(&Event::Resize(120, 36), &mut app);
+        assert!(!quit);
+        assert_eq!(app.stream_scroll_offset, 3);
+    }
+
+    #[test]
+    fn test_resize_keeps_log_follow_pinned() {
+        use agent_team_mail_core::logging_event::new_log_event;
+        let mut app = new_app();
+        app.log_follow_mode = true;
+        app.log_events = vec![
+            new_log_event("atm", "a1", "atm::test", "info"),
+            new_log_event("atm", "a2", "atm::test", "info"),
+        ];
+        app.log_scroll_offset = 0;
+        let quit = handle_event(&Event::Resize(100, 28), &mut app);
+        assert!(!quit);
+        assert_eq!(app.log_scroll_offset, 2);
     }
 
     #[test]
