@@ -2253,6 +2253,10 @@ Session ending. Write a concise summary of:\n\
                 let is_success = resp.get("error").is_none()
                     && resp.pointer("/result/isError").and_then(|v| v.as_bool()) != Some(true);
                 if is_success {
+                    if let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) {
+                        self.watch_subscriptions.lock().await.remove(agent_id);
+                        let _ = self.detach_watch_stream(agent_id).await;
+                    }
                     let sessions_path = crate::lock::sessions_dir()
                         .join(&self.team)
                         .join("registry.json");
@@ -2291,10 +2295,35 @@ Session ending. Write a concise summary of:\n\
                             }
                         })
                     }
-                    Err(WatchAttachError::AlreadyAttached) => atm_tools::make_mcp_error_result(
-                        id,
-                        &format!("agent_watch_attach: watcher already attached for '{agent_id}'"),
-                    ),
+                    Err(WatchAttachError::AlreadyAttached) => {
+                        let already_owned = self
+                            .watch_subscriptions
+                            .lock()
+                            .await
+                            .contains_key(agent_id);
+                        if already_owned {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "content": [{
+                                        "type": "text",
+                                        "text": json!({
+                                            "agent_id": agent_id,
+                                            "attached": true,
+                                            "already_attached": true,
+                                            "replay": [],
+                                        }).to_string()
+                                    }]
+                                }
+                            })
+                        } else {
+                            atm_tools::make_mcp_error_result(
+                                id,
+                                &format!("agent_watch_attach: watcher already attached for '{agent_id}'"),
+                            )
+                        }
+                    }
                 }
             }
             "agent_watch_poll" => {
@@ -3647,6 +3676,26 @@ mod tests {
         let attach_json: Value = serde_json::from_str(attach_text).expect("valid attach payload");
         assert_eq!(attach_json["attached"], true);
         assert_eq!(attach_json["replay"].as_array().map(|a| a.len()), Some(1));
+
+        let attach_again = proxy
+            .handle_synthetic_tool(
+                &json!(11),
+                "agent_watch_attach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            attach_again.get("error").is_none(),
+            "second attach should be idempotent: {attach_again}"
+        );
+        let attach_again_text = attach_again
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("attach_again text");
+        let attach_again_json: Value =
+            serde_json::from_str(attach_again_text).expect("valid attach_again payload");
+        assert_eq!(attach_again_json["already_attached"], true);
 
         proxy.watch_stream_hub.lock().await.publish_frame(
             agent_id,
