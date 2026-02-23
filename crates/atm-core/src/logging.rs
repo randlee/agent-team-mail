@@ -167,13 +167,12 @@ impl LoggingGuards {
 ///
 /// ```no_run
 /// use agent_team_mail_core::logging::{UnifiedLogMode, init_unified, init_stderr_only};
-/// use std::path::PathBuf;
 ///
 /// let _guards = init_unified(
 ///     "atm",
 ///     UnifiedLogMode::ProducerFanIn {
-///         daemon_socket: PathBuf::from("/tmp/atm-daemon.sock"),
-///         fallback_spool_dir: PathBuf::from("/tmp/atm-spool"),
+///         daemon_socket: std::env::temp_dir().join("atm-daemon.sock"),
+///         fallback_spool_dir: std::env::temp_dir().join("atm-spool"),
 ///     },
 /// ).unwrap_or_else(|_| init_stderr_only());
 /// ```
@@ -260,10 +259,13 @@ struct ForwarderHandle(Option<std::thread::JoinHandle<()>>);
 
 impl Drop for ForwarderHandle {
     fn drop(&mut self) {
-        if let Some(handle) = self.0.take() {
-            // Best-effort join; ignore errors on shutdown.
-            let _ = handle.join();
-        }
+        // Do not join the forwarder thread.  The static `PRODUCER_TX` OnceLock
+        // keeps the channel sender alive for the entire process lifetime, so
+        // the receiver loop in `run_forwarder` would never see a disconnected
+        // channel and `join()` would block forever.  The OS reclaims the thread
+        // on process exit, which is the correct behaviour for a fire-and-forget
+        // background worker.
+        let _ = self.0.take(); // drop the JoinHandle without joining
     }
 }
 
