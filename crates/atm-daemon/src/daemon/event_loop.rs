@@ -1,6 +1,6 @@
 //! Main daemon event loop
 
-use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedDedupeStore, SharedPubSubStore, SharedSessionRegistry, SharedStateStore, SharedStreamEventSender};
+use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, LogEventQueue, SharedDedupeStore, SharedPubSubStore, SharedSessionRegistry, SharedStateStore, SharedStreamEventSender};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
@@ -55,6 +55,8 @@ use tracing::{debug, error, info, warn};
 /// * `stream_state_store` - Per-agent stream turn state store.
 /// * `stream_event_sender` - Broadcast sender for push-based stream event fanout.
 ///   Create with `crate::daemon::new_stream_event_sender()`.
+/// * `log_event_queue` - Bounded queue for `"log-event"` socket commands.
+///   Create with `crate::daemon::new_log_event_queue()`.
 #[expect(
     clippy::too_many_arguments,
     reason = "event loop wiring needs shared runtime handles and plugin coordination state"
@@ -71,6 +73,7 @@ pub async fn run(
     dedup_store: SharedDedupeStore,
     stream_state_store: crate::daemon::SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
+    log_event_queue: LogEventQueue,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -128,7 +131,7 @@ pub async fn run(
             agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
         });
     let socket_cancel = cancel.clone();
-    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, session_registry, dedup_store, stream_state_store, stream_event_sender, socket_cancel).await {
+    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, session_registry, dedup_store, stream_state_store, stream_event_sender, log_event_queue, socket_cancel).await {
         Ok(handle) => {
             if handle.is_some() {
                 info!("Unix socket server started successfully");

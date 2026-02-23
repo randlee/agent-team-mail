@@ -26,12 +26,15 @@ use agent_team_mail_core::control::{
 };
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::logging_event::LogEventV1;
 use agent_team_mail_core::schema::TeamConfig;
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
+
+use crate::daemon::log_writer::LogEventQueue;
 
 use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
 use crate::daemon::session_registry::SharedSessionRegistry;
@@ -79,6 +82,8 @@ pub fn new_dedup_store(home_dir: &std::path::Path) -> Result<SharedDedupeStore> 
 /// * `stream_state_store` - Shared per-agent stream turn state store.
 /// * `stream_event_sender` - Broadcast sender for push-based stream event fanout.
 ///   Create with [`new_stream_event_sender()`].
+/// * `log_event_queue` - Bounded queue for incoming `"log-event"` commands.
+///   Create with [`crate::daemon::new_log_event_queue()`].
 /// * `cancel` - Cancellation token; server stops accepting when cancelled
 ///
 /// # Platform Behaviour
@@ -97,6 +102,7 @@ pub async fn start_socket_server(
     dedup_store: SharedDedupeStore,
     stream_state_store: SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
+    log_event_queue: LogEventQueue,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
@@ -110,6 +116,7 @@ pub async fn start_socket_server(
             dedup_store,
             stream_state_store,
             stream_event_sender,
+            log_event_queue,
             cancel,
         )
         .await
@@ -118,6 +125,7 @@ pub async fn start_socket_server(
 
     #[cfg(not(unix))]
     {
+        let _ = log_event_queue;
         info!("Unix socket server not available on this platform");
         Ok(None)
     }
@@ -271,6 +279,7 @@ async fn start_unix_socket_server(
     dedup_store: SharedDedupeStore,
     stream_state_store: SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
+    log_event_queue: LogEventQueue,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -311,6 +320,7 @@ async fn start_unix_socket_server(
             dedup_store,
             stream_state_store,
             stream_event_sender,
+            log_event_queue,
             cancel,
             &accept_socket_path,
             &accept_pid_path,
@@ -339,6 +349,7 @@ async fn run_accept_loop(
     dedup_store: SharedDedupeStore,
     stream_state_store: SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
+    log_event_queue: LogEventQueue,
     cancel: tokio_util::sync::CancellationToken,
     socket_path: &std::path::Path,
     _pid_path: &std::path::Path,
@@ -362,8 +373,9 @@ async fn run_accept_loop(
                         let dd = dedup_store.clone();
                         let ss = stream_state_store.clone();
                         let ses = stream_event_sender.clone();
+                        let leq = log_event_queue.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, home, store, ps, tx, sr, dd, ss, ses).await {
+                            if let Err(e) = handle_connection(stream, home, store, ps, tx, sr, dd, ss, ses, leq).await {
                                 error!("Socket connection handler error: {e}");
                             }
                         });
@@ -396,6 +408,7 @@ async fn handle_connection(
     dedup_store: SharedDedupeStore,
     stream_state_store: SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
+    log_event_queue: LogEventQueue,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -438,6 +451,8 @@ async fn handle_connection(
         handle_hook_event_command(request_str, &state_store, &session_registry).await
     } else if is_stream_event_command(request_str) {
         handle_stream_event_command(request_str, &stream_state_store, &stream_event_sender).await
+    } else if is_log_event_command(request_str) {
+        handle_log_event_command(request_str, &log_event_queue).await
     } else {
         match parse_and_dispatch(request_str, &state_store, &pubsub_store, &session_registry, &stream_state_store) {
             Ok(resp) => resp,
@@ -503,6 +518,13 @@ fn is_stream_event_command(request_str: &str) -> bool {
 fn is_stream_subscribe_command(request_str: &str) -> bool {
     request_str.contains(r#""command":"stream-subscribe""#)
         || request_str.contains(r#""command": "stream-subscribe""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"log-event"` command.
+#[cfg(unix)]
+fn is_log_event_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"log-event""#)
+        || request_str.contains(r#""command": "log-event""#)
 }
 
 /// Handle a `"stream-subscribe"` command: long-lived connection that streams
@@ -682,6 +704,92 @@ async fn handle_stream_event_command(
     debug!("stream-event processed: {event:?}");
 
     make_ok_response(&request.request_id, serde_json::json!({"ok": true}))
+}
+
+/// Handle a `"log-event"` command.
+///
+/// Parses the [`LogEventV1`] from the socket request payload, validates it,
+/// redacts sensitive fields, and enqueues it in the bounded log event queue.
+///
+/// # Response payload
+///
+/// - On success: `{"accepted": true}`
+/// - On queue full: `{"accepted": false, "error": "QUEUE_FULL"}`
+/// - On validation failure: error response with code `INVALID_PAYLOAD`
+/// - On version mismatch: error response with code `VERSION_MISMATCH`
+/// - On parse failure: error response with code `INVALID_REQUEST`
+#[cfg(unix)]
+async fn handle_log_event_command(
+    request_str: &str,
+    log_event_queue: &LogEventQueue,
+) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse log-event request: {e}"),
+            );
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let mut event: LogEventV1 = match serde_json::from_value(request.payload) {
+        Ok(e) => e,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INVALID_PAYLOAD",
+                &format!("Failed to parse LogEventV1: {e}"),
+            );
+        }
+    };
+
+    if event.v != 1 {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!("Unsupported log event schema version {}; expected 1", event.v),
+        );
+    }
+
+    if let Err(e) = event.validate() {
+        return make_error_response(
+            &request.request_id,
+            "INVALID_PAYLOAD",
+            &format!("Log event validation failed: {e}"),
+        );
+    }
+
+    // Redact sensitive fields before enqueueing.
+    event.redact();
+
+    let accepted = {
+        let mut q = log_event_queue.lock().await;
+        q.push(event)
+    };
+
+    if accepted {
+        make_ok_response(&request.request_id, serde_json::json!({"accepted": true}))
+    } else {
+        make_ok_response(
+            &request.request_id,
+            serde_json::json!({"accepted": false, "error": "QUEUE_FULL"}),
+        )
+    }
 }
 
 #[cfg(unix)]
@@ -2564,6 +2672,7 @@ mod tests {
             dd,
             new_stream_state_store(),
             new_stream_event_sender(),
+            crate::daemon::new_log_event_queue(),
             cancel.clone(),
         )
         .await
@@ -2633,6 +2742,7 @@ mod tests {
             dd,
             new_stream_state_store(),
             new_stream_event_sender(),
+            crate::daemon::new_log_event_queue(),
             cancel.clone(),
         )
         .await
@@ -2693,6 +2803,7 @@ mod tests {
             dd,
             new_stream_state_store(),
             new_stream_event_sender(),
+            crate::daemon::new_log_event_queue(),
             cancel.clone(),
         )
         .await
@@ -2775,6 +2886,7 @@ mod tests {
             dd,
             new_stream_state_store(),
             new_stream_event_sender(),
+            crate::daemon::new_log_event_queue(),
             cancel.clone(),
         )
         .await
@@ -2842,6 +2954,7 @@ mod tests {
             dd,
             new_stream_state_store(),
             new_stream_event_sender(),
+            crate::daemon::new_log_event_queue(),
             cancel.clone(),
         )
         .await
@@ -3124,6 +3237,7 @@ mod tests {
             dd,
             new_stream_state_store(),
             new_stream_event_sender(),
+            crate::daemon::new_log_event_queue(),
             cancel.clone(),
         )
         .await
@@ -3245,6 +3359,7 @@ mod tests {
             dd,
             new_stream_state_store(),
             new_stream_event_sender(),
+            crate::daemon::new_log_event_queue(),
             cancel.clone(),
         )
         .await
@@ -3375,6 +3490,7 @@ mod tests {
                 dd,
                 new_stream_state_store(),
                 new_stream_event_sender(),
+                crate::daemon::new_log_event_queue(),
                 cancel.clone(),
             )
             .await
