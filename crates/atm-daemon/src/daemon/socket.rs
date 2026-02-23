@@ -76,11 +76,18 @@ pub fn new_dedup_store(home_dir: &std::path::Path) -> Result<SharedDedupeStore> 
 /// * `session_registry` - Shared session registry for `session-query` requests
 /// * `dedup_store` - Shared durable dedupe store for idempotency across restarts.
 ///   Create with [`new_dedup_store()`].
+/// * `stream_state_store` - Shared per-agent stream turn state store.
+/// * `stream_event_sender` - Broadcast sender for push-based stream event fanout.
+///   Create with [`new_stream_event_sender()`].
 /// * `cancel` - Cancellation token; server stops accepting when cancelled
 ///
 /// # Platform Behaviour
 ///
 /// On non-Unix platforms this function returns `Ok(None)` immediately.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "public entry point passes through all shared daemon resources"
+)]
 pub async fn start_socket_server(
     home_dir: PathBuf,
     state_store: SharedStateStore,
@@ -88,6 +95,8 @@ pub async fn start_socket_server(
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
     dedup_store: SharedDedupeStore,
+    stream_state_store: SharedStreamStateStore,
+    stream_event_sender: SharedStreamEventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
@@ -99,6 +108,8 @@ pub async fn start_socket_server(
             launch_tx,
             session_registry,
             dedup_store,
+            stream_state_store,
+            stream_event_sender,
             cancel,
         )
         .await
@@ -176,6 +187,46 @@ pub fn new_pubsub_store() -> SharedPubSubStore {
     std::sync::Arc::new(std::sync::Mutex::new(PubSub::new()))
 }
 
+// ── Stream state store ───────────────────────────────────────────────────────
+
+/// Per-agent stream turn state, updated by `"stream-event"` socket commands.
+///
+/// Maps agent name to [`AgentStreamState`].
+pub type SharedStreamStateStore = std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<String, agent_team_mail_core::daemon_stream::AgentStreamState>>,
+>;
+
+/// Create a new, empty [`SharedStreamStateStore`].
+pub fn new_stream_state_store() -> SharedStreamStateStore {
+    std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+// ── Stream event broadcast channel ───────────────────────────────────────────
+
+/// Sender half of the daemon's stream-event broadcast channel.
+///
+/// `atm-agent-mcp` transports send [`DaemonStreamEvent`](agent_team_mail_core::daemon_stream::DaemonStreamEvent)
+/// to the daemon via the `"stream-event"` socket command. The daemon publishes
+/// each received event on this channel so that any in-process subscriber
+/// (e.g. `atm-tui` via a `"stream-subscribe"` connection) receives events
+/// with low latency.
+///
+/// Capacity of 256 events: lagged subscribers receive an error and must
+/// re-sync via `agent-stream-state`.
+pub type SharedStreamEventSender = std::sync::Arc<
+    tokio::sync::broadcast::Sender<agent_team_mail_core::daemon_stream::DaemonStreamEvent>,
+>;
+
+/// Create a new broadcast channel for stream events.
+///
+/// Returns an [`SharedStreamEventSender`] backed by a channel with capacity
+/// 256.  Dropping the last [`tokio::sync::broadcast::Receiver`] does not
+/// close the sender; the sender is kept alive by the `Arc`.
+pub fn new_stream_event_sender() -> SharedStreamEventSender {
+    let (tx, _rx) = tokio::sync::broadcast::channel(256);
+    std::sync::Arc::new(tx)
+}
+
 // ── Launch channel types ──────────────────────────────────────────────────────
 
 /// A request to launch a new agent, sent from the socket handler to the
@@ -207,6 +258,10 @@ pub fn new_launch_sender() -> LaunchSender {
 // ── Unix implementation ───────────────────────────────────────────────────────
 
 #[cfg(unix)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "socket server startup requires shared daemon resources passed from main"
+)]
 async fn start_unix_socket_server(
     home_dir: PathBuf,
     state_store: SharedStateStore,
@@ -214,6 +269,8 @@ async fn start_unix_socket_server(
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
     dedup_store: SharedDedupeStore,
+    stream_state_store: SharedStreamStateStore,
+    stream_event_sender: SharedStreamEventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -252,6 +309,8 @@ async fn start_unix_socket_server(
             launch_tx,
             session_registry,
             dedup_store,
+            stream_state_store,
+            stream_event_sender,
             cancel,
             &accept_socket_path,
             &accept_pid_path,
@@ -278,6 +337,8 @@ async fn run_accept_loop(
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
     dedup_store: SharedDedupeStore,
+    stream_state_store: SharedStreamStateStore,
+    stream_event_sender: SharedStreamEventSender,
     cancel: tokio_util::sync::CancellationToken,
     socket_path: &std::path::Path,
     _pid_path: &std::path::Path,
@@ -299,8 +360,10 @@ async fn run_accept_loop(
                         let tx = launch_tx.clone();
                         let sr = session_registry.clone();
                         let dd = dedup_store.clone();
+                        let ss = stream_state_store.clone();
+                        let ses = stream_event_sender.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, home, store, ps, tx, sr, dd).await {
+                            if let Err(e) = handle_connection(stream, home, store, ps, tx, sr, dd, ss, ses).await {
                                 error!("Socket connection handler error: {e}");
                             }
                         });
@@ -319,6 +382,10 @@ async fn run_accept_loop(
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "connection handler needs all shared daemon resources for command dispatch"
+)]
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     home: std::path::PathBuf,
@@ -327,6 +394,8 @@ async fn handle_connection(
     launch_tx: LaunchSender,
     session_registry: SharedSessionRegistry,
     dedup_store: SharedDedupeStore,
+    stream_state_store: SharedStreamStateStore,
+    stream_event_sender: SharedStreamEventSender,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -350,6 +419,14 @@ async fn handle_connection(
 
     let request_str = request_line.trim();
 
+    // Long-lived "stream-subscribe" connections are handled before the normal
+    // one-shot request/response path.
+    if is_stream_subscribe_command(request_str) {
+        let mut stream = reader.into_inner();
+        handle_stream_subscribe(&mut stream, request_str, &stream_event_sender).await;
+        return Ok(());
+    }
+
     // Check whether this is a launch command before sync dispatch so we can
     // use async channel communication with the WorkerAdapterPlugin.
     let response = if is_launch_command(request_str) {
@@ -359,8 +436,10 @@ async fn handle_connection(
             .await
     } else if is_hook_event_command(request_str) {
         handle_hook_event_command(request_str, &state_store, &session_registry).await
+    } else if is_stream_event_command(request_str) {
+        handle_stream_event_command(request_str, &stream_state_store, &stream_event_sender).await
     } else {
-        match parse_and_dispatch(request_str, &state_store, &pubsub_store, &session_registry) {
+        match parse_and_dispatch(request_str, &state_store, &pubsub_store, &session_registry, &stream_state_store) {
             Ok(resp) => resp,
             Err(e) => {
                 error!("Failed to dispatch socket request: {e}");
@@ -410,6 +489,162 @@ fn is_control_command(request_str: &str) -> bool {
 fn is_hook_event_command(request_str: &str) -> bool {
     request_str.contains(r#""command":"hook-event""#)
         || request_str.contains(r#""command": "hook-event""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"stream-event"` command.
+#[cfg(unix)]
+fn is_stream_event_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"stream-event""#)
+        || request_str.contains(r#""command": "stream-event""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"stream-subscribe"` command.
+#[cfg(unix)]
+fn is_stream_subscribe_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"stream-subscribe""#)
+        || request_str.contains(r#""command": "stream-subscribe""#)
+}
+
+/// Handle a `"stream-subscribe"` command: long-lived connection that streams
+/// [`DaemonStreamEvent`]s to the caller via the broadcast channel.
+///
+/// Sends an initial ACK line `{"version":1,"status":"ok","streaming":true}`,
+/// then writes one JSON line per received event until the client disconnects
+/// or the broadcast sender is closed.
+///
+/// An optional `agent` field in the request payload filters events to a single
+/// agent; when absent all events are forwarded.
+///
+/// Lagged subscribers (more than 256 unconsumed events) receive a warning log
+/// and continue — they will miss events but the connection stays open.
+#[cfg(unix)]
+async fn handle_stream_subscribe(
+    stream: &mut tokio::net::UnixStream,
+    request_str: &str,
+    stream_event_sender: &SharedStreamEventSender,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    // Parse optional agent filter from payload.
+    let agent_filter: Option<String> = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|v| {
+            v.get("payload")
+                .and_then(|p| p.get("agent"))
+                .and_then(|a| a.as_str().map(str::to_string))
+        });
+
+    // Send initial ACK so the subscriber knows the channel is live.
+    let ack = serde_json::json!({"version": 1, "status": "ok", "streaming": true});
+    let ack_line = format!("{ack}\n");
+    if stream.write_all(ack_line.as_bytes()).await.is_err() {
+        return; // Client already gone.
+    }
+    if stream.flush().await.is_err() {
+        return;
+    }
+
+    // Subscribe to the broadcast channel.
+    let mut rx = stream_event_sender.subscribe();
+
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                // Apply optional agent filter.
+                let matches = match &agent_filter {
+                    Some(filter) => event.agent() == filter,
+                    None => true,
+                };
+                if !matches {
+                    continue;
+                }
+                match serde_json::to_string(&event) {
+                    Ok(line) => {
+                        let line = format!("{line}\n");
+                        if stream.write_all(line.as_bytes()).await.is_err() {
+                            break; // Client disconnected.
+                        }
+                        if stream.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("stream-subscribe: failed to serialize event: {e}");
+                    }
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                debug!("stream-subscribe: broadcast channel closed");
+                break;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                warn!("stream-subscribe: lagged by {n} events; subscriber must re-sync via agent-stream-state");
+                // Continue — subscriber misses events but stays connected.
+            }
+        }
+    }
+}
+
+/// Handle a `"stream-event"` command: parse the [`DaemonStreamEvent`], update
+/// the per-agent stream state store, publish to the broadcast channel, and
+/// return an `{ok: true}` response.
+#[cfg(unix)]
+async fn handle_stream_event_command(
+    request_str: &str,
+    stream_state_store: &SharedStreamStateStore,
+    stream_event_sender: &SharedStreamEventSender,
+) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+    use agent_team_mail_core::daemon_stream::{AgentStreamState, DaemonStreamEvent};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse stream-event request: {e}"),
+            );
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let event: DaemonStreamEvent = match serde_json::from_value(request.payload) {
+        Ok(e) => e,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INVALID_PAYLOAD",
+                &format!("Failed to parse DaemonStreamEvent: {e}"),
+            );
+        }
+    };
+
+    // Update the per-agent stream state.
+    let agent = AgentStreamState::agent_from_event(&event).to_string();
+    {
+        let mut store = stream_state_store.lock().unwrap();
+        let state = store.entry(agent).or_default();
+        state.apply(&event);
+    }
+
+    // Publish to the broadcast channel for push-based subscribers.
+    // Ignore send errors — no active subscribers is the normal steady state.
+    let _ = stream_event_sender.send(event.clone());
+
+    debug!("stream-event processed: {event:?}");
+
+    make_ok_response(&request.request_id, serde_json::json!({"ok": true}))
 }
 
 #[cfg(unix)]
@@ -1159,6 +1394,7 @@ fn parse_and_dispatch(
     state_store: &SharedStateStore,
     pubsub_store: &SharedPubSubStore,
     session_registry: &SharedSessionRegistry,
+    stream_state_store: &SharedStreamStateStore,
 ) -> Result<SocketResponse> {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
 
@@ -1199,6 +1435,7 @@ fn parse_and_dispatch(
         "subscribe" => handle_subscribe(&request, pubsub_store),
         "unsubscribe" => handle_unsubscribe(&request, pubsub_store),
         "session-query" => handle_session_query(&request, session_registry),
+        "agent-stream-state" => handle_agent_stream_state(&request, stream_state_store),
         // "launch" is handled asynchronously before parse_and_dispatch is called.
         // If it somehow reaches here, return a clear internal error.
         "launch" => make_error_response(
@@ -1218,6 +1455,12 @@ fn parse_and_dispatch(
             "INTERNAL_ERROR",
             "hook-event command should have been handled by the async path",
         ),
+        // "stream-event" is handled asynchronously before parse_and_dispatch is called.
+        "stream-event" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "stream-event command should have been handled by the async path",
+        ),
         other => make_error_response(
             &request.request_id,
             "UNKNOWN_COMMAND",
@@ -1226,6 +1469,39 @@ fn parse_and_dispatch(
     };
 
     Ok(response)
+}
+
+/// Handle the `agent-stream-state` command.
+///
+/// Payload: `{"agent": "<agent-name>"}`
+/// Response: the agent's [`AgentStreamState`] or `AGENT_NOT_FOUND` error.
+fn handle_agent_stream_state(
+    request: &agent_team_mail_core::daemon_client::SocketRequest,
+    stream_state_store: &SharedStreamStateStore,
+) -> SocketResponse {
+    let agent = match request.payload.get("agent").and_then(|v| v.as_str()) {
+        Some(a) if !a.is_empty() => a.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'agent'",
+            );
+        }
+    };
+
+    let store = stream_state_store.lock().unwrap();
+    match store.get(&agent) {
+        Some(state) => {
+            let payload = serde_json::to_value(state).unwrap_or_default();
+            make_ok_response(&request.request_id, payload)
+        }
+        None => make_error_response(
+            &request.request_id,
+            "AGENT_NOT_FOUND",
+            &format!("No stream state for agent '{agent}'"),
+        ),
+    }
 }
 
 /// Handle the `session-query` command.
@@ -1723,7 +1999,7 @@ mod tests {
         let ps = make_ps();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r1","command":"launch","payload":{"agent":"","team":"atm-dev","command":"codex","timeout_secs":30,"env_vars":{}}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         // In parse_and_dispatch the "launch" arm returns INTERNAL_ERROR
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
@@ -1766,7 +2042,7 @@ mod tests {
         let ps = make_ps();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r1","command":"bogus","payload":{}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "UNKNOWN_COMMAND");
     }
@@ -1776,7 +2052,7 @@ mod tests {
         let store = make_store();
         let ps = make_ps();
         let sr = make_sr();
-        let resp = parse_and_dispatch("not-json{{", &store, &ps, &sr).unwrap();
+        let resp = parse_and_dispatch("not-json{{", &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INVALID_REQUEST");
     }
@@ -1787,7 +2063,7 @@ mod tests {
         let ps = make_ps();
         let sr = make_sr();
         let req_json = r#"{"version":99,"request_id":"r1","command":"agent-state","payload":{}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
     }
@@ -2249,6 +2525,8 @@ mod tests {
             launch_tx,
             make_sr(),
             dd,
+            new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2316,6 +2594,8 @@ mod tests {
             launch_tx,
             make_sr(),
             dd,
+            new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2374,6 +2654,8 @@ mod tests {
             launch_tx,
             make_sr(),
             dd,
+            new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2454,6 +2736,8 @@ mod tests {
             launch_tx,
             sr,
             dd,
+            new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2519,6 +2803,8 @@ mod tests {
             launch_tx,
             make_sr(),
             dd,
+            new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2566,7 +2852,7 @@ mod tests {
         let ps = make_ps();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-hook","command":"hook-event","payload":{"event":"session_start","agent":"test-agent","session_id":"s1"}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps, &sr).unwrap();
+        let resp = parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
     }
@@ -2799,6 +3085,8 @@ mod tests {
             launch_tx,
             session_registry.clone(),
             dd,
+            new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -2918,6 +3206,8 @@ mod tests {
             launch_tx,
             session_registry.clone(),
             dd,
+            new_stream_state_store(),
+            new_stream_event_sender(),
             cancel.clone(),
         )
         .await
@@ -3046,6 +3336,8 @@ mod tests {
                 launch_tx,
                 make_sr(),
                 dd,
+                new_stream_state_store(),
+                new_stream_event_sender(),
                 cancel.clone(),
             )
             .await
@@ -3537,5 +3829,265 @@ mod tests {
         let reg = sr.lock().unwrap();
         let record = reg.query("arch-ctm").expect("arch-ctm must remain in registry");
         assert_eq!(record.state, SessionState::Dead);
+    }
+
+    // ── G.7 stream-event and agent-stream-state tests ────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_stream_event_command_detection() {
+        assert!(is_stream_event_command(
+            r#"{"version":1,"request_id":"r1","command":"stream-event","payload":{}}"#
+        ));
+        assert!(is_stream_event_command(
+            r#"{"version":1,"request_id":"r1","command": "stream-event","payload":{}}"#
+        ));
+        assert!(!is_stream_event_command(
+            r#"{"version":1,"request_id":"r1","command":"agent-state","payload":{}}"#
+        ));
+        assert!(!is_stream_event_command(
+            r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{}}"#
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_stream_event_command_accepts_turn_started_and_updates_store() {
+        use agent_team_mail_core::daemon_stream::StreamTurnStatus;
+
+        let store = new_stream_state_store();
+        let req_json = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "request_id": "se-1",
+            "command": "stream-event",
+            "payload": {
+                "kind": "turn_started",
+                "agent": "arch-ctm",
+                "thread_id": "th-1",
+                "turn_id": "turn-abc",
+                "transport": "app-server"
+            }
+        });
+        let req_str = serde_json::to_string(&req_json).unwrap();
+
+        let resp = handle_stream_event_command(&req_str, &store, &new_stream_event_sender()).await;
+        assert_eq!(resp.status, "ok", "stream-event should succeed");
+        assert!(
+            resp.payload.unwrap()["ok"].as_bool().unwrap(),
+            "response should contain ok: true"
+        );
+
+        // Verify the state store was updated.
+        let guard = store.lock().unwrap();
+        let state = guard.get("arch-ctm").expect("agent should be in store");
+        assert_eq!(state.turn_status, StreamTurnStatus::Busy);
+        assert_eq!(state.turn_id.as_deref(), Some("turn-abc"));
+        assert_eq!(state.thread_id.as_deref(), Some("th-1"));
+        assert_eq!(state.transport.as_deref(), Some("app-server"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_stream_event_command_turn_completed_sets_terminal() {
+        use agent_team_mail_core::daemon_stream::StreamTurnStatus;
+
+        let store = new_stream_state_store();
+
+        // First send TurnStarted so agent is Busy.
+        let started = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "request_id": "se-2a",
+            "command": "stream-event",
+            "payload": {
+                "kind": "turn_started",
+                "agent": "worker-1",
+                "thread_id": "th-2",
+                "turn_id": "turn-def",
+                "transport": "cli-json"
+            }
+        });
+        let resp = handle_stream_event_command(
+            &serde_json::to_string(&started).unwrap(),
+            &store,
+            &new_stream_event_sender(),
+        )
+        .await;
+        assert_eq!(resp.status, "ok");
+
+        // Now TurnCompleted.
+        let completed = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "request_id": "se-2b",
+            "command": "stream-event",
+            "payload": {
+                "kind": "turn_completed",
+                "agent": "worker-1",
+                "thread_id": "th-2",
+                "turn_id": "turn-def",
+                "status": "completed",
+                "transport": "cli-json"
+            }
+        });
+        let resp = handle_stream_event_command(
+            &serde_json::to_string(&completed).unwrap(),
+            &store,
+            &new_stream_event_sender(),
+        )
+        .await;
+        assert_eq!(resp.status, "ok");
+
+        let guard = store.lock().unwrap();
+        let state = guard.get("worker-1").unwrap();
+        assert_eq!(state.turn_status, StreamTurnStatus::Terminal);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_stream_event_command_invalid_payload() {
+        let store = new_stream_state_store();
+        let req_json = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "request_id": "se-bad",
+            "command": "stream-event",
+            "payload": {"invalid": true}
+        });
+        let req_str = serde_json::to_string(&req_json).unwrap();
+        let resp = handle_stream_event_command(&req_str, &store, &new_stream_event_sender()).await;
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "INVALID_PAYLOAD");
+    }
+
+    #[test]
+    fn test_agent_stream_state_returns_state_after_event() {
+        use agent_team_mail_core::daemon_stream::{AgentStreamState, DaemonStreamEvent};
+
+        let store = new_stream_state_store();
+        // Pre-populate the store with a known state.
+        {
+            let mut guard = store.lock().unwrap();
+            let mut state = AgentStreamState::default();
+            state.apply(&DaemonStreamEvent::TurnStarted {
+                agent: "test-agent".to_string(),
+                thread_id: "th-x".to_string(),
+                turn_id: "t-99".to_string(),
+                transport: "mcp".to_string(),
+            });
+            guard.insert("test-agent".to_string(), state);
+        }
+
+        let req = make_request(
+            "agent-stream-state",
+            serde_json::json!({"agent": "test-agent"}),
+        );
+        let resp = handle_agent_stream_state(&req, &store);
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["turn_status"].as_str(), Some("busy"));
+        assert_eq!(payload["turn_id"].as_str(), Some("t-99"));
+        assert_eq!(payload["thread_id"].as_str(), Some("th-x"));
+        assert_eq!(payload["transport"].as_str(), Some("mcp"));
+    }
+
+    #[test]
+    fn test_agent_stream_state_missing_agent_field() {
+        let store = new_stream_state_store();
+        let req = make_request("agent-stream-state", serde_json::json!({}));
+        let resp = handle_agent_stream_state(&req, &store);
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
+    }
+
+    #[test]
+    fn test_agent_stream_state_unknown_agent() {
+        let store = new_stream_state_store();
+        let req = make_request(
+            "agent-stream-state",
+            serde_json::json!({"agent": "ghost"}),
+        );
+        let resp = handle_agent_stream_state(&req, &store);
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "AGENT_NOT_FOUND");
+    }
+
+    #[test]
+    fn test_agent_stream_state_via_parse_and_dispatch() {
+        use agent_team_mail_core::daemon_stream::{AgentStreamState, DaemonStreamEvent};
+
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let ss = new_stream_state_store();
+
+        // Pre-populate stream state.
+        {
+            let mut guard = ss.lock().unwrap();
+            let mut state = AgentStreamState::default();
+            state.apply(&DaemonStreamEvent::TurnIdle {
+                agent: "worker-2".to_string(),
+                turn_id: "t-idle".to_string(),
+                transport: "app-server".to_string(),
+            });
+            guard.insert("worker-2".to_string(), state);
+        }
+
+        let req_json = format!(
+            r#"{{"version":{},"request_id":"r1","command":"agent-stream-state","payload":{{"agent":"worker-2"}}}}"#,
+            PROTOCOL_VERSION
+        );
+        let resp = parse_and_dispatch(&req_json, &store, &ps, &sr, &ss).unwrap();
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["turn_status"].as_str(), Some("idle"));
+    }
+
+    // ── Broadcast channel tests ───────────────────────────────────────────────
+
+    /// Creating a sender should produce a valid channel that accepts subscribers.
+    #[test]
+    fn test_new_stream_event_sender_creates_valid_channel() {
+        let sender = new_stream_event_sender();
+        // subscribing must not panic
+        let _rx = sender.subscribe();
+        // receiver count is at least 1 (the one we just created)
+        // This confirms the channel is alive.
+    }
+
+    /// Sending a stream-event command publishes the event to broadcast subscribers.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_stream_event_broadcast_received_by_subscriber() {
+        use agent_team_mail_core::daemon_stream::DaemonStreamEvent;
+
+        let store = new_stream_state_store();
+        let sender = new_stream_event_sender();
+        let mut rx = sender.subscribe();
+
+        let req_json = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "request_id": "bcast-1",
+            "command": "stream-event",
+            "payload": {
+                "kind": "turn_started",
+                "agent": "arch-ctm",
+                "thread_id": "th-bcast",
+                "turn_id": "turn-bcast-1",
+                "transport": "mcp"
+            }
+        });
+        let req_str = serde_json::to_string(&req_json).unwrap();
+
+        let resp = handle_stream_event_command(&req_str, &store, &sender).await;
+        assert_eq!(resp.status, "ok");
+
+        // The subscriber should receive the event without blocking.
+        let event = rx.try_recv().expect("event should be immediately available");
+        assert!(
+            matches!(
+                &event,
+                DaemonStreamEvent::TurnStarted { agent, turn_id, .. }
+                if agent == "arch-ctm" && turn_id == "turn-bcast-1"
+            ),
+            "unexpected event: {event:?}"
+        );
     }
 }

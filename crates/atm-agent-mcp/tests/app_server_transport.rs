@@ -544,6 +544,7 @@ async fn test_app_server_background_task_turn_lifecycle() {
         elicitation_counter: None,
         upstream_tx: None,
         child_stdin: None,
+        agent_identity: Some("test-agent".to_string()),
     };
 
     tokio::task::spawn(drive_notification_task(
@@ -872,6 +873,7 @@ async fn test_response_correlation_via_background_task() {
         elicitation_counter: None,
         upstream_tx: None,
         child_stdin: None,
+        agent_identity: Some("test-agent".to_string()),
     };
 
     tokio::task::spawn(drive_notification_task(

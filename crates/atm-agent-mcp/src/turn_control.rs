@@ -33,6 +33,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use agent_team_mail_core::daemon_stream::DaemonStreamEvent;
+
 use crate::lifecycle_emit::{EventKind, emit_lifecycle_event};
 use crate::stream_norm::TurnStatus;
 
@@ -216,6 +218,9 @@ impl TurnTracker {
 
     /// Emit a [`EventKind::TeammateIdle`] event to the daemon (best-effort).
     ///
+    /// Also emits a [`DaemonStreamEvent::TurnIdle`] stream event so that the
+    /// TUI receives push notification of the transition.
+    ///
     /// No-op if no [`SessionContext`] has been set.
     async fn emit_idle(&self) {
         let guard = self.ctx.lock().await;
@@ -228,6 +233,12 @@ impl TurnTracker {
                 None,
             )
             .await;
+            crate::stream_emit::emit_stream_event(&DaemonStreamEvent::TurnIdle {
+                agent: ctx.identity.clone(),
+                turn_id: String::new(),
+                transport: "mcp".to_string(),
+            })
+            .await;
         }
     }
 }
@@ -235,13 +246,26 @@ impl TurnTracker {
 #[async_trait]
 impl TurnControl for TurnTracker {
     async fn start_turn(&self, thread_id: &str, turn_id: &str) {
-        let mut guard = self.active_turns.lock().await;
-        guard.insert(thread_id.to_string(), Some(turn_id.to_string()));
+        {
+            let mut guard = self.active_turns.lock().await;
+            guard.insert(thread_id.to_string(), Some(turn_id.to_string()));
+        }
         tracing::debug!(
             thread_id = %thread_id,
             turn_id = %turn_id,
             "turn_control: turn started"
         );
+        // Emit stream event (best-effort, fire-and-forget).
+        let guard = self.ctx.lock().await;
+        if let Some(ref ctx) = *guard {
+            crate::stream_emit::emit_stream_event(&DaemonStreamEvent::TurnStarted {
+                agent: ctx.identity.clone(),
+                thread_id: thread_id.to_string(),
+                turn_id: turn_id.to_string(),
+                transport: "mcp".to_string(),
+            })
+            .await;
+        }
     }
 
     async fn steer_turn(
@@ -275,6 +299,20 @@ impl TurnControl for TurnTracker {
             status = ?status,
             "turn_control: turn completed → idle"
         );
+        // Emit TurnCompleted stream event before the idle transition.
+        {
+            let guard = self.ctx.lock().await;
+            if let Some(ref ctx) = *guard {
+                crate::stream_emit::emit_stream_event(&DaemonStreamEvent::TurnCompleted {
+                    agent: ctx.identity.clone(),
+                    thread_id: thread_id.to_string(),
+                    turn_id: turn_id.to_string(),
+                    status: agent_team_mail_core::daemon_stream::TurnStatusWire::from(status),
+                    transport: "mcp".to_string(),
+                })
+                .await;
+            }
+        }
         self.emit_idle().await;
     }
 
@@ -690,5 +728,56 @@ mod tests {
         assert_eq!(ctx.identity, "agent-1");
         assert_eq!(ctx.team, "team-x");
         assert_eq!(ctx.session_id, "codex:abc");
+    }
+
+    // ── Stream event emission: no-panic with absent daemon ───────────────────
+
+    /// Verify that `start_turn` emits a stream event without panicking when no
+    /// daemon socket is present (best-effort noop).
+    #[tokio::test]
+    #[serial]
+    async fn start_turn_emits_stream_event_with_no_daemon() {
+        let dir = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ATM_HOME", dir.path());
+        }
+
+        let tracker = make_tracker();
+        // Must not panic even with no daemon running.
+        tracker.start_turn("t1", "turn-stream-1").await;
+        assert_eq!(
+            tracker.active_turn_id("t1").await,
+            Some("turn-stream-1".to_string())
+        );
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+        }
+    }
+
+    /// Verify that `on_turn_completed` emits a stream event without panicking
+    /// when no daemon socket is present (best-effort noop).
+    #[tokio::test]
+    #[serial]
+    async fn on_turn_completed_emits_stream_event_with_no_daemon() {
+        let dir = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ATM_HOME", dir.path());
+        }
+
+        let tracker = make_tracker();
+        tracker.start_turn("t1", "turn-stream-2").await;
+        // Must not panic even with no daemon running.
+        tracker
+            .on_turn_completed("t1", "turn-stream-2", TurnStatus::Completed)
+            .await;
+        assert!(
+            tracker.active_turn_id("t1").await.is_none(),
+            "active_turn_id must be None after completion"
+        );
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+        }
     }
 }

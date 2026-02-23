@@ -39,6 +39,16 @@ pub enum TurnStatus {
     Failed,
 }
 
+impl From<TurnStatus> for agent_team_mail_core::daemon_stream::TurnStatusWire {
+    fn from(status: TurnStatus) -> Self {
+        match status {
+            TurnStatus::Completed => Self::Completed,
+            TurnStatus::Interrupted => Self::Interrupted,
+            TurnStatus::Failed => Self::Failed,
+        }
+    }
+}
+
 // ─── TurnState ────────────────────────────────────────────────────────────────
 
 /// Per-thread turn state, tracking the current lifecycle stage.

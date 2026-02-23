@@ -207,7 +207,24 @@ fn draw_stream_pane(
         Span::styled("[WAITING] ", Style::default().fg(Color::DarkGray))
     };
 
-    let title_line = Line::from(vec![source_badge, Span::raw(agent_label)]);
+    // Add daemon turn state badge if available.
+    let turn_badge = match &app.daemon_turn_state {
+        Some(state) => {
+            use agent_team_mail_core::daemon_stream::StreamTurnStatus;
+            let (text, color) = match state.turn_status {
+                StreamTurnStatus::Busy => ("[BUSY] ", Color::Yellow),
+                StreamTurnStatus::Terminal => ("[DONE] ", Color::Cyan),
+                StreamTurnStatus::Idle => ("[IDLE] ", Color::Blue),
+            };
+            Span::styled(
+                text,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )
+        }
+        None => Span::raw(""),
+    };
+
+    let title_line = Line::from(vec![source_badge, turn_badge, Span::raw(agent_label)]);
 
     let block = Block::default()
         .title(title_line)

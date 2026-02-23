@@ -12,6 +12,7 @@ pub mod config;
 pub mod context;
 pub mod control;
 pub mod daemon_client;
+pub mod daemon_stream;
 pub mod event_log;
 pub mod home;
 pub mod io;
