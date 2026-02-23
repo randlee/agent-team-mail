@@ -2842,6 +2842,14 @@ fn should_publish_watch_event(event: &Value) -> bool {
         kind,
         "task_started"
             | "task_complete"
+            | "approval_prompt"
+            | "approval_request"
+            | "approval_rejected"
+            | "approval_approved"
+            | "entered_review_mode"
+            | "exited_review_mode"
+            | "item/enteredReviewMode"
+            | "item/exitedReviewMode"
             | "agent_message_delta"
             | "agent_message"
             | "agent_message_completed"
@@ -2858,6 +2866,10 @@ fn should_publish_watch_event(event: &Value) -> bool {
             | "thread_status_changed"
             | "turn_started"
             | "turn_completed"
+            | "turn_interrupted"
+            | "turn_cancelled"
+            | "cancelled"
+            | "interrupt"
             | "idle"
             | "done"
             | "stream_error"
@@ -4008,6 +4020,14 @@ mod tests {
         let canonical_kinds = vec![
             "task_started",
             "task_complete",
+            "approval_prompt",
+            "approval_request",
+            "approval_rejected",
+            "approval_approved",
+            "entered_review_mode",
+            "exited_review_mode",
+            "item/enteredReviewMode",
+            "item/exitedReviewMode",
             "agent_message_delta",
             "agent_message",
             "agent_message_completed",
@@ -4024,6 +4044,10 @@ mod tests {
             "thread_status_changed",
             "turn_started",
             "turn_completed",
+            "turn_interrupted",
+            "turn_cancelled",
+            "cancelled",
+            "interrupt",
             "idle",
             "done",
             "stream_error",
