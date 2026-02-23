@@ -126,11 +126,13 @@ pub fn read_last_n_lines(path: &Path, n: usize) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
 
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open log file: {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open log file: {}", path.display()))?;
 
     let reader = BufReader::new(file);
-    let all_lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()
+    let all_lines: Vec<String> = reader
+        .lines()
+        .collect::<std::io::Result<_>>()
         .with_context(|| format!("Failed to read log file: {}", path.display()))?;
 
     if all_lines.len() <= n {
@@ -145,11 +147,12 @@ pub fn read_last_n_lines(path: &Path, n: usize) -> Result<Vec<String>> {
 /// Polls the file every 500 ms. Exits cleanly when an I/O error occurs
 /// (e.g., Ctrl-C terminates the process).
 fn follow_log_file(path: &Path) -> Result<()> {
-    let mut file = File::open(path)
-        .with_context(|| format!("Failed to open log file: {}", path.display()))?;
+    let mut file =
+        File::open(path).with_context(|| format!("Failed to open log file: {}", path.display()))?;
 
     // Seek to end so we only print new content.
-    let mut pos = file.seek(SeekFrom::End(0))
+    let mut pos = file
+        .seek(SeekFrom::End(0))
         .with_context(|| "Failed to seek log file")?;
 
     loop {
@@ -177,7 +180,8 @@ fn follow_log_file(path: &Path) -> Result<()> {
 
         let mut line = String::new();
         loop {
-            let bytes = reader.read_line(&mut line)
+            let bytes = reader
+                .read_line(&mut line)
                 .with_context(|| "Failed to read log file")?;
             if bytes == 0 {
                 break;
@@ -231,7 +235,10 @@ fn run_tmux_capture_fallback(agent: &str, n: usize) -> Result<()> {
         .context("Failed to run 'tmux list-panes'. Is tmux installed?")?;
 
     if !list_output.status.success() {
-        anyhow::bail!("tmux list-panes failed: {}", String::from_utf8_lossy(&list_output.stderr));
+        anyhow::bail!(
+            "tmux list-panes failed: {}",
+            String::from_utf8_lossy(&list_output.stderr)
+        );
     }
 
     let stdout = String::from_utf8_lossy(&list_output.stdout);

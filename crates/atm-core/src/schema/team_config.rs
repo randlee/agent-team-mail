@@ -52,7 +52,10 @@ mod tests {
         assert_eq!(config.name, "test-team");
         assert_eq!(config.created_at, 1770765919076);
         assert_eq!(config.lead_agent_id, "team-lead@test-team");
-        assert_eq!(config.lead_session_id, "6075f866-f103-4be1-b2e9-8dbf66009eb9");
+        assert_eq!(
+            config.lead_session_id,
+            "6075f866-f103-4be1-b2e9-8dbf66009eb9"
+        );
         assert!(config.description.is_none());
         assert!(config.members.is_empty());
 
@@ -100,7 +103,10 @@ mod tests {
 
         let config: TeamConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.name, "test-team");
-        assert_eq!(config.description, Some("Test team for agent coordination".to_string()));
+        assert_eq!(
+            config.description,
+            Some("Test team for agent coordination".to_string())
+        );
         assert_eq!(config.members.len(), 2);
         assert_eq!(config.members[0].name, "team-lead");
         assert_eq!(config.members[1].name, "haiku-poet-1");

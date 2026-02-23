@@ -3,11 +3,11 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
 use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_daemon::plugin::MailService;
 use agent_team_mail_daemon::plugin::{Plugin, PluginContext};
 use agent_team_mail_daemon::plugins::issues::{
     Issue, IssueLabel, IssueState, IssuesPlugin, MockCall, MockProvider,
 };
-use agent_team_mail_daemon::plugin::MailService;
 use agent_team_mail_daemon::roster::RosterService;
 use std::collections::HashMap;
 use std::path::Path;
@@ -134,19 +134,29 @@ async fn test_issue_created_delivers_inbox_message() {
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
     plugin_config.insert("poll_interval".to_string(), toml::Value::Integer(1)); // 1 second for fast test
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("issues-bot".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("issues-bot".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
     config.plugins.insert("issues".to_string(), plugin_config);
-    ctx = PluginContext::new(ctx.system.clone(), ctx.mail.clone(), Arc::new(config), ctx.roster.clone());
+    ctx = PluginContext::new(
+        ctx.system.clone(),
+        ctx.mail.clone(),
+        Arc::new(config),
+        ctx.roster.clone(),
+    );
 
     // Create team structure
     create_team_config(ctx.mail.teams_root(), "test-team");
 
     // Create plugin with injected provider
-    let mut plugin = IssuesPlugin::new()
-        .with_provider(Box::new(mock_provider));
+    let mut plugin = IssuesPlugin::new().with_provider(Box::new(mock_provider));
 
     // Init plugin (will skip provider creation since we injected one)
     plugin.init(&ctx).await.unwrap();
@@ -168,9 +178,18 @@ async fn test_issue_created_delivers_inbox_message() {
     assert!(!messages.is_empty(), "Should have at least one message");
 
     let msg = &messages[0];
-    assert!(msg.text.contains("[issue:42]"), "Message should have issue reference");
-    assert!(msg.text.contains("Test issue"), "Message should have issue title");
-    assert!(msg.text.contains("https://github.com/test/repo/issues/42"), "Message should have URL");
+    assert!(
+        msg.text.contains("[issue:42]"),
+        "Message should have issue reference"
+    );
+    assert!(
+        msg.text.contains("Test issue"),
+        "Message should have issue title"
+    );
+    assert!(
+        msg.text.contains("https://github.com/test/repo/issues/42"),
+        "Message should have URL"
+    );
     assert_eq!(msg.from, "issues-bot");
 }
 
@@ -193,19 +212,29 @@ async fn test_inbox_reply_posts_comment() {
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
     plugin_config.insert("poll_interval".to_string(), toml::Value::Integer(300));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("issues-bot".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("issues-bot".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
     config.plugins.insert("issues".to_string(), plugin_config);
-    ctx = PluginContext::new(ctx.system.clone(), ctx.mail.clone(), Arc::new(config), ctx.roster.clone());
+    ctx = PluginContext::new(
+        ctx.system.clone(),
+        ctx.mail.clone(),
+        Arc::new(config),
+        ctx.roster.clone(),
+    );
 
     // Create team structure
     create_team_config(ctx.mail.teams_root(), "test-team");
 
     // Create plugin with injected provider
-    let mut plugin = IssuesPlugin::new()
-        .with_provider(Box::new(mock_provider));
+    let mut plugin = IssuesPlugin::new().with_provider(Box::new(mock_provider));
 
     plugin.init(&ctx).await.unwrap();
 
@@ -235,8 +264,14 @@ async fn test_inbox_reply_posts_comment() {
 
     if let MockCall::AddComment { issue_number, body } = add_comment_call.unwrap() {
         assert_eq!(*issue_number, 42);
-        assert!(body.contains("This is my reply"), "Body should contain 'This is my reply', got: {body}");
-        assert!(body.contains("With multiple lines"), "Body should contain 'With multiple lines', got: {body}");
+        assert!(
+            body.contains("This is my reply"),
+            "Body should contain 'This is my reply', got: {body}"
+        );
+        assert!(
+            body.contains("With multiple lines"),
+            "Body should contain 'With multiple lines', got: {body}"
+        );
     }
 }
 
@@ -265,20 +300,33 @@ async fn test_issue_filter_applies_labels() {
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
     plugin_config.insert("poll_interval".to_string(), toml::Value::Integer(1));
-    plugin_config.insert("labels".to_string(), toml::Value::Array(vec![toml::Value::String("bug".to_string())]));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("issues-bot".to_string()));
+    plugin_config.insert(
+        "labels".to_string(),
+        toml::Value::Array(vec![toml::Value::String("bug".to_string())]),
+    );
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("issues-bot".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
     config.plugins.insert("issues".to_string(), plugin_config);
-    ctx = PluginContext::new(ctx.system.clone(), ctx.mail.clone(), Arc::new(config), ctx.roster.clone());
+    ctx = PluginContext::new(
+        ctx.system.clone(),
+        ctx.mail.clone(),
+        Arc::new(config),
+        ctx.roster.clone(),
+    );
 
     // Create team structure
     create_team_config(ctx.mail.teams_root(), "test-team");
 
     // Create plugin with injected provider
-    let mut plugin = IssuesPlugin::new()
-        .with_provider(Box::new(mock_provider));
+    let mut plugin = IssuesPlugin::new().with_provider(Box::new(mock_provider));
 
     plugin.init(&ctx).await.unwrap();
 
@@ -295,20 +343,25 @@ async fn test_issue_filter_applies_labels() {
 
     // Verify list_issues was called with bug label filter
     let calls = provider_clone.get_calls();
-    let list_call = calls
-        .iter()
-        .find(|c| matches!(c, MockCall::ListIssues(_)));
+    let list_call = calls.iter().find(|c| matches!(c, MockCall::ListIssues(_)));
 
     assert!(list_call.is_some(), "Should have ListIssues call");
 
     if let MockCall::ListIssues(filter) = list_call.unwrap() {
-        assert!(filter.labels.contains(&"bug".to_string()), "Filter should include 'bug' label");
+        assert!(
+            filter.labels.contains(&"bug".to_string()),
+            "Filter should include 'bug' label"
+        );
     }
 
     // Verify only bug issues were delivered
     let messages = read_inbox(ctx.mail.teams_root(), "test-team", "issues-bot");
     // Should have 2 messages (issues #1 and #3 have bug label)
-    assert_eq!(messages.len(), 2, "Should deliver only issues matching filter");
+    assert_eq!(
+        messages.len(),
+        2,
+        "Should deliver only issues matching filter"
+    );
 }
 
 #[tokio::test]
@@ -334,12 +387,23 @@ async fn test_issue_updates_deliver_multiple_messages() {
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
     plugin_config.insert("poll_interval".to_string(), toml::Value::Integer(1));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("issues-bot".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("issues-bot".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
     config.plugins.insert("issues".to_string(), plugin_config);
-    ctx = PluginContext::new(ctx.system.clone(), ctx.mail.clone(), Arc::new(config), ctx.roster.clone());
+    ctx = PluginContext::new(
+        ctx.system.clone(),
+        ctx.mail.clone(),
+        Arc::new(config),
+        ctx.roster.clone(),
+    );
 
     // Create team structure
     create_team_config(ctx.mail.teams_root(), "test-team");
@@ -358,7 +422,11 @@ async fn test_issue_updates_deliver_multiple_messages() {
 
     // Remove synthetic member before re-init to avoid duplicate member error
     ctx.roster
-        .cleanup_plugin("test-team", "issues", agent_team_mail_daemon::roster::CleanupMode::Hard)
+        .cleanup_plugin(
+            "test-team",
+            "issues",
+            agent_team_mail_daemon::roster::CleanupMode::Hard,
+        )
         .unwrap();
 
     // Run plugin again with updated issue
@@ -447,7 +515,12 @@ async fn test_disabled_plugin_skips_init() {
     // Update context config
     let mut config = (*ctx.config).clone();
     config.plugins.insert("issues".to_string(), plugin_config);
-    ctx = PluginContext::new(ctx.system.clone(), ctx.mail.clone(), Arc::new(config), ctx.roster.clone());
+    ctx = PluginContext::new(
+        ctx.system.clone(),
+        ctx.mail.clone(),
+        Arc::new(config),
+        ctx.roster.clone(),
+    );
 
     // Create and init plugin
     let mut plugin = IssuesPlugin::new();
@@ -467,7 +540,10 @@ async fn test_disabled_plugin_skips_init() {
     let config: serde_json::Value = serde_json::from_str(&config_content).unwrap();
 
     let members = config["members"].as_array().unwrap();
-    assert!(members.is_empty(), "No members should be registered when disabled");
+    assert!(
+        members.is_empty(),
+        "No members should be registered when disabled"
+    );
 }
 
 #[tokio::test]

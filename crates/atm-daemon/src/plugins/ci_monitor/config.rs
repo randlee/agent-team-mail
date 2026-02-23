@@ -1,7 +1,7 @@
 //! Configuration for the CI Monitor plugin
 
-use crate::plugin::PluginError;
 use super::types::CiRunConclusion;
+use crate::plugin::PluginError;
 use agent_team_mail_core::toml;
 use globset::{GlobSet, GlobSetBuilder};
 use std::collections::HashMap;
@@ -390,10 +390,7 @@ enabled = true
         let table: toml::Table = toml::from_str(toml_str).unwrap();
         let result = CiMonitorConfig::from_toml(&table);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("team is required"));
+        assert!(result.unwrap_err().to_string().contains("team is required"));
     }
 
     #[test]
@@ -405,10 +402,12 @@ poll_interval_secs = 5
         let table: toml::Table = toml::from_str(toml_str).unwrap();
         let result = CiMonitorConfig::from_toml(&table);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("at least 10 seconds"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("at least 10 seconds")
+        );
     }
 
     #[test]
@@ -430,7 +429,9 @@ gitlab = "~/.config/atm/providers/libatm_ci_gitlab.dylib"
         );
         assert_eq!(
             config.provider_libraries.get("gitlab"),
-            Some(&PathBuf::from("~/.config/atm/providers/libatm_ci_gitlab.dylib"))
+            Some(&PathBuf::from(
+                "~/.config/atm/providers/libatm_ci_gitlab.dylib"
+            ))
         );
     }
 

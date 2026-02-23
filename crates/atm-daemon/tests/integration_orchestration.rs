@@ -6,13 +6,13 @@
 //! - Pub/sub subscription round-trip via socket
 //! - Alias config parsing and resolution
 
-use agent_team_mail_core::config::aliases::resolve_alias;
 use agent_team_mail_core::config::Config;
-use agent_team_mail_daemon::daemon::session_registry::new_session_registry;
+use agent_team_mail_core::config::aliases::resolve_alias;
 use agent_team_mail_daemon::daemon::log_writer::new_log_event_queue;
+use agent_team_mail_daemon::daemon::session_registry::new_session_registry;
 use agent_team_mail_daemon::daemon::socket::{
-    new_dedup_store, new_launch_sender, new_pubsub_store, new_state_store,
-    new_stream_event_sender, new_stream_state_store, start_socket_server,
+    new_dedup_store, new_launch_sender, new_pubsub_store, new_state_store, new_stream_event_sender,
+    new_stream_state_store, start_socket_server,
 };
 use agent_team_mail_daemon::plugins::worker_adapter::{AgentState, AgentStateTracker, PubSub};
 use std::collections::HashMap;
@@ -75,11 +75,17 @@ fn test_state_tracker_transition_time() {
 
     // After a state transition, time_since_transition should be available
     let elapsed = tracker.time_since_transition("arch-ctm");
-    assert!(elapsed.is_some(), "Elapsed time should be available after state set");
+    assert!(
+        elapsed.is_some(),
+        "Elapsed time should be available after state set"
+    );
 
     let duration = elapsed.unwrap();
     // Should be very recent (< 1 second)
-    assert!(duration.as_secs() < 1, "Transition should have just happened");
+    assert!(
+        duration.as_secs() < 1,
+        "Transition should have just happened"
+    );
 }
 
 // ── Test 2: Socket server query for agent state ────────────────────────────────
@@ -87,7 +93,7 @@ fn test_state_tracker_transition_time() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_socket_query_agent_state() {
-    use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio_util::sync::CancellationToken;
 
@@ -133,7 +139,11 @@ async fn test_socket_query_agent_state() {
     let req_line = format!("{}\n", serde_json::to_string(&request).unwrap());
 
     let mut reader = BufReader::new(stream);
-    reader.get_mut().write_all(req_line.as_bytes()).await.unwrap();
+    reader
+        .get_mut()
+        .write_all(req_line.as_bytes())
+        .await
+        .unwrap();
 
     let mut resp_line = String::new();
     reader.read_line(&mut resp_line).await.unwrap();
@@ -151,7 +161,7 @@ async fn test_socket_query_agent_state() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_socket_query_agent_not_found() {
-    use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio_util::sync::CancellationToken;
 
@@ -187,7 +197,11 @@ async fn test_socket_query_agent_not_found() {
     let req_line = format!("{}\n", serde_json::to_string(&request).unwrap());
 
     let mut reader = BufReader::new(stream);
-    reader.get_mut().write_all(req_line.as_bytes()).await.unwrap();
+    reader
+        .get_mut()
+        .write_all(req_line.as_bytes())
+        .await
+        .unwrap();
 
     let mut resp_line = String::new();
     reader.read_line(&mut resp_line).await.unwrap();
@@ -206,7 +220,7 @@ async fn test_socket_query_agent_not_found() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_pubsub_subscription_roundtrip() {
-    use agent_team_mail_core::daemon_client::{SocketRequest, PROTOCOL_VERSION};
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio_util::sync::CancellationToken;
 
@@ -250,7 +264,11 @@ async fn test_pubsub_subscription_roundtrip() {
 
     let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
     let mut reader = BufReader::new(stream);
-    reader.get_mut().write_all(req_line.as_bytes()).await.unwrap();
+    reader
+        .get_mut()
+        .write_all(req_line.as_bytes())
+        .await
+        .unwrap();
 
     let mut resp_line = String::new();
     reader.read_line(&mut resp_line).await.unwrap();
@@ -258,7 +276,11 @@ async fn test_pubsub_subscription_roundtrip() {
     let resp: agent_team_mail_core::daemon_client::SocketResponse =
         serde_json::from_str(resp_line.trim()).unwrap();
 
-    assert!(resp.is_ok(), "Subscribe should succeed, got: {:?}", resp.error);
+    assert!(
+        resp.is_ok(),
+        "Subscribe should succeed, got: {:?}",
+        resp.error
+    );
     let payload = resp.payload.unwrap();
     assert!(payload["subscribed"].as_bool().unwrap());
 
@@ -287,7 +309,11 @@ async fn test_pubsub_subscription_roundtrip() {
 
     let stream2 = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
     let mut reader2 = BufReader::new(stream2);
-    reader2.get_mut().write_all(unsub_line.as_bytes()).await.unwrap();
+    reader2
+        .get_mut()
+        .write_all(unsub_line.as_bytes())
+        .await
+        .unwrap();
 
     let mut resp2_line = String::new();
     reader2.read_line(&mut resp2_line).await.unwrap();
@@ -330,9 +356,18 @@ codex = "arch-ctm"
 
     // Verify aliases are loaded
     assert_eq!(config.aliases.len(), 3);
-    assert_eq!(config.aliases.get("arch-atm").map(String::as_str), Some("team-lead"));
-    assert_eq!(config.aliases.get("dev").map(String::as_str), Some("worker-1"));
-    assert_eq!(config.aliases.get("codex").map(String::as_str), Some("arch-ctm"));
+    assert_eq!(
+        config.aliases.get("arch-atm").map(String::as_str),
+        Some("team-lead")
+    );
+    assert_eq!(
+        config.aliases.get("dev").map(String::as_str),
+        Some("worker-1")
+    );
+    assert_eq!(
+        config.aliases.get("codex").map(String::as_str),
+        Some("arch-ctm")
+    );
 
     // Resolve aliases using the helper
     assert_eq!(resolve_alias("arch-atm", &config.aliases), "team-lead");
@@ -481,6 +516,9 @@ fn test_pubsub_shared_store() {
             .unwrap();
     }
 
-    let matches = store.lock().unwrap().matching_subscribers("arch-ctm", "idle");
+    let matches = store
+        .lock()
+        .unwrap()
+        .matching_subscribers("arch-ctm", "idle");
     assert_eq!(matches, vec!["team-lead"]);
 }

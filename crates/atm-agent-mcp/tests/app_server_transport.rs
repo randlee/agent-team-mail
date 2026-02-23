@@ -196,7 +196,9 @@ async fn test_app_server_handshake_failure_via_mock() {
 /// the parser correctly identifies them.
 #[test]
 fn test_turn_state_tracking() {
-    use atm_agent_mcp::stream_norm::{TurnState, TurnStatus, parse_app_server_notification, AppServerNotification};
+    use atm_agent_mcp::stream_norm::{
+        AppServerNotification, TurnState, TurnStatus, parse_app_server_notification,
+    };
 
     let started_line = make_turn_started("turn-abc");
     let completed_line = make_turn_completed("turn-abc", "completed");
@@ -209,8 +211,7 @@ fn test_turn_state_tracking() {
     );
 
     // Simulate state update: Idle -> Busy.
-    let mut state: std::collections::HashMap<String, TurnState> =
-        std::collections::HashMap::new();
+    let mut state: std::collections::HashMap<String, TurnState> = std::collections::HashMap::new();
     if let AppServerNotification::TurnStarted { thread_id, turn_id } =
         parse_app_server_notification(&started_line).unwrap()
     {
@@ -237,16 +238,13 @@ fn test_turn_state_tracking() {
     );
 
     // Simulate state update: Busy -> Terminal.
-    if let AppServerNotification::TurnCompleted { thread_id, turn_id, status } =
-        parse_app_server_notification(&completed_line).unwrap()
+    if let AppServerNotification::TurnCompleted {
+        thread_id,
+        turn_id,
+        status,
+    } = parse_app_server_notification(&completed_line).unwrap()
     {
-        state.insert(
-            thread_id,
-            TurnState::Terminal {
-                turn_id,
-                status,
-            },
-        );
+        state.insert(thread_id, TurnState::Terminal { turn_id, status });
     }
     assert!(
         !state.values().all(|s| s.is_idle()),
@@ -290,7 +288,7 @@ fn test_unknown_notification_is_nonfatal() {
 /// `thread/fork` request written to the mock stdin channel.
 #[tokio::test]
 async fn test_thread_fork() {
-    use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (transport, mut handle): (MockTransport, MockTransportHandle) =
         MockTransport::new_with_handle();
@@ -368,7 +366,10 @@ fn test_graceful_shutdown() {
             transport: Some("app-server".to_string()),
             ..Default::default()
         };
-        let t = atm_agent_mcp::transport_factory_test::make_transport_for_test(&config, "shutdown-test-team");
+        let t = atm_agent_mcp::transport_factory_test::make_transport_for_test(
+            &config,
+            "shutdown-test-team",
+        );
         // Explicit drop to verify no panic.
         drop(t);
     }
@@ -509,13 +510,13 @@ async fn test_incompatible_protocol_version_returns_err() {
 /// the correct `TurnState` values.
 #[tokio::test]
 async fn test_app_server_background_task_turn_lifecycle() {
+    use atm_agent_mcp::stream_norm::TurnState;
+    use atm_agent_mcp::transport::{NotificationTaskState, drive_notification_task};
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
     use tokio::io::AsyncWriteExt;
-    use atm_agent_mcp::transport::{drive_notification_task, NotificationTaskState};
-    use atm_agent_mcp::stream_norm::TurnState;
 
     // Create a duplex for feeding data into the background task.
     let (mut feed_write, feed_read) = tokio::io::duplex(4096);
@@ -547,11 +548,7 @@ async fn test_app_server_background_task_turn_lifecycle() {
         agent_identity: Some("test-agent".to_string()),
     };
 
-    tokio::task::spawn(drive_notification_task(
-        feed_read,
-        proxy_write_half,
-        state,
-    ));
+    tokio::task::spawn(drive_notification_task(feed_read, proxy_write_half, state));
 
     // Inject turn/started.
     let started = format!("{}\n", make_turn_started("turn-T1"));
@@ -605,8 +602,8 @@ async fn test_app_server_background_task_turn_lifecycle() {
 /// attempted and the final success response was returned.
 #[tokio::test]
 async fn test_backpressure_overload_retry() {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use atm_agent_mcp::app_server_test::TestAppServerTransport;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     // Set up a duplex pair: one side is "child stdin/stdout", the other is us.
     let (client_stdin, mut mock_stdin_rx) = tokio::io::duplex(8192);
@@ -646,23 +643,21 @@ async fn test_backpressure_overload_retry() {
 
         // 5. Send -32001 overload error.
         let overload = format!("{}\n", make_error_response(req_id, -32001, "overloaded"));
-        mock_stdout_tx
-            .write_all(overload.as_bytes())
-            .await
-            .unwrap();
+        mock_stdout_tx.write_all(overload.as_bytes()).await.unwrap();
 
         // 6. Read the retry fork request (same id).
         let mut fork_line2 = String::new();
         reader.read_line(&mut fork_line2).await.unwrap();
         let fork_req2: serde_json::Value = serde_json::from_str(fork_line2.trim()).unwrap();
-        assert_eq!(fork_req2["id"].as_u64().unwrap(), req_id, "retry should use same request id");
+        assert_eq!(
+            fork_req2["id"].as_u64().unwrap(),
+            req_id,
+            "retry should use same request id"
+        );
 
         // 7. Send success response.
         let success = format!("{}\n", make_fork_response(req_id, "forked-thread-99"));
-        mock_stdout_tx
-            .write_all(success.as_bytes())
-            .await
-            .unwrap();
+        mock_stdout_tx.write_all(success.as_bytes()).await.unwrap();
     });
 
     let raw_io = transport
@@ -693,8 +688,8 @@ async fn test_backpressure_overload_retry() {
 /// the request ID in the fork request is non-zero.
 #[tokio::test]
 async fn test_fork_thread_via_spawn_from_io() {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use atm_agent_mcp::app_server_test::TestAppServerTransport;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (client_stdin, mut mock_stdin_rx) = tokio::io::duplex(8192);
     let (mut mock_stdout_tx, client_stdout) = tokio::io::duplex(8192);
@@ -763,8 +758,8 @@ async fn test_fork_thread_via_spawn_from_io() {
 /// - No messages are sent before `initialize`.
 #[tokio::test]
 async fn test_app_server_handshake_order() {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use atm_agent_mcp::app_server_test::TestAppServerTransport;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (client_stdin, mut mock_stdin_rx) = tokio::io::duplex(8192);
     let (mut mock_stdout_tx, client_stdout) = tokio::io::duplex(8192);
@@ -828,7 +823,9 @@ async fn test_app_server_handshake_order() {
         .expect("spawn_from_io should succeed for handshake order test");
 
     // Ensure the mock task completed all assertions successfully.
-    mock_task.await.expect("mock child task should complete without panic");
+    mock_task
+        .await
+        .expect("mock child task should complete without panic");
 }
 
 // ─── Response correlation test ───────────────────────────────────────────────
@@ -836,9 +833,9 @@ async fn test_app_server_handshake_order() {
 /// Verifies that the background task routes responses to `pending_responses` channels.
 #[tokio::test]
 async fn test_response_correlation_via_background_task() {
-    use std::sync::{atomic::AtomicBool, Arc};
+    use atm_agent_mcp::transport::{NotificationTaskState, drive_notification_task};
+    use std::sync::{Arc, atomic::AtomicBool};
     use tokio::io::AsyncWriteExt;
-    use atm_agent_mcp::transport::{drive_notification_task, NotificationTaskState};
 
     let (mut feed_write, feed_read) = tokio::io::duplex(4096);
     let (proxy_write_half, _proxy_read_half) = tokio::io::duplex(4096);
@@ -876,11 +873,7 @@ async fn test_response_correlation_via_background_task() {
         agent_identity: Some("test-agent".to_string()),
     };
 
-    tokio::task::spawn(drive_notification_task(
-        feed_read,
-        proxy_write_half,
-        state,
-    ));
+    tokio::task::spawn(drive_notification_task(feed_read, proxy_write_half, state));
 
     // Inject a response for id=42.
     let response_line = format!("{}\n", make_fork_response(42, "thread-new"));

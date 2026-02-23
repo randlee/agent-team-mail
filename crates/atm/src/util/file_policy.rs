@@ -1,7 +1,7 @@
 //! File access policy enforcement for file references
 
-use anyhow::Result;
 use agent_team_mail_core::config::resolve_settings;
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 /// Walk up from `start_dir` to find the nearest `.git` directory,
@@ -134,8 +134,13 @@ fn file_matches_rule(file_path: &Path, rule: &str) -> bool {
         // Handle glob patterns (basic support for **)
         if normalized_pattern.contains("**") {
             // Pattern with ** - match any subdirectory
-            let base = normalized_pattern.trim_end_matches("**").trim_end_matches('/');
-            return file_path.to_str().map(|p| p.contains(base)).unwrap_or(false);
+            let base = normalized_pattern
+                .trim_end_matches("**")
+                .trim_end_matches('/');
+            return file_path
+                .to_str()
+                .map(|p| p.contains(base))
+                .unwrap_or(false);
         }
 
         // Simple prefix match
@@ -294,16 +299,14 @@ mod tests {
         fs::write(&file_path, "test content").unwrap();
 
         // Run check_file_reference from subdir - should walk up and find repo root
-        let (is_allowed, _) = check_file_reference(
-            &file_path,
-            "Test message",
-            "test-team",
-            &subdir,
-            home_dir,
-        )
-        .unwrap();
+        let (is_allowed, _) =
+            check_file_reference(&file_path, "Test message", "test-team", &subdir, home_dir)
+                .unwrap();
 
-        assert!(is_allowed, "File inside repo should be allowed from subdirectory");
+        assert!(
+            is_allowed,
+            "File inside repo should be allowed from subdirectory"
+        );
     }
 
     #[test]
@@ -320,14 +323,9 @@ mod tests {
 
         // check_file_reference from a dir with no .git above
         // On most systems, TempDir is not inside a git repo, so file should be denied
-        let (is_allowed, rewritten) = check_file_reference(
-            &file_path,
-            "Test message",
-            "test-team",
-            &no_repo,
-            home_dir,
-        )
-        .unwrap();
+        let (is_allowed, rewritten) =
+            check_file_reference(&file_path, "Test message", "test-team", &no_repo, home_dir)
+                .unwrap();
 
         // If we're NOT in a git repo, file should be denied and copied
         // But if there's a system-level git repo above temp, it might be allowed

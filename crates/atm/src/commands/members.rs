@@ -1,8 +1,8 @@
 //! Members command implementation
 
-use anyhow::Result;
-use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::schema::TeamConfig;
+use anyhow::Result;
 use clap::Args;
 use serde_json::json;
 use std::fs;
@@ -70,7 +70,11 @@ pub fn execute(args: MembersArgs) -> Result<()> {
             println!("  {}", "─".repeat(72));
 
             for member in &team_config.members {
-                let active = if member.is_active.unwrap_or(false) { "Online" } else { "Offline" };
+                let active = if member.is_active.unwrap_or(false) {
+                    "Online"
+                } else {
+                    "Offline"
+                };
                 let name = &member.name;
                 let agent_type = &member.agent_type;
                 let model = &member.model;

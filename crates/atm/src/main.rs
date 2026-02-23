@@ -3,9 +3,9 @@
 //! A thin CLI over the `~/.claude/teams/` file-based API, providing
 //! send, read, broadcast, and inbox commands with atomic file I/O.
 
-use clap::Parser;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging;
+use clap::Parser;
 
 mod commands;
 mod util;

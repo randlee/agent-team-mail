@@ -155,9 +155,7 @@ fn claim_and_read_spool_file(
         Ok(_) => {}
         Err(e) => {
             // Another process claimed it, or it vanished — skip silently.
-            return Err(anyhow::anyhow!(
-                "Failed to claim spool file (rename): {e}"
-            ));
+            return Err(anyhow::anyhow!("Failed to claim spool file (rename): {e}"));
         }
     }
 
@@ -283,7 +281,10 @@ mod tests {
 
         let count = merge_spool_on_startup(&spool_dir, &log_path).unwrap();
         assert_eq!(count, 0);
-        assert!(!log_path.exists(), "log should not be created when nothing to merge");
+        assert!(
+            !log_path.exists(),
+            "log should not be created when nothing to merge"
+        );
     }
 
     #[test]
@@ -397,8 +398,16 @@ mod tests {
         let mut ev_t05 = new_log_event("atm-tui", "event_t05", "atm_tui::main", "info");
         ev_t05.ts = "2026-01-01T00:00:05Z".to_string();
 
-        make_spool_file(&spool_dir, "atm-1-100.jsonl", &[ev_t02.clone(), ev_t10.clone()]);
-        make_spool_file(&spool_dir, "atm-tui-2-200.jsonl", &[ev_t01.clone(), ev_t05.clone()]);
+        make_spool_file(
+            &spool_dir,
+            "atm-1-100.jsonl",
+            &[ev_t02.clone(), ev_t10.clone()],
+        );
+        make_spool_file(
+            &spool_dir,
+            "atm-tui-2-200.jsonl",
+            &[ev_t01.clone(), ev_t05.clone()],
+        );
 
         let count = merge_spool_on_startup(&spool_dir, &log_path).unwrap();
         assert_eq!(count, 4, "should merge 4 events total");

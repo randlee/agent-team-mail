@@ -6,13 +6,13 @@ use super::sync::SyncEngine;
 #[cfg(feature = "ssh")]
 use super::transport::Transport;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
+use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use serde_json::Value;
-use std::path::PathBuf;
 
 /// Bridge plugin — synchronizes agent inbox queues across machines
 pub struct BridgePlugin {
@@ -66,8 +66,8 @@ impl Plugin for BridgePlugin {
             BridgePluginConfig::from_toml(table, &ctx.system.hostname)?
         } else {
             // No config section - create disabled default
-            let default_table: toml::Table = toml::from_str("enabled = false")
-                .map_err(|e| PluginError::Config {
+            let default_table: toml::Table =
+                toml::from_str("enabled = false").map_err(|e| PluginError::Config {
                     message: format!("Failed to create default config: {e}"),
                 })?;
             BridgePluginConfig::from_toml(&default_table, &ctx.system.hostname)?
@@ -87,7 +87,10 @@ impl Plugin for BridgePlugin {
             config.registry.len()
         );
 
-        debug!("Bridge sync interval: {} seconds", config.core.sync_interval_secs);
+        debug!(
+            "Bridge sync interval: {} seconds",
+            config.core.sync_interval_secs
+        );
 
         // Log registered remotes
         for remote in config.registry.remotes() {
@@ -168,14 +171,21 @@ impl Plugin for BridgePlugin {
             return Ok(());
         }
 
-        let sync_engine = self.sync_engine.as_ref().ok_or_else(|| PluginError::Runtime {
-            message: "Sync engine not initialized".to_string(),
-            source: None,
-        })?;
+        let sync_engine = self
+            .sync_engine
+            .as_ref()
+            .ok_or_else(|| PluginError::Runtime {
+                message: "Sync engine not initialized".to_string(),
+                source: None,
+            })?;
 
-        info!("Bridge plugin running with sync interval: {} seconds", config.core.sync_interval_secs);
+        info!(
+            "Bridge plugin running with sync interval: {} seconds",
+            config.core.sync_interval_secs
+        );
 
-        let mut interval = tokio::time::interval(Duration::from_secs(config.core.sync_interval_secs));
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(config.core.sync_interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -212,7 +222,12 @@ impl Plugin for BridgePlugin {
         &mut self,
         msg: &agent_team_mail_core::schema::InboxMessage,
     ) -> Result<(), PluginError> {
-        if !self.config.as_ref().map(|c| c.is_enabled()).unwrap_or(false) {
+        if !self
+            .config
+            .as_ref()
+            .map(|c| c.is_enabled())
+            .unwrap_or(false)
+        {
             return Ok(());
         }
 
@@ -262,10 +277,10 @@ impl Plugin for BridgePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_team_mail_core::config::Config;
-    use agent_team_mail_core::context::{Platform, SystemContext};
     use crate::plugin::MailService;
     use crate::roster::RosterService;
+    use agent_team_mail_core::config::Config;
+    use agent_team_mail_core::context::{Platform, SystemContext};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -422,9 +437,7 @@ address = "user@server2.local"
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
-        let run_handle = tokio::spawn(async move {
-            plugin.run(cancel_clone).await
-        });
+        let run_handle = tokio::spawn(async move { plugin.run(cancel_clone).await });
 
         // Cancel immediately
         cancel.cancel();
@@ -454,9 +467,7 @@ address = "user@remote.local"
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
-        let run_handle = tokio::spawn(async move {
-            plugin.run(cancel_clone).await
-        });
+        let run_handle = tokio::spawn(async move { plugin.run(cancel_clone).await });
 
         // Cancel after short delay
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

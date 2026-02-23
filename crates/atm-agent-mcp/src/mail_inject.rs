@@ -373,7 +373,10 @@ pub fn mark_messages_read(identity: &str, team: &str, message_ids: &[String]) {
             }
         }
     }) {
-        tracing::warn!("mark_messages_read: failed atomic update for '{}': {e}", identity);
+        tracing::warn!(
+            "mark_messages_read: failed atomic update for '{}': {e}",
+            identity
+        );
     }
 }
 
@@ -657,8 +660,14 @@ mod tests {
         let messages = read_inbox_file(dir.path(), "team", "agent");
         unset_atm_home();
 
-        let msg1 = messages.iter().find(|m| m.message_id.as_deref() == Some("id-1")).unwrap();
-        let msg2 = messages.iter().find(|m| m.message_id.as_deref() == Some("id-2")).unwrap();
+        let msg1 = messages
+            .iter()
+            .find(|m| m.message_id.as_deref() == Some("id-1"))
+            .unwrap();
+        let msg2 = messages
+            .iter()
+            .find(|m| m.message_id.as_deref() == Some("id-2"))
+            .unwrap();
         assert!(msg1.read, "id-1 should be marked read");
         assert!(!msg2.read, "id-2 should remain unread");
     }
@@ -680,7 +689,10 @@ mod tests {
         let messages = read_inbox_file(dir.path(), "team", "agent");
         unset_atm_home();
 
-        assert!(!messages[0].read, "no messages should be marked when ids list is empty");
+        assert!(
+            !messages[0].read,
+            "no messages should be marked when ids list is empty"
+        );
     }
 
     #[test]
@@ -720,7 +732,10 @@ mod tests {
         // Step 2: messages still unread
         {
             let msgs = read_inbox_file(dir.path(), "team", "agent");
-            assert!(msgs.iter().all(|m| !m.read), "must remain unread before delivery");
+            assert!(
+                msgs.iter().all(|m| !m.read),
+                "must remain unread before delivery"
+            );
         }
 
         // Step 3: format content (simulates writing to child stdin)
@@ -734,7 +749,10 @@ mod tests {
         // Step 5: verify messages are now read
         let msgs = read_inbox_file(dir.path(), "team", "agent");
         unset_atm_home();
-        assert!(msgs.iter().all(|m| m.read), "all messages should be marked read after delivery");
+        assert!(
+            msgs.iter().all(|m| m.read),
+            "all messages should be marked read after delivery"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -791,8 +809,14 @@ mod tests {
 
         set.clear_inflight(&ids);
 
-        assert!(!set.is_inflight("id-1"), "id-1 should be injectable again after clear");
-        assert!(!set.is_inflight("id-2"), "id-2 should be injectable again after clear");
+        assert!(
+            !set.is_inflight("id-1"),
+            "id-1 should be injectable again after clear"
+        );
+        assert!(
+            !set.is_inflight("id-2"),
+            "id-2 should be injectable again after clear"
+        );
     }
 
     #[test]
@@ -813,7 +837,11 @@ mod tests {
         ];
         let set = InflightMailSet::new();
         let injectable = set.filter_injectable(&envelopes);
-        assert_eq!(injectable.len(), 2, "all envelopes injectable when set is empty");
+        assert_eq!(
+            injectable.len(),
+            2,
+            "all envelopes injectable when set is empty"
+        );
     }
 
     #[test]
@@ -827,6 +855,9 @@ mod tests {
         let mut set = InflightMailSet::new();
         set.mark_inflight(&["only-one".to_string()]);
         let injectable = set.filter_injectable(&envelopes);
-        assert!(injectable.is_empty(), "no envelopes injectable when all in-flight");
+        assert!(
+            injectable.is_empty(),
+            "no envelopes injectable when all in-flight"
+        );
     }
 }

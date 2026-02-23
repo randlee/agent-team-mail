@@ -17,10 +17,7 @@ pub trait IssueProvider: Send + Sync + std::fmt::Debug {
     ) -> impl Future<Output = Result<Vec<Issue>, PluginError>> + Send;
 
     /// Get a single issue by number
-    fn get_issue(
-        &self,
-        number: u64,
-    ) -> impl Future<Output = Result<Issue, PluginError>> + Send;
+    fn get_issue(&self, number: u64) -> impl Future<Output = Result<Issue, PluginError>> + Send;
 
     /// Post a comment on an issue
     fn add_comment(

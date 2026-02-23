@@ -77,7 +77,11 @@ impl PluginRegistry {
 
     /// Update the state of a plugin by name
     pub fn set_state(&mut self, name: &str, state: PluginState) -> bool {
-        if let Some(entry) = self.plugins.iter_mut().find(|e| e.plugin.metadata().name == name) {
+        if let Some(entry) = self
+            .plugins
+            .iter_mut()
+            .find(|e| e.plugin.metadata().name == name)
+        {
             entry.state = state;
             true
         } else {

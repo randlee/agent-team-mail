@@ -445,7 +445,12 @@ mod tests {
 
     #[test]
     fn test_create_test_step_helper() {
-        let step = create_test_step("Setup", 1, CiRunStatus::Completed, Some(CiRunConclusion::Success));
+        let step = create_test_step(
+            "Setup",
+            1,
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Success),
+        );
 
         assert_eq!(step.name, "Setup");
         assert_eq!(step.number, 1);

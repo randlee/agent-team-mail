@@ -52,14 +52,18 @@ fn macos_atomic_swap(path1: &Path, path2: &Path) -> Result<(), InboxError> {
         fn renamex_np(from: *const c_char, to: *const c_char, flags: c_uint) -> c_int;
     }
 
-    let path1_cstr = CString::new(path1.as_os_str().to_string_lossy().as_bytes())
-        .map_err(|_| InboxError::InvalidPath {
-            path: path1.to_path_buf(),
+    let path1_cstr =
+        CString::new(path1.as_os_str().to_string_lossy().as_bytes()).map_err(|_| {
+            InboxError::InvalidPath {
+                path: path1.to_path_buf(),
+            }
         })?;
 
-    let path2_cstr = CString::new(path2.as_os_str().to_string_lossy().as_bytes())
-        .map_err(|_| InboxError::InvalidPath {
-            path: path2.to_path_buf(),
+    let path2_cstr =
+        CString::new(path2.as_os_str().to_string_lossy().as_bytes()).map_err(|_| {
+            InboxError::InvalidPath {
+                path: path2.to_path_buf(),
+            }
         })?;
 
     let result = unsafe { renamex_np(path1_cstr.as_ptr(), path2_cstr.as_ptr(), RENAME_SWAP) };
@@ -76,7 +80,7 @@ fn macos_atomic_swap(path1: &Path, path2: &Path) -> Result<(), InboxError> {
 
 #[cfg(target_os = "linux")]
 fn linux_atomic_swap(path1: &Path, path2: &Path) -> Result<(), InboxError> {
-    use libc::{c_char, c_int, AT_FDCWD};
+    use libc::{AT_FDCWD, c_char, c_int};
 
     // renameat2 flags
     const RENAME_EXCHANGE: c_int = 1 << 1;
@@ -91,14 +95,18 @@ fn linux_atomic_swap(path1: &Path, path2: &Path) -> Result<(), InboxError> {
         ) -> c_int;
     }
 
-    let path1_cstr = CString::new(path1.as_os_str().to_string_lossy().as_bytes())
-        .map_err(|_| InboxError::InvalidPath {
-            path: path1.to_path_buf(),
+    let path1_cstr =
+        CString::new(path1.as_os_str().to_string_lossy().as_bytes()).map_err(|_| {
+            InboxError::InvalidPath {
+                path: path1.to_path_buf(),
+            }
         })?;
 
-    let path2_cstr = CString::new(path2.as_os_str().to_string_lossy().as_bytes())
-        .map_err(|_| InboxError::InvalidPath {
-            path: path2.to_path_buf(),
+    let path2_cstr =
+        CString::new(path2.as_os_str().to_string_lossy().as_bytes()).map_err(|_| {
+            InboxError::InvalidPath {
+                path: path2.to_path_buf(),
+            }
         })?;
 
     let result = unsafe {

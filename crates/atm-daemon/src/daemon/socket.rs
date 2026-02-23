@@ -46,8 +46,7 @@ use crate::plugins::worker_adapter::AgentState;
 ///
 /// Wraps a [`DurableDedupeStore`] in an `Arc<Mutex<_>>` so it can be
 /// cloned cheaply and shared across connection-handler tasks.
-pub type SharedDedupeStore =
-    std::sync::Arc<std::sync::Mutex<DurableDedupeStore>>;
+pub type SharedDedupeStore = std::sync::Arc<std::sync::Mutex<DurableDedupeStore>>;
 
 /// Create a new [`SharedDedupeStore`] from the given home directory.
 ///
@@ -201,7 +200,9 @@ pub fn new_pubsub_store() -> SharedPubSubStore {
 ///
 /// Maps agent name to [`AgentStreamState`].
 pub type SharedStreamStateStore = std::sync::Arc<
-    std::sync::Mutex<std::collections::HashMap<String, agent_team_mail_core::daemon_stream::AgentStreamState>>,
+    std::sync::Mutex<
+        std::collections::HashMap<String, agent_team_mail_core::daemon_stream::AgentStreamState>,
+    >,
 >;
 
 /// Create a new, empty [`SharedStreamStateStore`].
@@ -445,8 +446,14 @@ async fn handle_connection(
     let response = if is_launch_command(request_str) {
         handle_launch_command(request_str, &launch_tx).await
     } else if is_control_command(request_str) {
-        handle_control_command(request_str, &home, &state_store, &session_registry, &dedup_store)
-            .await
+        handle_control_command(
+            request_str,
+            &home,
+            &state_store,
+            &session_registry,
+            &dedup_store,
+        )
+        .await
     } else if is_hook_event_command(request_str) {
         handle_hook_event_command(request_str, &state_store, &session_registry).await
     } else if is_stream_event_command(request_str) {
@@ -454,7 +461,13 @@ async fn handle_connection(
     } else if is_log_event_command(request_str) {
         handle_log_event_command(request_str, &log_event_queue).await
     } else {
-        match parse_and_dispatch(request_str, &state_store, &pubsub_store, &session_registry, &stream_state_store) {
+        match parse_and_dispatch(
+            request_str,
+            &state_store,
+            &pubsub_store,
+            &session_registry,
+            &stream_state_store,
+        ) {
             Ok(resp) => resp,
             Err(e) => {
                 error!("Failed to dispatch socket request: {e}");
@@ -600,7 +613,9 @@ async fn handle_stream_subscribe(
                 break;
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                warn!("stream-subscribe: lagged by {n} events; subscriber must re-sync via agent-stream-state");
+                warn!(
+                    "stream-subscribe: lagged by {n} events; subscriber must re-sync via agent-stream-state"
+                );
                 // Continue — subscriber misses events but stays connected.
             }
         }
@@ -697,6 +712,45 @@ async fn handle_stream_event_command(
         state.apply(&event);
     }
 
+    // Append observability summaries to structured logs for non-turn events.
+    match &event {
+        DaemonStreamEvent::StreamError {
+            agent_id,
+            session_id,
+            error_summary,
+        } => {
+            agent_team_mail_core::event_log::emit_event_best_effort(
+                agent_team_mail_core::event_log::EventFields {
+                    level: "warn",
+                    source: "atm-daemon",
+                    action: "stream_error_summary",
+                    session_id: Some(session_id.clone()),
+                    agent_id: Some(agent_id.clone()),
+                    error: Some(error_summary.clone()),
+                    ..Default::default()
+                },
+            );
+        }
+        DaemonStreamEvent::DroppedCounters {
+            agent_id,
+            dropped,
+            unknown,
+        } => {
+            agent_team_mail_core::event_log::emit_event_best_effort(
+                agent_team_mail_core::event_log::EventFields {
+                    level: "info",
+                    source: "atm-daemon",
+                    action: "stream_dropped_counters",
+                    agent_id: Some(agent_id.clone()),
+                    result: Some(format!("dropped={dropped},unknown={unknown}")),
+                    count: Some(dropped.saturating_add(*unknown)),
+                    ..Default::default()
+                },
+            );
+        }
+        _ => {}
+    }
+
     // Publish to the broadcast channel for push-based subscribers.
     // Ignore send errors — no active subscribers is the normal steady state.
     let _ = stream_event_sender.send(event.clone());
@@ -762,7 +816,10 @@ async fn handle_log_event_command(
         return make_error_response(
             &request.request_id,
             "VERSION_MISMATCH",
-            &format!("Unsupported log event schema version {}; expected 1", event.v),
+            &format!(
+                "Unsupported log event schema version {}; expected 1",
+                event.v
+            ),
         );
     }
 
@@ -824,11 +881,14 @@ fn authorize_hook_event(
         return Err("missing ATM_HOME/HOME".to_string());
     };
 
-    let config_path = home_dir.join(".claude/teams").join(team).join("config.json");
+    let config_path = home_dir
+        .join(".claude/teams")
+        .join(team)
+        .join("config.json");
     let content = std::fs::read_to_string(&config_path)
         .map_err(|_| format!("team config not found: {}", config_path.display()))?;
-    let config: TeamConfig = serde_json::from_str(&content)
-        .map_err(|e| format!("invalid team config: {e}"))?;
+    let config: TeamConfig =
+        serde_json::from_str(&content).map_err(|e| format!("invalid team config: {e}"))?;
 
     // Support either canonical agent_id or bare name.
     let expected_agent_id = format!("{agent}@{team}");
@@ -841,7 +901,10 @@ fn authorize_hook_event(
     };
 
     let is_team_lead = member.agent_id == config.lead_agent_id;
-    Ok(HookEventAuth { is_team_lead, source })
+    Ok(HookEventAuth {
+        is_team_lead,
+        source,
+    })
 }
 
 /// Handle the `"hook-event"` command, updating daemon state in real-time
@@ -861,7 +924,7 @@ async fn handle_hook_event_command(
                 "unknown",
                 "INVALID_REQUEST",
                 &format!("bad hook-event: {e}"),
-            )
+            );
         }
     };
 
@@ -935,7 +998,7 @@ async fn handle_hook_event_command(
             return make_ok_response(
                 &request.request_id,
                 serde_json::json!({"processed": false, "reason": reason}),
-            )
+            );
         }
     };
 
@@ -1509,7 +1572,8 @@ async fn process_control_request(
                     Some("stdin payload cannot be empty".to_string()),
                 )
             } else {
-                match enqueue_stdin_message(home, &control.team, &control.agent_id, &content).await {
+                match enqueue_stdin_message(home, &control.team, &control.agent_id, &content).await
+                {
                     Ok(()) => control_ack(
                         &control.request_id,
                         ControlResult::Ok,
@@ -1954,8 +2018,8 @@ mod tests {
     use crate::plugins::worker_adapter::AgentStateTracker;
     use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
-    use std::time::Duration;
     use serial_test::serial;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn make_store() -> SharedStateStore {
@@ -2030,7 +2094,12 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn write_hook_auth_team_config(home_dir: &std::path::Path, team: &str, lead: &str, members: &[&str]) {
+    fn write_hook_auth_team_config(
+        home_dir: &std::path::Path,
+        team: &str,
+        lead: &str,
+        members: &[&str],
+    ) {
         let team_dir = home_dir.join(".claude/teams").join(team);
         std::fs::create_dir_all(&team_dir).unwrap();
         let mut member_values = Vec::new();
@@ -2144,7 +2213,8 @@ mod tests {
         let ps = make_ps();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r1","command":"launch","payload":{"agent":"","team":"atm-dev","command":"codex","timeout_secs":30,"env_vars":{}}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         // In parse_and_dispatch the "launch" arm returns INTERNAL_ERROR
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
@@ -2187,7 +2257,8 @@ mod tests {
         let ps = make_ps();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r1","command":"bogus","payload":{}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "UNKNOWN_COMMAND");
     }
@@ -2197,7 +2268,8 @@ mod tests {
         let store = make_store();
         let ps = make_ps();
         let sr = make_sr();
-        let resp = parse_and_dispatch("not-json{{", &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        let resp =
+            parse_and_dispatch("not-json{{", &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INVALID_REQUEST");
     }
@@ -2208,7 +2280,8 @@ mod tests {
         let ps = make_ps();
         let sr = make_sr();
         let req_json = r#"{"version":99,"request_id":"r1","command":"agent-state","payload":{}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
     }
@@ -3002,7 +3075,8 @@ mod tests {
         let ps = make_ps();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-hook","command":"hook-event","payload":{"event":"session_start","agent":"test-agent","session_id":"s1"}}"#;
-        let resp = parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
     }
@@ -3144,10 +3218,12 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
-        assert!(payload["reason"]
-            .as_str()
-            .unwrap()
-            .contains("unknown event type"));
+        assert!(
+            payload["reason"]
+                .as_str()
+                .unwrap()
+                .contains("unknown event type")
+        );
     }
 
     #[cfg(unix)]
@@ -3203,10 +3279,12 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
-        assert!(payload["reason"]
-            .as_str()
-            .unwrap()
-            .contains("only team-lead"));
+        assert!(
+            payload["reason"]
+                .as_str()
+                .unwrap()
+                .contains("only team-lead")
+        );
     }
 
     #[cfg(unix)]
@@ -3272,7 +3350,11 @@ mod tests {
         reader.read_line(&mut resp_line).await.unwrap();
         let resp: agent_team_mail_core::daemon_client::SocketResponse =
             serde_json::from_str(resp_line.trim()).unwrap();
-        assert!(resp.is_ok(), "session_start hook-event failed: {:?}", resp.error);
+        assert!(
+            resp.is_ok(),
+            "session_start hook-event failed: {:?}",
+            resp.error
+        );
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
 
@@ -3307,7 +3389,11 @@ mod tests {
         reader2.read_line(&mut resp_line2).await.unwrap();
         let resp2: agent_team_mail_core::daemon_client::SocketResponse =
             serde_json::from_str(resp_line2.trim()).unwrap();
-        assert!(resp2.is_ok(), "teammate_idle hook-event failed: {:?}", resp2.error);
+        assert!(
+            resp2.is_ok(),
+            "teammate_idle hook-event failed: {:?}",
+            resp2.error
+        );
 
         // Verify state updated to Idle
         {
@@ -3603,10 +3689,7 @@ mod tests {
             !payload["processed"].as_bool().unwrap(),
             "processed must be false when session_id is empty"
         );
-        assert_eq!(
-            payload["reason"].as_str().unwrap(),
-            "missing session_id",
-        );
+        assert_eq!(payload["reason"].as_str().unwrap(), "missing session_id",);
 
         // Session registry must remain empty — no upsert occurred
         let reg = sr.lock().unwrap();
@@ -3686,10 +3769,7 @@ mod tests {
         let req = make_control_req_with_sent_at(&old.to_rfc3339());
         let err = validate_control_request(&req);
         assert!(err.is_some(), "should be rejected");
-        assert!(
-            err.unwrap().contains("skew"),
-            "error should mention skew"
-        );
+        assert!(err.unwrap().contains("skew"), "error should mention skew");
     }
 
     /// A `sent_at` timestamp within the default 300s window is accepted.
@@ -3710,10 +3790,7 @@ mod tests {
         let req = make_control_req_with_sent_at(&future.to_rfc3339());
         let err = validate_control_request(&req);
         assert!(err.is_some(), "future skew should be rejected");
-        assert!(
-            err.unwrap().contains("skew"),
-            "error should mention skew"
-        );
+        assert!(err.unwrap().contains("skew"), "error should mention skew");
     }
 
     /// A `sent_at` timestamp at "now" (within a few seconds) is accepted.
@@ -3723,7 +3800,11 @@ mod tests {
         let now = chrono::Utc::now();
         let req = make_control_req_with_sent_at(&now.to_rfc3339());
         let err = validate_control_request(&req);
-        assert!(err.is_none(), "current timestamp should be accepted, got: {:?}", err);
+        assert!(
+            err.is_none(),
+            "current timestamp should be accepted, got: {:?}",
+            err
+        );
     }
 
     /// A malformed `sent_at` value fails RFC3339 parse → rejected.
@@ -3767,7 +3848,10 @@ mod tests {
             "non-lead claude_hook session_start must be rejected"
         );
         assert!(
-            payload["reason"].as_str().unwrap().contains("only team-lead"),
+            payload["reason"]
+                .as_str()
+                .unwrap()
+                .contains("only team-lead"),
             "rejection reason should mention team-lead"
         );
     }
@@ -3806,7 +3890,9 @@ mod tests {
         );
         // Verify the session was actually registered.
         let reg = sr.lock().unwrap();
-        let record = reg.query("arch-ctm").expect("arch-ctm must be in session registry");
+        let record = reg
+            .query("arch-ctm")
+            .expect("arch-ctm must be in session registry");
         assert_eq!(record.session_id, "codex:abc-session-1");
     }
 
@@ -3841,7 +3927,10 @@ mod tests {
             "unknown source must be treated like claude_hook (strictest)"
         );
         assert!(
-            payload["reason"].as_str().unwrap().contains("only team-lead"),
+            payload["reason"]
+                .as_str()
+                .unwrap()
+                .contains("only team-lead"),
             "rejection reason should mention team-lead"
         );
     }
@@ -3910,7 +3999,10 @@ mod tests {
             "legacy flat-string source must degrade to Unknown (strictest)"
         );
         assert!(
-            payload["reason"].as_str().unwrap().contains("only team-lead"),
+            payload["reason"]
+                .as_str()
+                .unwrap()
+                .contains("only team-lead"),
             "legacy flat-string source should follow Unknown/claude_hook restrictions"
         );
     }
@@ -3956,7 +4048,9 @@ mod tests {
         let store = make_store();
         let sr = make_sr();
         // Pre-populate registry so mark_dead has something to work with.
-        sr.lock().unwrap().upsert("arch-ctm", "codex:sess-end-test", 0);
+        sr.lock()
+            .unwrap()
+            .upsert("arch-ctm", "codex:sess-end-test", 0);
 
         let req = SocketRequest {
             version: PROTOCOL_VERSION,
@@ -3980,7 +4074,9 @@ mod tests {
         // Verify session marked dead.
         use crate::daemon::session_registry::SessionState;
         let reg = sr.lock().unwrap();
-        let record = reg.query("arch-ctm").expect("arch-ctm must remain in registry");
+        let record = reg
+            .query("arch-ctm")
+            .expect("arch-ctm must remain in registry");
         assert_eq!(record.state, SessionState::Dead);
     }
 
@@ -4110,6 +4206,61 @@ mod tests {
         assert_eq!(resp.error.unwrap().code, "INVALID_PAYLOAD");
     }
 
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_stream_event_command_accepts_stream_error_observability_event() {
+        use agent_team_mail_core::daemon_stream::StreamTurnStatus;
+
+        let store = new_stream_state_store();
+        let req_json = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "request_id": "se-err",
+            "command": "stream-event",
+            "payload": {
+                "kind": "stream_error",
+                "agent_id": "arch-ctm",
+                "session_id": "th-err",
+                "error_summary": "socket closed"
+            }
+        });
+        let req_str = serde_json::to_string(&req_json).unwrap();
+        let resp = handle_stream_event_command(&req_str, &store, &new_stream_event_sender()).await;
+        assert_eq!(resp.status, "ok");
+
+        // StreamError should not mutate turn-state beyond creating an agent entry.
+        let guard = store.lock().unwrap();
+        let state = guard.get("arch-ctm").expect("agent should be tracked");
+        assert_eq!(state.turn_status, StreamTurnStatus::Idle);
+        assert!(state.turn_id.is_none());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_stream_event_command_accepts_dropped_counters_event() {
+        use agent_team_mail_core::daemon_stream::StreamTurnStatus;
+
+        let store = new_stream_state_store();
+        let req_json = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "request_id": "se-counters",
+            "command": "stream-event",
+            "payload": {
+                "kind": "dropped_counters",
+                "agent_id": "proxy:all",
+                "dropped": 5,
+                "unknown": 2
+            }
+        });
+        let req_str = serde_json::to_string(&req_json).unwrap();
+        let resp = handle_stream_event_command(&req_str, &store, &new_stream_event_sender()).await;
+        assert_eq!(resp.status, "ok");
+
+        let guard = store.lock().unwrap();
+        let state = guard.get("proxy:all").expect("agent should be tracked");
+        assert_eq!(state.turn_status, StreamTurnStatus::Idle);
+        assert!(state.turn_id.is_none());
+    }
+
     #[test]
     fn test_agent_stream_state_returns_state_after_event() {
         use agent_team_mail_core::daemon_stream::{AgentStreamState, DaemonStreamEvent};
@@ -4153,10 +4304,7 @@ mod tests {
     #[test]
     fn test_agent_stream_state_unknown_agent() {
         let store = new_stream_state_store();
-        let req = make_request(
-            "agent-stream-state",
-            serde_json::json!({"agent": "ghost"}),
-        );
+        let req = make_request("agent-stream-state", serde_json::json!({"agent": "ghost"}));
         let resp = handle_agent_stream_state(&req, &store);
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "AGENT_NOT_FOUND");
@@ -4233,7 +4381,9 @@ mod tests {
         assert_eq!(resp.status, "ok");
 
         // The subscriber should receive the event without blocking.
-        let event = rx.try_recv().expect("event should be immediately available");
+        let event = rx
+            .try_recv()
+            .expect("event should be immediately available");
         assert!(
             matches!(
                 &event,

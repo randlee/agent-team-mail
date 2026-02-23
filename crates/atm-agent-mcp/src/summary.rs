@@ -19,10 +19,7 @@ fn sessions_root() -> PathBuf {
 
 /// Return the directory for a specific session's summary.
 pub fn summary_dir(team: &str, identity: &str, backend_id: &str) -> PathBuf {
-    sessions_root()
-        .join(team)
-        .join(identity)
-        .join(backend_id)
+    sessions_root().join(team).join(identity).join(backend_id)
 }
 
 /// Return the full path to a session's summary file.
@@ -160,7 +157,8 @@ mod tests {
 
     #[test]
     fn test_format_resume_context_contains_identity() {
-        let result = format_resume_context("arch-ctm", Some("my-repo"), Some("main"), "some summary");
+        let result =
+            format_resume_context("arch-ctm", Some("my-repo"), Some("main"), "some summary");
         assert!(result.contains("arch-ctm"));
     }
 
@@ -190,7 +188,10 @@ mod tests {
     #[test]
     fn test_format_resume_context_no_repo() {
         let result = format_resume_context("dev", None, None, "summary text");
-        assert!(result.contains("unknown"), "should handle None repo/branch gracefully");
+        assert!(
+            result.contains("unknown"),
+            "should handle None repo/branch gracefully"
+        );
         assert!(result.contains("summary text"));
     }
 

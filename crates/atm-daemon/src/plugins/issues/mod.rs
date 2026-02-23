@@ -18,8 +18,8 @@ pub use provider::{ErasedIssueProvider, IssueProvider};
 pub use registry::{ProviderFactory, ProviderRegistry};
 pub use types::{Issue, IssueComment, IssueFilter, IssueLabel, IssueState};
 
-use agent_team_mail_core::context::GitProvider;
 use crate::plugin::PluginError;
+use agent_team_mail_core::context::GitProvider;
 
 /// Create an issue provider for the given git provider (legacy function)
 ///
@@ -40,10 +40,9 @@ pub fn create_provider(
     _config: Option<&toml::Table>,
 ) -> Result<Box<dyn ErasedIssueProvider>, PluginError> {
     match provider {
-        GitProvider::GitHub { owner, repo } => Ok(Box::new(GitHubProvider::new(
-            owner.clone(),
-            repo.clone(),
-        ))),
+        GitProvider::GitHub { owner, repo } => {
+            Ok(Box::new(GitHubProvider::new(owner.clone(), repo.clone())))
+        }
         GitProvider::AzureDevOps { org, project, repo } => Err(PluginError::Provider {
             message: format!(
                 "Azure DevOps provider moved to external plugin (org: {org}, project: {project}, repo: {repo})"
@@ -51,11 +50,15 @@ pub fn create_provider(
             source: None,
         }),
         GitProvider::GitLab { namespace, repo } => Err(PluginError::Provider {
-            message: format!("GitLab issue provider not yet implemented (namespace: {namespace}, repo: {repo})"),
+            message: format!(
+                "GitLab issue provider not yet implemented (namespace: {namespace}, repo: {repo})"
+            ),
             source: None,
         }),
         GitProvider::Bitbucket { workspace, repo } => Err(PluginError::Provider {
-            message: format!("Bitbucket issue provider not yet implemented (workspace: {workspace}, repo: {repo})"),
+            message: format!(
+                "Bitbucket issue provider not yet implemented (workspace: {workspace}, repo: {repo})"
+            ),
             source: None,
         }),
         GitProvider::Unknown { host } => Err(PluginError::Provider {
@@ -90,10 +93,12 @@ mod tests {
         };
         let result = create_provider(&provider, None);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("moved to external plugin"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("moved to external plugin")
+        );
     }
 
     #[test]
@@ -104,10 +109,12 @@ mod tests {
         };
         let result = create_provider(&provider, None);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("GitLab issue provider not yet implemented"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("GitLab issue provider not yet implemented")
+        );
     }
 
     #[test]
@@ -118,10 +125,12 @@ mod tests {
         };
         let result = create_provider(&provider, None);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Bitbucket issue provider not yet implemented"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Bitbucket issue provider not yet implemented")
+        );
     }
 
     #[test]
@@ -131,9 +140,11 @@ mod tests {
         };
         let result = create_provider(&provider, None);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("No issue provider for unknown git host"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No issue provider for unknown git host")
+        );
     }
 }

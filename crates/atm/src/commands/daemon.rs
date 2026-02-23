@@ -51,11 +51,11 @@ fn execute_status(args: StatusArgs) -> Result<()> {
     }
 
     // Read and parse status file
-    let content = std::fs::read_to_string(&status_path)
-        .context("Failed to read daemon status file")?;
+    let content =
+        std::fs::read_to_string(&status_path).context("Failed to read daemon status file")?;
 
-    let status: DaemonStatus = serde_json::from_str(&content)
-        .context("Failed to parse daemon status file")?;
+    let status: DaemonStatus =
+        serde_json::from_str(&content).context("Failed to parse daemon status file")?;
 
     // Check if status is stale (timestamp older than 2x poll interval = 60 seconds)
     let stale_threshold_secs = 60;
@@ -79,7 +79,10 @@ fn execute_status(args: StatusArgs) -> Result<()> {
 
         if is_stale {
             println!();
-            println!("WARNING: Daemon status is stale (last update > {}s ago)", stale_threshold_secs);
+            println!(
+                "WARNING: Daemon status is stale (last update > {}s ago)",
+                stale_threshold_secs
+            );
             println!("         The daemon may not be running.");
         }
 
@@ -101,7 +104,11 @@ fn execute_status(args: StatusArgs) -> Result<()> {
                     PluginStatusKind::Disabled => "disabled",
                 };
 
-                let enabled_str = if plugin.enabled { "enabled" } else { "disabled" };
+                let enabled_str = if plugin.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
 
                 print!("  {} - {} ({})", plugin.name, status_str, enabled_str);
 

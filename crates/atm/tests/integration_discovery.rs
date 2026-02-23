@@ -99,7 +99,11 @@ fn create_inbox_with_messages(team_dir: &Path, agent_name: &str, unread_count: u
         })
         .collect();
 
-    fs::write(&inbox_path, serde_json::to_string_pretty(&messages).unwrap()).unwrap();
+    fs::write(
+        &inbox_path,
+        serde_json::to_string_pretty(&messages).unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -130,10 +134,7 @@ fn test_teams_command_json_output() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
-    cmd.arg("teams")
-        .arg("--json")
-        .assert()
-        .success();
+    cmd.arg("teams").arg("--json").assert().success();
 }
 
 #[test]
@@ -259,10 +260,7 @@ fn test_config_command_json_output() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
-    cmd.arg("config")
-        .arg("--json")
-        .assert()
-        .success();
+    cmd.arg("config").arg("--json").assert().success();
 }
 
 #[test]
@@ -282,8 +280,9 @@ fn test_empty_team_members() {
 
     fs::write(
         team_dir.join("config.json"),
-        serde_json::to_string_pretty(&config).unwrap()
-    ).unwrap();
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);

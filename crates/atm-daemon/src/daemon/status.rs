@@ -98,8 +98,7 @@ impl StatusWriter {
     pub fn write_status(&self, plugins: Vec<PluginStatus>, teams: Vec<String>) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = self.status_path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("Failed to create daemon status directory")?;
+            std::fs::create_dir_all(parent).context("Failed to create daemon status directory")?;
         }
 
         // Calculate uptime
@@ -120,14 +119,13 @@ impl StatusWriter {
         };
 
         // Serialize to JSON
-        let json = serde_json::to_string_pretty(&status)
-            .context("Failed to serialize daemon status")?;
+        let json =
+            serde_json::to_string_pretty(&status).context("Failed to serialize daemon status")?;
 
         // Atomic write: temp file + rename
         // On Windows, std::fs::rename doesn't replace existing files, so we remove first
         let temp_path = self.status_path.with_extension("json.tmp");
-        std::fs::write(&temp_path, json.as_bytes())
-            .context("Failed to write status temp file")?;
+        std::fs::write(&temp_path, json.as_bytes()).context("Failed to write status temp file")?;
 
         // Remove existing file if present (required for Windows compatibility)
         if self.status_path.exists() {
@@ -149,17 +147,14 @@ impl StatusWriter {
 
 /// Format timestamp as ISO 8601 string
 fn format_timestamp(time: SystemTime) -> String {
-    let duration = time
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
+    let duration = time.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
 
     // Format as ISO 8601: YYYY-MM-DDTHH:MM:SSZ
     // Use chrono for proper formatting
     use chrono::{DateTime, Utc};
-    let dt = DateTime::<Utc>::from_timestamp(secs as i64, nanos)
-        .unwrap_or_else(Utc::now);
+    let dt = DateTime::<Utc>::from_timestamp(secs as i64, nanos).unwrap_or_else(Utc::now);
     dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 

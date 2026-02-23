@@ -34,7 +34,10 @@ use std::collections::HashMap;
 /// assert_eq!(resolve_alias("unknown", &aliases), "unknown");
 /// ```
 pub fn resolve_alias(name: &str, aliases: &HashMap<String, String>) -> String {
-    aliases.get(name).cloned().unwrap_or_else(|| name.to_string())
+    aliases
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| name.to_string())
 }
 
 /// Resolve an identity through the roles table first, then aliases.
@@ -73,7 +76,10 @@ pub fn resolve_identity(
     if let Some(resolved) = roles.get(name) {
         return resolved.clone();
     }
-    aliases.get(name).cloned().unwrap_or_else(|| name.to_string())
+    aliases
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| name.to_string())
 }
 
 #[cfg(test)]

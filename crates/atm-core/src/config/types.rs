@@ -281,7 +281,10 @@ identity = "test-user"
         assert_eq!(config.strategy, CleanupStrategy::Delete);
         assert_eq!(config.archive_dir, None);
         assert!(!config.enabled, "Retention should be disabled by default");
-        assert_eq!(config.interval_secs, 300, "Default interval should be 5 minutes");
+        assert_eq!(
+            config.interval_secs, 300,
+            "Default interval should be 5 minutes"
+        );
     }
 
     #[test]
@@ -300,7 +303,10 @@ interval_secs = 600
         assert_eq!(config.retention.max_age, Some("7d".to_string()));
         assert_eq!(config.retention.max_count, Some(1000));
         assert_eq!(config.retention.strategy, CleanupStrategy::Archive);
-        assert_eq!(config.retention.archive_dir, Some("tmp/archive".to_string()));
+        assert_eq!(
+            config.retention.archive_dir,
+            Some("tmp/archive".to_string())
+        );
         assert!(config.retention.enabled);
         assert_eq!(config.retention.interval_secs, 600);
     }
@@ -335,7 +341,10 @@ qa = "worker-2"
 "#;
 
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.roles.get("team-lead").map(|s| s.as_str()), Some("arch-atm"));
+        assert_eq!(
+            config.roles.get("team-lead").map(|s| s.as_str()),
+            Some("arch-atm")
+        );
         assert_eq!(config.roles.get("qa").map(|s| s.as_str()), Some("worker-2"));
         assert_eq!(config.roles.len(), 2);
     }
@@ -360,7 +369,10 @@ team-lead = "arch-atm"
     #[test]
     fn test_roles_default_is_empty() {
         let config = Config::default();
-        assert!(config.roles.is_empty(), "roles should default to empty HashMap");
+        assert!(
+            config.roles.is_empty(),
+            "roles should default to empty HashMap"
+        );
     }
 
     #[test]

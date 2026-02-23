@@ -1,4 +1,4 @@
-use agent_team_mail_core::io::{inbox_append, InboxError, WriteOutcome};
+use agent_team_mail_core::io::{InboxError, WriteOutcome, inbox_append};
 use agent_team_mail_core::schema::InboxMessage;
 use std::path::PathBuf;
 

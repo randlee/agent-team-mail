@@ -10,7 +10,7 @@ use tokio::fs;
 use tracing::{debug, info, warn};
 
 use super::config::BridgePluginConfig;
-use super::dedup::{assign_message_ids, SyncState};
+use super::dedup::{SyncState, assign_message_ids};
 use super::metrics::BridgeMetrics;
 use super::self_write_filter::SelfWriteFilter;
 use super::team_config_sync::sync_team_config;
@@ -179,7 +179,9 @@ impl SyncEngine {
 
             if let Some(transport) = self.transports.get(remote_hostname) {
                 let mut transport_guard = transport.lock().await;
-                if !transport_guard.is_connected().await && let Err(e) = transport_guard.connect().await {
+                if !transport_guard.is_connected().await
+                    && let Err(e) = transport_guard.connect().await
+                {
                     warn!("Failed to connect to {}: {}", remote_hostname, e);
                     stats.errors += 1;
                     self.metrics.record_remote_failure(remote_hostname);
@@ -206,12 +208,19 @@ impl SyncEngine {
                         self.metrics.reset_remote_failures(remote_hostname);
                     }
                     Err(e) => {
-                        warn!("Failed to push {} to {}: {}", path.display(), remote_hostname, e);
+                        warn!(
+                            "Failed to push {} to {}: {}",
+                            path.display(),
+                            remote_hostname,
+                            e
+                        );
                         stats.errors += 1;
                         self.metrics.record_remote_failure(remote_hostname);
 
                         // Check if we should disable this remote
-                        if self.metrics.get_remote_failures(remote_hostname) >= CIRCUIT_BREAKER_THRESHOLD {
+                        if self.metrics.get_remote_failures(remote_hostname)
+                            >= CIRCUIT_BREAKER_THRESHOLD
+                        {
                             warn!(
                                 "Remote {} disabled after {} consecutive failures",
                                 remote_hostname, CIRCUIT_BREAKER_THRESHOLD
@@ -252,7 +261,9 @@ impl SyncEngine {
 
             if let Some(transport) = self.transports.get(remote_hostname) {
                 let mut transport_guard = transport.lock().await;
-                if !transport_guard.is_connected().await && let Err(e) = transport_guard.connect().await {
+                if !transport_guard.is_connected().await
+                    && let Err(e) = transport_guard.connect().await
+                {
                     warn!("Failed to connect to {}: {}", remote_hostname, e);
                     stats.errors += 1;
                     self.metrics.record_remote_failure(remote_hostname);
@@ -282,7 +293,9 @@ impl SyncEngine {
                     self.metrics.record_remote_failure(&remote_hostname);
 
                     // Check if we should disable this remote
-                    if self.metrics.get_remote_failures(&remote_hostname) >= CIRCUIT_BREAKER_THRESHOLD {
+                    if self.metrics.get_remote_failures(&remote_hostname)
+                        >= CIRCUIT_BREAKER_THRESHOLD
+                    {
                         warn!(
                             "Remote {} disabled after {} consecutive failures",
                             remote_hostname, CIRCUIT_BREAKER_THRESHOLD
@@ -352,11 +365,8 @@ impl SyncEngine {
         }
 
         // Update metrics
-        self.metrics.record_sync(
-            stats.messages_pushed,
-            stats.messages_pulled,
-            stats.errors,
-        );
+        self.metrics
+            .record_sync(stats.messages_pushed, stats.messages_pulled, stats.errors);
 
         // Save metrics
         if let Err(e) = self.metrics.save(&self.metrics_path).await {
@@ -396,8 +406,13 @@ impl SyncEngine {
             let path = entry.path();
 
             // Only process per-origin files (contain hostname suffix)
-            if !self.is_local_inbox_file(&path) && path.extension().and_then(|s| s.to_str()) == Some("json") {
-                match self.trim_per_origin_file(&path, MAX_MESSAGES_PER_ORIGIN).await {
+            if !self.is_local_inbox_file(&path)
+                && path.extension().and_then(|s| s.to_str()) == Some("json")
+            {
+                match self
+                    .trim_per_origin_file(&path, MAX_MESSAGES_PER_ORIGIN)
+                    .await
+                {
                     Ok(trimmed) => {
                         if trimmed > 0 {
                             debug!("Trimmed {} messages from {}", trimmed, path.display());
@@ -446,28 +461,40 @@ impl SyncEngine {
 
         if self.config.core.role == BridgeRole::Spoke {
             // For spoke, first remote is the hub
-            self.config.registry.remotes().next().map(|r| r.hostname.clone())
+            self.config
+                .registry
+                .remotes()
+                .next()
+                .map(|r| r.hostname.clone())
         } else {
             None
         }
     }
 
     /// Get transport for a specific remote hostname
-    fn get_transport(&self, remote_hostname: &str) -> Option<&Arc<tokio::sync::Mutex<dyn Transport>>> {
+    fn get_transport(
+        &self,
+        remote_hostname: &str,
+    ) -> Option<&Arc<tokio::sync::Mutex<dyn Transport>>> {
         self.transports.get(remote_hostname)
     }
 
     /// Push a single inbox file to a specific remote
-    async fn push_inbox_file_to_remote(&mut self, local_path: &Path, remote_hostname: &str) -> Result<usize> {
+    async fn push_inbox_file_to_remote(
+        &mut self,
+        local_path: &Path,
+        remote_hostname: &str,
+    ) -> Result<usize> {
         // Get transport for this remote
-        let transport_arc = self.get_transport(remote_hostname)
+        let transport_arc = self
+            .get_transport(remote_hostname)
             .ok_or_else(|| anyhow::anyhow!("No transport for remote: {remote_hostname}"))?
             .clone();
 
         // Read inbox file
         let content = fs::read(local_path).await?;
-        let mut messages: Vec<InboxMessage> = serde_json::from_slice(&content)
-            .context("Failed to parse inbox file")?;
+        let mut messages: Vec<InboxMessage> =
+            serde_json::from_slice(&content).context("Failed to parse inbox file")?;
 
         // Assign message_ids to messages that don't have one
         assign_message_ids(&mut messages);
@@ -504,7 +531,8 @@ impl SyncEngine {
             .await?;
 
         // Update cursor and mark messages as synced
-        self.state.set_cursor(PathBuf::from(cursor_key), messages.len());
+        self.state
+            .set_cursor(PathBuf::from(cursor_key), messages.len());
         for msg in &new_messages {
             if let Some(ref msg_id) = msg.message_id {
                 self.state.mark_synced(msg_id.clone());
@@ -529,20 +557,21 @@ impl SyncEngine {
         // Remote path: <team>/inboxes/<agent>.<local-hostname>.json
         let local_hostname = &self.config.local_hostname;
         let remote_filename = format!("{agent_name}.{local_hostname}.json");
-        let remote_inboxes_dir = PathBuf::from(self.team_dir.file_name().unwrap())
-            .join("inboxes");
+        let remote_inboxes_dir = PathBuf::from(self.team_dir.file_name().unwrap()).join("inboxes");
         let remote_path = remote_inboxes_dir.join(&remote_filename);
 
         // Read existing messages from remote (if file exists)
-        let remote_temp_path = self.team_dir.join(format!(".bridge-pull-{remote_hostname}.json"));
+        let remote_temp_path = self
+            .team_dir
+            .join(format!(".bridge-pull-{remote_hostname}.json"));
 
         let transport = transport_arc.lock().await;
         let mut existing_messages = if transport.is_connected().await {
             match transport.download(&remote_path, &remote_temp_path).await {
                 Ok(()) => {
                     let content = fs::read(&remote_temp_path).await?;
-                    let msgs: Vec<InboxMessage> = serde_json::from_slice(&content)
-                        .unwrap_or_default();
+                    let msgs: Vec<InboxMessage> =
+                        serde_json::from_slice(&content).unwrap_or_default();
                     let _ = fs::remove_file(&remote_temp_path).await; // Cleanup
                     msgs
                 }
@@ -562,7 +591,9 @@ impl SyncEngine {
         let content = serde_json::to_vec_pretty(&existing_messages)?;
 
         // Write to local temp file
-        let local_temp = self.team_dir.join(format!(".bridge-push-{remote_hostname}.json"));
+        let local_temp = self
+            .team_dir
+            .join(format!(".bridge-push-{remote_hostname}.json"));
         fs::write(&local_temp, &content).await?;
 
         // Upload to remote temp path
@@ -581,13 +612,13 @@ impl SyncEngine {
     /// Pull messages from a specific remote
     async fn pull_from_remote(&mut self, remote_hostname: &str) -> Result<usize> {
         // Get transport for this remote
-        let transport_arc = self.get_transport(remote_hostname)
+        let transport_arc = self
+            .get_transport(remote_hostname)
             .ok_or_else(|| anyhow::anyhow!("No transport for remote: {remote_hostname}"))?
             .clone();
 
         // Remote path: <team>/inboxes/*.json (base inbox files, not per-origin files)
-        let remote_inboxes_dir = PathBuf::from(self.team_dir.file_name().unwrap())
-            .join("inboxes");
+        let remote_inboxes_dir = PathBuf::from(self.team_dir.file_name().unwrap()).join("inboxes");
 
         // List files on remote matching pattern *.json
         let pattern = "*.json";
@@ -621,7 +652,9 @@ impl SyncEngine {
             // IMPORTANT: Check if stem is a known agent name FIRST.
             // An agent name like "dev.hub" should be treated as a base inbox file,
             // even if "hub" is a known hostname.
-            let is_known_agent = self.agent_names.as_ref()
+            let is_known_agent = self
+                .agent_names
+                .as_ref()
                 .map(|names| names.contains(stem))
                 .unwrap_or(false);
 
@@ -651,7 +684,10 @@ impl SyncEngine {
                     pulled_count += count;
                 }
                 Err(e) => {
-                    warn!("Failed to pull {} from {}: {}", filename, remote_hostname, e);
+                    warn!(
+                        "Failed to pull {} from {}: {}",
+                        filename, remote_hostname, e
+                    );
                 }
             }
         }
@@ -660,7 +696,12 @@ impl SyncEngine {
     }
 
     /// Pull a single file from remote
-    async fn pull_file(&mut self, remote_path: &Path, local_path: &Path, transport: &tokio::sync::MutexGuard<'_, dyn Transport>) -> Result<usize> {
+    async fn pull_file(
+        &mut self,
+        remote_path: &Path,
+        local_path: &Path,
+        transport: &tokio::sync::MutexGuard<'_, dyn Transport>,
+    ) -> Result<usize> {
         // Download to temp file first
         let temp_path = local_path.with_extension("tmp");
         transport.download(remote_path, &temp_path).await?;
@@ -753,7 +794,12 @@ impl SyncEngine {
                     total_pushed += pushed;
                 }
                 Err(e) => {
-                    warn!("Failed to push {} to {}: {}", path.display(), remote_hostname, e);
+                    warn!(
+                        "Failed to push {} to {}: {}",
+                        path.display(),
+                        remote_hostname,
+                        e
+                    );
                 }
             }
         }
@@ -770,7 +816,8 @@ impl SyncEngine {
             let potential_hostname = parts[i..].join(".");
             // Check if it's a known remote hostname OR the local hostname
             if self.config.registry.is_known_hostname(&potential_hostname)
-                || potential_hostname == self.config.local_hostname {
+                || potential_hostname == self.config.local_hostname
+            {
                 let agent_name = parts[..i].join(".");
                 return Some((agent_name, potential_hostname));
             }
@@ -795,10 +842,10 @@ fn load_agent_names(team_dir: &Path) -> Option<HashSet<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::self_write_filter::SelfWriteFilter;
     use super::super::mock_transport::MockTransport;
-    use agent_team_mail_core::config::{BridgeConfig, BridgeRole, RemoteConfig, HostnameRegistry};
+    use super::super::self_write_filter::SelfWriteFilter;
+    use super::*;
+    use agent_team_mail_core::config::{BridgeConfig, BridgeRole, HostnameRegistry, RemoteConfig};
     use std::collections::HashMap;
     use tempfile::TempDir;
     use tokio::sync::Mutex as TokioMutex;
@@ -870,7 +917,9 @@ mod tests {
             "members": members_json
         });
         let path = team_dir.join("config.json");
-        fs::write(path, serde_json::to_vec_pretty(&config).unwrap()).await.unwrap();
+        fs::write(path, serde_json::to_vec_pretty(&config).unwrap())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -879,12 +928,15 @@ mod tests {
         let team_dir = temp_dir.path().to_path_buf();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new()))
+            as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
         write_team_config(&team_dir, &["agent-1", "dev.mac"]).await;
-        let engine = SyncEngine::new(config, transports, team_dir, new_filter()).await.unwrap();
+        let engine = SyncEngine::new(config, transports, team_dir, new_filter())
+            .await
+            .unwrap();
         assert!(engine.state.synced_message_ids.is_empty());
     }
 
@@ -894,11 +946,14 @@ mod tests {
         let team_dir = temp_dir.path().to_path_buf();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new()))
+            as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
-        let mut engine = SyncEngine::new(config, transports, team_dir, new_filter()).await.unwrap();
+        let mut engine = SyncEngine::new(config, transports, team_dir, new_filter())
+            .await
+            .unwrap();
 
         // Push with no inboxes directory
         let stats = engine.sync_push().await.unwrap();
@@ -927,11 +982,14 @@ mod tests {
         fs::create_dir_all(&inboxes_dir).await.unwrap();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new()))
+            as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
-        let engine = SyncEngine::new(config, transports, team_dir, new_filter()).await.unwrap();
+        let engine = SyncEngine::new(config, transports, team_dir, new_filter())
+            .await
+            .unwrap();
 
         // Local inbox file
         let local = inboxes_dir.join("agent-1.json");
@@ -964,17 +1022,19 @@ mod tests {
         let team_dir = temp_dir.path().to_path_buf();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new()))
+            as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
-        let engine = SyncEngine::new(config, transports, team_dir.clone(), new_filter()).await.unwrap();
+        let engine = SyncEngine::new(config, transports, team_dir.clone(), new_filter())
+            .await
+            .unwrap();
 
         let path = team_dir.join("inboxes/agent-1.json");
         let name = engine.extract_agent_name(&path).unwrap();
         assert_eq!(name, "agent-1");
     }
-
 
     #[tokio::test]
     async fn test_sync_stats_add() {
@@ -1005,7 +1065,8 @@ mod tests {
         fs::create_dir_all(&inboxes_dir).await.unwrap();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new()))
+            as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
@@ -1016,7 +1077,11 @@ mod tests {
         // Create per-origin file with 10 messages
         let mut messages = Vec::new();
         for i in 0..10 {
-            messages.push(create_test_message(&format!("user-{i}"), &format!("Message {i}"), None));
+            messages.push(create_test_message(
+                &format!("user-{i}"),
+                &format!("Message {i}"),
+                None,
+            ));
         }
 
         let per_origin_file = inboxes_dir.join("agent-1.desktop.json");
@@ -1024,7 +1089,10 @@ mod tests {
         fs::write(&per_origin_file, content).await.unwrap();
 
         // Trim to 5 messages
-        let trimmed = engine.trim_per_origin_file(&per_origin_file, 5).await.unwrap();
+        let trimmed = engine
+            .trim_per_origin_file(&per_origin_file, 5)
+            .await
+            .unwrap();
         assert_eq!(trimmed, 5);
 
         // Verify only last 5 messages remain
@@ -1043,7 +1111,8 @@ mod tests {
         fs::create_dir_all(&inboxes_dir).await.unwrap();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new()))
+            as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
@@ -1063,7 +1132,10 @@ mod tests {
         fs::write(&per_origin_file, content).await.unwrap();
 
         // Trim to 5 messages (no trim should happen)
-        let trimmed = engine.trim_per_origin_file(&per_origin_file, 5).await.unwrap();
+        let trimmed = engine
+            .trim_per_origin_file(&per_origin_file, 5)
+            .await
+            .unwrap();
         assert_eq!(trimmed, 0);
 
         // Verify all 3 messages remain
@@ -1080,7 +1152,8 @@ mod tests {
         fs::create_dir_all(&inboxes_dir).await.unwrap();
 
         let config = create_test_config("laptop", "desktop");
-        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new()))
+            as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("desktop".to_string(), transport);
 
@@ -1092,19 +1165,29 @@ mod tests {
         // Create local inbox (should NOT be trimmed)
         let local_messages = vec![create_test_message("user-1", "Local message", None)];
         let local_inbox = inboxes_dir.join("agent-1.json");
-        fs::write(&local_inbox, serde_json::to_vec_pretty(&local_messages).unwrap())
-            .await
-            .unwrap();
+        fs::write(
+            &local_inbox,
+            serde_json::to_vec_pretty(&local_messages).unwrap(),
+        )
+        .await
+        .unwrap();
 
         // Create per-origin file with 1100 messages (exceeds limit)
         let mut origin_messages = Vec::new();
         for i in 0..1100 {
-            origin_messages.push(create_test_message(&format!("user-{i}"), &format!("Msg {i}"), None));
+            origin_messages.push(create_test_message(
+                &format!("user-{i}"),
+                &format!("Msg {i}"),
+                None,
+            ));
         }
         let origin_file = inboxes_dir.join("agent-1.desktop.json");
-        fs::write(&origin_file, serde_json::to_vec_pretty(&origin_messages).unwrap())
-            .await
-            .unwrap();
+        fs::write(
+            &origin_file,
+            serde_json::to_vec_pretty(&origin_messages).unwrap(),
+        )
+        .await
+        .unwrap();
 
         // Apply retention policy
         let trimmed = engine.apply_retention_policy().await.unwrap();
@@ -1158,7 +1241,8 @@ mod tests {
             local_hostname: "laptop".to_string(),
         });
 
-        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new())) as Arc<tokio::sync::Mutex<dyn Transport>>;
+        let transport = Arc::new(tokio::sync::Mutex::new(MockTransport::new()))
+            as Arc<tokio::sync::Mutex<dyn Transport>>;
         let mut transports = HashMap::new();
         transports.insert("hub".to_string(), transport);
 
@@ -1170,22 +1254,30 @@ mod tests {
 
         // Test that "dev.hub.json" is treated as a base inbox file (known agent)
         let dev_hub_inbox = inboxes_dir.join("dev.hub.json");
-        assert!(engine.is_local_inbox_file(&dev_hub_inbox),
-            "dev.hub.json should be treated as a base inbox file because dev.hub is a known agent");
+        assert!(
+            engine.is_local_inbox_file(&dev_hub_inbox),
+            "dev.hub.json should be treated as a base inbox file because dev.hub is a known agent"
+        );
 
         // Test that "dev.hub.laptop.json" is treated as per-origin (agent.hostname pattern)
         let dev_hub_origin = inboxes_dir.join("dev.hub.laptop.json");
-        assert!(!engine.is_local_inbox_file(&dev_hub_origin),
-            "dev.hub.laptop.json should be treated as per-origin file");
+        assert!(
+            !engine.is_local_inbox_file(&dev_hub_origin),
+            "dev.hub.laptop.json should be treated as per-origin file"
+        );
 
         // Test that "qa.hub.json" is treated as per-origin (qa is agent, hub is hostname)
         let qa_hub_origin = inboxes_dir.join("qa.hub.json");
-        assert!(!engine.is_local_inbox_file(&qa_hub_origin),
-            "qa.hub.json should be treated as per-origin file (qa from hub)");
+        assert!(
+            !engine.is_local_inbox_file(&qa_hub_origin),
+            "qa.hub.json should be treated as per-origin file (qa from hub)"
+        );
 
         // Test that "unknown.hub.json" is treated as per-origin (not a known agent)
         let unknown_hub = inboxes_dir.join("unknown.hub.json");
-        assert!(!engine.is_local_inbox_file(&unknown_hub),
-            "unknown.hub.json should be treated as per-origin file (ends with known hostname hub)");
+        assert!(
+            !engine.is_local_inbox_file(&unknown_hub),
+            "unknown.hub.json should be treated as per-origin file (ends with known hostname hub)"
+        );
     }
 }

@@ -94,7 +94,11 @@ pub fn execute(args: LogsArgs) -> Result<()> {
         agent: args.agent.clone(),
         level: args.level.clone(),
         since,
-        limit: if args.limit == 0 { None } else { Some(args.limit) },
+        limit: if args.limit == 0 {
+            None
+        } else {
+            Some(args.limit)
+        },
     };
 
     let reader = LogReader::new(log_path.clone(), filter.clone());
@@ -326,8 +330,14 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let formatted = agent_team_mail_core::log_reader::format_event_human(&results[0]);
-        assert!(formatted.contains("send_message"), "human output must contain action");
-        assert!(formatted.contains("INFO"), "human output must contain level");
+        assert!(
+            formatted.contains("send_message"),
+            "human output must contain action"
+        );
+        assert!(
+            formatted.contains("INFO"),
+            "human output must contain level"
+        );
     }
 
     // ── --agent filter via execute ────────────────────────────────────────────
@@ -382,7 +392,10 @@ mod tests {
 
         unsafe { std::env::remove_var("ATM_LOG_PATH") };
 
-        assert_eq!(resolved, custom, "ATM_LOG_PATH should be honoured when ATM_LOG_FILE is absent");
+        assert_eq!(
+            resolved, custom,
+            "ATM_LOG_PATH should be honoured when ATM_LOG_FILE is absent"
+        );
     }
 
     // ── --limit 0 means unlimited ─────────────────────────────────────────────
@@ -404,6 +417,10 @@ mod tests {
         let reader = LogReader::new(path, filter);
         let results = reader.read_filtered().unwrap();
 
-        assert_eq!(results.len(), 5, "--limit 0 should return all events, not zero");
+        assert_eq!(
+            results.len(),
+            5,
+            "--limit 0 should return all events, not zero"
+        );
     }
 }

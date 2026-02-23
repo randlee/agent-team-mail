@@ -5,8 +5,8 @@ use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemCo
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
 use agent_team_mail_daemon::plugins::ci_monitor::{
-    create_test_job, create_test_run, CiMonitorPlugin, CiRunConclusion, CiRunStatus, MockCall,
-    MockCiProvider,
+    CiMonitorPlugin, CiRunConclusion, CiRunStatus, MockCall, MockCiProvider, create_test_job,
+    create_test_run,
 };
 use agent_team_mail_daemon::roster::RosterService;
 use std::path::Path;
@@ -123,10 +123,7 @@ async fn test_ci_failure_delivers_inbox_message() {
     // Add plugin config to context
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
-    plugin_config.insert(
-        "poll_interval_secs".to_string(),
-        toml::Value::Integer(10),
-    ); // Minimum 10 seconds
+    plugin_config.insert("poll_interval_secs".to_string(), toml::Value::Integer(10)); // Minimum 10 seconds
     plugin_config.insert(
         "team".to_string(),
         toml::Value::String("test-team".to_string()),
@@ -137,7 +134,9 @@ async fn test_ci_failure_delivers_inbox_message() {
     );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -225,7 +224,9 @@ async fn test_ci_deduplication() {
     );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -333,7 +334,9 @@ async fn test_status_transition_notification() {
     );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -365,7 +368,11 @@ async fn test_status_transition_notification() {
 
     // Remove synthetic member before re-init
     ctx.roster
-        .cleanup_plugin("test-team", "ci_monitor", agent_team_mail_daemon::roster::CleanupMode::Hard)
+        .cleanup_plugin(
+            "test-team",
+            "ci_monitor",
+            agent_team_mail_daemon::roster::CleanupMode::Hard,
+        )
         .unwrap();
 
     // Run plugin again with failed run
@@ -439,7 +446,9 @@ async fn test_multiple_failures() {
     );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -529,7 +538,9 @@ async fn test_branch_filtering() {
     );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -564,17 +575,16 @@ async fn test_branch_filtering() {
     // After Sprint 9.3: Branch filtering is done client-side using glob patterns
     // API calls fetch all branches without branch filter
     for filter in &list_calls {
-        assert!(filter.branch.is_none(), "Branch filtering should be client-side");
+        assert!(
+            filter.branch.is_none(),
+            "Branch filtering should be client-side"
+        );
     }
 
     // Only two messages (main and develop, not feature-x)
     // Client-side glob matching filters out feature-x
     let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
-    assert_eq!(
-        messages.len(),
-        2,
-        "Should only notify for watched branches"
-    );
+    assert_eq!(messages.len(), 2, "Should only notify for watched branches");
     assert!(messages.iter().any(|m| m.text.contains("[ci:301]")));
     assert!(messages.iter().any(|m| m.text.contains("[ci:302]")));
     assert!(!messages.iter().any(|m| m.text.contains("[ci:303]")));
@@ -631,7 +641,9 @@ async fn test_conclusion_filtering() {
     );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -678,11 +690,19 @@ async fn test_synthetic_member_lifecycle() {
     // Add minimal plugin config
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("ci-monitor".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -740,11 +760,19 @@ async fn test_disabled_plugin_skips_init() {
     // Configure plugin as disabled (but still needs team/agent for config validation)
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(false));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("ci-monitor".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -791,11 +819,19 @@ async fn test_full_lifecycle_init_run_shutdown() {
     // Add minimal plugin config
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
-    plugin_config.insert("team".to_string(), toml::Value::String("test-team".to_string()));
-    plugin_config.insert("agent".to_string(), toml::Value::String("ci-monitor".to_string()));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
 
     let mut config = (*ctx.config).clone();
-    config.plugins.insert("ci_monitor".to_string(), plugin_config);
+    config
+        .plugins
+        .insert("ci_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),

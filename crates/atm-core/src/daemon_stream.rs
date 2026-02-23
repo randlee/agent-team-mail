@@ -65,6 +65,24 @@ pub enum DaemonStreamEvent {
         /// Transport that generated the event.
         transport: String,
     },
+    /// Summary of a stream error emitted by the proxy.
+    StreamError {
+        /// Agent identity/session owner.
+        agent_id: String,
+        /// Session or thread identifier when available.
+        session_id: String,
+        /// Short, human-readable error summary.
+        error_summary: String,
+    },
+    /// Periodic report of dropped/ignored stream counters from the proxy.
+    DroppedCounters {
+        /// Aggregation key (typically proxy-level identifier).
+        agent_id: String,
+        /// Number of upstream events dropped due to backpressure.
+        dropped: u64,
+        /// Number of unknown event kinds ignored by the watch publisher gate.
+        unknown: u64,
+    },
 }
 
 // ── TurnStatusWire ───────────────────────────────────────────────────────────
@@ -157,13 +175,14 @@ impl AgentStreamState {
                 self.turn_status = StreamTurnStatus::Terminal;
             }
             DaemonStreamEvent::TurnIdle {
-                turn_id,
-                transport,
-                ..
+                turn_id, transport, ..
             } => {
                 self.turn_id = Some(turn_id.clone());
                 self.transport = Some(transport.clone());
                 self.turn_status = StreamTurnStatus::Idle;
+            }
+            DaemonStreamEvent::StreamError { .. } | DaemonStreamEvent::DroppedCounters { .. } => {
+                // Observability events do not mutate turn-state.
             }
         }
     }
@@ -174,6 +193,8 @@ impl AgentStreamState {
             DaemonStreamEvent::TurnStarted { agent, .. }
             | DaemonStreamEvent::TurnCompleted { agent, .. }
             | DaemonStreamEvent::TurnIdle { agent, .. } => agent,
+            DaemonStreamEvent::StreamError { agent_id, .. }
+            | DaemonStreamEvent::DroppedCounters { agent_id, .. } => agent_id,
         }
     }
 }
@@ -187,6 +208,8 @@ impl DaemonStreamEvent {
             Self::TurnStarted { agent, .. } => agent,
             Self::TurnCompleted { agent, .. } => agent,
             Self::TurnIdle { agent, .. } => agent,
+            Self::StreamError { agent_id, .. } => agent_id,
+            Self::DroppedCounters { agent_id, .. } => agent_id,
         }
     }
 }
@@ -213,12 +236,23 @@ impl std::fmt::Display for DaemonStreamEvent {
                 "TurnCompleted(agent={agent}, turn_id={turn_id}, transport={transport})"
             ),
             Self::TurnIdle {
-                agent,
-                transport,
-                ..
+                agent, transport, ..
+            } => write!(f, "TurnIdle(agent={agent}, transport={transport})"),
+            Self::StreamError {
+                agent_id,
+                session_id,
+                error_summary,
             } => write!(
                 f,
-                "TurnIdle(agent={agent}, transport={transport})"
+                "StreamError(agent_id={agent_id}, session_id={session_id}, error_summary={error_summary})"
+            ),
+            Self::DroppedCounters {
+                agent_id,
+                dropped,
+                unknown,
+            } => write!(
+                f,
+                "DroppedCounters(agent_id={agent_id}, dropped={dropped}, unknown={unknown})"
             ),
         }
     }
@@ -251,12 +285,21 @@ mod tests {
                 turn_id: "turn-abc".to_string(),
                 transport: "cli-json".to_string(),
             },
+            DaemonStreamEvent::StreamError {
+                agent_id: "arch-ctm".to_string(),
+                session_id: "th-1".to_string(),
+                error_summary: "socket closed".to_string(),
+            },
+            DaemonStreamEvent::DroppedCounters {
+                agent_id: "proxy:all".to_string(),
+                dropped: 3,
+                unknown: 2,
+            },
         ];
 
         for event in &events {
             let json = serde_json::to_string(event).expect("serialize");
-            let deserialized: DaemonStreamEvent =
-                serde_json::from_str(&json).expect("deserialize");
+            let deserialized: DaemonStreamEvent = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(&deserialized, event, "round-trip mismatch for {json}");
         }
     }
@@ -327,6 +370,29 @@ mod tests {
     }
 
     #[test]
+    fn agent_stream_state_apply_observability_events_no_state_change() {
+        let mut state = AgentStreamState {
+            turn_status: StreamTurnStatus::Busy,
+            turn_id: Some("t1".into()),
+            thread_id: Some("th1".into()),
+            transport: Some("app-server".into()),
+        };
+        state.apply(&DaemonStreamEvent::StreamError {
+            agent_id: "a".to_string(),
+            session_id: "th1".to_string(),
+            error_summary: "err".to_string(),
+        });
+        assert_eq!(state.turn_status, StreamTurnStatus::Busy);
+        state.apply(&DaemonStreamEvent::DroppedCounters {
+            agent_id: "proxy:all".to_string(),
+            dropped: 1,
+            unknown: 2,
+        });
+        assert_eq!(state.turn_status, StreamTurnStatus::Busy);
+        assert_eq!(state.turn_id.as_deref(), Some("t1"));
+    }
+
+    #[test]
     fn agent_from_event_extracts_agent() {
         let event = DaemonStreamEvent::TurnStarted {
             agent: "test-agent".to_string(),
@@ -367,7 +433,10 @@ mod tests {
             transport: "app-server".to_string(),
         };
         let s = event.to_string();
-        assert_eq!(s, "TurnStarted(agent=arch-ctm, turn_id=turn-abc, transport=app-server)");
+        assert_eq!(
+            s,
+            "TurnStarted(agent=arch-ctm, turn_id=turn-abc, transport=app-server)"
+        );
     }
 
     #[test]
@@ -380,7 +449,10 @@ mod tests {
             transport: "mcp".to_string(),
         };
         let s = event.to_string();
-        assert_eq!(s, "TurnCompleted(agent=arch-ctm, turn_id=turn-abc, transport=mcp)");
+        assert_eq!(
+            s,
+            "TurnCompleted(agent=arch-ctm, turn_id=turn-abc, transport=mcp)"
+        );
     }
 
     #[test]
@@ -392,5 +464,19 @@ mod tests {
         };
         let s = event.to_string();
         assert_eq!(s, "TurnIdle(agent=arch-ctm, transport=cli-json)");
+    }
+
+    #[test]
+    fn daemon_stream_event_display_stream_error() {
+        let event = DaemonStreamEvent::StreamError {
+            agent_id: "arch-ctm".to_string(),
+            session_id: "th-1".to_string(),
+            error_summary: "socket closed".to_string(),
+        };
+        let s = event.to_string();
+        assert_eq!(
+            s,
+            "StreamError(agent_id=arch-ctm, session_id=th-1, error_summary=socket closed)"
+        );
     }
 }

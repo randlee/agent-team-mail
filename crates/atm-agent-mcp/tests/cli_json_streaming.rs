@@ -145,19 +145,34 @@ async fn event_ordering_and_idle_reset() {
     }
 
     assert_eq!(received.len(), 4, "all 4 events must be forwarded");
-    assert!(received[0].contains("agent_message"), "line 0 must be agent_message");
+    assert!(
+        received[0].contains("agent_message"),
+        "line 0 must be agent_message"
+    );
     assert!(received[1].contains("\"idle\""), "line 1 must be idle");
-    assert!(received[2].contains("tool_call"), "line 2 must be tool_call");
+    assert!(
+        received[2].contains("tool_call"),
+        "line 2 must be tool_call"
+    );
     assert!(received[3].contains("\"done\""), "line 3 must be done");
 
     // --- Verify state machine transitions ---
     // After 'done', idle_flag must be false.
-    assert!(!idle_flag.load(Ordering::SeqCst), "idle_flag must be false after done");
+    assert!(
+        !idle_flag.load(Ordering::SeqCst),
+        "idle_flag must be false after done"
+    );
 
     // Turn state must be Terminal.
     let state = turn_state.lock().await.clone();
     assert!(
-        matches!(state, TurnState::Terminal { status: TurnStatus::Completed, .. }),
+        matches!(
+            state,
+            TurnState::Terminal {
+                status: TurnStatus::Completed,
+                ..
+            }
+        ),
         "turn state must be Terminal(Completed) after done: {state:?}"
     );
 }
@@ -173,8 +188,8 @@ async fn idle_reset_after_activity_sequence() {
     // Process: idle → agent_message → tool_call
     let seq: &[(&str, bool)] = &[
         (r#"{"type":"idle"}"#, true),           // idle sets flag
-        (r#"{"type":"agent_message"}"#, false),  // activity resets it
-        (r#"{"type":"tool_call"}"#, false),      // still reset
+        (r#"{"type":"agent_message"}"#, false), // activity resets it
+        (r#"{"type":"tool_call"}"#, false),     // still reset
     ];
 
     for (line, expected_idle) in seq {
@@ -220,7 +235,12 @@ async fn all_event_types_forwarded_through_duplex() {
         line_buf.clear();
     }
 
-    assert_eq!(count, all_events.len(), "all {} events must be forwarded", all_events.len());
+    assert_eq!(
+        count,
+        all_events.len(),
+        "all {} events must be forwarded",
+        all_events.len()
+    );
 }
 
 // ─── AC6: Mail injection timing ───────────────────────────────────────────────
@@ -244,9 +264,13 @@ async fn mail_enqueued_before_idle_is_drained_on_idle() {
 
     // Enqueue 3 messages before the idle signal fires.
     for i in 0..3usize {
-        stdin_queue::enqueue(team, agent, &format!(r#"{{"seq":{i},"type":"tool_result"}}"#))
-            .await
-            .unwrap();
+        stdin_queue::enqueue(
+            team,
+            agent,
+            &format!(r#"{{"seq":{i},"type":"tool_result"}}"#),
+        )
+        .await
+        .unwrap();
     }
 
     // Simulate the idle event: create the drain writer.
@@ -261,7 +285,10 @@ async fn mail_enqueued_before_idle_is_drained_on_idle() {
 
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    assert_eq!(drained, 3, "all 3 pre-idle messages must be drained on idle event");
+    assert_eq!(
+        drained, 3,
+        "all 3 pre-idle messages must be drained on idle event"
+    );
 
     // Verify the captured output contains all 3 messages.
     let output = captured.lock().unwrap().clone();
@@ -301,7 +328,10 @@ async fn mail_enqueued_after_drain_waits_for_next_idle() {
     let count1 = stdin_queue::drain(team, agent, &stdin1, Duration::from_secs(600))
         .await
         .unwrap();
-    assert_eq!(count1, 1, "first drain must deliver the 1 pre-queued message");
+    assert_eq!(
+        count1, 1,
+        "first drain must deliver the 1 pre-queued message"
+    );
 
     // Enqueue another message AFTER the first drain.
     stdin_queue::enqueue(team, agent, r#"{"seq":1}"#)
@@ -318,10 +348,16 @@ async fn mail_enqueued_after_drain_waits_for_next_idle() {
 
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    assert_eq!(count2, 1, "second drain must deliver the 1 post-first-idle message");
+    assert_eq!(
+        count2, 1,
+        "second drain must deliver the 1 post-first-idle message"
+    );
     let output = cap2.lock().unwrap().clone();
     let text = String::from_utf8_lossy(&output);
-    assert!(text.contains(r#""seq":1"#), "second drain must contain seq:1");
+    assert!(
+        text.contains(r#""seq":1"#),
+        "second drain must contain seq:1"
+    );
 }
 
 /// Additional event-ordering test: idle followed by done (without intervening
@@ -334,15 +370,30 @@ async fn idle_followed_by_done_reaches_terminal() {
 
     // idle event
     apply_event(r#"{"type":"idle"}"#, &idle_flag, &turn_state).await;
-    assert!(idle_flag.load(Ordering::SeqCst), "idle_flag must be true after idle");
-    assert!(turn_state.lock().await.is_idle(), "turn_state must be Idle after idle");
+    assert!(
+        idle_flag.load(Ordering::SeqCst),
+        "idle_flag must be true after idle"
+    );
+    assert!(
+        turn_state.lock().await.is_idle(),
+        "turn_state must be Idle after idle"
+    );
 
     // done event
     apply_event(r#"{"type":"done"}"#, &idle_flag, &turn_state).await;
-    assert!(!idle_flag.load(Ordering::SeqCst), "idle_flag must be false after done");
+    assert!(
+        !idle_flag.load(Ordering::SeqCst),
+        "idle_flag must be false after done"
+    );
     let state = turn_state.lock().await.clone();
     assert!(
-        matches!(state, TurnState::Terminal { status: TurnStatus::Completed, .. }),
+        matches!(
+            state,
+            TurnState::Terminal {
+                status: TurnStatus::Completed,
+                ..
+            }
+        ),
         "turn_state must be Terminal(Completed) after done: {state:?}"
     );
 }
@@ -381,9 +432,13 @@ async fn mid_turn_steering_injection() {
     );
 
     // Enqueue a steering message while the turn is active.
-    stdin_queue::enqueue(team, agent, r#"{"type":"tool_result","content":"steer this"}"#)
-        .await
-        .unwrap();
+    stdin_queue::enqueue(
+        team,
+        agent,
+        r#"{"type":"tool_result","content":"steer this"}"#,
+    )
+    .await
+    .unwrap();
 
     // At this point, the proxy would NOT drain (idle_flag is false).
     // We assert the message is still queued.
@@ -393,7 +448,10 @@ async fn mid_turn_steering_injection() {
     while let Ok(Some(_)) = entries.next_entry().await {
         count += 1;
     }
-    assert_eq!(count, 1, "message must still be in queue while agent is busy");
+    assert_eq!(
+        count, 1,
+        "message must still be in queue while agent is busy"
+    );
 
     // Simulate idle event firing (the drain trigger).
     apply_event(r#"{"type":"idle"}"#, &idle_flag, &turn_state).await;
@@ -531,9 +589,13 @@ async fn no_idle_event_queue_can_be_drained_after_timeout() {
 
     // Enqueue messages without ever firing an idle event.
     for i in 0..3usize {
-        stdin_queue::enqueue(team, agent, &format!(r#"{{"seq":{i},"type":"tool_result"}}"#))
-            .await
-            .unwrap();
+        stdin_queue::enqueue(
+            team,
+            agent,
+            &format!(r#"{{"seq":{i},"type":"tool_result"}}"#),
+        )
+        .await
+        .unwrap();
     }
 
     // Drain directly, simulating the 30-second fallback timer firing.
@@ -577,9 +639,18 @@ async fn no_idle_event_queue_can_be_drained_after_timeout() {
 async fn no_cli_json_event_produces_busy_turn_state() {
     let events: &[(&str, bool)] = &[
         (r#"{"type":"agent_message","content":"hi"}"#, false),
-        (r#"{"type":"tool_call","name":"bash","call_id":"c1"}"#, false),
-        (r#"{"type":"tool_result","call_id":"c1","output":"ok"}"#, false),
-        (r#"{"type":"file_change","path":"/tmp/x","action":"write"}"#, false),
+        (
+            r#"{"type":"tool_call","name":"bash","call_id":"c1"}"#,
+            false,
+        ),
+        (
+            r#"{"type":"tool_result","call_id":"c1","output":"ok"}"#,
+            false,
+        ),
+        (
+            r#"{"type":"file_change","path":"/tmp/x","action":"write"}"#,
+            false,
+        ),
         // idle and done are valid state-changing events but never produce Busy.
         (r#"{"type":"idle"}"#, false),
         (r#"{"type":"done"}"#, false),
@@ -628,12 +699,21 @@ async fn multi_cycle_idle_windows_no_cross_contamination() {
     let count1 = stdin_queue::drain(team, agent, &stdin1, Duration::from_secs(600))
         .await
         .unwrap();
-    assert_eq!(count1, 2, "idle cycle 1 must drain exactly 2 messages (A and B)");
+    assert_eq!(
+        count1, 2,
+        "idle cycle 1 must drain exactly 2 messages (A and B)"
+    );
 
     let out1 = cap1.lock().unwrap().clone();
     let text1 = String::from_utf8_lossy(&out1);
-    assert!(text1.contains(r#""A""#), "cycle-1 output must contain A: {text1}");
-    assert!(text1.contains(r#""B""#), "cycle-1 output must contain B: {text1}");
+    assert!(
+        text1.contains(r#""A""#),
+        "cycle-1 output must contain A: {text1}"
+    );
+    assert!(
+        text1.contains(r#""B""#),
+        "cycle-1 output must contain B: {text1}"
+    );
 
     // --- Idle cycle 2: enqueue C, drain, assert count==1 and no A/B ---
     stdin_queue::enqueue(team, agent, r#"{"seq":"C","type":"tool_result"}"#)
@@ -650,11 +730,17 @@ async fn multi_cycle_idle_windows_no_cross_contamination() {
 
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    assert_eq!(count2, 1, "idle cycle 2 must drain exactly 1 message (C only)");
+    assert_eq!(
+        count2, 1,
+        "idle cycle 2 must drain exactly 1 message (C only)"
+    );
 
     let out2 = cap2.lock().unwrap().clone();
     let text2 = String::from_utf8_lossy(&out2);
-    assert!(text2.contains(r#""C""#), "cycle-2 output must contain C: {text2}");
+    assert!(
+        text2.contains(r#""C""#),
+        "cycle-2 output must contain C: {text2}"
+    );
     assert!(
         !text2.contains(r#""A""#),
         "cycle-2 output must NOT contain A (cross-contamination): {text2}"

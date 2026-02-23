@@ -70,6 +70,10 @@ const WATCH_RENDER_TRUNCATE_AT: usize = WATCH_RENDER_MAX_CHARS - 3;
 const WATCH_FEED_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// Counter for unknown watch event kinds skipped by the MVP publisher gate.
 static WATCH_UNKNOWN_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Periodic flush interval for dropped/unknown stream counters.
+const WATCH_COUNTER_REPORT_INTERVAL_SECS: u64 = 60;
+#[cfg(test)]
+static STREAM_ERROR_EMIT_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 
 /// JSON-RPC error code: child process has died.
 pub const ERR_CHILD_DEAD: i64 = -32005;
@@ -372,7 +376,7 @@ impl ProxyServer {
         self.watch_stream_hub.lock().await.subscribe(agent_id)
     }
 
-    /// Detach active watcher for a session (MVP: one watcher per session).
+    /// Detach active watcher for a session.
     pub async fn detach_watch_stream(&self, agent_id: &str) -> bool {
         self.watch_stream_hub.lock().await.detach(agent_id)
     }
@@ -508,6 +512,18 @@ impl ProxyServer {
                 }
             });
         }
+
+        // Periodic daemon-side observability flush for dropped/unknown counters.
+        let dropped_for_flush = Arc::clone(&self.dropped_events);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                WATCH_COUNTER_REPORT_INTERVAL_SECS,
+            ));
+            loop {
+                interval.tick().await;
+                flush_dropped_counters_to_daemon(&dropped_for_flush, "proxy:all").await;
+            }
+        });
 
         // Spawn the idle mail poller (FR-8.2): checks all idle sessions for unread
         // mail at the configured interval and injects auto-mail turns via the
@@ -2778,6 +2794,10 @@ async fn forward_event(
             obj.insert("agent_id".to_string(), Value::String(agent_id.clone()));
         }
     }
+
+    // Forward stream-error summaries to daemon observability channel.
+    emit_stream_error_summary_to_daemon(event, &agent_id).await;
+
     // Publish to direct watch-stream hub using MVP subset + source envelope.
     if should_publish_watch_event(event) {
         let source = infer_source_envelope(event, &agent_id, pending).await;
@@ -2840,6 +2860,59 @@ fn should_publish_watch_event(event: &Value) -> bool {
             | "done"
             | "stream_error"
     )
+}
+
+fn extract_stream_error_event(
+    event: &Value,
+    agent_id: &str,
+) -> Option<agent_team_mail_core::daemon_stream::DaemonStreamEvent> {
+    let kind = event.pointer("/params/type").and_then(|v| v.as_str())?;
+    if kind != "stream_error" {
+        return None;
+    }
+    let session_id = event
+        .pointer("/params/_meta/threadId")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/threadId").and_then(|v| v.as_str()))
+        .unwrap_or("unknown")
+        .to_string();
+    let error_summary = event
+        .pointer("/params/error")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/message").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/text").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/delta").and_then(|v| v.as_str()))
+        .unwrap_or("stream error")
+        .to_string();
+    Some(
+        agent_team_mail_core::daemon_stream::DaemonStreamEvent::StreamError {
+            agent_id: agent_id.to_string(),
+            session_id,
+            error_summary,
+        },
+    )
+}
+
+async fn emit_stream_error_summary_to_daemon(event: &Value, agent_id: &str) {
+    if let Some(daemon_event) = extract_stream_error_event(event, agent_id) {
+        #[cfg(test)]
+        STREAM_ERROR_EMIT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        crate::stream_emit::emit_stream_event(&daemon_event).await;
+    }
+}
+
+async fn flush_dropped_counters_to_daemon(dropped_events: &Arc<AtomicU64>, agent_id: &str) {
+    let dropped = dropped_events.swap(0, Ordering::Relaxed);
+    let unknown = WATCH_UNKNOWN_EVENT_COUNT.swap(0, Ordering::Relaxed);
+    if dropped == 0 && unknown == 0 {
+        return;
+    }
+    let event = agent_team_mail_core::daemon_stream::DaemonStreamEvent::DroppedCounters {
+        agent_id: agent_id.to_string(),
+        dropped,
+        unknown,
+    };
+    crate::stream_emit::emit_stream_event(&event).await;
 }
 
 fn format_watch_frame(frame: &Value) -> String {
@@ -3943,6 +4016,48 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_stream_error_event_maps_summary_and_session() {
+        let event = json!({
+            "params": {
+                "type": "stream_error",
+                "threadId": "th-err-1",
+                "message": "socket closed"
+            }
+        });
+        let mapped = extract_stream_error_event(&event, "codex:agent-1");
+        let Some(agent_team_mail_core::daemon_stream::DaemonStreamEvent::StreamError {
+            agent_id,
+            session_id,
+            error_summary,
+        }) = mapped
+        else {
+            panic!("expected StreamError mapping");
+        };
+        assert_eq!(agent_id, "codex:agent-1");
+        assert_eq!(session_id, "th-err-1");
+        assert_eq!(error_summary, "socket closed");
+    }
+
+    #[tokio::test]
+    async fn test_emit_stream_error_summary_to_daemon_noop_without_daemon() {
+        // Best-effort emit should never panic/fail when daemon socket is absent.
+        let event = json!({
+            "params": { "type": "stream_error", "message": "test error" }
+        });
+        emit_stream_error_summary_to_daemon(&event, "codex:agent-1").await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_flush_dropped_counters_reports_and_resets() {
+        WATCH_UNKNOWN_EVENT_COUNT.store(7, Ordering::Relaxed);
+        let dropped = Arc::new(AtomicU64::new(5));
+        flush_dropped_counters_to_daemon(&dropped, "proxy:all").await;
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(WATCH_UNKNOWN_EVENT_COUNT.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn test_format_watch_frame_graceful_on_partial_payloads() {
         let frame = json!({
             "source": {"kind":"atm_mail"},
@@ -4061,6 +4176,42 @@ mod tests {
         assert!(
             sub.replay.is_empty(),
             "unknown watch events should not be published to replay"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_forward_event_stream_error_triggers_daemon_emit_attempt() {
+        let before = STREAM_ERROR_EMIT_ATTEMPTS.load(Ordering::Relaxed);
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert("th-err".to_string(), "codex:err-agent".to_string());
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+        let mut event = json!({
+            "jsonrpc":"2.0",
+            "method":"codex/event",
+            "params":{"type":"stream_error","threadId":"th-err","message":"socket closed"}
+        });
+
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should forward upstream");
+        let after = STREAM_ERROR_EMIT_ATTEMPTS.load(Ordering::Relaxed);
+        assert_eq!(
+            after,
+            before + 1,
+            "stream_error should trigger daemon emission"
         );
     }
 

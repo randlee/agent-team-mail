@@ -72,7 +72,11 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 /// Create a test inbox with messages
 fn create_test_inbox(team_dir: &Path, agent_name: &str, messages: Vec<serde_json::Value>) {
     let inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
-    fs::write(&inbox_path, serde_json::to_string_pretty(&messages).unwrap()).unwrap();
+    fs::write(
+        &inbox_path,
+        serde_json::to_string_pretty(&messages).unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]

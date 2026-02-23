@@ -33,7 +33,11 @@ pub struct SourceEnvelope {
 }
 
 impl SourceEnvelope {
-    pub fn new(kind: impl Into<String>, actor: impl Into<String>, channel: impl Into<String>) -> Self {
+    pub fn new(
+        kind: impl Into<String>,
+        actor: impl Into<String>,
+        channel: impl Into<String>,
+    ) -> Self {
         Self {
             kind: kind.into(),
             actor: actor.into(),
@@ -122,19 +126,26 @@ impl WatchStreamHub {
     /// Number of currently attached live watchers for one agent.
     pub fn watcher_count(&mut self, agent_id: &str) -> usize {
         self.by_agent
-            .entry(agent_id.to_string())
-            .or_insert_with(|| AgentWatchState::new(self.replay_capacity))
-            .tx
-            .receiver_count()
+            .get(agent_id)
+            .map(|state| state.tx.receiver_count())
+            .unwrap_or(0)
     }
 
     /// Detach bookkeeping for compatibility with existing call sites.
     ///
     /// In multi-watcher mode subscriptions are detached by dropping the
-    /// corresponding receiver. This method returns whether the agent stream
-    /// exists in the hub.
+    /// corresponding receiver. Once the receiver count reaches zero, the
+    /// per-agent state is evicted (replay buffer + channel).
     pub fn detach(&mut self, agent_id: &str) -> bool {
-        self.by_agent.contains_key(agent_id)
+        let Some(receiver_count) = self.by_agent.get(agent_id).map(|s| s.tx.receiver_count())
+        else {
+            return false;
+        };
+        if receiver_count == 0 {
+            self.by_agent.remove(agent_id);
+            return true;
+        }
+        false
     }
 }
 
@@ -203,6 +214,20 @@ mod tests {
         let live2 = second.rx.try_recv().expect("second receives");
         assert_eq!(live1["n"], 1);
         assert_eq!(live2["n"], 1);
+    }
+
+    #[test]
+    fn detach_evicts_state_when_no_receivers() {
+        let mut hub = WatchStreamHub::default();
+        hub.publish("a1", json!({"n": 1}));
+        // No active watchers yet; detach should evict buffered state.
+        assert!(hub.detach("a1"));
+        assert_eq!(hub.watcher_count("a1"), 0);
+        let sub = hub.subscribe("a1");
+        assert!(
+            sub.replay.is_empty(),
+            "evicted state must not retain prior replay entries"
+        );
     }
 
     #[tokio::test]

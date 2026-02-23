@@ -104,9 +104,7 @@ async fn emit_stream_event_unix(event: &DaemonStreamEvent) -> anyhow::Result<()>
             }
         }
         Ok(Err(_)) | Err(_) => {
-            tracing::debug!(
-                "stream_emit: no response from daemon within timeout"
-            );
+            tracing::debug!("stream_emit: no response from daemon within timeout");
         }
         Ok(Ok(_)) => {} // empty line — ignore
     }

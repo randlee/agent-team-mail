@@ -5,8 +5,8 @@
 //! A 500ms delay is inserted between the literal text send and the Enter keypress
 //! to ensure tmux has fully buffered the text before submission.
 
-use super::trait_def::{WorkerAdapter, WorkerHandle};
 use super::tmux_sender::{DefaultTmuxSender, DeliveryMethod, TmuxSender};
+use super::trait_def::{WorkerAdapter, WorkerHandle};
 use crate::plugin::PluginError;
 use std::path::PathBuf;
 use std::process::Command;
@@ -159,9 +159,7 @@ impl WorkerAdapter for CodexTmuxBackend {
             });
         }
 
-        let pane_id = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string();
+        let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
         debug!("Created tmux pane {pane_id} for agent {agent_id}");
 
@@ -173,12 +171,7 @@ impl WorkerAdapter for CodexTmuxBackend {
         debug!("Starting worker {agent_id} with: {startup}");
 
         self.sender
-            .send_text_and_enter(
-                &pane_id,
-                &startup,
-                self.delivery_method,
-                "spawn-startup",
-            )
+            .send_text_and_enter(&pane_id, &startup, self.delivery_method, "spawn-startup")
             .await?;
 
         // Create tmux-specific payload
@@ -250,9 +243,7 @@ impl WorkerAdapter for CodexTmuxBackend {
             });
         }
 
-        let pane_id = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string();
+        let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
         debug!("Created tmux pane {pane_id} for agent {agent_id} (with env)");
 
@@ -374,10 +365,7 @@ mod tests {
     #[test]
     fn test_log_path_generation() {
         let log_dir = std::env::temp_dir().join("logs");
-        let backend = CodexTmuxBackend::new(
-            "test-session".to_string(),
-            log_dir.clone(),
-        );
+        let backend = CodexTmuxBackend::new("test-session".to_string(), log_dir.clone());
 
         let path = backend.log_path("arch-ctm@atm-planning");
         assert_eq!(path, log_dir.join("arch-ctm_atm-planning.log"));
@@ -396,10 +384,7 @@ mod tests {
     #[test]
     fn test_backend_creation() {
         let log_dir = std::env::temp_dir().join("logs");
-        let backend = CodexTmuxBackend::new(
-            "test-session".to_string(),
-            log_dir.clone(),
-        );
+        let backend = CodexTmuxBackend::new("test-session".to_string(), log_dir.clone());
         assert_eq!(backend.tmux_session, "test-session");
         assert_eq!(backend.log_dir, log_dir);
     }

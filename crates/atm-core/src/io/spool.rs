@@ -21,7 +21,10 @@
 //! 5. On failure: retry_count incremented
 //! 6. After max_retries: message moved to failed/
 
-use crate::io::{error::InboxError, inbox::{inbox_append, WriteOutcome}};
+use crate::io::{
+    error::InboxError,
+    inbox::{WriteOutcome, inbox_append},
+};
 use crate::schema::InboxMessage;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -79,7 +82,11 @@ pub struct SpoolStatus {
 /// # Returns
 ///
 /// Path to the spooled message file in pending/
-pub fn spool_message(team: &str, agent: &str, message: &InboxMessage) -> Result<PathBuf, InboxError> {
+pub fn spool_message(
+    team: &str,
+    agent: &str,
+    message: &InboxMessage,
+) -> Result<PathBuf, InboxError> {
     spool_message_with_base(team, agent, message, None)
 }
 
@@ -137,7 +144,10 @@ pub fn spool_drain(inbox_base: &Path) -> Result<SpoolStatus, InboxError> {
 }
 
 /// Internal implementation that accepts an optional base directory for testing
-fn spool_drain_with_base(inbox_base: &Path, base_dir: Option<&Path>) -> Result<SpoolStatus, InboxError> {
+fn spool_drain_with_base(
+    inbox_base: &Path,
+    base_dir: Option<&Path>,
+) -> Result<SpoolStatus, InboxError> {
     let pending_dir = get_spool_dir_with_base("pending", base_dir)?;
     let failed_dir = get_spool_dir_with_base("failed", base_dir)?;
 
@@ -235,7 +245,12 @@ fn process_spooled_message(
             })?;
         }
 
-        inbox_append(&inbox_path, &spooled.message, &spooled.target_team, &spooled.target_agent)
+        inbox_append(
+            &inbox_path,
+            &spooled.message,
+            &spooled.target_team,
+            &spooled.target_agent,
+        )
     })();
 
     match delivery_result {
@@ -243,7 +258,9 @@ fn process_spooled_message(
             // Message delivered successfully
             return Ok(true);
         }
-        Ok(WriteOutcome::Queued { spool_path: new_spool_path }) => {
+        Ok(WriteOutcome::Queued {
+            spool_path: new_spool_path,
+        }) => {
             // Lock contention - inbox_append re-spooled the message.
             // Delete the redundant spool file since we keep the original.
             let _ = fs::remove_file(&new_spool_path);
@@ -259,19 +276,19 @@ fn process_spooled_message(
 
     if spooled.retry_count >= spooled.max_retries {
         // Move to failed directory
-        let failed_path = failed_dir.join(
-            spool_path
-                .file_name()
-                .ok_or_else(|| InboxError::SpoolError {
-                    message: format!("Invalid spool path: {spool_path:?}"),
-                })?,
-        );
+        let failed_path =
+            failed_dir.join(
+                spool_path
+                    .file_name()
+                    .ok_or_else(|| InboxError::SpoolError {
+                        message: format!("Invalid spool path: {spool_path:?}"),
+                    })?,
+            );
 
-        let failed_content =
-            serde_json::to_vec_pretty(&spooled).map_err(|e| InboxError::Json {
-                path: failed_path.clone(),
-                source: e,
-            })?;
+        let failed_content = serde_json::to_vec_pretty(&spooled).map_err(|e| InboxError::Json {
+            path: failed_path.clone(),
+            source: e,
+        })?;
 
         fs::write(&failed_path, failed_content).map_err(|e| InboxError::Io {
             path: failed_path.clone(),
@@ -359,14 +376,18 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let message = create_test_message("team-lead", "Test message", Some("msg-001".to_string()));
 
-        let spool_path = spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path())).unwrap();
+        let spool_path =
+            spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path()))
+                .unwrap();
         assert!(spool_path.exists());
-        assert!(spool_path
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .contains("test-agent@test-team.json"));
+        assert!(
+            spool_path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("test-agent@test-team.json")
+        );
 
         // Verify SpooledMessage structure
         let content = fs::read_to_string(&spool_path).unwrap();
@@ -387,7 +408,9 @@ mod tests {
         fs::create_dir_all(&inbox_base).unwrap();
 
         let message = create_test_message("team-lead", "Test message", Some("msg-001".to_string()));
-        let spool_path = spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path())).unwrap();
+        let spool_path =
+            spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path()))
+                .unwrap();
         assert!(spool_path.exists());
 
         // Drain spool
@@ -418,7 +441,9 @@ mod tests {
         let inbox_base = temp_dir.path().join("teams");
 
         let message = create_test_message("team-lead", "Test message", Some("msg-001".to_string()));
-        let spool_path = spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path())).unwrap();
+        let spool_path =
+            spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path()))
+                .unwrap();
 
         // Manually modify the spool message to simulate a previous failed attempt
         let content = fs::read_to_string(&spool_path).unwrap();
@@ -450,7 +475,9 @@ mod tests {
         let inbox_base = temp_dir.path().join("teams");
 
         let message = create_test_message("team-lead", "Test message", Some("msg-001".to_string()));
-        let spool_path = spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path())).unwrap();
+        let spool_path =
+            spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path()))
+                .unwrap();
 
         // Manually set retry_count to max_retries to trigger immediate failure
         let content = fs::read_to_string(&spool_path).unwrap();
@@ -495,7 +522,13 @@ mod tests {
                 &format!("Message {i}"),
                 Some(format!("msg-{i:03}")),
             );
-            spool_message_with_base("test-team", &format!("agent-{i}"), &message, Some(temp_dir.path())).unwrap();
+            spool_message_with_base(
+                "test-team",
+                &format!("agent-{i}"),
+                &message,
+                Some(temp_dir.path()),
+            )
+            .unwrap();
         }
 
         // Drain - all should be delivered
@@ -513,7 +546,9 @@ mod tests {
         let message = create_test_message("team-lead", "Test message", Some("msg-001".to_string()));
 
         // Spool message - should auto-create pending directory
-        let spool_path = spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path())).unwrap();
+        let spool_path =
+            spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path()))
+                .unwrap();
         assert!(spool_path.exists());
         assert!(spool_path.parent().unwrap().exists());
 
@@ -590,7 +625,8 @@ mod tests {
         assert_eq!(result, WriteOutcome::Success);
 
         // Now spool the same message (simulating duplicate)
-        spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path())).unwrap();
+        spool_message_with_base("test-team", "test-agent", &message, Some(temp_dir.path()))
+            .unwrap();
 
         // Drain spool
         let status = spool_drain_with_base(&inbox_base, Some(temp_dir.path())).unwrap();

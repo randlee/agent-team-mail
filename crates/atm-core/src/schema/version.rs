@@ -102,7 +102,10 @@ impl SchemaVersion {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".config").join("atm").join("claude-version.json")
+        PathBuf::from(home)
+            .join(".config")
+            .join("atm")
+            .join("claude-version.json")
     }
 
     fn read_cache() -> Option<VersionCache> {

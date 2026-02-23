@@ -134,14 +134,7 @@ mod tests {
 
     #[test]
     fn build_session_context_null_repo_fields_when_not_in_git() {
-        let ctx = build_session_context(
-            "dev-agent",
-            "atm-dev",
-            None,
-            None,
-            None,
-            "workspace",
-        );
+        let ctx = build_session_context("dev-agent", "atm-dev", None, None, None, "workspace");
         assert!(ctx.contains("Repo:      null (null)"));
         assert!(ctx.contains("Branch:    null"));
     }
