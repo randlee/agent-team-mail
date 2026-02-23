@@ -3929,7 +3929,7 @@ mod tests {
         ];
         for kind in canonical_kinds {
             let event = json!({"params":{"type":kind}});
-            assert_eq!(should_publish_watch_event(&event), true, "kind={kind}");
+            assert!(should_publish_watch_event(&event), "kind={kind}");
         }
         assert!(!should_publish_watch_event(
             &json!({"params":{"type":"unknown_new_event_kind"}})

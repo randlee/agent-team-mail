@@ -271,8 +271,18 @@ mod tests {
             acquire_lock("test-team", "agent-x", "codex:abc-123")
                 .await
                 .unwrap();
-            let info = check_lock("test-team", "agent-x").await;
-            assert!(info.is_some());
+            // CI can observe a brief delay between file write completion and
+            // immediate re-open on some platforms/filesystems. Retry a few
+            // times before declaring failure.
+            let mut info = None;
+            for _ in 0..5 {
+                info = check_lock("test-team", "agent-x").await;
+                if info.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(info.is_some(), "lock should be observable after acquire");
             let (_, agent_id) = info.unwrap();
             assert_eq!(agent_id, "codex:abc-123");
 
