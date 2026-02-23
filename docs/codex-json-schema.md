@@ -102,6 +102,50 @@ newline-delimited JSON tool result objects:
 Each message is terminated with `\n`. The `drain()` function writes one JSON object per
 queued message. The `content` field contains the raw ATM message text.
 
+## Idle Detection Behavior
+
+The `idle` event is the primary trigger for draining the stdin queue.  Here is
+how the `JsonCodecTransport` background task handles it:
+
+### idle event processing
+
+When a line with `"type":"idle"` is received:
+
+1. `idle_flag` is set to `true` (an `Arc<AtomicBool>` shared between the
+   background task and the proxy).
+2. `cli_json_turn_state` transitions to `TurnState::Idle` (using the shared
+   `stream_norm::TurnState` type — not a parallel type).
+3. A `DaemonStreamEvent::TurnIdle { transport: "cli-json", ... }` is emitted
+   to the ATM daemon via `stream_emit::emit_stream_event` (best-effort).
+4. A C.1 structured log event (`action: "idle_detected"`) is emitted.
+5. The proxy's idle-poll loop detects `is_idle() == true` and drains the stdin
+   queue via `stdin_queue::drain`.
+
+Messages enqueued in the stdin queue before the `idle` event fires are
+guaranteed to be present in the drain on that idle cycle.
+
+### idle_flag reset on activity
+
+`idle_flag` is reset to `false` whenever any non-idle, non-done event arrives
+(`agent_message`, `tool_call`, `tool_result`, `file_change`).  This signals
+that the agent is processing again and the proxy must not drain until the next
+`idle` event.
+
+### Fallback drain: 30-second timeout
+
+In addition to idle-triggered drains, the proxy drains the stdin queue every
+30 seconds as a safety net.  This ensures messages are not indefinitely delayed
+when the agent does not reach an idle state (e.g. because of a long-running
+tool call).
+
+### `done` event shape
+
+The `done` event has no required additional fields beyond `"type":"done"`.  The
+parser is intentionally lenient: extra fields (if present) are ignored.  The
+`done` event resets `idle_flag` to `false` and transitions `cli_json_turn_state`
+to `TurnState::Terminal { status: TurnStatus::Completed }`, then emits
+`DaemonStreamEvent::TurnCompleted { transport: "cli-json", ... }`.
+
 ## Usage in atm-agent-mcp
 
 The `JsonCodecTransport` handles this protocol:
