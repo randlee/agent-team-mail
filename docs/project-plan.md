@@ -3328,6 +3328,9 @@ Design references:
 - [ ] Watch stream events preserve source attribution (`client_prompt`, `atm_mail`, `user_steer`)
 - [ ] Daemon continues receiving lifecycle/status events; continuous render deltas are not routed through daemon
 - [ ] Integration tests cover attach/replay/detach and watcher handoff behavior
+- [ ] Requirements mapping is complete and verified:
+  - FR-21.1..FR-21.5 implemented/covered
+  - FR-22.1..FR-22.3 implemented/covered
 
 ---
 
@@ -3419,6 +3422,7 @@ Additional plugins planned (each is a self-contained sprint series):
 | **E** | E.7 | Unified lifecycle source model + MCP lifecycle emission | ✅ | [#165](https://github.com/randlee/agent-team-mail/pull/165) |
 | **E** | E.8 | ATM Identity Role Mapping + Team Backup/Restore | ✅ | [#162](https://github.com/randlee/agent-team-mail/pull/162) |
 | **E** | — | Daemon hook-event auth validation | ✅ | [#163](https://github.com/randlee/agent-team-mail/pull/163) |
+| **L** | L.5 | Direct watch-stream path (`atm-agent-mcp` -> `atm-tui`) for active session | ⏳ | TBD |
 
 **Completed**: 79 sprints across 15 phases (CI green)
 **Current version**: v0.15.0
