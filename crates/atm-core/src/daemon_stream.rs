@@ -191,6 +191,39 @@ impl DaemonStreamEvent {
     }
 }
 
+impl std::fmt::Display for DaemonStreamEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TurnStarted {
+                agent,
+                turn_id,
+                transport,
+                ..
+            } => write!(
+                f,
+                "TurnStarted(agent={agent}, turn_id={turn_id}, transport={transport})"
+            ),
+            Self::TurnCompleted {
+                agent,
+                turn_id,
+                transport,
+                ..
+            } => write!(
+                f,
+                "TurnCompleted(agent={agent}, turn_id={turn_id}, transport={transport})"
+            ),
+            Self::TurnIdle {
+                agent,
+                transport,
+                ..
+            } => write!(
+                f,
+                "TurnIdle(agent={agent}, transport={transport})"
+            ),
+        }
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -323,5 +356,41 @@ mod tests {
         assert!(state.turn_id.is_none());
         assert!(state.thread_id.is_none());
         assert!(state.transport.is_none());
+    }
+
+    #[test]
+    fn daemon_stream_event_display_turn_started() {
+        let event = DaemonStreamEvent::TurnStarted {
+            agent: "arch-ctm".to_string(),
+            thread_id: "th-1".to_string(),
+            turn_id: "turn-abc".to_string(),
+            transport: "app-server".to_string(),
+        };
+        let s = event.to_string();
+        assert_eq!(s, "TurnStarted(agent=arch-ctm, turn_id=turn-abc, transport=app-server)");
+    }
+
+    #[test]
+    fn daemon_stream_event_display_turn_completed() {
+        let event = DaemonStreamEvent::TurnCompleted {
+            agent: "arch-ctm".to_string(),
+            thread_id: "th-1".to_string(),
+            turn_id: "turn-abc".to_string(),
+            status: TurnStatusWire::Completed,
+            transport: "mcp".to_string(),
+        };
+        let s = event.to_string();
+        assert_eq!(s, "TurnCompleted(agent=arch-ctm, turn_id=turn-abc, transport=mcp)");
+    }
+
+    #[test]
+    fn daemon_stream_event_display_turn_idle() {
+        let event = DaemonStreamEvent::TurnIdle {
+            agent: "arch-ctm".to_string(),
+            turn_id: "turn-abc".to_string(),
+            transport: "cli-json".to_string(),
+        };
+        let s = event.to_string();
+        assert_eq!(s, "TurnIdle(agent=arch-ctm, transport=cli-json)");
     }
 }

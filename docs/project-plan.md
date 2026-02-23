@@ -3262,6 +3262,7 @@ Design references:
 - [ ] Architecture is explicit: `atm-agent-mcp` emits events to daemon; daemon remains the single fanout hub to TUI (pubsub + UDP if enabled); no direct `atm-agent-mcp -> atm-tui` channel
 - [ ] High-rate deltas fan out via daemon pubsub/UDP path without dropping required terminal events
 - [ ] TUI displays consistent item/turn state regardless of source transport
+  > Note: MCP transport emits TurnIdle only (no TurnStarted/TurnCompleted), so MCP agent sessions never show [BUSY] in the TUI badge. This is consistent with the G.4 scope note that deferred explicit MCP turn tracking.
 - [ ] Control protocol compatibility (`control.stdin.request`, `control.interrupt.request`) preserved
 
 ---

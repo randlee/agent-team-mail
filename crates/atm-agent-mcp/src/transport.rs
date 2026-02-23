@@ -627,7 +627,7 @@ impl AppServerTransport {
             )),
             elicitation_counter: Arc::new(AtomicU64::new(0)),
             upstream_tx: Arc::new(Mutex::new(None)),
-            turn_tracker: crate::turn_control::TurnTracker::new_deferred(),
+            turn_tracker: crate::turn_control::TurnTracker::new_deferred_with_transport("app-server"),
         }
     }
 
@@ -1265,8 +1265,11 @@ pub async fn drive_notification_task(
                     // all transports.  Pass thread_id as the first argument
                     // (key for per-thread tracking) and turn_id as the second
                     // (unique turn identifier within the thread).
+                    // Use start_turn_no_emit to avoid double-emitting TurnStarted
+                    // — AppServerTransport emits the stream event directly below
+                    // with the correct transport="app-server" label.
                     if let Some(ref tracker) = turn_tracker {
-                        tracker.start_turn(&thread_id, &turn_id).await;
+                        tracker.start_turn_no_emit(&thread_id, &turn_id).await;
                     }
                     // Emit normalized stream event to the daemon (best-effort).
                     {
@@ -1313,13 +1316,16 @@ pub async fn drive_notification_task(
                             idle_flag.store(true, Ordering::SeqCst);
                         }
                     }
-                    // Notify the unified turn tracker (if wired).  Pass thread_id
-                    // as the per-thread key and turn_id as the completed turn identifier.
-                    // This emits a `teammate_idle` daemon lifecycle event via the single
-                    // normalised path in `TurnTracker::on_turn_completed`.
+                    // Notify the unified turn tracker (if wired).  Use
+                    // on_turn_completed_no_emit to update internal per-thread
+                    // turn state and emit the TeammateIdle lifecycle event,
+                    // but skip DaemonStreamEvent emission — AppServerTransport
+                    // emits TurnCompleted and TurnIdle directly below with the
+                    // correct transport="app-server" label, avoiding
+                    // double-emission.
                     if let Some(ref tracker) = turn_tracker {
                         tracker
-                            .on_turn_completed(&thread_id, &turn_id, status_for_tracker)
+                            .on_turn_completed_no_emit(&thread_id, &turn_id, status_for_tracker)
                             .await;
                     }
                     // Emit normalized stream event to the daemon (best-effort).
