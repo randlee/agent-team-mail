@@ -401,10 +401,13 @@ impl CodexTransport for JsonCodecTransport {
         let idle_flag = Arc::clone(&self.idle_flag);
         let cli_json_turn_state = Arc::clone(&self.cli_json_turn_state);
         let team_for_task = self.team.clone();
+        let cli_json_agent_identity = self.config.identity.clone()
+            .unwrap_or_else(|| "unknown".to_string());
 
         // Background task: read lines from the real child stdout, detect idle/done
         // events, and forward everything to the duplex write half.
         tokio::spawn(async move {
+            use agent_team_mail_core::daemon_stream::DaemonStreamEvent;
             use crate::stream_norm::{TurnState, TurnStatus};
 
             let reader = BufReader::new(child_stdout);
@@ -416,6 +419,17 @@ impl CodexTransport for JsonCodecTransport {
                         idle_flag.store(true, Ordering::SeqCst);
                         // Also reflect idle via the shared stream_norm TurnState.
                         *cli_json_turn_state.lock().await = TurnState::Idle;
+                        // Emit TurnIdle to daemon (best-effort).
+                        {
+                            let event = DaemonStreamEvent::TurnIdle {
+                                agent: cli_json_agent_identity.clone(),
+                                turn_id: String::new(),
+                                transport: "cli-json".to_string(),
+                            };
+                            tokio::spawn(async move {
+                                crate::stream_emit::emit_stream_event(&event).await;
+                            });
+                        }
                         emit_event_best_effort(EventFields {
                             level: "info",
                             source: "atm-agent-mcp",
@@ -441,6 +455,19 @@ impl CodexTransport for JsonCodecTransport {
                             turn_id: String::new(),
                             status: TurnStatus::Completed,
                         };
+                        // Emit TurnCompleted to daemon (best-effort).
+                        {
+                            let event = DaemonStreamEvent::TurnCompleted {
+                                agent: cli_json_agent_identity.clone(),
+                                thread_id: String::new(),
+                                turn_id: String::new(),
+                                status: agent_team_mail_core::daemon_stream::TurnStatusWire::Completed,
+                                transport: "cli-json".to_string(),
+                            };
+                            tokio::spawn(async move {
+                                crate::stream_emit::emit_stream_event(&event).await;
+                            });
+                        }
                     }
                     _ => {
                         // Reset idle flag on any other event (agent is active)
@@ -890,6 +917,7 @@ impl AppServerTransport {
             // Share child stdin so the notification task can deliver approval
             // decisions back to the child process.
             child_stdin: Some(Arc::clone(&shared_stdin)),
+            agent_identity: self.config.identity.clone(),
         };
 
         tokio::spawn(drive_notification_task(
@@ -985,6 +1013,11 @@ pub struct NotificationTaskState {
     /// `None` when operating without a real child process (unit tests that do
     /// not exercise the full approval round-trip).
     pub child_stdin: Option<Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>>>,
+    /// Agent identity for daemon stream event emission (e.g., `"arch-ctm"`).
+    ///
+    /// Resolved from [`AgentMcpConfig::identity`]. When `None`, stream events
+    /// use `"unknown"` as the agent name.
+    pub agent_identity: Option<String>,
 }
 
 /// Bridge an `item/enteredReviewMode` notification upstream as an
@@ -1176,10 +1209,14 @@ pub async fn drive_notification_task(
         elicitation_counter,
         upstream_tx: upstream_tx_arc,
         child_stdin,
+        agent_identity,
     } = state;
+    use agent_team_mail_core::daemon_stream::{DaemonStreamEvent, TurnStatusWire};
     use crate::stream_norm::{
         AppServerNotification, TurnState, TurnStatus, parse_app_server_notification,
     };
+
+    let agent_name = agent_identity.unwrap_or_else(|| "unknown".to_string());
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let reader = BufReader::new(stdout);
@@ -1231,6 +1268,18 @@ pub async fn drive_notification_task(
                     if let Some(ref tracker) = turn_tracker {
                         tracker.start_turn(&thread_id, &turn_id).await;
                     }
+                    // Emit normalized stream event to the daemon (best-effort).
+                    {
+                        let event = DaemonStreamEvent::TurnStarted {
+                            agent: agent_name.clone(),
+                            thread_id: thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                            transport: "app-server".to_string(),
+                        };
+                        tokio::spawn(async move {
+                            crate::stream_emit::emit_stream_event(&event).await;
+                        });
+                    }
                     emit_event_best_effort(EventFields {
                         level: "info",
                         source: "atm-agent-mcp",
@@ -1243,6 +1292,11 @@ pub async fn drive_notification_task(
                 AppServerNotification::TurnCompleted { thread_id, turn_id, status } => {
                     let event_result = format!("{status:?}");
                     let status_for_tracker = status.clone();
+                    let wire_status = match &status {
+                        TurnStatus::Completed => TurnStatusWire::Completed,
+                        TurnStatus::Interrupted => TurnStatusWire::Interrupted,
+                        TurnStatus::Failed => TurnStatusWire::Failed,
+                    };
                     {
                         let mut ts = turn_state.lock().await;
                         ts.insert(
@@ -1267,6 +1321,19 @@ pub async fn drive_notification_task(
                         tracker
                             .on_turn_completed(&thread_id, &turn_id, status_for_tracker)
                             .await;
+                    }
+                    // Emit normalized stream event to the daemon (best-effort).
+                    {
+                        let event = DaemonStreamEvent::TurnCompleted {
+                            agent: agent_name.clone(),
+                            thread_id: thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                            status: wire_status,
+                            transport: "app-server".to_string(),
+                        };
+                        tokio::spawn(async move {
+                            crate::stream_emit::emit_stream_event(&event).await;
+                        });
                     }
                     emit_event_best_effort(EventFields {
                         level: "info",
@@ -1521,6 +1588,7 @@ impl CodexTransport for AppServerTransport {
             // Share child stdin so the notification task can deliver approval
             // decisions back to the child process.
             child_stdin: Some(Arc::clone(&shared_stdin)),
+            agent_identity: self.config.identity.clone(),
         };
 
         // Background task: read lines, parse notifications, forward to duplex.

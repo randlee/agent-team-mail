@@ -20,6 +20,7 @@ pub mod mail_inject;
 pub mod proxy;
 pub mod session;
 pub mod stdin_queue;
+pub mod stream_emit;
 pub mod stream_norm;
 pub mod summary;
 pub mod tools;

@@ -66,6 +66,7 @@ pub async fn run(
     launch_tx: crate::daemon::LaunchSender,
     session_registry: SharedSessionRegistry,
     dedup_store: SharedDedupeStore,
+    stream_state_store: crate::daemon::SharedStreamStateStore,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -123,7 +124,7 @@ pub async fn run(
             agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
         });
     let socket_cancel = cancel.clone();
-    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, session_registry, dedup_store, socket_cancel).await {
+    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, session_registry, dedup_store, stream_state_store, socket_cancel).await {
         Ok(handle) => {
             if handle.is_some() {
                 info!("Unix socket server started successfully");
