@@ -139,6 +139,11 @@ pub async fn acquire_lock(team: &str, identity: &str, agent_id: &str) -> anyhow:
                     let _ = fs::remove_file(&path).await;
                     return Err(e.into());
                 }
+                // Explicitly close the file handle so the lock file is fully
+                // released before any subsequent `check_lock` reads it.
+                // On Windows, an open handle can prevent other processes (or
+                // even the same process) from reading the file.
+                drop(file);
                 // Register in the in-process lock set only after durable write.
                 in_process_locks().lock().unwrap().insert(key);
                 return Ok(());
