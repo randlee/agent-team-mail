@@ -237,11 +237,15 @@ mod tests {
             .collect();
         let actual = format!("{}\n", actual_lines.join("\n"));
 
-        let expected_120 =
-            fs::read_to_string(scenario.join("viewport-120x36.snap")).expect("120x36 snapshot");
-        let expected_80 =
-            fs::read_to_string(scenario.join("viewport-80x24.snap")).expect("80x24 snapshot");
+        let expected_120 = fs::read_to_string(scenario.join("viewport-120x36.snap"))
+            .expect("120x36 snapshot")
+            .replace("\r\n", "\n");
+        let expected_80 = fs::read_to_string(scenario.join("viewport-80x24.snap"))
+            .expect("80x24 snapshot")
+            .replace("\r\n", "\n");
 
+        // Current parity baseline uses viewport-independent line snapshots.
+        // Keep both fixtures explicit until full frame-buffer snapshots land.
         assert_eq!(actual, expected_120, "renderer mismatch for 120x36 snapshot");
         assert_eq!(actual, expected_80, "renderer mismatch for 80x24 snapshot");
     }
