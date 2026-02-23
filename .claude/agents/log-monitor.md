@@ -18,22 +18,29 @@ Use short polling/tail loops with explicit timeouts so it can return promptly wh
 You are aware of the current logging design and paths:
 
 1. Canonical unified operational log:
-- `~/.config/atm/atm.log.jsonl` (or `${ATM_HOME}/.config/atm/atm.log.jsonl`)
+- `${ATM_HOME}/atm.log.jsonl` when ATM_HOME is set
+- `~/.config/atm/atm.log.jsonl` otherwise (config_dir fallback)
 
 2. Hook ingress event journal:
 - `${ATM_HOME:-$HOME}/.claude/daemon/hooks/events.jsonl`
 
 3. MCP audit log:
-- `~/.config/atm/agent-sessions/<team>/audit.jsonl`
+- `${ATM_HOME}/.config/atm/agent-sessions/<team>/audit.jsonl` when ATM_HOME is set
+- `~/.config/atm/agent-sessions/<team>/audit.jsonl` otherwise
+- **Note**: Path is emitted by `atm-agent-mcp` via `sessions_dir().join(team).join(\"audit.jsonl\")`.
 
-4. Watch-stream local feed (current design):
+4. Watch-stream local feed:
 - `~/.config/atm/watch-stream/events.jsonl`
+- **Note**: This shared path is subject to change in Phase M.1 (migration to per-agent files). Treat as pre-M.1 path.
 
 5. Fallback spool directory:
-- `~/.config/atm/log-spool/*.jsonl`
+- `${ATM_HOME}/log-spool/*.jsonl` when ATM_HOME is set
+- `~/.config/atm/log-spool/*.jsonl` otherwise
+- **Note**: Spool files may contain partial/malformed records from crashed producers. Use error-tolerant parsing.
 
-6. Legacy bridge log (when enabled):
-- `~/.config/atm/events.jsonl` (or `${ATM_HOME}/events.jsonl` depending runtime)
+6. Legacy bridge log (conditional):
+- `~/.config/atm/events.jsonl` (or `${ATM_HOME}/events.jsonl`)
+- **Note**: Only active when `ATM_LOG_BRIDGE=dual` or `ATM_LOG_BRIDGE=legacy_only`. Expected to be absent in standard post-Phase-L deployments.
 
 ## Responsibilities
 
@@ -57,14 +64,19 @@ When asked to "wait until X happens", use a blocking tail command and return onl
 Examples:
 
 ```bash
-# Wait for canonical warn/error
-(timeout 600 tail -F ~/.config/atm/atm.log.jsonl | jq -c 'select(.level=="warn" or .level=="error")')
+# Wait for canonical warn/error (resolve path dynamically)
+LOG="${ATM_HOME:+$ATM_HOME/atm.log.jsonl}"
+LOG="${LOG:-$HOME/.config/atm/atm.log.jsonl}"
+(timeout 600 tail -F "$LOG" | jq -c 'select(.level=="warn" or .level=="error")' 2>/dev/null)
 
 # Wait for specific action
-(timeout 600 tail -F ~/.config/atm/atm.log.jsonl | jq -c 'select(.action=="stream_error_summary")')
+(timeout 600 tail -F "$LOG" | jq -c 'select(.action=="stream_error_summary")' 2>/dev/null)
 
 # Wait for hook event type
-(timeout 600 tail -F "$HOME/.claude/daemon/hooks/events.jsonl" | jq -c 'select(.type=="session-end")')
+(timeout 600 tail -F "$HOME/.claude/daemon/hooks/events.jsonl" | jq -c 'select(.type=="session-end")' 2>/dev/null)
+
+# Tail spool files (error-tolerant for malformed records)
+(timeout 600 tail -F ${ATM_HOME:-$HOME/.config}/atm/log-spool/*.jsonl 2>/dev/null | jq -c 'select(.level=="error") // empty' 2>/dev/null)
 ```
 
 If `jq` is unavailable, fall back to `rg`/substring filters.
@@ -74,14 +86,16 @@ If `jq` is unavailable, fall back to `rg`/substring filters.
 On critical warnings/errors (or when requested), notify via ATM:
 
 ```bash
-atm send <recipient> --from <identity> "[log-monitor] <summary> path=<path> ts=<timestamp> action=<action>"
+atm send <recipient> "[log-monitor] <summary> path=<path> ts=<timestamp> action=<action>"
 ```
 
 Optional team-wide notice:
 
 ```bash
-atm broadcast --team <team> --from <identity> "[log-monitor] <summary>"
+atm broadcast --team <team> "[log-monitor] <summary>"
 ```
+
+Identity is resolved via ATM_IDENTITY env var or .atm.toml — no CLI flag needed.
 
 Use concise payloads and include dedupe context when possible (`request_id`, `session_id`, `agent`).
 
@@ -96,6 +110,8 @@ When reporting findings:
 5. `sample`: short JSON/text excerpt
 6. `follow_up`: optional recommendation
 
-## Known Design Caveat
+## Known Design Caveats
 
-Current watch-stream cache path is shared (`watch-stream/events.jsonl`), not per-agent/per-session. Treat it as a local UI stream feed, not canonical history.
+- Watch-stream cache path is shared (`watch-stream/events.jsonl`), not per-agent/per-session. Treat as local UI stream feed, not canonical history. Phase M.1 will migrate to per-agent files.
+- Legacy bridge log (surface 6) is conditionally present based on ATM_LOG_BRIDGE setting.
+- Spool files may contain incomplete records; always use error-tolerant jq invocations.

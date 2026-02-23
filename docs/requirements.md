@@ -713,6 +713,9 @@ Validation rules:
 - Reject payloads missing required fields
 - Enforce serialized-size guard (`64 KiB` max per line, initial default)
 - Apply built-in redaction before enqueue/write
+- `action` MUST be stable snake_case. Canonical baseline action vocabulary is
+  defined in `docs/logging-l1a-spec.md` and is the source of truth for
+  dashboard/alert naming.
 
 #### Sink Paths and Files
 
@@ -733,7 +736,7 @@ Spool filename convention:
 - Overflow policy: `drop-new`
 - Overflow observability: increment dropped counter + rate-limited warning
 - Redaction v1 denylist keys (case-insensitive): `password`, `secret`, `token`,
-  `api_key`, `authorization`; plus bearer-token value pattern
+  `api_key`, `auth`; plus bearer-token value pattern
 - Rotation: size-based at `50 MiB`, retain `5` rotated files
 
 #### Failure and Merge Semantics
