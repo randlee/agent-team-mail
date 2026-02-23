@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging;
 use agent_team_mail_daemon::daemon;
-use agent_team_mail_daemon::daemon::{new_dedup_store, new_launch_sender, new_pubsub_store, new_session_registry, new_state_store, new_stream_event_sender, new_stream_state_store, StatusWriter};
+use agent_team_mail_daemon::daemon::{new_dedup_store, new_launch_sender, new_log_event_queue, new_pubsub_store, new_session_registry, new_state_store, new_stream_event_sender, new_stream_state_store, run_log_writer_task, LogWriterConfig, StatusWriter};
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
 use agent_team_mail_daemon::roster::RosterService;
 use clap::Parser;
@@ -272,6 +272,16 @@ async fn main() -> Result<()> {
     // Create the broadcast sender for push-based stream event fanout.
     let stream_event_sender = new_stream_event_sender();
 
+    // Create the bounded log event queue and async writer task.
+    let log_event_queue = new_log_event_queue();
+    let log_writer_config = LogWriterConfig::from_env(&home_dir);
+    let log_cancel = cancel_token.clone();
+    tokio::spawn(run_log_writer_task(
+        log_event_queue.clone(),
+        log_writer_config,
+        log_cancel,
+    ));
+
     // Run the daemon event loop
     let run_result = daemon::run(
         &mut registry,
@@ -285,6 +295,7 @@ async fn main() -> Result<()> {
         dedup_store,
         stream_state_store,
         stream_event_sender,
+        log_event_queue,
     )
     .await;
     match &run_result {

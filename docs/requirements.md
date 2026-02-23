@@ -657,107 +657,167 @@ Rationale:
 
 ### 4.6 Unified Event Logging (Phase C.1)
 
-`atm` must provide a **single structured event stream** across `atm`, `atm-daemon`,
-and `atm-agent-mcp` so operators can filter by team and reconstruct state transitions.
+`atm` must provide one structured event stream across `atm`, `atm-daemon`, `atm-tui`,
+and `atm-agent-mcp` so operators can reconstruct causality and filter by team/session.
+
+Phase C.1 established baseline instrumentation. Phase L hardens this into a single
+daemon-owned write path with producer fan-in and spool fallback.
 
 #### Goals
 
-- One common sink for all binaries (CLI, daemon, MCP proxy)
-- Compact JSONL records suitable for standard log viewers and stream tools
-- Team/session traceability by default
-- Visibility into state transitions: send/receive, read-flag changes, watermark updates,
-  cleanup/resume/session lifecycle transitions
-- Logging must be fail-open (never block command execution or daemon progress)
+- One common sink across all binaries
+- Deterministic, schema-validated JSONL records
+- Team/session/request correlation by default
+- Fail-open behavior (logging must never block or fail core workflows)
+- Safe multi-process operation (no cross-process file append races)
 
-#### Sink Path and Cross-Platform Behavior
+#### Canonical Architecture (Phase L)
 
-- Canonical event sink path:
-  - If `ATM_HOME` is set: `${ATM_HOME}/events.jsonl`
-  - Else: `${config_dir}/atm/events.jsonl` where `config_dir` is platform-native
-    (`~/.config` on Linux/macOS, `%APPDATA%` equivalent on Windows)
-- Implementations may expose `ATM_LOG_PATH` override for tests and advanced ops.
-  - Canonical env override: `ATM_LOG_FILE`
-  - Backward-compat alias accepted: `ATM_LOG_PATH`
+- Producers (`atm`, `atm-tui`, `atm-agent-mcp`) emit `log-event` messages to daemon over
+  the existing socket envelope.
+- `atm-daemon` is the only writer to canonical log files and the only component that
+  performs validation, redaction, queueing, and rotation.
+- If daemon is unavailable, producers spool locally and daemon merges spool on startup.
 
-#### Record Format
+#### Socket Contract (`command = "log-event"`)
 
-- File format: JSONL (one JSON object per line).
-- Compact key names for storage efficiency.
-- First line in each new/rotated file should be a header/mapping object so tools can
-  discover explicit field meanings.
+- Request envelope: existing `SocketRequest` with `version`, `request_id`, `command`,
+  and `payload`.
+- Command: `log-event`
+- Payload: `LogEventV1`
+- Success response: `status = "ok"` with payload `{ "accepted": true }`
+- Error response: `status = "error"` and code:
+  - `VERSION_MISMATCH`
+  - `INVALID_PAYLOAD`
+  - `INTERNAL_ERROR`
 
-**Header record (`k = "h"`) example mapping**:
-- `v` → schema version
-- `k` → record kind (`h` header, `e` event)
-- `ts` → timestamp
-- `lv` → level
-- `src` → source binary/component
-- `act` → action
-- `team` → team name
-- `sid` → session id
-- `aid` → agent id
-- `anm` → agent name
-- `target` → target identity/resource
-- `res` → result
-- `mid` → message id
-- `rid` → request id
-- `cnt` → count
-- `err` → error text
-- `msg` → message text (subject to verbosity policy)
+#### Canonical Event Schema (`LogEventV1`)
 
-#### Mandatory and Optional Fields
+Required fields:
+- `v` (schema version)
+- `ts` (RFC3339 UTC)
+- `level` (`trace|debug|info|warn|error`)
+- `source_binary` (`atm|atm-daemon|atm-tui|atm-agent-mcp`)
+- `hostname`
+- `pid`
+- `target`
+- `action`
 
-Every event record (`k = "e"`) must include:
-- `v`, `k`, `ts`, `lv`, `src`, `act`, `team`, `sid`
+Optional correlation fields:
+- `team`, `agent`, `session_id`
+- `request_id`, `correlation_id`
+- `outcome`, `error`
+- `fields` (structured map), `spans` (span refs)
 
-Rules:
-- `sid` is required in output; if unavailable/unrelated, emit `sid: "unknown"`.
-- `team` should be emitted whenever relevant to the operation.
-- Additional contextual fields (`aid`, `anm`, `target`, `mid`, `rid`, `cnt`, `res`, `err`)
-  are strongly recommended and should be added where available.
+Validation rules:
+- Reject payloads missing required fields
+- Enforce serialized-size guard (`64 KiB` max per line, initial default)
+- Apply built-in redaction before enqueue/write
 
-#### Message Content Policy
+#### Sink Paths and Files
 
-- Default: no message body in event logs.
-- Verbosity modes:
-  - `none` (default): omit `msg`
-  - `truncated`: include Unicode-safe truncated message text
-  - `full`: include full message text
-- Intended controls: config/env/CLI compatibility layer, with env override acceptable
-  for initial C.1 rollout.
-  - `ATM_LOG_MSG=none|truncated|full`
+Canonical log file (daemon-writer mode):
+- `${ATM_HOME}/atm.log.jsonl` if `ATM_HOME` is set
+- else `${config_dir}/atm/atm.log.jsonl` (`~/.config/atm` on Linux/macOS, `%APPDATA%\\atm` on Windows)
 
-#### Rotation and Retention
+Producer fallback spool directory:
+- `${ATM_HOME}/log-spool` if `ATM_HOME` is set
+- else `${config_dir}/atm/log-spool`
 
-- Size-based rotation only.
-- Default policy:
-  - rotate at `50 MiB`
-  - retain `5` files (`events.jsonl`, `events.jsonl.1` … `.5`)
-- Rotation/retention failures must be non-fatal; emit best-effort warning and continue.
+Spool filename convention:
+- `{source_binary}-{pid}-{unix_millis}.jsonl`
 
-#### Reliability / Failure Semantics
+#### Queue, Redaction, Rotation Defaults
 
-- Logging must never cause command or daemon failure.
-- On sink write errors:
-  - swallow and continue
-  - optionally emit best-effort diagnostic to stderr/tracing
- - `ATM_LOG=trace|debug|info|warn|error` controls console tracing verbosity for operators.
+- Daemon in-memory queue capacity: `4096`
+- Overflow policy: `drop-new`
+- Overflow observability: increment dropped counter + rate-limited warning
+- Redaction v1 denylist keys (case-insensitive): `password`, `secret`, `token`,
+  `api_key`, `authorization`; plus bearer-token value pattern
+- Rotation: size-based at `50 MiB`, retain `5` rotated files
 
-#### Minimum Event Coverage (C.1 baseline)
+#### Failure and Merge Semantics
 
-- `atm` CLI:
-  - `send`, `broadcast`, `request` outcomes
-  - `read` outcomes (including timeout)
-  - read-flag updates (`read=false` → `read=true`) with counts
-  - seen/watermark updates
-  - teams session operations (`resume`, `cleanup`)
-- `atm-daemon`:
-  - daemon start/stop lifecycle
-  - session registry transitions
-  - plugin lifecycle and significant warnings/errors
-- `atm-agent-mcp`:
-  - tool-call audit events mirrored into common sink
-  - session/identity context preserved where available
+- Logging failures never fail CLI command execution or daemon progress.
+- Producer path is non-blocking best-effort; if socket send fails, write to spool.
+- Daemon startup merges spool files via claim/rename then append; delete source file
+  only after successful merge.
+- Merge ordering: timestamp then file order, append-only.
+
+#### Migration Bridge (Legacy `events.jsonl`)
+
+During migration window:
+- `emit_event_best_effort` dual-writes by mapping legacy fields into `LogEventV1`
+  and preserving legacy sink output.
+- Control via `ATM_LOG_BRIDGE`:
+  - `dual` (default during migration)
+  - `unified_only`
+  - `legacy_only` (rollback safety)
+
+Legacy sink removal target is Phase L.4 after parity + soak.
+
+#### Minimum Event Coverage
+
+- `atm`: `send`, `broadcast`, `request`, `read` outcomes, watermark updates, teams ops
+- `atm-daemon`: lifecycle, session registry transitions, plugin lifecycle/errors
+- `atm-agent-mcp`: tool-call audit + lifecycle context
+- `atm-tui`: startup/shutdown, stream attach/detach, control-send/ack summaries
+
+#### Runtime Controls
+
+- `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
+- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy.
+- `ATM_LOG_FILE` may override file path for tests/ops; `ATM_LOG_PATH` remains alias.
+
+### 4.7 Daemon Auto-Start and Single-Instance Guarantees (Issue #181)
+
+Daemon-backed features must work without manual `atm-daemon` bootstrapping while
+guaranteeing at most one live daemon per machine/user scope.
+
+#### Start Conditions
+
+CLI must ensure daemon availability before executing daemon-backed commands, including:
+- session/lifecycle updates (`hook-event`, session registry reads/writes)
+- TUI and control protocol commands
+- unified logging producer fan-in (`log-event`)
+- plugin-backed operations
+
+If daemon is unreachable, CLI attempts auto-start once per command invocation.
+
+#### Single-Instance Contract
+
+- Daemon startup acquires an exclusive process lock in `${config_dir}/atm/daemon.lock`.
+- If lock acquisition fails, new daemon process exits immediately (existing daemon is authoritative).
+- Socket path is fixed per user scope:
+  - Unix/macOS: `${ATM_HOME:-$HOME/.claude}/daemon/atm-daemon.sock` (existing convention)
+  - Windows: named-pipe equivalent (canonical path documented in daemon crate)
+- CLI must never spawn a second daemon when lock/socket indicate an existing healthy instance.
+
+#### CLI Spawn/Readiness Flow
+
+1. Probe daemon socket/pipe.
+2. If healthy, continue.
+3. If unavailable, spawn daemon detached with platform-native process creation.
+4. Wait for readiness with bounded retry/backoff (default total wait `5s`).
+5. If ready, continue command.
+6. If not ready, fail daemon-backed command with actionable error; non-daemon commands continue.
+
+#### Mid-Session Daemon Death
+
+- Producers (logging, lifecycle, control) fail-open where possible:
+  - lifecycle/logging events use spool fallback or best-effort warning
+  - control commands return explicit daemon-unavailable error
+- CLI retries one auto-restart attempt on next daemon-backed operation.
+- Daemon startup must recover durable state needed for safety:
+  - replay pending spool files
+  - restore dedupe/session metadata from durable stores where implemented
+
+#### Cross-Platform Requirements
+
+- Windows CI coverage must validate spawn/readiness/lock behavior.
+- Use `std::process::Command`/Tokio process APIs only; no shell-specific assumptions.
+- Path handling must use `Path`/`PathBuf`; avoid hardcoded separators.
+- Readiness timeout/backoff defaults must be shared across platforms.
 
 ---
 
