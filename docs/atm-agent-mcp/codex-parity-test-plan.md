@@ -69,6 +69,7 @@ crates/atm-agent-mcp/tests/fixtures/parity/
     cli-json/
     app-server/
     mcp/
+crates/atm-tui/tests/fixtures/parity/
   adapter/
     <scenario>/
       input.events.jsonl
@@ -81,6 +82,11 @@ crates/atm-agent-mcp/tests/fixtures/parity/
       viewport-80x24.snap
       meta.toml
 ```
+
+Placement rationale:
+- Layer A contract fixtures remain in `atm-agent-mcp` (transport boundary).
+- Layer B adapter fixtures live in `atm-tui` because `CodexAdapter` is implemented there.
+- Layer C renderer snapshots also live in `atm-tui` with the watch UI implementation.
 
 `meta.toml` minimum fields:
 

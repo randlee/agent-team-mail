@@ -56,7 +56,7 @@ Notes:
 
 ### 3.3 Event subset for MVP rendering
 
-Use a minimal, stable subset from Codex stream notifications:
+Baseline MVP lifecycle subset:
 
 - `turn_started`
 - `item_started`
@@ -65,8 +65,14 @@ Use a minimal, stable subset from Codex stream notifications:
 - `turn_completed`
 - `turn_idle`
 
+M.3 adapter expansion (documented behavior):
+- command output and execution lifecycle: `exec_command_output_delta`, `exec_command_completed`, `exec_command_error`
+- reasoning deltas: `reasoning_content_delta`, `agent_reasoning_delta`, `reasoning_content`
+- additional lifecycle aliases: `task_complete`, `done`, `idle`
+- transport fault signal: `stream_error`
+
 Unknown events:
-- ignore for rendering,
+- are rendered as `unknown.<kind>` in watch mode for observability,
 - increment unknown-event counters and emit periodic diagnostics.
 
 ## 4. Source Attribution Model
