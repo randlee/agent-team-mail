@@ -60,6 +60,74 @@ pub fn render_stream_line(raw_line: &str) -> Line<'static> {
         ]);
     }
 
+    if let Some(rest) = trimmed.strip_prefix("turn.interrupted ") {
+        return Line::from(vec![
+            Span::styled(
+                "⏹ ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Turn interrupted ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(rest.to_string()),
+        ]);
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("approval.request ") {
+        return Line::from(vec![
+            Span::styled(
+                "? ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Approval requested ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(rest.to_string()),
+        ]);
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("approval.rejected ") {
+        return Line::from(vec![
+            Span::styled(
+                "✗ ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Approval rejected ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(rest.to_string()),
+        ]);
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("approval.resolved ") {
+        return Line::from(vec![
+            Span::styled(
+                "✓ ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Approval resolved ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(rest.to_string()),
+        ]);
+    }
+
     if let Some(rest) = trimmed.strip_prefix("stream.error ") {
         return Line::from(vec![
             Span::styled(
@@ -132,5 +200,17 @@ mod tests {
         let line = render_stream_line("## Heading");
         assert_eq!(line.spans.len(), 1);
         assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn renders_approval_prefix() {
+        let line = render_stream_line("approval.request allow command");
+        let rendered: String = line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(rendered.contains("Approval requested"));
     }
 }

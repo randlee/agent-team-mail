@@ -86,12 +86,33 @@ impl CodexAdapter {
                     is_turn_boundary: false,
                 }
             }
+            "approval_prompt"
+            | "approval_request"
+            | "entered_review_mode"
+            | "item/enteredReviewMode" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.request {text}"),
+                is_turn_boundary: true,
+            },
+            "approval_rejected" | "reject" | "rejected" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.rejected {text}"),
+                is_turn_boundary: true,
+            },
+            "approval_approved" | "approved" | "item/exitedReviewMode" | "exited_review_mode" => {
+                AdaptedWatchLine {
+                    line: format!("{source_badge} approval.resolved {text}"),
+                    is_turn_boundary: true,
+                }
+            }
             "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
                 AdaptedWatchLine {
                     line: format!("{source_badge} reasoning {text}"),
                     is_turn_boundary: false,
                 }
             }
+            "turn_interrupted" | "interrupt" | "cancelled" | "turn_cancelled" => AdaptedWatchLine {
+                line: format!("{source_badge} turn.interrupted {text}"),
+                is_turn_boundary: true,
+            },
             "stream_error" | "error" => AdaptedWatchLine {
                 line: format!("{source_badge} stream.error {text}"),
                 is_turn_boundary: true,
@@ -142,5 +163,53 @@ mod tests {
         let out = adapter.adapt_frame(&frame);
         assert!(out.line.contains("unknown.future_new_kind"));
         assert_eq!(adapter.unknown_events(), 1);
+    }
+
+    #[test]
+    fn maps_approval_and_rejection_events() {
+        let mut adapter = CodexAdapter::new();
+        let approval = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"approval_request","message":"allow command?"}}
+        });
+        let rejected = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"approval_rejected","message":"denied"}}
+        });
+        let resolved = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"approval_approved","message":"granted"}}
+        });
+        assert!(
+            adapter
+                .adapt_frame(&approval)
+                .line
+                .contains("approval.request")
+        );
+        assert!(
+            adapter
+                .adapt_frame(&rejected)
+                .line
+                .contains("approval.rejected")
+        );
+        assert!(
+            adapter
+                .adapt_frame(&resolved)
+                .line
+                .contains("approval.resolved")
+        );
+        assert_eq!(adapter.unknown_events(), 0);
+    }
+
+    #[test]
+    fn maps_interrupt_and_cancel_events() {
+        let mut adapter = CodexAdapter::new();
+        let interrupted = serde_json::json!({
+            "source":{"kind":"user_steer","actor":"randlee","channel":"tui_user"},
+            "event":{"params":{"type":"turn_interrupted","message":"cancelled by user"}}
+        });
+        let line = adapter.adapt_frame(&interrupted).line;
+        assert!(line.contains("turn.interrupted"));
+        assert_eq!(adapter.unknown_events(), 0);
     }
 }

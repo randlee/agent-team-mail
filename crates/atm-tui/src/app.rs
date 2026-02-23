@@ -304,7 +304,7 @@ impl App {
             "turn_completed" | "task_complete" | "done" => {
                 self.watch_turn_completed = self.watch_turn_completed.saturating_add(1);
             }
-            "turn_interrupted" | "interrupt" => {
+            "turn_interrupted" | "interrupt" | "cancelled" | "turn_cancelled" => {
                 self.watch_turn_interrupted = self.watch_turn_interrupted.saturating_add(1);
             }
             "stream_error" | "error" => {
