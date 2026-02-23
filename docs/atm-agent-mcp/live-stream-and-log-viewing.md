@@ -19,6 +19,7 @@ Scope: `atm-agent-mcp` + `atm-tui` UX integration for session watching and struc
 - `atm-agent-mcp` remains the stream owner.
 - `atm-tui` watches a selected session by attaching directly to proxy stream output.
 - `atm-daemon` receives lifecycle/state events only, not continuous stream deltas.
+- This is an explicit exception to daemon fan-in for high-rate render transport only; it does not change daemon ownership of structured logs/state.
 
 Rationale:
 - lower implementation complexity,
