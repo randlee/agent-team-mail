@@ -261,6 +261,61 @@ impl TurnTracker {
             .await;
         }
     }
+
+    /// Record that a new turn has begun on `thread_id`, updating internal
+    /// state only — **without** emitting any [`DaemonStreamEvent`].
+    ///
+    /// This variant is used by transports (e.g. `AppServerTransport`) that
+    /// manage their own stream event emission and want to avoid double-emission
+    /// of `TurnStarted` events.
+    ///
+    /// Prefer [`TurnControl::start_turn`] for transports that delegate all
+    /// stream emission to the tracker.
+    pub async fn start_turn_no_emit(&self, thread_id: &str, turn_id: &str) {
+        let mut guard = self.active_turns.lock().await;
+        guard.insert(thread_id.to_string(), Some(turn_id.to_string()));
+        tracing::debug!(
+            thread_id = %thread_id,
+            turn_id = %turn_id,
+            "turn_control: turn started (no-emit)"
+        );
+    }
+
+    /// Record that the active turn on `thread_id` has completed, updating
+    /// internal state only — **without** emitting any [`DaemonStreamEvent`].
+    ///
+    /// This variant is used by transports (e.g. `AppServerTransport`) that
+    /// manage their own stream event emission and want to avoid double-emission.
+    /// The `TeammateIdle` daemon lifecycle event is still emitted via
+    /// [`crate::lifecycle_emit::emit_lifecycle_event`] so the daemon's
+    /// turn-state table is updated.
+    ///
+    /// Prefer [`TurnControl::on_turn_completed`] for transports that delegate
+    /// all stream emission to the tracker.
+    pub async fn on_turn_completed_no_emit(&self, thread_id: &str, turn_id: &str, status: TurnStatus) {
+        {
+            let mut guard = self.active_turns.lock().await;
+            guard.insert(thread_id.to_string(), None);
+        }
+        tracing::debug!(
+            thread_id = %thread_id,
+            turn_id = %turn_id,
+            status = ?status,
+            "turn_control: turn completed → idle (no-emit)"
+        );
+        // Emit lifecycle event only (no DaemonStreamEvent stream emission).
+        let guard = self.ctx.lock().await;
+        if let Some(ref ctx) = *guard {
+            emit_lifecycle_event(
+                EventKind::TeammateIdle,
+                &ctx.identity,
+                &ctx.team,
+                &ctx.session_id,
+                None,
+            )
+            .await;
+        }
+    }
 }
 
 #[async_trait]

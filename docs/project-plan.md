@@ -3134,7 +3134,7 @@ Design references:
 | G.4 | Unified turn control + daemon turn-state reporting across all transports | G.3 | ✅ COMPLETE (PR #171) |
 | G.5 | Approval/elicitation bridging parity for app-server | G.4 | ✅ COMPLETE (PR #172) |
 | G.6 | Mail injection parity (`mcp`, `cli-json`, `app-server`) + queue semantics | G.4 | ✅ COMPLETE (PR #173) |
-| G.7 | TUI streaming normalization + daemon pubsub/UDP fanout architecture | G.4, G.6 | ✅ COMPLETE (PR #174) |
+| G.7 | TUI streaming normalization + daemon pubsub/UDP fanout architecture | G.4, G.6 | ✅ COMPLETE (PR #174, #176) |
 | G.2 | CLI-JSON streaming verification + idle detection hardening | G.7 | ✅ COMPLETE (PR #175) |
 | G.8 | Cross-platform reliability + soak testing (Linux/macOS/Windows) | G.5, G.6, G.7 | ✅ COMPLETE (PR #177) |
 | G.9 | Docs finalization, migration notes, and release gate | G.2, G.8 | ⏳ PLANNED |
@@ -3258,11 +3258,13 @@ Design references:
 
 #### Exit Criteria
 
-- [ ] Transport-specific event payloads normalized to one daemon stream contract
-- [ ] Architecture is explicit: `atm-agent-mcp` emits events to daemon; daemon remains the single fanout hub to TUI (pubsub + UDP if enabled); no direct `atm-agent-mcp -> atm-tui` channel
-- [ ] High-rate deltas fan out via daemon pubsub/UDP path without dropping required terminal events
-- [ ] TUI displays consistent item/turn state regardless of source transport
-- [ ] Control protocol compatibility (`control.stdin.request`, `control.interrupt.request`) preserved
+- [x] Transport-specific event payloads normalized to one daemon stream contract
+- [x] Architecture is explicit: `atm-agent-mcp` emits events to daemon; daemon remains the single fanout hub to TUI (pubsub + UDP if enabled); no direct `atm-agent-mcp -> atm-tui` channel
+- [x] High-rate deltas fan out via daemon pubsub/UDP path without dropping required terminal events
+- [x] TUI displays consistent item/turn state regardless of source transport
+  > Note: MCP transport emits TurnIdle only (no TurnStarted/TurnCompleted), so MCP agent sessions never show [BUSY] in the TUI badge. This is consistent with the G.4 scope note that deferred explicit MCP turn tracking.
+  > Note: cli-json transport does not emit TurnStarted (the cli-json protocol has no explicit turn-start notification — the `idle` JSONL event is the only turn-boundary signal). As a result, cli-json sessions never show [BUSY] in the TUI badge; they transition directly from idle to [DONE] when the `done` event is received.
+- [x] Control protocol compatibility (`control.stdin.request`, `control.interrupt.request`) preserved
 
 ---
 
