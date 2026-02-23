@@ -130,8 +130,26 @@ pub struct App {
     /// `"agent-stream-state"` socket command. `None` when the daemon has no
     /// stream state recorded for the agent.
     pub daemon_turn_state: Option<agent_team_mail_core::daemon_stream::AgentStreamState>,
-    /// Long-lived daemon stream subscription used for live turn/event updates.
-    pub daemon_stream_rx: Option<agent_team_mail_core::daemon_client::StreamSubscription>,
+    /// Path to direct watch-stream feed emitted by `atm-agent-mcp`.
+    pub watch_stream_path: Option<PathBuf>,
+    /// File-read byte position for incremental watch-stream tailing.
+    pub watch_stream_pos: u64,
+    /// Last transport observed from live daemon stream events.
+    pub watch_transport: Option<String>,
+    /// Last turn id observed from live daemon stream events.
+    pub watch_turn_id: Option<String>,
+    /// Count of `turn_started` events observed in this watch session.
+    pub watch_turn_started: u64,
+    /// Count of `turn_completed(status=completed)` events observed.
+    pub watch_turn_completed: u64,
+    /// Count of `turn_completed(status=interrupted)` events observed.
+    pub watch_turn_interrupted: u64,
+    /// Count of `turn_completed(status=failed)` events observed.
+    pub watch_turn_failed: u64,
+    /// Latest dropped-event counter value from stream telemetry.
+    pub watch_dropped: u64,
+    /// Latest unknown-event counter value from stream telemetry.
+    pub watch_unknown: u64,
 }
 
 impl App {
@@ -162,7 +180,16 @@ impl App {
             follow_mode,
             stream_scroll_offset: 0,
             daemon_turn_state: None,
-            daemon_stream_rx: None,
+            watch_stream_path: None,
+            watch_stream_pos: 0,
+            watch_transport: None,
+            watch_turn_id: None,
+            watch_turn_started: 0,
+            watch_turn_completed: 0,
+            watch_turn_interrupted: 0,
+            watch_turn_failed: 0,
+            watch_dropped: 0,
+            watch_unknown: 0,
             log_viewer_visible: false,
             log_events: Vec::new(),
             log_scroll_offset: 0,
@@ -238,7 +265,55 @@ impl App {
         self.session_log_path = None;
         self.stream_source_error = None;
         self.stream_scroll_offset = 0;
-        self.daemon_stream_rx = None;
+        self.watch_stream_path = None;
+        self.watch_stream_pos = 0;
+        self.watch_transport = None;
+        self.watch_turn_id = None;
+        self.watch_turn_started = 0;
+        self.watch_turn_completed = 0;
+        self.watch_turn_interrupted = 0;
+        self.watch_turn_failed = 0;
+        self.watch_dropped = 0;
+        self.watch_unknown = 0;
+    }
+
+    /// Apply a direct watch-stream JSON frame to watch metrics.
+    pub fn apply_watch_frame(&mut self, frame: &serde_json::Value) {
+        let event = frame.get("event").unwrap_or(frame);
+        let kind = event
+            .pointer("/params/type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let transport = event
+            .pointer("/params/transport")
+            .and_then(|v| v.as_str())
+            .unwrap_or("watch");
+        let turn_id = event
+            .pointer("/params/turn_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| event.pointer("/params/turnId").and_then(|v| v.as_str()))
+            .unwrap_or("n/a");
+
+        self.watch_transport = Some(transport.to_string());
+        self.watch_turn_id = Some(turn_id.to_string());
+
+        match kind {
+            "turn_started" => {
+                self.watch_turn_started = self.watch_turn_started.saturating_add(1);
+            }
+            "turn_completed" | "task_complete" | "done" => {
+                self.watch_turn_completed = self.watch_turn_completed.saturating_add(1);
+            }
+            "turn_interrupted" | "interrupt" => {
+                self.watch_turn_interrupted = self.watch_turn_interrupted.saturating_add(1);
+            }
+            "stream_error" | "error" => {
+                self.watch_turn_failed = self.watch_turn_failed.saturating_add(1);
+            }
+            _ => {
+                self.watch_unknown = self.watch_unknown.saturating_add(1);
+            }
+        }
     }
 
     /// Append new structured log events to [`log_events`](Self::log_events), keeping
