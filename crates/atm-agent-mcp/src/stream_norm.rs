@@ -140,14 +140,21 @@ pub fn parse_app_server_notification(line: &str) -> Option<AppServerNotification
                 .get("threadId")
                 .or_else(|| params.get("thread_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
             let turn_id = params
                 .get("turnId")
                 .or_else(|| params.get("turn_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) else {
+                tracing::warn!(
+                    method = "turn/started",
+                    "missing required threadId/turnId in notification; dropping"
+                );
+                return None;
+            };
             AppServerNotification::TurnStarted { thread_id, turn_id }
         }
         "turn/completed" => {
@@ -155,14 +162,21 @@ pub fn parse_app_server_notification(line: &str) -> Option<AppServerNotification
                 .get("threadId")
                 .or_else(|| params.get("thread_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
             let turn_id = params
                 .get("turnId")
                 .or_else(|| params.get("turn_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) else {
+                tracing::warn!(
+                    method = "turn/completed",
+                    "missing required threadId/turnId in notification; dropping"
+                );
+                return None;
+            };
             let status_str = params
                 .get("status")
                 .and_then(|v| v.as_str())
@@ -306,14 +320,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_turn_started_missing_thread_id_defaults_empty() {
-        // When threadId is absent, thread_id defaults to empty string.
+    fn parse_turn_started_missing_thread_id_returns_none() {
+        // When threadId is absent, the notification is dropped (returns None).
         let line = r#"{"method":"turn/started","params":{"turnId":"t1"}}"#;
-        let n = parse_app_server_notification(line).unwrap();
         assert!(
-            matches!(&n, AppServerNotification::TurnStarted { thread_id, turn_id }
-                if thread_id.is_empty() && turn_id == "t1"),
-            "unexpected: {n:?}"
+            parse_app_server_notification(line).is_none(),
+            "expected None when threadId is missing"
         );
     }
 

@@ -585,9 +585,16 @@ async fn handle_stream_subscribe(
     }
 }
 
-/// Handle a `"stream-event"` command: parse the [`DaemonStreamEvent`], update
-/// the per-agent stream state store, publish to the broadcast channel, and
-/// return an `{ok: true}` response.
+/// Handle a `"stream-event"` command: parse the [`DaemonStreamEvent`], validate
+/// sender authorization, update the per-agent stream state store, publish to
+/// the broadcast channel, and return an `{ok: true}` response.
+///
+/// # Authorization (arch-ctm review finding)
+///
+/// Extracts the `team` field from the request payload and validates that the
+/// agent identified in the event is a member of that team (using the same
+/// team config lookup as [`authorize_hook_event`]).  This prevents local
+/// processes from spoofing agent stream state for arbitrary teams.
 #[cfg(unix)]
 async fn handle_stream_event_command(
     request_str: &str,
@@ -619,6 +626,10 @@ async fn handle_stream_event_command(
         );
     }
 
+    // Clone payload before consuming it for deserialization, so we can
+    // read the "team" field for authorization afterwards.
+    let payload_raw = request.payload.clone();
+
     let event: DaemonStreamEvent = match serde_json::from_value(request.payload) {
         Ok(e) => e,
         Err(e) => {
@@ -630,8 +641,34 @@ async fn handle_stream_event_command(
         }
     };
 
-    // Update the per-agent stream state.
+    // Authorization: verify that the agent in the event is a team member.
+    // Extract team from the payload's "team" field (same pattern as hook-event).
     let agent = AgentStreamState::agent_from_event(&event).to_string();
+    if let Some(team) = payload_raw.get("team").and_then(|v| v.as_str()) {
+        if let Err(reason) = authorize_hook_event(
+            team,
+            &agent,
+            agent_team_mail_core::daemon_client::LifecycleSourceKind::Unknown,
+        ) {
+            warn!(
+                agent = %agent,
+                team = %team,
+                reason = %reason,
+                "stream-event rejected: sender authorization failed"
+            );
+            return make_error_response(
+                &request.request_id,
+                "UNAUTHORIZED",
+                &format!("stream-event sender not authorized: {reason}"),
+            );
+        }
+    }
+    // Note: if no "team" field is present, we allow the event through — this
+    // matches the behavior of internal emitters (stream_emit.rs) which may
+    // not include a team field.  The daemon socket is already local-only (Unix
+    // domain socket), so the auth gate above is defense-in-depth.
+
+    // Update the per-agent stream state.
     {
         let mut store = stream_state_store.lock().unwrap();
         let state = store.entry(agent).or_default();
