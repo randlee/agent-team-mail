@@ -25,9 +25,18 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 /// Scan `spool_dir` for `*.jsonl` spool files, claim each by atomic rename,
-/// and append their contents to `canonical_log_path` in timestamp order.
+/// collect all events globally, sort by timestamp, and append to
+/// `canonical_log_path` in a single write pass.
 ///
 /// Returns the total number of log events merged across all spool files.
+///
+/// # Global sort
+///
+/// Events from all spool files are collected into a single `Vec<LogEventV1>`,
+/// sorted globally by the `ts` field (RFC 3339 string comparison is correct
+/// for UTC timestamps), and then appended to the canonical log in one pass.
+/// This guarantees that events are stored in monotonic timestamp order even
+/// when multiple producer binaries wrote overlapping timestamp ranges.
 ///
 /// # Errors
 ///
@@ -56,25 +65,49 @@ pub fn merge_spool_on_startup(spool_dir: &Path, canonical_log_path: &Path) -> Re
         return Ok(0);
     }
 
-    let mut total_merged: u64 = 0;
+    // Phase 1: Claim all spool files and collect all events into one Vec.
+    let mut all_events: Vec<LogEventV1> = Vec::new();
+    let mut claimed_paths: Vec<std::path::PathBuf> = Vec::new();
 
-    for spool_path in spool_files {
-        match process_one_spool_file(&spool_path, canonical_log_path) {
-            Ok(count) => {
-                total_merged += count;
-                debug!(
-                    file = %spool_path.display(),
-                    count,
-                    "Merged spool file"
-                );
+    for spool_path in &spool_files {
+        match claim_and_read_spool_file(spool_path, &mut all_events) {
+            Ok(claiming_path) => {
+                claimed_paths.push(claiming_path);
+                debug!(file = %spool_path.display(), "Claimed spool file");
             }
             Err(e) => {
                 warn!(
                     file = %spool_path.display(),
                     error = %e,
-                    "Failed to process spool file (skipping)"
+                    "Failed to claim spool file (skipping)"
                 );
             }
+        }
+    }
+
+    if all_events.is_empty() {
+        // Also try to clean up any stale .claiming files left by a crashed daemon.
+        cleanup_stale_claiming_files(spool_dir);
+        return Ok(0);
+    }
+
+    // Phase 2: Sort all events globally by timestamp.
+    // RFC 3339 UTC timestamps are lexicographically comparable.
+    all_events.sort_by(|a, b| a.ts.cmp(&b.ts));
+
+    // Phase 3: Append all events to canonical log in one pass.
+    let total_merged = append_events_to_log(&all_events, canonical_log_path)?;
+
+    // Phase 4: Delete all claimed spool files after successful write.
+    for claiming_path in claimed_paths {
+        if let Err(e) = fs::remove_file(&claiming_path) {
+            warn!(
+                file = %claiming_path.display(),
+                error = %e,
+                "Failed to remove claiming file after successful merge"
+            );
+        } else {
+            debug!(file = %claiming_path.display(), "Removed claiming file");
         }
     }
 
@@ -102,10 +135,20 @@ fn collect_spool_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Claim one spool file, read its events, append to canonical log, then delete.
+/// Claim one spool file by atomic rename and read its events into `out`.
 ///
-/// Returns the number of events successfully written to the canonical log.
-fn process_one_spool_file(spool_path: &Path, canonical_log_path: &Path) -> Result<u64> {
+/// Returns the `.claiming` path on success so the caller can delete it after
+/// the global write pass completes.
+///
+/// # Errors
+///
+/// Returns an error if the atomic rename fails (e.g., another process already
+/// claimed this file) or if the claiming file cannot be read.  On error the
+/// spool file is left in place for the next startup attempt.
+fn claim_and_read_spool_file(
+    spool_path: &Path,
+    out: &mut Vec<LogEventV1>,
+) -> Result<std::path::PathBuf> {
     // Claim by rename: <file>.jsonl → <file>.claiming
     let claiming_path = spool_path.with_extension("claiming");
     match fs::rename(spool_path, &claiming_path) {
@@ -127,14 +170,13 @@ fn process_one_spool_file(spool_path: &Path, canonical_log_path: &Path) -> Resul
         }
     };
 
-    let mut events: Vec<LogEventV1> = Vec::new();
     for (line_no, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
         match serde_json::from_str::<LogEventV1>(trimmed) {
-            Ok(event) => events.push(event),
+            Ok(event) => out.push(event),
             Err(e) => {
                 warn!(
                     file = %claiming_path.display(),
@@ -146,22 +188,7 @@ fn process_one_spool_file(spool_path: &Path, canonical_log_path: &Path) -> Resul
         }
     }
 
-    // Sort events by timestamp (ISO 8601 string sort is correct for UTC).
-    events.sort_by(|a, b| a.ts.cmp(&b.ts));
-
-    // Append to canonical log.
-    let written = append_events_to_log(&events, canonical_log_path)?;
-
-    // Only delete after successful write.
-    if let Err(e) = fs::remove_file(&claiming_path) {
-        warn!(
-            file = %claiming_path.display(),
-            error = %e,
-            "Failed to remove claiming file after successful merge"
-        );
-    }
-
-    Ok(written)
+    Ok(claiming_path)
 }
 
 /// Append `events` to `log_path` (create if absent).
@@ -348,5 +375,46 @@ mod tests {
             !claiming_path.exists(),
             "stale .claiming file should be cleaned up"
         );
+    }
+
+    #[test]
+    fn test_merge_global_sort_across_files() {
+        // Two spool files with interleaved timestamps.
+        // File 1 contains: T=02, T=10
+        // File 2 contains: T=01, T=05
+        // After global sort the canonical log should be: T=01, T=02, T=05, T=10
+        let tmp = TempDir::new().unwrap();
+        let spool_dir = tmp.path().join("spool");
+        fs::create_dir_all(&spool_dir).unwrap();
+        let log_path = tmp.path().join("canonical.jsonl");
+
+        let mut ev_t02 = new_log_event("atm", "event_t02", "atm::cmd", "info");
+        ev_t02.ts = "2026-01-01T00:00:02Z".to_string();
+        let mut ev_t10 = new_log_event("atm", "event_t10", "atm::cmd", "info");
+        ev_t10.ts = "2026-01-01T00:00:10Z".to_string();
+        let mut ev_t01 = new_log_event("atm-tui", "event_t01", "atm_tui::main", "info");
+        ev_t01.ts = "2026-01-01T00:00:01Z".to_string();
+        let mut ev_t05 = new_log_event("atm-tui", "event_t05", "atm_tui::main", "info");
+        ev_t05.ts = "2026-01-01T00:00:05Z".to_string();
+
+        make_spool_file(&spool_dir, "atm-1-100.jsonl", &[ev_t02.clone(), ev_t10.clone()]);
+        make_spool_file(&spool_dir, "atm-tui-2-200.jsonl", &[ev_t01.clone(), ev_t05.clone()]);
+
+        let count = merge_spool_on_startup(&spool_dir, &log_path).unwrap();
+        assert_eq!(count, 4, "should merge 4 events total");
+
+        let content = fs::read_to_string(&log_path).unwrap();
+        let events: Vec<LogEventV1> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("valid LogEventV1 JSON"))
+            .collect();
+
+        assert_eq!(events.len(), 4);
+        // Global timestamp order: T=01, T=02, T=05, T=10
+        assert_eq!(events[0].action, "event_t01", "first should be T=01");
+        assert_eq!(events[1].action, "event_t02", "second should be T=02");
+        assert_eq!(events[2].action, "event_t05", "third should be T=05");
+        assert_eq!(events[3].action, "event_t10", "fourth should be T=10");
     }
 }

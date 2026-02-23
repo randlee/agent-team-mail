@@ -433,6 +433,18 @@ impl ProxyServer {
         let dropped = Arc::clone(&self.dropped_events);
         let thread_to_agent = Arc::clone(&self.thread_to_agent);
 
+        // Emit proxy_start lifecycle event.
+        agent_team_mail_core::event_log::emit_event_best_effort(
+            agent_team_mail_core::event_log::EventFields {
+                level: "info",
+                source: "atm-agent-mcp",
+                action: "proxy_start",
+                team: Some(self.team.clone()),
+                result: Some("ok".to_string()),
+                ..Default::default()
+            },
+        );
+
         // Channel for upstream writes (events + responses routed through the channel).
         // Bounded to prevent unbounded memory growth under backpressure.
         let (upstream_tx, mut upstream_rx) = mpsc::channel::<Value>(UPSTREAM_CHANNEL_CAPACITY);
@@ -535,8 +547,30 @@ impl ProxyServer {
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
                     .expect("failed to install SIGINT handler");
             tokio::select! {
-                _ = sigterm.recv() => { tracing::info!("received SIGTERM"); }
-                _ = sigint.recv() => { tracing::info!("received SIGINT"); }
+                _ = sigterm.recv() => {
+                    tracing::info!("received SIGTERM");
+                    agent_team_mail_core::event_log::emit_event_best_effort(
+                        agent_team_mail_core::event_log::EventFields {
+                            level: "info",
+                            source: "atm-agent-mcp",
+                            action: "proxy_shutdown",
+                            result: Some("sigterm".to_string()),
+                            ..Default::default()
+                        },
+                    );
+                }
+                _ = sigint.recv() => {
+                    tracing::info!("received SIGINT");
+                    agent_team_mail_core::event_log::emit_event_best_effort(
+                        agent_team_mail_core::event_log::EventFields {
+                            level: "info",
+                            source: "atm-agent-mcp",
+                            action: "proxy_shutdown",
+                            result: Some("sigint".to_string()),
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         };
         #[cfg(not(unix))]
@@ -698,6 +732,18 @@ impl ProxyServer {
                 }
             }
         }
+
+        // Emit proxy_shutdown lifecycle event.
+        agent_team_mail_core::event_log::emit_event_best_effort(
+            agent_team_mail_core::event_log::EventFields {
+                level: "info",
+                source: "atm-agent-mcp",
+                action: "proxy_shutdown",
+                team: Some(self.team.clone()),
+                result: Some("ok".to_string()),
+                ..Default::default()
+            },
+        );
 
         // Shutdown: abort the idle mail poller task to prevent leaked background work.
         if let Some(handle) = mail_poller_handle.take() {
