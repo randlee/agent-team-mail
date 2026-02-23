@@ -76,6 +76,8 @@ pub struct LogEventV1 {
     pub ts: String,               // RFC3339 UTC timestamp
     pub level: String,            // trace|debug|info|warn|error
     pub source_binary: String,    // atm|atm-daemon|atm-tui|atm-agent-mcp
+    pub hostname: String,         // host that emitted the record
+    pub pid: u32,                 // process id of emitter
     pub target: String,           // tracing target/module path
     pub action: String,           // stable event name
     pub team: Option<String>,
@@ -97,9 +99,10 @@ pub struct SpanRefV1 {
 
 Validation:
 
-- required: `ts`, `level`, `source_binary`, `target`, `action`
+- required: `ts`, `level`, `source_binary`, `hostname`, `pid`, `target`, `action`
 - serialized-size guard (initial target: 64 KiB per line)
-- redaction policy runs before persistence
+- v1 redaction: minimal built-in denylist for sensitive keys in `fields`/`error`
+  (`password`, `secret`, `token`, `api_key`, `auth`) plus bearer-token-like values.
 
 ## Initialization API
 
@@ -189,6 +192,7 @@ Daemon-only.
 - Add `LogEventV1` + serde/schema tests.
 - Add daemon `log-event` socket handler.
 - Add bounded in-memory queue for accepted log events.
+  Queue defaults: capacity `4096`, overflow policy `drop-new`, warn + dropped counter.
 - Add daemon writer task (JSONL + rotation).
 - Add fallback spool format and producer write path.
 
@@ -207,8 +211,8 @@ Daemon-only.
 - spool fallback + merge works across daemon restart,
 - rotation works under sustained concurrent producer load.
 
-## Open Questions
+## Resolved Defaults
 
-- default queue capacity and overflow policy (drop-new vs drop-old),
-- first-pass redaction fields and denylist behavior,
-- whether to include hostname/pid in canonical schema v1.
+- Queue defaults: capacity `4096`, overflow policy `drop-new`, warn + dropped counter.
+- Redaction v1: minimal denylist + bearer token pattern; full policy deferred to L.5.
+- Schema v1 includes required `hostname` and `pid`.
