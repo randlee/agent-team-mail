@@ -115,6 +115,32 @@ pub(crate) trait CodexTransport: Send + Sync + std::fmt::Debug {
     /// The default implementation is intentionally a no-op so that
     /// [`McpTransport`] and [`JsonCodecTransport`] do not need to be changed.
     fn set_approval_upstream_tx(&self, _tx: tokio::sync::mpsc::Sender<Value>) {}
+
+    /// Returns `true` if this transport uses the app-server JSON-RPC protocol
+    /// for mail injection (`turn/start` or `turn/steer`) rather than the MCP
+    /// `codex-reply` path.
+    ///
+    /// Only [`AppServerTransport`] returns `true`; all other transports inherit
+    /// the default `false`.
+    fn uses_app_server_injection(&self) -> bool {
+        false
+    }
+
+    /// Returns the active `turn_id` for the given `thread_id` if a turn is
+    /// currently in progress ([`crate::stream_norm::TurnState::Busy`]).
+    ///
+    /// Returns `None` for all other states (`Idle`, `Terminal`, or if the
+    /// thread is unknown).
+    ///
+    /// Uses `try_lock` internally so it never blocks in a synchronous context.
+    /// If the lock is contended, returns `None` conservatively (causing the
+    /// caller to fall back to `turn/start`, which is always safe).
+    ///
+    /// Only [`AppServerTransport`] provides a meaningful implementation; all
+    /// other transports inherit the default `None`.
+    fn active_turn_id_for_thread(&self, _thread_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Transport that spawns `codex mcp-server` as a child subprocess.
@@ -1572,6 +1598,24 @@ impl CodexTransport for AppServerTransport {
             *upstream_tx_arc.lock().await = Some(tx);
         });
     }
+
+    fn uses_app_server_injection(&self) -> bool {
+        true
+    }
+
+    fn active_turn_id_for_thread(&self, thread_id: &str) -> Option<String> {
+        use crate::stream_norm::TurnState;
+        // try_lock is acceptable here: the turn_state map is tiny (one entry
+        // per active thread) and the lock is held only briefly. If contended,
+        // return None conservatively — the caller falls back to turn/start,
+        // which is always safe.
+        if let Ok(guard) = self.turn_state.try_lock() {
+            if let Some(TurnState::Busy { turn_id }) = guard.get(thread_id) {
+                return Some(turn_id.clone());
+            }
+        }
+        None
+    }
 }
 
 /// Select a transport based on the `transport` field in [`AgentMcpConfig`].
@@ -2130,6 +2174,136 @@ mod tests {
             registry.lock().await.len(),
             1,
             "pending entry must be registered even when upstream_tx is not yet populated"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Transport trait method overrides for AppServerTransport (G.6)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn app_server_transport_uses_app_server_injection() {
+        let t = AppServerTransport::new(AgentMcpConfig::default(), "test-team");
+        assert!(
+            t.uses_app_server_injection(),
+            "AppServerTransport must report uses_app_server_injection() == true"
+        );
+    }
+
+    #[test]
+    fn mcp_transport_does_not_use_app_server_injection() {
+        let t = McpTransport::new(AgentMcpConfig::default(), "test-team");
+        assert!(
+            !t.uses_app_server_injection(),
+            "McpTransport must not use app-server injection"
+        );
+    }
+
+    #[test]
+    fn json_codec_transport_does_not_use_app_server_injection() {
+        let t = JsonCodecTransport::new(AgentMcpConfig::default(), "test-team");
+        assert!(
+            !t.uses_app_server_injection(),
+            "JsonCodecTransport must not use app-server injection"
+        );
+    }
+
+    #[test]
+    fn app_server_transport_active_turn_id_returns_none_when_idle() {
+        let t = AppServerTransport::new(AgentMcpConfig::default(), "test-team");
+        assert!(
+            t.active_turn_id_for_thread("thread-1").is_none(),
+            "active_turn_id_for_thread should be None when no turn is active"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_server_transport_active_turn_id_returns_some_when_busy() {
+        use crate::stream_norm::TurnState;
+        let t = AppServerTransport::new(AgentMcpConfig::default(), "test-team");
+
+        t.turn_state
+            .lock()
+            .await
+            .insert("thread-1".to_string(), TurnState::Busy { turn_id: "turn-abc".to_string() });
+
+        assert_eq!(
+            t.active_turn_id_for_thread("thread-1"),
+            Some("turn-abc".to_string()),
+            "active_turn_id_for_thread should return the active turn_id when Busy"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_server_transport_active_turn_id_returns_none_when_terminal() {
+        use crate::stream_norm::{TurnState, TurnStatus};
+        let t = AppServerTransport::new(AgentMcpConfig::default(), "test-team");
+
+        t.turn_state.lock().await.insert(
+            "thread-1".to_string(),
+            TurnState::Terminal { turn_id: "turn-xyz".to_string(), status: TurnStatus::Completed },
+        );
+
+        assert!(
+            t.active_turn_id_for_thread("thread-1").is_none(),
+            "active_turn_id_for_thread should be None for Terminal state"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // App-server injection JSON structure tests (G.6)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn app_server_injection_uses_turn_start_when_idle() {
+        let thread_id = "thread-idle";
+        let content = "You have 1 unread message:\n\n[1] From: alice | ...";
+        let req_id: u64 = 42;
+
+        let msg = serde_json::json!({
+            "id": req_id,
+            "method": "turn/start",
+            "params": {
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": content }]
+            }
+        });
+
+        assert!(msg.get("jsonrpc").is_none(), "jsonrpc must be omitted per protocol spec");
+        assert_eq!(msg["method"].as_str().unwrap(), "turn/start");
+        assert_eq!(msg["params"]["threadId"].as_str().unwrap(), thread_id);
+        assert_eq!(msg["params"]["input"][0]["type"].as_str().unwrap(), "text");
+        assert_eq!(msg["params"]["input"][0]["text"].as_str().unwrap(), content);
+        assert!(
+            msg["params"].get("expectedTurnId").is_none()
+                || msg["params"]["expectedTurnId"].is_null(),
+            "turn/start must not include expectedTurnId"
+        );
+    }
+
+    #[test]
+    fn app_server_injection_uses_turn_steer_when_busy() {
+        let thread_id = "thread-busy";
+        let active_turn_id = "turn-xyz-123";
+        let content = "You have 2 unread messages:\n\n[1] From: bob | ...";
+        let req_id: u64 = 99;
+
+        let msg = serde_json::json!({
+            "id": req_id,
+            "method": "turn/steer",
+            "params": {
+                "threadId": thread_id,
+                "expectedTurnId": active_turn_id,
+                "input": [{ "type": "text", "text": content }]
+            }
+        });
+
+        assert!(msg.get("jsonrpc").is_none(), "jsonrpc must be omitted per protocol spec");
+        assert_eq!(msg["method"].as_str().unwrap(), "turn/steer");
+        assert_eq!(msg["params"]["threadId"].as_str().unwrap(), thread_id);
+        assert_eq!(msg["params"]["expectedTurnId"].as_str().unwrap(), active_turn_id);
+        assert_eq!(msg["params"]["input"][0]["type"].as_str().unwrap(), "text");
+        assert_eq!(msg["params"]["input"][0]["text"].as_str().unwrap(), content
         );
     }
 }
