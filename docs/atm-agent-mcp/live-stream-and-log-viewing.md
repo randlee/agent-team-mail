@@ -177,6 +177,18 @@ Implementation principle:
   - no regressions in existing TUI panes,
   - Codex watch pane compiles/renders in all supported platforms.
 
+#### M.2 Scope Reduction Record (2026-02-23)
+
+- Copy-first target was partially met: `codex-rs/tui/src/text_formatting.rs` was vendored into
+  `crates/atm-tui/src/codex_vendor/text_formatting.rs` and integrated in the watch rendering path.
+- Full transcript/status/progress ratatui modules were **not** directly reusable from Codex CLI
+  without introducing substantial framework divergence in ATM TUI.
+- M.2 therefore keeps ATM-native watch pane composition while preserving Codex look-and-feel
+  goals through:
+  - vendored formatter reuse,
+  - parity adapter/event mapping from M.3,
+  - parity/golden verification gates in M.7.
+
 ### M.3 Event adapter parity
 
 - Build `CodexAdapter` mapping ATM/MCP stream payloads into Codex-native render events.
