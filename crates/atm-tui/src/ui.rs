@@ -224,7 +224,8 @@ fn draw_stream_pane(
         .as_deref()
         .unwrap_or("(none selected)");
 
-    // Choose stream badge based on error/live/waiting state.
+    // Choose stream badge from daemon-derived stream state rather than
+    // filesystem inference.
     let source_badge = if app.stream_source_error.is_some() {
         Span::styled(
             "[FROZEN] ",
@@ -232,11 +233,18 @@ fn draw_stream_pane(
                 .fg(Color::Red)
                 .add_modifier(Modifier::BOLD),
         )
-    } else if app.session_log_path.as_ref().is_some_and(|p| p.exists()) {
+    } else if app.daemon_turn_state.is_some() {
         Span::styled(
             "[LIVE] ",
             Style::default()
                 .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if !app.stream_lines.is_empty() {
+        Span::styled(
+            "[REPLAY] ",
+            Style::default()
+                .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
     } else {

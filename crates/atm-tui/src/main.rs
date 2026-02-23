@@ -55,10 +55,10 @@ use tokio::time::interval;
 use agent_team_mail_core::{
     control::{ControlAck, ControlAction, ControlRequest, ControlResult, CONTROL_SCHEMA_VERSION},
     daemon_client::{
-        AgentSummary, daemon_is_running, query_agent_stream_state, query_list_agents, send_control,
-        subscribe_stream_events,
+        AgentSummary, daemon_is_running, daemon_socket_path, query_agent_stream_state,
+        query_list_agents, send_control, subscribe_stream_events,
     },
-    daemon_stream::{DaemonStreamEvent, StreamTurnStatus, TurnStatusWire},
+    daemon_stream::{DaemonStreamEvent, TurnStatusWire},
     event_log::{EventFields, emit_event_best_effort},
     home::get_home_dir,
     logging,
@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let team = cli.team.clone();
-    ensure_daemon_running(&team);
+    let daemon_warning = ensure_daemon_running(&team);
 
     // Load user preferences before terminal setup so parse warnings go to stderr.
     let config = load_tui_config();
@@ -138,7 +138,14 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let result = run_app(&mut terminal, team.clone(), config, log_file_path).await;
+    let result = run_app(
+        &mut terminal,
+        team.clone(),
+        config,
+        log_file_path,
+        daemon_warning,
+    )
+    .await;
 
     // Restore terminal on exit (even on error)
     disable_raw_mode().ok();
@@ -169,8 +176,12 @@ async fn run_app<B: ratatui::backend::Backend>(
     team: String,
     config: TuiConfig,
     log_file_path: std::path::PathBuf,
+    daemon_warning: Option<String>,
 ) -> Result<()> {
     let mut app = App::new(team.clone(), config);
+    if let Some(w) = daemon_warning {
+        app.status_message = Some(w);
+    }
 
     // Rate-limit daemon/inbox queries to 2-second intervals.
     const DAEMON_REFRESH: Duration = Duration::from_secs(2);
@@ -390,28 +401,21 @@ fn build_member_rows(
 
     states_by_agent
         .into_iter()
-        .map(|(agent, fallback_state)| {
-            let reconciled_state = query_agent_stream_state(&agent)
-                .ok()
-                .flatten()
-                .map(|s| match s.turn_status {
-                    StreamTurnStatus::Busy => "busy".to_string(),
-                    StreamTurnStatus::Idle | StreamTurnStatus::Terminal => "idle".to_string(),
-                })
-                .unwrap_or(fallback_state);
-
+        .map(|(agent, state)| {
             MemberRow {
                 inbox_count: get_inbox_count(home, team, &agent),
                 agent,
-                state: reconciled_state,
+                state,
             }
         })
         .collect()
 }
 
-fn ensure_daemon_running(team: &str) {
-    if daemon_is_running() {
-        return;
+fn ensure_daemon_running(team: &str) -> Option<String> {
+    let socket_path = daemon_socket_path()
+        .unwrap_or_else(|_| std::env::temp_dir().join("atm-daemon.sock"));
+    if daemon_is_running() && socket_path.exists() {
+        return None;
     }
 
     let spawn = std::process::Command::new("atm-daemon")
@@ -423,16 +427,18 @@ fn ensure_daemon_running(team: &str) {
         .spawn();
 
     if spawn.is_err() {
-        eprintln!("atm-tui: warning: failed to start atm-daemon; run `atm-daemon --team {team}`");
-        return;
+        return Some(format!(
+            "daemon unavailable: failed to start; run `atm-daemon --team {team}`"
+        ));
     }
 
     for _ in 0..20 {
-        if daemon_is_running() {
-            break;
+        if daemon_is_running() && socket_path.exists() {
+            return None;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    Some("daemon startup incomplete: socket unavailable".to_string())
 }
 
 /// Read new bytes from a log file since `pos`, returning new lines and the

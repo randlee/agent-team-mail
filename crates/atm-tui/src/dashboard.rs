@@ -46,6 +46,11 @@ pub fn get_inbox_count(home: &Path, team: &str, agent: &str) -> usize {
 /// Returns an empty vector when the config is missing or malformed.
 pub fn read_team_members(home: &Path, team: &str) -> Vec<String> {
     let config_path = home.join(".claude/teams").join(team).join("config.json");
+    let lock_path = config_path.with_extension("lock");
+    let _lock = match acquire_lock(&lock_path, 5) {
+        Ok(lock) => lock,
+        Err(_) => return Vec::new(),
+    };
     let content = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
