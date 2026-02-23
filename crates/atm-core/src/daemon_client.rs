@@ -585,6 +585,39 @@ pub fn query_agent_stream_state(
     }
 }
 
+/// Handle for an active daemon stream subscription.
+///
+/// Dropping this value requests the background reader thread to stop.
+pub struct StreamSubscription {
+    /// Receiver of daemon stream events.
+    pub rx: std::sync::mpsc::Receiver<crate::daemon_stream::DaemonStreamEvent>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for StreamSubscription {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Subscribe to daemon stream events over a long-lived socket connection.
+///
+/// Returns:
+/// - `Ok(Some(rx))` when subscription succeeds.
+/// - `Ok(None)` when daemon/socket is unavailable on this platform/session.
+pub fn subscribe_stream_events(
+) -> anyhow::Result<Option<StreamSubscription>> {
+    #[cfg(unix)]
+    {
+        subscribe_stream_events_unix()
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(None)
+    }
+}
+
 /// Send a control request to the daemon and wait for an acknowledgement.
 ///
 /// Sends `command: "control"` with the given [`ControlRequest`] as payload.
@@ -701,6 +734,97 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
     };
 
     Ok(Some(response))
+}
+
+#[cfg(unix)]
+fn subscribe_stream_events_unix(
+) -> anyhow::Result<Option<StreamSubscription>> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let socket_path = daemon_socket_path()?;
+    let mut stream = match UnixStream::connect(&socket_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+
+    let req = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "stream-subscribe".to_string(),
+        payload: serde_json::json!({}),
+    };
+    let req_line = serde_json::to_string(&req)?;
+    stream.write_all(req_line.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    // Must receive an explicit stream ACK before treating the subscription as live.
+    {
+        let mut ack_reader = BufReader::new(stream.try_clone()?);
+        let mut ack_line = String::new();
+        if ack_reader.read_line(&mut ack_line)? == 0 {
+            return Ok(None);
+        }
+        let ack_json: serde_json::Value = match serde_json::from_str(ack_line.trim()) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        let ok = ack_json
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "ok")
+            .unwrap_or(false);
+        let streaming = ack_json
+            .get("streaming")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !(ok && streaming) {
+            return Ok(None);
+        }
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<crate::daemon_stream::DaemonStreamEvent>();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_thread = std::sync::Arc::clone(&stop);
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .ok();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stream);
+        loop {
+            if stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            let mut line = String::new();
+            let n = match reader.read_line(&mut line) {
+                Ok(n) => n,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(_) => break,
+            };
+            if n == 0 {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(event) =
+                serde_json::from_str::<crate::daemon_stream::DaemonStreamEvent>(trimmed)
+            {
+                if tx.send(event).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(Some(StreamSubscription { rx, stop }))
 }
 
 /// Check whether a Unix PID is alive using `kill -0`.
