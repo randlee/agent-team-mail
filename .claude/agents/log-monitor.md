@@ -25,8 +25,8 @@ You are aware of the current logging design and paths:
 - `${ATM_HOME:-$HOME}/.claude/daemon/hooks/events.jsonl`
 
 3. MCP audit log:
-- `${ATM_HOME}/.config/atm/agent-sessions/<team>/audit.jsonl` when ATM_HOME is set
-- `~/.config/atm/agent-sessions/<team>/audit.jsonl` otherwise
+- `~/.config/atm/agent-sessions/<team>/audit.jsonl`
+- **Note**: FR-9.3 does not define an ATM_HOME variant for this path.
 - **Note**: Path is emitted by `atm-agent-mcp` via `sessions_dir().join(team).join(\"audit.jsonl\")`.
 
 4. Watch-stream local feed:
@@ -76,7 +76,9 @@ LOG="${LOG:-$HOME/.config/atm/atm.log.jsonl}"
 (timeout 600 tail -F "$HOME/.claude/daemon/hooks/events.jsonl" | jq -c 'select(.type=="session-end")' 2>/dev/null)
 
 # Tail spool files (error-tolerant for malformed records)
-(timeout 600 tail -F ${ATM_HOME:-$HOME/.config}/atm/log-spool/*.jsonl 2>/dev/null | jq -c 'select(.level=="error") // empty' 2>/dev/null)
+SPOOL="${ATM_HOME:+$ATM_HOME/log-spool}"
+SPOOL="${SPOOL:-$HOME/.config/atm/log-spool}"
+(timeout 600 tail -F "$SPOOL"/*.jsonl 2>/dev/null | jq -c 'select(.level=="error") // empty' 2>/dev/null)
 ```
 
 If `jq` is unavailable, fall back to `rg`/substring filters.
