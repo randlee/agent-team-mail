@@ -101,15 +101,7 @@ impl WatchStreamHub {
 
     /// Publish one event wrapped with source attribution.
     pub fn publish_frame(&mut self, agent_id: &str, source: SourceEnvelope, event: Value) {
-        let frame = json!({
-            "agent_id": agent_id,
-            "source": {
-                "kind": source.kind,
-                "actor": source.actor,
-                "channel": source.channel,
-            },
-            "event": event,
-        });
+        let frame = build_watch_frame(agent_id, &source, event);
         self.publish(agent_id, frame);
     }
 
@@ -144,6 +136,19 @@ impl WatchStreamHub {
     pub fn detach(&mut self, agent_id: &str) -> bool {
         self.by_agent.contains_key(agent_id)
     }
+}
+
+/// Build a structured watch frame shared by live fanout and direct TUI feed.
+pub fn build_watch_frame(agent_id: &str, source: &SourceEnvelope, event: Value) -> Value {
+    json!({
+        "agent_id": agent_id,
+        "source": {
+            "kind": source.kind,
+            "actor": source.actor,
+            "channel": source.channel,
+        },
+        "event": event,
+    })
 }
 
 impl Default for WatchStreamHub {

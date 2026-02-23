@@ -45,7 +45,7 @@ use crate::mail_inject::{
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
 use crate::transport::{CodexTransport, make_transport};
-use crate::watch_stream::{SourceEnvelope, WatchStreamHub, WatchSubscription};
+use crate::watch_stream::{SourceEnvelope, WatchStreamHub, WatchSubscription, build_watch_frame};
 
 /// Type alias for the shared child stdin writer.
 ///
@@ -2771,10 +2771,9 @@ async fn forward_event(
     // Publish to direct watch-stream hub using MVP subset + source envelope.
     if should_publish_watch_event(event) {
         let source = infer_source_envelope(event, &agent_id, pending).await;
-        watch_stream_hub
-            .lock()
-            .await
-            .publish_frame(&agent_id, source, event.clone());
+        let frame = build_watch_frame(&agent_id, &source, event.clone());
+        watch_stream_hub.lock().await.publish(&agent_id, frame.clone());
+        append_watch_frame_for_tui(&frame);
     }
 
     match upstream_tx.try_send(event.clone()) {
@@ -2876,6 +2875,34 @@ fn format_watch_frame(frame: &Value) -> String {
         base.push_str(&format!(" | ctx {:.0}%", pct));
     }
     base
+}
+
+fn watch_feed_path() -> Option<std::path::PathBuf> {
+    let home = agent_team_mail_core::home::get_home_dir().ok()?;
+    Some(home.join(".config/atm/watch-stream/events.jsonl"))
+}
+
+fn append_watch_frame_for_tui(frame: &Value) {
+    let Some(path) = watch_feed_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let rendered = format_watch_frame(frame);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let record = json!({
+        "ts_unix": ts,
+        "frame": frame,
+        "rendered": rendered,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = writeln!(file, "{}", record);
+    }
 }
 
 /// Infer source attribution for watch-stream frames (FR-22 baseline).

@@ -169,6 +169,8 @@ async fn run_app<B: ratatui::backend::Backend>(
     log_file_path: std::path::PathBuf,
 ) -> Result<()> {
     let mut app = App::new(team.clone(), config);
+    let watch_feed_path = watch_feed_path();
+    let mut watch_feed_pos = std::fs::metadata(&watch_feed_path).map(|m| m.len()).unwrap_or(0);
 
     // Rate-limit daemon/inbox queries to 2-second intervals.
     const DAEMON_REFRESH: Duration = Duration::from_secs(2);
@@ -241,6 +243,18 @@ async fn run_app<B: ratatui::backend::Backend>(
         }
 
         // ── Live daemon stream drain (100 ms) ─────────────────────────────────
+        if let Some(agent) = &app.streaming_agent
+            && let Ok((lines, new_pos)) =
+                tail_watch_feed_file(&watch_feed_path, watch_feed_pos, agent).await
+            && new_pos > watch_feed_pos
+        {
+            watch_feed_pos = new_pos;
+            if !lines.is_empty() {
+                app.append_stream_lines(lines);
+            }
+        }
+
+        // ── Daemon coarse stream drain (100 ms) ──────────────────────────────
         if let (Some(agent), Some(sub)) = (&app.streaming_agent, &app.daemon_stream_rx) {
             let mut lines = Vec::new();
             let mut disconnected = false;
@@ -515,6 +529,65 @@ fn format_stream_event_line(event: &DaemonStreamEvent) -> String {
             format!("[live] turn idle ({transport}) id={turn_id}")
         }
     }
+}
+
+fn watch_feed_path() -> std::path::PathBuf {
+    get_home_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(".config/atm/watch-stream/events.jsonl")
+}
+
+async fn tail_watch_feed_file(
+    path: &std::path::Path,
+    pos: u64,
+    selected_agent: &str,
+) -> Result<(Vec<String>, u64)> {
+    use tokio::fs::File;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    if !path.exists() {
+        return Ok((Vec::new(), pos));
+    }
+
+    let mut file = File::open(path).await?;
+    let metadata = file.metadata().await?;
+    let file_len = metadata.len();
+    if file_len < pos {
+        return Ok((Vec::new(), 0));
+    }
+    if file_len == pos {
+        return Ok((Vec::new(), pos));
+    }
+    file.seek(std::io::SeekFrom::Start(pos)).await?;
+    let read_len = (file_len - pos).min(256 * 1024) as usize;
+    let mut buf = vec![0u8; read_len];
+    let n = file.read(&mut buf).await?;
+    buf.truncate(n);
+
+    let chunk = String::from_utf8_lossy(&buf);
+    let lines = chunk
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|v| watch_record_matches_agent(v, selected_agent))
+        .filter_map(|v| v.get("rendered").and_then(|r| r.as_str()).map(str::to_string))
+        .map(|s| format!("[direct] {s}"))
+        .collect();
+
+    Ok((lines, pos + n as u64))
+}
+
+fn watch_record_matches_agent(record: &serde_json::Value, selected_agent: &str) -> bool {
+    let actor = record
+        .pointer("/frame/source/actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let agent_id = record
+        .pointer("/frame/agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    actor == selected_agent
+        || actor.starts_with(&format!("{selected_agent}@"))
+        || agent_id.contains(selected_agent)
 }
 
 // ── Control dispatch ──────────────────────────────────────────────────────────
