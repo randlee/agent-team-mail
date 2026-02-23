@@ -32,6 +32,7 @@
 
 mod agent_terminal;
 mod app;
+mod codex_vendor;
 mod codex_watch;
 mod config;
 mod dashboard;
@@ -57,7 +58,7 @@ use agent_team_mail_core::{
     control::{CONTROL_SCHEMA_VERSION, ControlAck, ControlAction, ControlRequest, ControlResult},
     daemon_client::{
         AgentSummary, daemon_is_running, daemon_socket_path, query_agent_stream_state,
-        query_list_agents, send_control, subscribe_stream_events,
+        query_list_agents, send_control,
     },
     event_log::{EventFields, emit_event_best_effort},
     home::get_home_dir,
@@ -65,7 +66,7 @@ use agent_team_mail_core::{
 };
 
 use app::{App, MemberRow, PendingControl};
-use codex_watch::format_daemon_event_line;
+use codex_watch::format_watch_frame_line;
 use config::{TuiConfig, load_tui_config};
 use dashboard::{get_inbox_count, read_inbox_preview, read_team_members, session_log_path};
 
@@ -237,7 +238,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                 app.reset_stream();
                 app.streaming_agent = Some(agent_name.clone());
                 app.session_log_path = Some(session_log_path(&team, &agent_name));
-                app.daemon_stream_rx = subscribe_stream_events().ok().flatten();
+                app.watch_stream_path = watch_feed_path();
 
                 emit_event_best_effort(EventFields {
                     level: "info",
@@ -257,44 +258,41 @@ async fn run_app<B: ratatui::backend::Backend>(
             }
         }
 
-        // ── Live daemon stream drain (100 ms) ─────────────────────────────────
+        // ── Direct watch-stream tail (100 ms, MCP->TUI path) ─────────────────
         let current_agent = app.streaming_agent.clone();
-        if let (Some(agent), Some(sub)) = (current_agent, app.daemon_stream_rx.as_ref()) {
-            let mut events_for_agent = Vec::new();
-            let mut disconnected = false;
-            loop {
-                match sub.rx.try_recv() {
-                    Ok(event) => {
-                        if event.agent() == agent.as_str() {
-                            events_for_agent.push(event);
-                        }
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
+        let current_watch_path = app.watch_stream_path.clone();
+        if let (Some(agent), Some(path)) = (current_agent, current_watch_path) {
+            match tail_watch_stream_file(&path, app.watch_stream_pos, &agent).await {
+                Ok((frames, new_pos)) => {
+                    if new_pos == 0 && app.watch_stream_pos > 0 {
+                        app.watch_stream_pos = 0;
+                        app.stream_lines.clear();
+                        app.stream_source_error =
+                            Some("stream reset: watch feed truncated".to_string());
+                    } else if new_pos > app.watch_stream_pos {
+                        app.stream_source_error = None;
+                        app.watch_stream_pos = new_pos;
+                        let lines: Vec<String> = frames
+                            .iter()
+                            .map(|frame| {
+                                app.apply_watch_frame(frame);
+                                format_watch_frame_line(frame)
+                            })
+                            .collect();
+                        app.append_stream_lines(lines);
                     }
                 }
-            }
-            let lines: Vec<String> = events_for_agent
-                .iter()
-                .map(format_daemon_event_line)
-                .collect();
-            for event in &events_for_agent {
-                app.apply_watch_event(event);
-            }
-            if !lines.is_empty() {
-                app.append_stream_lines(lines);
-            }
-            if disconnected {
-                app.stream_source_error =
-                    Some("live stream disconnected; using log replay".to_string());
-                app.daemon_stream_rx = None;
+                Err(_) => {
+                    if app.watch_stream_pos > 0 {
+                        app.stream_source_error =
+                            Some("stream frozen: watch feed unreadable".to_string());
+                    }
+                }
             }
         }
 
         // ── Session log tail (100 ms) ─────────────────────────────────────────
-        if app.daemon_stream_rx.is_none()
+        if app.watch_stream_pos == 0
             && let Some(ref log_path) = app.session_log_path.clone()
         {
             match tail_log_file(log_path, app.stream_pos).await {
@@ -505,6 +503,54 @@ async fn tail_log_file(path: &std::path::Path, pos: u64) -> Result<(Vec<String>,
     Ok((lines, pos + n as u64))
 }
 
+fn watch_feed_path() -> Option<std::path::PathBuf> {
+    let home = get_home_dir().ok()?;
+    Some(home.join(".config/atm/watch-stream/events.jsonl"))
+}
+
+async fn tail_watch_stream_file(
+    path: &std::path::Path,
+    pos: u64,
+    agent_id: &str,
+) -> Result<(Vec<serde_json::Value>, u64)> {
+    use tokio::fs::File;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    if !path.exists() {
+        return Ok((Vec::new(), pos));
+    }
+
+    let mut file = File::open(path).await?;
+    let metadata = file.metadata().await?;
+    let file_len = metadata.len();
+    if file_len < pos {
+        return Ok((Vec::new(), 0));
+    }
+    if file_len == pos {
+        return Ok((Vec::new(), pos));
+    }
+
+    file.seek(std::io::SeekFrom::Start(pos)).await?;
+    let read_len = (file_len - pos).min(256 * 1024) as usize;
+    let mut buf = vec![0u8; read_len];
+    let n = file.read(&mut buf).await?;
+    buf.truncate(n);
+
+    let chunk = String::from_utf8_lossy(&buf);
+    let mut out = Vec::new();
+    for line in chunk.lines().filter(|l| !l.trim().is_empty()) {
+        if let Ok(frame) = serde_json::from_str::<serde_json::Value>(line)
+            && frame
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| id == agent_id)
+        {
+            out.push(frame);
+        }
+    }
+    Ok((out, pos + n as u64))
+}
+
 /// Read new [`LogEventV1`] events from a JSONL log file since `pos`.
 ///
 /// Returns matching events and the updated byte position.
@@ -705,9 +751,7 @@ fn format_ack_result(ack: &ControlAck) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codex_watch::format_daemon_event_line;
     use agent_team_mail_core::control::{ControlAck, ControlResult};
-    use agent_team_mail_core::daemon_stream::{DaemonStreamEvent, TurnStatusWire};
 
     fn make_ack(result: ControlResult, duplicate: bool, detail: Option<&str>) -> ControlAck {
         ControlAck {
@@ -771,33 +815,6 @@ mod tests {
     fn test_format_ack_internal_error() {
         let ack = make_ack(ControlResult::InternalError, false, None);
         assert_eq!(format_ack_result(&ack), "internal error");
-    }
-
-    #[test]
-    fn test_format_daemon_event_line_started() {
-        let e = DaemonStreamEvent::TurnStarted {
-            agent: "arch-ctm".to_string(),
-            thread_id: "th-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            transport: "app-server".to_string(),
-        };
-        let line = format_daemon_event_line(&e);
-        assert!(line.contains("turn.started"));
-        assert!(line.contains("app-server"));
-    }
-
-    #[test]
-    fn test_format_daemon_event_line_completed() {
-        let e = DaemonStreamEvent::TurnCompleted {
-            agent: "arch-ctm".to_string(),
-            thread_id: "th-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            status: TurnStatusWire::Completed,
-            transport: "cli-json".to_string(),
-        };
-        let line = format_daemon_event_line(&e);
-        assert!(line.contains("turn.completed"));
-        assert!(line.contains("cli-json"));
     }
 
     #[tokio::test]
