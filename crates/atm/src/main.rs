@@ -13,7 +13,17 @@ mod util;
 use commands::Cli;
 
 fn main() {
-    logging::init();
+    let _guards = logging::init_unified(
+        "atm",
+        logging::UnifiedLogMode::ProducerFanIn {
+            daemon_socket: agent_team_mail_core::daemon_client::daemon_socket_path()
+                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/atm-daemon.sock")),
+            fallback_spool_dir: agent_team_mail_core::logging_event::default_spool_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/atm-spool")),
+        },
+    )
+    .unwrap_or_else(|_| logging::init_stderr_only());
+
     let cli = Cli::parse();
 
     if let Err(e) = cli.execute() {

@@ -15,6 +15,12 @@ You are spawned as a **full team member** (with `name` parameter) running in **t
 - You CAN spawn background sub-agents (rust-developer, rust-qa-agent, etc.)
 - You CAN compact context when approaching limits
 - Background agents you spawn do NOT get `name` parameter — they run as lightweight sidechain agents
+- **ALL background agents MUST have `max_turns` set** to prevent runaway execution:
+  - `rust-developer`: max_turns: 50
+  - `rust-qa-agent`: max_turns: 30
+  - `atm-qa-agent`: max_turns: 20
+  - `ci-monitor`: max_turns: 15
+  - `rust-architect`: max_turns: 25
 
 ## CRITICAL CONSTRAINTS
 
@@ -65,6 +71,7 @@ Tool: Task
   subagent_type: "rust-developer"
   run_in_background: true
   model: "sonnet"            # or "opus" for complex sprints
+  max_turns: 50              # MANDATORY — prevents runaway agents
   prompt: <your dev prompt>
   # Do NOT set 'name' or 'team_name'
 ```
@@ -93,6 +100,7 @@ Tool: Task
   subagent_type: "rust-qa-agent"
   run_in_background: true
   model: "sonnet"
+  max_turns: 30              # MANDATORY — QA is focused validation, not exploration
   prompt: <your QA prompt>
   # Do NOT set 'name' or 'team_name'
 ```
@@ -113,6 +121,7 @@ Tool: Task
   subagent_type: "atm-qa-agent"
   run_in_background: true
   model: "sonnet"
+  max_turns: 20              # MANDATORY — compliance check only, not deep exploration
   prompt: <your ATM QA prompt with fenced JSON input>
   # Do NOT set 'name' or 'team_name'
 ```
@@ -143,7 +152,7 @@ WHILE iteration <= 3:
     IF EITHER QA verdict is FAIL:
         Extract specific findings from both QA outputs
         Write a NEW dev prompt that:
-          - Lists the exact QA failures
+          - Lists the exact QA failures from each agent
           - Quotes the specific error messages or code issues
           - Provides clear fix instructions
           - References the worktree path
