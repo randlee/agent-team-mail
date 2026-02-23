@@ -59,7 +59,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!(" Team: {}", app.team)),
+        Span::raw(format!(" v{}  Team: {}", env!("CARGO_PKG_VERSION"), app.team)),
     ]);
     frame.render_widget(Paragraph::new(text), area);
 }
@@ -95,6 +95,11 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style);
+
+    let left_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(area);
 
     // Column header row
     let header = ListItem::new(Line::from(vec![
@@ -153,11 +158,38 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
     // +1 because the header occupies index 0 in the item list
     list_state.select(Some(app.selected_index + 1));
 
-    frame.render_stateful_widget(
-        List::new(items).block(block),
-        area,
-        &mut list_state,
-    );
+    frame.render_stateful_widget(List::new(items).block(block), left_rows[0], &mut list_state);
+
+    let inbox_title = app
+        .selected_agent()
+        .map(|a| format!(" Inbox Preview ({a}) "))
+        .unwrap_or_else(|| " Inbox Preview ".to_string());
+    let inbox_block = Block::default()
+        .title(inbox_title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style);
+
+    if app.inbox_preview.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No messages")
+                .block(inbox_block)
+                .style(Style::default().fg(Color::DarkGray)),
+            left_rows[1],
+        );
+    } else {
+        let lines: Vec<Line> = app
+            .inbox_preview
+            .iter()
+            .map(|s| Line::from(Span::raw(s.clone())))
+            .collect();
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(inbox_block)
+                .wrap(Wrap { trim: false }),
+            left_rows[1],
+        );
+    }
 }
 
 // ── Agent Terminal panel ──────────────────────────────────────────────────────
