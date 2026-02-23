@@ -3298,6 +3298,97 @@ Design references:
 
 ---
 
+## 16.7 Phase L: Unified Logging Hardening + Daemon Auto-Start
+
+**Status**: IN PROGRESS
+
+**Goal**: Move from partial/fragmented logging to one daemon-owned structured log pipeline,
+define and implement daemon auto-start with single-instance guarantees, and complete
+migration away from legacy event sinks.
+
+Primary requirements source: `docs/requirements.md` (Sections 4.6 and 4.7).
+
+### Phase L Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| L.1a | Unified log-event schema + daemon writer queue/rotation/fallback spool | Phase G | ✅ COMPLETE (PR #189) |
+| L.1b | Producer wiring + dual-write bridge + spool merge integration | L.1a | ⏳ PLANNED |
+| L.2 | Cross-crate instrumentation parity + event coverage completion | L.1b | ⏳ PLANNED |
+| L.3 | Daemon auto-start + single-instance lock/readiness guarantees | L.1b | ⏳ PLANNED |
+| L.4 | Legacy sink sunset, migration cleanup, soak/reliability gate | L.2, L.3 | ⏳ PLANNED |
+
+### Sprint L.1a — Schema + Daemon Writer Foundation
+
+**Branch**: `feature/logging-l1-spec`
+**Crate(s)**: docs-first spec + `crates/atm-daemon` design baseline
+**Depends on**: Phase G integration branch
+
+#### Exit Criteria
+
+- [x] Canonical `log-event` socket contract documented (request/response/error codes)
+- [x] `LogEventV1` required fields include `hostname` and `pid`
+- [x] Queue defaults specified: capacity `4096`, overflow `drop-new`, dropped counter + warn
+- [x] Redaction v1 baseline specified (denylist + bearer-pattern)
+- [x] Fallback spool and merge invariants specified
+- [x] Requirements consolidated into `docs/requirements.md` (single source for QA)
+
+### Sprint L.1b — Producer Wiring + Bridge Integration
+
+**Branch**: `feature/pL-s1b-producer-wiring`
+**Crate(s)**: `atm-core`, `atm`, `atm-agent-mcp`, `atm-tui`, `atm-daemon`
+**Depends on**: L.1a
+
+#### Exit Criteria
+
+- [ ] `init_unified()` mode wiring added to all binaries
+- [ ] `emit_event_best_effort` supports `ATM_LOG_BRIDGE=dual|unified_only|legacy_only`
+- [ ] Producer fallback spool writes on daemon-unavailable path
+- [ ] Daemon startup spool merge path implemented (claim/append/cleanup)
+- [ ] Integration tests: fan-in happy-path, daemon-down fallback, restart merge, rotation
+
+### Sprint L.2 — Coverage Parity + Contract Tests
+
+**Branch**: `feature/pL-s2-coverage-parity`
+**Crate(s)**: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, tests
+**Depends on**: L.1b
+
+#### Exit Criteria
+
+- [ ] Required event families emitted across all binaries per requirements 4.6
+- [ ] Schema/validation tests include malformed payload and oversize guards
+- [ ] Cross-platform path + permission behavior covered in CI
+- [ ] No regressions in existing events consumers
+
+### Sprint L.3 — Daemon Auto-Start + Single-Instance
+
+**Branch**: `feature/pL-s3-daemon-autostart`
+**Crate(s)**: `atm`, `atm-daemon`
+**Depends on**: L.1b
+
+#### Exit Criteria
+
+- [ ] CLI auto-starts daemon for daemon-backed commands if unavailable
+- [ ] Exclusive lock guarantees one daemon instance per user/machine scope
+- [ ] Socket/pipe readiness wait + bounded timeout/backoff implemented
+- [ ] Mid-session daemon death handling is fail-open where required and recoverable
+- [ ] Windows/Linux/macOS tests cover start/readiness/lock behavior
+
+### Sprint L.4 — Legacy Sunset + Reliability Gate
+
+**Branch**: `feature/pL-s4-legacy-sunset`
+**Crate(s)**: all logging producers/consumers + docs/release checklist
+**Depends on**: L.2, L.3
+
+#### Exit Criteria
+
+- [ ] Remove legacy `events.jsonl` write path from default runtime
+- [ ] Migration notes + rollback path documented
+- [ ] Soak tests validate sustained high-rate logging and daemon restart safety
+- [ ] Release gate requires green cross-platform CI and QA sign-off
+
+---
+
 ## 17. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
