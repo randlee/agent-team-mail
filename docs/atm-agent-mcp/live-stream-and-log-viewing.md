@@ -56,7 +56,7 @@ Notes:
 
 ### 3.3 Event subset for MVP rendering
 
-Use a minimal, stable subset from Codex stream notifications:
+Baseline MVP lifecycle subset:
 
 - `turn_started`
 - `item_started`
@@ -65,8 +65,14 @@ Use a minimal, stable subset from Codex stream notifications:
 - `turn_completed`
 - `turn_idle`
 
+M.3 adapter expansion (documented behavior):
+- command output and execution lifecycle: `exec_command_output_delta`, `exec_command_completed`, `exec_command_error`
+- reasoning deltas: `reasoning_content_delta`, `agent_reasoning_delta`, `reasoning_content`
+- additional lifecycle aliases: `task_complete`, `done`, `idle`
+- transport fault signal: `stream_error`
+
 Unknown events:
-- ignore for rendering,
+- are rendered as `unknown.<kind>` in watch mode for observability,
 - increment unknown-event counters and emit periodic diagnostics.
 
 ## 4. Source Attribution Model
@@ -176,6 +182,18 @@ Implementation principle:
 - Exit criteria:
   - no regressions in existing TUI panes,
   - Codex watch pane compiles/renders in all supported platforms.
+
+#### M.2 Scope Reduction Record (2026-02-23)
+
+- Copy-first target was partially met: `codex-rs/tui/src/text_formatting.rs` was vendored into
+  `crates/atm-tui/src/codex_vendor/text_formatting.rs` and integrated in the watch rendering path.
+- Full transcript/status/progress ratatui modules were **not** directly reusable from Codex CLI
+  without introducing substantial framework divergence in ATM TUI.
+- M.2 therefore keeps ATM-native watch pane composition while preserving Codex look-and-feel
+  goals through:
+  - vendored formatter reuse,
+  - parity adapter/event mapping from M.3,
+  - parity/golden verification gates in M.7.
 
 ### M.3 Event adapter parity
 
