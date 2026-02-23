@@ -42,6 +42,7 @@ Codex CLI can run in multiple execution modes (`codex mcp-server`, `codex exec -
 - `app-server`: `codex app-server`
 
 Reference: `docs/atm-agent-mcp/codex-execution-modes.md`
+Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-viewing.md`
 
 ---
 
@@ -298,6 +299,27 @@ Reference: `docs/atm-agent-mcp/codex-execution-modes.md`
 - **FR-19.3**: Event forwarding MUST NOT block or delay the proxy's request/response processing. Events are fire-and-forget to the upstream client.
 - **FR-19.4**: If the upstream client disconnects or the write buffer is full, the proxy MUST drop events (not queue indefinitely). A dropped-event counter SHOULD be tracked per session for diagnostics.
 - **FR-19.5**: The proxy MUST NOT filter or transform event content — all events from the child are forwarded as-is (with `agent_id` metadata added).
+
+### FR-21: Session Watch Stream for `atm-tui` (No Daemon in Continuous Path)
+
+> **Design Decision**: High-volume Codex stream deltas MUST flow directly from `atm-agent-mcp` to active watchers. `atm-daemon` receives lifecycle/state summaries, not continuous token streams.
+
+- **FR-21.1**: Proxy MUST support watcher attach/detach per active session (`agent_id`), with at most one active watcher sink per session in MVP.
+- **FR-21.2**: When no watcher is attached, proxy MAY drop render-stream deltas after normal upstream forwarding.
+- **FR-21.3**: Proxy MUST maintain a bounded per-session replay buffer (default: last `50` rendered lines/events) for fast context fill when a watcher attaches or switches sessions.
+- **FR-21.4**: On watcher attach, proxy MUST replay buffered lines/events in order, then switch to live streaming.
+- **FR-21.5**: Proxy MUST emit only coarse lifecycle summaries to daemon (`session_start`, `turn_started`, `turn_idle/turn_completed`, `session_end`, stream error summaries). Continuous stream deltas MUST NOT be forwarded to daemon.
+
+### FR-22: Stream Source Attribution and Input Provenance
+
+> **Design Decision**: All injected inputs and rendered outputs must carry source metadata so operators can distinguish orchestrator prompts, ATM mail injections, and user steering.
+
+- **FR-22.1**: Proxy MUST tag each turn input with a stable source envelope:
+  - `source.kind` (`client_prompt` | `atm_mail` | `user_steer` | future-extensible),
+  - `source.actor` (for example: `arch-atm`, `arch-atm@atm-dev`, `randlee`),
+  - `source.channel` (`mcp_primary` | `mail_injector` | `tui_user`).
+- **FR-22.2**: Watch stream events delivered to `atm-tui` MUST preserve source metadata so UI can render origin badges/labels.
+- **FR-22.3**: Structured logs for turn/request lifecycle MUST include `source.kind` and `source.actor` fields where available.
 
 ---
 
