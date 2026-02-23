@@ -3298,6 +3298,42 @@ Design references:
 
 ---
 
+## 16.7 Phase L: Logging Overhaul + Live Stream Exception Work
+
+**Status**: PLANNED
+
+**Goal**: Preserve daemon-owned structured logging while explicitly implementing the approved direct watch-stream exception for active `atm-tui` session viewing.
+
+### Phase L Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| L.1a | LogEventV1 schema + daemon writer hardening | G.9 | ⏳ PLANNED |
+| L.1b | Unified log init + producer fan-in bridge | L.1a | ⏳ PLANNED |
+| L.2 | Cross-crate event coverage + validation tests | L.1b | ⏳ PLANNED |
+| L.3 | `atm logs` CLI and operator views | L.2 | ⏳ PLANNED |
+| L.4 | TUI log viewer + legacy sink sunset | L.3 | ⏳ PLANNED |
+| L.5 | Direct watch-stream path (`atm-agent-mcp` -> `atm-tui`) for active session | L.2 | ⏳ PLANNED |
+
+### Sprint L.5 — Direct Watch-Stream Path (Approved Exception)
+
+**Branch**: `feature/pL-s5-direct-watch-stream`
+**Crate(s)**: `crates/atm-agent-mcp`, `crates/atm-tui`
+**Depends on**: L.2
+
+#### Exit Criteria
+
+- [ ] `atm-agent-mcp` exposes watcher attach/detach for active session stream viewing
+- [ ] Per-session replay buffer defaults to 50 rendered lines/events on attach
+- [ ] Watch stream events preserve source attribution (`client_prompt`, `atm_mail`, `user_steer`)
+- [ ] Daemon continues receiving lifecycle/status events; continuous render deltas are not routed through daemon
+- [ ] Integration tests cover attach/replay/detach and watcher handoff behavior
+- [ ] Requirements mapping is complete and verified:
+  - FR-21.1..FR-21.5 implemented/covered
+  - FR-22.1..FR-22.3 implemented/covered
+
+---
+
 ## 17. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
@@ -3386,6 +3422,7 @@ Additional plugins planned (each is a self-contained sprint series):
 | **E** | E.7 | Unified lifecycle source model + MCP lifecycle emission | ✅ | [#165](https://github.com/randlee/agent-team-mail/pull/165) |
 | **E** | E.8 | ATM Identity Role Mapping + Team Backup/Restore | ✅ | [#162](https://github.com/randlee/agent-team-mail/pull/162) |
 | **E** | — | Daemon hook-event auth validation | ✅ | [#163](https://github.com/randlee/agent-team-mail/pull/163) |
+| **L** | L.5 | Direct watch-stream path (`atm-agent-mcp` -> `atm-tui`) for active session | ⏳ | TBD |
 
 **Completed**: 79 sprints across 15 phases (CI green)
 **Current version**: v0.15.0

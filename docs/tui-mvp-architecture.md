@@ -140,6 +140,7 @@ Routing safety:
 MVP:
 
 - use session log tail as live/replay source (`tail -f` behavior)
+- approved exception: allow direct `atm-agent-mcp -> atm-tui` live stream for the currently watched session
 
 Planned enhancement:
 
@@ -231,6 +232,7 @@ Backend mapping rule:
 - replacing daemon as state owner
 - introducing a parallel UDP raw stdout transport
 - inferring team/member status in TUI without daemon state
+- routing all high-rate render deltas through daemon when only one session is actively watched
 
 ---
 
@@ -239,7 +241,8 @@ Backend mapping rule:
 Source of truth by concern:
 
 - team/member/session status: daemon query APIs
-- stream history and MVP live view: session logs
+- stream history: session logs (and structured logs via daemon)
+- MVP live view: session logs; approved direct watch path from `atm-agent-mcp` for active session
 - control acceptance/rejection and dedupe: daemon control receiver
 - mail delivery and inbox counts: ATM mail commands and mailbox files
 

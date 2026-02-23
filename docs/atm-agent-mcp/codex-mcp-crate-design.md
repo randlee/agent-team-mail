@@ -6,6 +6,9 @@ A new crate in the `agent-team-mail` workspace: `crates/atm-agent-mcp`.
 
 A thin MCP-facing proxy that supports multiple downstream execution modes (`mcp`, `cli-json`, `app-server`), injects ATM identity/team/repo context, provides native ATM MCP tools, and manages 0..N Codex sessions through one proxy process.
 
+Live stream/watch architecture and structured log-viewing guidance:
+`docs/atm-agent-mcp/live-stream-and-log-viewing.md`
+
 ---
 
 ## Workspace Integration
@@ -177,6 +180,12 @@ atm-agent-mcp (proxy)
     │     if no active session for identity → keep mail unread
     │     polling runs while MCP connection is open (no idle timeout)
     │     mail arriving during active turn → queue, deliver after turn completes
+    │
+    ├── live watch stream (MVP):
+    │     maintain per-session ring buffer (50 rendered lines/events default)
+    │     watcher attach(agent_id) -> replay buffer -> switch to live stream
+    │     watcher detach(agent_id) -> drop render deltas if no watcher
+    │     daemon receives lifecycle summaries only (no continuous token stream)
     │
     └── on shutdown (SIGTERM/SIGINT/parent disconnect):
           request summary from each active thread
