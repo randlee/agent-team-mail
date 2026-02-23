@@ -2296,12 +2296,8 @@ Session ending. Write a concise summary of:\n\
                         })
                     }
                     Err(WatchAttachError::AlreadyAttached) => {
-                        let already_owned = self
-                            .watch_subscriptions
-                            .lock()
-                            .await
-                            .contains_key(agent_id);
-                        if already_owned {
+                        // Primary happy path: this proxy process already owns the watcher.
+                        if self.watch_subscriptions.lock().await.contains_key(agent_id) {
                             json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
@@ -2318,10 +2314,37 @@ Session ending. Write a concise summary of:\n\
                                 }
                             })
                         } else {
-                            atm_tools::make_mcp_error_result(
-                                id,
-                                &format!("agent_watch_attach: watcher already attached for '{agent_id}'"),
-                            )
+                            // Out-of-sync recovery path:
+                            // hub says attached, but local receiver map is missing.
+                            // Force-detach hub state once, then re-attach and store receiver.
+                            let _ = self.detach_watch_stream(agent_id).await;
+                            match self.subscribe_watch_stream(agent_id).await {
+                                Ok(sub) => {
+                                    self.watch_subscriptions
+                                        .lock()
+                                        .await
+                                        .insert(agent_id.to_string(), sub.rx);
+                                    json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "content": [{
+                                                "type": "text",
+                                                "text": json!({
+                                                    "agent_id": agent_id,
+                                                    "attached": true,
+                                                    "recovered_from_desync": true,
+                                                    "replay": sub.replay,
+                                                }).to_string()
+                                            }]
+                                        }
+                                    })
+                                }
+                                Err(WatchAttachError::AlreadyAttached) => atm_tools::make_mcp_error_result(
+                                    id,
+                                    &format!("agent_watch_attach: watcher already attached for '{agent_id}'"),
+                                ),
+                            }
                         }
                     }
                 }
@@ -2378,8 +2401,17 @@ Session ending. Write a concise summary of:\n\
                         "agent_watch_detach: 'agent_id' is required",
                     );
                 };
-                self.watch_subscriptions.lock().await.remove(agent_id);
-                let detached = self.detach_watch_stream(agent_id).await;
+                let removed_local = self.watch_subscriptions.lock().await.remove(agent_id).is_some();
+                let removed_hub = self.detach_watch_stream(agent_id).await;
+                if removed_local != removed_hub {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        removed_local,
+                        removed_hub,
+                        "watch detach resolved out-of-sync local/hub watcher state"
+                    );
+                }
+                let detached = removed_local || removed_hub;
                 json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -3768,6 +3800,71 @@ mod tests {
             Some(true),
             "attach without agent_id must return isError=true"
         );
+    }
+
+    #[tokio::test]
+    async fn test_watch_attach_recovers_when_hub_and_local_map_desync() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let agent_id = "codex:desync-agent";
+
+        // Simulate hub-only attachment without a local receiver entry.
+        let _ = proxy.subscribe_watch_stream(agent_id).await.expect("seed hub attach");
+        assert!(
+            !proxy.watch_subscriptions.lock().await.contains_key(agent_id),
+            "local watch map intentionally empty for desync scenario"
+        );
+
+        let attach = proxy
+            .handle_synthetic_tool(
+                &json!(1),
+                "agent_watch_attach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            attach.get("error").is_none(),
+            "attach should recover from desync: {attach}"
+        );
+        let text = attach
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("attach text");
+        let payload: Value = serde_json::from_str(text).expect("attach payload json");
+        assert_eq!(payload["attached"], true);
+        assert_eq!(payload["recovered_from_desync"], true);
+        assert!(
+            proxy.watch_subscriptions.lock().await.contains_key(agent_id),
+            "local map should be restored after recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watch_detach_returns_true_when_local_map_only() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let agent_id = "codex:local-only";
+        let (_tx, rx) = tokio::sync::broadcast::channel::<Value>(8);
+        proxy
+            .watch_subscriptions
+            .lock()
+            .await
+            .insert(agent_id.to_string(), rx);
+
+        let detach = proxy
+            .handle_synthetic_tool(
+                &json!(2),
+                "agent_watch_detach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(detach.get("error").is_none(), "detach should succeed: {detach}");
+        let text = detach
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("detach text");
+        let payload: Value = serde_json::from_str(text).expect("detach payload json");
+        assert_eq!(payload["detached"], true);
     }
 
     #[test]
