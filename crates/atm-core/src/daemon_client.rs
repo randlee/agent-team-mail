@@ -955,6 +955,11 @@ mod tests {
 
     #[test]
     fn test_launch_agent_no_daemon_returns_none() {
+        if daemon_is_running() {
+            // Shared dev machines may have daemon active; this test validates
+            // no-daemon behavior only.
+            return;
+        }
         let config = LaunchConfig {
             agent: "test-agent".to_string(),
             team: "test-team".to_string(),
@@ -1090,6 +1095,11 @@ mod tests {
 
     #[test]
     fn test_send_control_no_daemon_returns_err() {
+        if daemon_is_running() {
+            // Shared dev machines may have daemon active; this test validates
+            // no-daemon behavior only.
+            return;
+        }
         // Without a running daemon, send_control must return Err (not None or panic).
         use crate::control::{ControlAction, ControlRequest, CONTROL_SCHEMA_VERSION};
 

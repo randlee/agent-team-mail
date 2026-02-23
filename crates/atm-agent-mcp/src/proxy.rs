@@ -45,7 +45,7 @@ use crate::mail_inject::{
 };
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
-use crate::watch_stream::{WatchStreamHub, WatchSubscription};
+use crate::watch_stream::{SourceEnvelope, WatchAttachError, WatchStreamHub, WatchSubscription};
 
 /// Type alias for the shared child stdin writer.
 ///
@@ -329,8 +329,16 @@ impl ProxyServer {
     /// Subscribe to an agent's direct watch stream.
     ///
     /// Returns a bounded replay snapshot plus a live receiver.
-    pub async fn subscribe_watch_stream(&self, agent_id: &str) -> WatchSubscription {
+    pub async fn subscribe_watch_stream(
+        &self,
+        agent_id: &str,
+    ) -> Result<WatchSubscription, WatchAttachError> {
         self.watch_stream_hub.lock().await.subscribe(agent_id)
+    }
+
+    /// Detach active watcher for a session (MVP: one watcher per session).
+    pub async fn detach_watch_stream(&self, agent_id: &str) -> bool {
+        self.watch_stream_hub.lock().await.detach(agent_id)
     }
 
     /// Create a proxy server with resume context (FR-6).
@@ -2600,11 +2608,14 @@ async fn forward_event(
             obj.insert("agent_id".to_string(), Value::String(agent_id.clone()));
         }
     }
-    // Publish to direct watch-stream hub as groundwork for L.5.
-    watch_stream_hub
-        .lock()
-        .await
-        .publish(&agent_id, event.clone());
+    // Publish to direct watch-stream hub using MVP subset + source envelope.
+    if should_publish_watch_event(event) {
+        let source = infer_source_envelope(event, &agent_id);
+        watch_stream_hub
+            .lock()
+            .await
+            .publish_frame(&agent_id, source, event.clone());
+    }
 
     match upstream_tx.try_send(event.clone()) {
         Ok(()) => {}
@@ -2612,6 +2623,53 @@ async fn forward_event(
             dropped_events.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// MVP subset gate for watch-stream fanout (FR-21.5 + docs Section 3.3).
+fn should_publish_watch_event(event: &Value) -> bool {
+    let kind = event
+        .pointer("/params/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    matches!(
+        kind,
+        "task_started"
+            | "task_complete"
+            | "agent_message_delta"
+            | "agent_message"
+            | "reasoning_content_delta"
+            | "agent_reasoning_delta"
+            | "exec_command_output_delta"
+            | "item_started"
+            | "item_completed"
+            | "idle"
+            | "done"
+            | "stream_error"
+    )
+}
+
+/// Infer source attribution for watch-stream frames (FR-22 baseline).
+fn infer_source_envelope(event: &Value, agent_id: &str) -> SourceEnvelope {
+    let src_kind = event
+        .pointer("/params/source/kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let kind = match src_kind {
+        // daemon lifecycle source value reused for mail injection origin mapping
+        "atm_mcp" | "atm_mail" => "atm_mail",
+        "user_steer" | "tui_user" => "user_steer",
+        _ => "client_prompt",
+    };
+    let actor = event
+        .pointer("/params/source/actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or(agent_id);
+    let channel = match kind {
+        "atm_mail" => "mail_injector",
+        "user_steer" => "tui_user",
+        _ => "mcp_primary",
+    };
+    SourceEnvelope::new(kind, actor, channel)
 }
 
 /// JSONL event type as parsed from a raw event line.
@@ -3102,6 +3160,10 @@ async fn try_reserve_thread_for_auto_mail(
 /// Handles `elicitation/create` requests by bridging them upstream with a new
 /// proxy-assigned request ID, registering correlation in [`ElicitationRegistry`]
 /// (FR-18).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "routing needs shared pending/thread/watch/elicitation state passed explicitly"
+)]
 async fn route_child_message(
     msg: Value,
     pending: &Arc<Mutex<PendingRequests>>,
@@ -3432,7 +3494,11 @@ mod tests {
         assert_eq!(received["params"]["agent_id"], "codex:abc-agent");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
 
-        let sub = watch_stream_hub.lock().await.subscribe("codex:abc-agent");
+        let sub = watch_stream_hub
+            .lock()
+            .await
+            .subscribe("codex:abc-agent")
+            .expect("attach");
         assert_eq!(sub.replay.len(), 1, "watch hub should retain replay event");
     }
 
