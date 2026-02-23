@@ -2,7 +2,7 @@
 
 **Version**: 0.3  
 **Date**: 2026-02-21  
-**Status**: Draft
+**Status**: Implemented baseline (Phase D/E delivered; Phase L stream/log refinements integrated)
 
 ---
 

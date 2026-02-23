@@ -2,7 +2,7 @@
 
 **Version**: 0.2  
 **Date**: 2026-02-21  
-**Status**: Draft
+**Status**: Implemented for L.5 stream-subscribe contract; control action sections remain design reference.
 
 ---
 
@@ -97,10 +97,12 @@ Connection behavior:
 Event contract:
 
 - Events use `agent_team_mail_core::daemon_stream::DaemonStreamEvent`.
-- Current variants are lifecycle-only:
+- Current variants:
   - `turn_started`
   - `turn_completed`
   - `turn_idle`
+  - `stream_error`
+  - `dropped_counters`
 - Continuous content deltas are intentionally out of scope for daemon fanout.
 
 ---

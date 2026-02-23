@@ -2,7 +2,7 @@
 
 **Version**: 0.3
 **Date**: 2026-02-22
-**Status**: Phase G complete (v0.16.0). Phase L in planning.
+**Status**: Phase L active (v0.17.0 target). Phase G complete (v0.16.0).
 
 ---
 
@@ -153,7 +153,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | E | ATM Core Bug Fixes | Resume fix, read scoping, hooks, TUI hardening | COMPLETE |
 | F | Team Installer | `atm team init` package installer | PLANNED |
 | G | Codex Multi-Transport Hardening | App-server, unified turns, mail injection parity | COMPLETE |
-| L | Logging Overhaul | Daemon fan-in architecture, unified JSONL writer | PLANNING |
+| L | Logging Overhaul | Daemon fan-in architecture, unified JSONL writer | COMPLETE |
 
 ---
 
@@ -463,7 +463,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17. Phase L: Logging Overhaul — IN PROGRESS
+## 17. Phase L: Logging Overhaul — COMPLETE
 
 **GitHub Issue**: [#188](https://github.com/randlee/agent-team-mail/issues/188)
 **Goal**: Daemon fan-in architecture — all binaries emit to daemon socket, single JSONL writer.
@@ -472,11 +472,12 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| L.1a | Sink architecture + API structs (LogEventV1) | — | IN REVIEW (PR pending) |
-| L.1b | `init_unified` + bridge to daemon socket | L.1a | PLANNING |
-| L.2 | Coverage — instrument all crates | L.1b | PLANNING |
-| L.3 | `atm logs` CLI command | L.2 | PLANNING |
-| L.4 | TUI log viewer + legacy sunset | L.3 | PLANNING |
+| L.1a | Sink architecture + API structs (LogEventV1) | — | COMPLETE |
+| L.1b | `init_unified` + bridge to daemon socket | L.1a | COMPLETE |
+| L.2 | Coverage — instrument all crates | L.1b | COMPLETE |
+| L.3 | `atm logs` CLI command | L.2 | COMPLETE |
+| L.4 | TUI log viewer + legacy sunset | L.3 | COMPLETE |
+| L.5 | Direct watch stream + daemon boundary hardening (L.5a-L.5d) | L.4 | COMPLETE ([#201](https://github.com/randlee/agent-team-mail/pull/201)) |
 
 **Deferred (explicit)**: Dashboard mail compose workflow is out of scope for current L-series work; Dashboard remains preview/navigation-only until a dedicated composer sprint is scheduled.
 
@@ -586,9 +587,16 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **G** | G.7 | TUI streaming normalization + pubsub/UDP | COMPLETE | [#174](https://github.com/randlee/agent-team-mail/pull/174), [#176](https://github.com/randlee/agent-team-mail/pull/176) |
 | **G** | G.8 | Cross-platform reliability + soak testing | COMPLETE | [#177](https://github.com/randlee/agent-team-mail/pull/177) |
 
-**Completed**: 80+ sprints across 17 phases (CI green)
-**Current version**: v0.16.0
-**Next**: Phase L (Logging Overhaul) planning; Phase F (Team Installer) planned
+| **L** | L.1a | Sink architecture + API structs (LogEventV1) | COMPLETE | integrate/phase-L |
+| **L** | L.1b | `init_unified` + bridge to daemon socket | COMPLETE | integrate/phase-L |
+| **L** | L.2 | Coverage — instrument all crates | COMPLETE | integrate/phase-L |
+| **L** | L.3 | `atm logs` CLI command | COMPLETE | integrate/phase-L |
+| **L** | L.4 | TUI log viewer + legacy sunset | COMPLETE | integrate/phase-L |
+| **L** | L.5 | Direct watch stream + daemon boundary hardening | COMPLETE | [#201](https://github.com/randlee/agent-team-mail/pull/201) |
+
+**Completed**: 80+ sprints across 18 phases (CI green)
+**Current version**: v0.17.0
+**Next**: Phase F (Team Installer) planned
 
 ---
 
@@ -615,14 +623,14 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 | Issue | Description | Notes |
 |-------|-------------|-------|
-| #181 | Daemon not auto-starting | — |
-| #182 | Agent roster not seeded from config.json | — |
-| #183 | Agent state never transitions after registration | — |
-| #184 | TUI right panel contradicts left panel | — |
-| #185 | No message viewing in TUI | — |
-| #186 | Per-agent output.log never written | Replaced by unified log filtering in L.4 |
-| #187 | TUI header missing version number | — |
-| #188 | Logging overhaul | Blocking prerequisite for testing |
+| #181 | Daemon not auto-starting | Resolved in Phase L daemon/logging stabilization (closed). |
+| #182 | Agent roster not seeded from config.json | Resolved in TUI/daemon state sync hardening (closed). |
+| #183 | Agent state never transitions after registration | Resolved by turn-state streaming + state-store wiring (closed). |
+| #184 | TUI right panel contradicts left panel | Resolved by unified stream-state source in L.4-L.5 (closed). |
+| #185 | No message viewing in TUI | Resolved by TUI stream + log viewer implementation (closed). |
+| #186 | Per-agent output.log never written | Replaced by unified log filtering in L.4 (closed as superseded). |
+| #187 | TUI header missing version number | Resolved by TUI header/version updates (closed). |
+| #188 | Logging overhaul | Closed via Phase L completion (L.1a-L.5). |
 
 ---
 
@@ -683,5 +691,5 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 ---
 
 **Document Version**: 0.3
-**Last Updated**: 2026-02-22
+**Last Updated**: 2026-02-23
 **Maintained By**: Claude (ARCH-ATM)

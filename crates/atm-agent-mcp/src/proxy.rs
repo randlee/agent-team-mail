@@ -3001,18 +3001,22 @@ fn append_watch_frame_for_tui_with_cap(frame: &Value, max_bytes: u64) {
     let Some(path) = watch_feed_path() else {
         return;
     };
+    append_watch_frame_for_tui_at_path(frame, max_bytes, &path);
+}
+
+fn append_watch_frame_for_tui_at_path(frame: &Value, max_bytes: u64, path: &std::path::Path) {
     if let Some(parent) = path.parent() {
         // Best-effort: streaming still functions without local file fanout.
         let _ = std::fs::create_dir_all(parent);
     }
     if max_bytes > 0
-        && let Ok(meta) = std::fs::metadata(&path)
+        && let Ok(meta) = std::fs::metadata(path)
         && meta.len() >= max_bytes
     {
         let rotated_path = path.with_extension("jsonl.1");
         // Best-effort rotation: failures should not break live stream publishing.
         let _ = std::fs::remove_file(&rotated_path);
-        let _ = std::fs::rename(&path, rotated_path);
+        let _ = std::fs::rename(path, rotated_path);
     }
     let rendered = format_watch_frame(frame);
     let ts = std::time::SystemTime::now()
@@ -4096,9 +4100,6 @@ mod tests {
     #[serial_test::serial]
     fn test_append_watch_frame_for_tui_with_cap_rotates_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: serial test isolates process env mutation.
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
-
         let watch_path = dir.path().join(".config/atm/watch-stream/events.jsonl");
         std::fs::create_dir_all(
             watch_path
@@ -4112,7 +4113,7 @@ mod tests {
             "source": {"kind": "client_prompt"},
             "event": {"params": {"type": "agent_message_delta", "delta": "hello"}}
         });
-        append_watch_frame_for_tui_with_cap(&frame, 64);
+        append_watch_frame_for_tui_at_path(&frame, 64, &watch_path);
 
         let rotated_path = watch_path.with_extension("jsonl.1");
         assert!(rotated_path.exists(), "rotation should create .jsonl.1");
@@ -4125,9 +4126,6 @@ mod tests {
             content.contains("assistant"),
             "rendered line should include formatted message class"
         );
-
-        // SAFETY: restore process env after test.
-        unsafe { std::env::remove_var("ATM_HOME") };
     }
 
     #[tokio::test]
