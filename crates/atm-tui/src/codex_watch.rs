@@ -183,15 +183,24 @@ pub fn render_stream_line(raw_line: &str) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn rendered_text(line: Line<'static>) -> String {
+        line.spans
+            .into_iter()
+            .map(|s| s.content.to_string())
+            .collect::<String>()
+    }
+
+    fn renderer_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parity/renderer")
+    }
 
     #[test]
     fn renders_turn_completed_prefix() {
         let line = render_stream_line("turn.completed status=completed transport=mcp id=t1");
-        let rendered: String = line
-            .spans
-            .into_iter()
-            .map(|s| s.content.to_string())
-            .collect();
+        let rendered = rendered_text(line);
         assert!(rendered.contains("Turn completed"));
     }
 
@@ -205,12 +214,35 @@ mod tests {
     #[test]
     fn renders_approval_prefix() {
         let line = render_stream_line("approval.request allow command");
-        let rendered: String = line
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect::<Vec<_>>()
-            .join("");
+        let rendered = rendered_text(line);
         assert!(rendered.contains("Approval requested"));
+    }
+
+    #[test]
+    fn parity_render_fixture_combined_flow() {
+        let scenario = renderer_fixture_dir().join("combined-flow");
+        let raw_events =
+            fs::read_to_string(scenario.join("normalized.events.jsonl")).expect("events fixture");
+        let actual_lines: Vec<String> = raw_events
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("valid JSON line"))
+            .map(|v| {
+                let raw = v
+                    .get("line")
+                    .and_then(|v| v.as_str())
+                    .expect("line field in fixture");
+                rendered_text(render_stream_line(raw))
+            })
+            .collect();
+        let actual = format!("{}\n", actual_lines.join("\n"));
+
+        let expected_120 =
+            fs::read_to_string(scenario.join("viewport-120x36.snap")).expect("120x36 snapshot");
+        let expected_80 =
+            fs::read_to_string(scenario.join("viewport-80x24.snap")).expect("80x24 snapshot");
+
+        assert_eq!(actual, expected_120, "renderer mismatch for 120x36 snapshot");
+        assert_eq!(actual, expected_80, "renderer mismatch for 80x24 snapshot");
     }
 }

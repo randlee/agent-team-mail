@@ -1,0 +1,5 @@
+{"line":"turn.started"}
+{"line":"item.delta hello"}
+{"line":"approval.request allow command"}
+{"line":"stream.error socket closed"}
+{"line":"turn.interrupted cancelled"}

@@ -165,3 +165,8 @@ Only after these are green should subjective user validation begin.
 - Keep fixture payloads minimal but semantically complete.
 - Keep deterministic sanitization rules in one helper module to avoid fixture churn.
 - Do not route continuous stream through daemon for parity tests; keep MCP->TUI stream path direct per Phase L/M architecture.
+
+## 9. M.7 Deviation Log
+
+- Current approved deviation: renderer parity snapshots are line-level textual snapshots derived from `codex_watch::render_stream_line`, not full terminal-buffer frame dumps.
+- Rationale: provides deterministic, cross-platform parity checks in CI while preserving a clear upgrade path to full-frame snapshotting in follow-up parity expansion work.

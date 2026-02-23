@@ -1,0 +1,5 @@
+name = "approval-flow"
+transport = "app-server"
+codex_version = "0.15.0"
+schema_version = "v1"
+notes = "approval request/reject/resolve"
