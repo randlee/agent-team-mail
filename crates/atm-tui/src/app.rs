@@ -52,6 +52,8 @@ pub struct App {
     pub team: String,
     /// Member rows shown in the dashboard left panel.
     pub members: Vec<MemberRow>,
+    /// Recent inbox message previews for the selected agent.
+    pub inbox_preview: Vec<String>,
     /// Index into [`members`](Self::members) of the currently selected agent.
     pub selected_index: usize,
     /// Raw agent list returned by the daemon `list-agents` command.
@@ -138,6 +140,7 @@ impl App {
         Self {
             team,
             members: Vec::new(),
+            inbox_preview: Vec::new(),
             selected_index: 0,
             agent_list: Vec::new(),
             stream_lines: Vec::new(),

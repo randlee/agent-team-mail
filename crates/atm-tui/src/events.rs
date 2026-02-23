@@ -42,7 +42,7 @@
 //! | `n` / `N` / `Esc` | Cancel — dismiss dialog |
 //! | _other_ | Ignored |
 //!
-//! Dashboard panel ignores character input — it is mail-only.
+//! Dashboard panel currently has no compose workflow; character input is ignored.
 //!
 //! [`InterruptPolicy`]: crate::config::InterruptPolicy
 
@@ -55,7 +55,10 @@ use crate::config::InterruptPolicy;
 ///
 /// Returns `true` if the application should quit after this event.
 pub fn handle_event(event: &Event, app: &mut App) -> bool {
-    if let Event::Key(KeyEvent { code, modifiers, .. }) = event {
+    if let Event::Key(KeyEvent {
+        code, modifiers, ..
+    }) = event
+    {
         // ── Interrupt confirmation dialog (higher priority) ────────────────────
         // When a confirmation is pending, only accept y/Y/Enter (confirm) or
         // n/N/Esc (cancel). All other keys are silently discarded so the user
@@ -152,11 +155,7 @@ fn handle_confirm_interrupt(code: &KeyCode, app: &mut App) -> bool {
 }
 
 /// Handle keys while the Agent Terminal panel is focused.
-fn handle_agent_terminal_key(
-    code: &KeyCode,
-    modifiers: &KeyModifiers,
-    app: &mut App,
-) -> bool {
+fn handle_agent_terminal_key(code: &KeyCode, modifiers: &KeyModifiers, app: &mut App) -> bool {
     // Ctrl-I — interrupt, gated by InterruptPolicy.
     if matches!(code, KeyCode::Char('i')) && modifiers.contains(KeyModifiers::CONTROL) {
         if app.is_live() {
@@ -169,8 +168,7 @@ fn handle_agent_terminal_key(
                 }
                 InterruptPolicy::Confirm => {
                     app.confirm_interrupt_pending = true;
-                    app.status_message =
-                        Some("Send interrupt? [y/N]".to_string());
+                    app.status_message = Some("Send interrupt? [y/N]".to_string());
                 }
             }
         }
@@ -221,8 +219,8 @@ fn handle_agent_terminal_key(
 
 /// Handle keys while the Dashboard panel is focused.
 ///
-/// The Dashboard is mail-only: character input is ignored here. Navigation
-/// keys are handled globally before this function is reached.
+/// The Dashboard currently has no compose workflow: character input is ignored
+/// here. Navigation keys are handled globally before this function is reached.
 fn handle_dashboard_key(code: &KeyCode, app: &mut App) -> bool {
     if let KeyCode::Char('q') = code {
         app.should_quit = true;
@@ -266,19 +264,36 @@ mod tests {
     fn app_with_members() -> App {
         let mut app = new_app();
         app.members = vec![
-            MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 },
-            MemberRow { agent: "b".into(), state: "busy".into(), inbox_count: 1 },
-            MemberRow { agent: "c".into(), state: "idle".into(), inbox_count: 2 },
+            MemberRow {
+                agent: "a".into(),
+                state: "idle".into(),
+                inbox_count: 0,
+            },
+            MemberRow {
+                agent: "b".into(),
+                state: "busy".into(),
+                inbox_count: 1,
+            },
+            MemberRow {
+                agent: "c".into(),
+                state: "idle".into(),
+                inbox_count: 2,
+            },
         ];
         app
     }
 
     fn app_with_policy(policy: InterruptPolicy) -> App {
-        let cfg = TuiConfig { interrupt_policy: policy, ..Default::default() };
+        let cfg = TuiConfig {
+            interrupt_policy: policy,
+            ..Default::default()
+        };
         let mut app = App::new("atm-dev".to_string(), cfg);
-        app.members = vec![
-            MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 },
-        ];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "busy".into(),
+            inbox_count: 0,
+        }];
         app.focus = FocusPanel::AgentTerminal;
         app.selected_index = 0;
         app
@@ -308,7 +323,10 @@ mod tests {
     #[test]
     fn test_ctrl_c_quits() {
         let mut app = new_app();
-        let quit = handle_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL), &mut app);
+        let quit = handle_event(
+            &key_event(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut app,
+        );
         assert!(quit);
         assert!(app.should_quit);
     }
@@ -364,7 +382,10 @@ mod tests {
         let mut app = new_app();
         app.follow_mode = true;
         handle_event(&key_event(KeyCode::Char('F'), KeyModifiers::NONE), &mut app);
-        assert!(!app.follow_mode, "F must disable follow mode when it was on");
+        assert!(
+            !app.follow_mode,
+            "F must disable follow mode when it was on"
+        );
     }
 
     // ── Agent Terminal input bindings ─────────────────────────────────────────
@@ -383,7 +404,10 @@ mod tests {
         let mut app = app_with_members();
         app.focus = FocusPanel::Dashboard;
         handle_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE), &mut app);
-        assert!(app.control_input.is_empty(), "Dashboard input must be ignored");
+        assert!(
+            app.control_input.is_empty(),
+            "Dashboard input must be ignored"
+        );
     }
 
     #[test]
@@ -427,7 +451,10 @@ mod tests {
         app.selected_index = 0; // idle
         app.control_input = "   ".to_string(); // whitespace only
         handle_event(&key_event(KeyCode::Enter, KeyModifiers::NONE), &mut app);
-        assert!(app.pending_control.is_none(), "Whitespace-only input should not set pending");
+        assert!(
+            app.pending_control.is_none(),
+            "Whitespace-only input should not set pending"
+        );
     }
 
     // ── Interrupt policy: Always ──────────────────────────────────────────────
@@ -435,7 +462,10 @@ mod tests {
     #[test]
     fn test_ctrl_i_always_policy_dispatches_immediately() {
         let mut app = app_with_policy(InterruptPolicy::Always);
-        handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
+        handle_event(
+            &key_event(KeyCode::Char('i'), KeyModifiers::CONTROL),
+            &mut app,
+        );
         assert!(
             matches!(app.pending_control, Some(PendingControl::Interrupt)),
             "Always policy must dispatch interrupt immediately"
@@ -448,8 +478,14 @@ mod tests {
     #[test]
     fn test_ctrl_i_never_policy_discards_silently() {
         let mut app = app_with_policy(InterruptPolicy::Never);
-        handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
-        assert!(app.pending_control.is_none(), "Never policy must discard interrupt");
+        handle_event(
+            &key_event(KeyCode::Char('i'), KeyModifiers::CONTROL),
+            &mut app,
+        );
+        assert!(
+            app.pending_control.is_none(),
+            "Never policy must discard interrupt"
+        );
         assert!(!app.confirm_interrupt_pending);
     }
 
@@ -458,10 +494,19 @@ mod tests {
     #[test]
     fn test_ctrl_i_confirm_policy_sets_pending_dialog() {
         let mut app = app_with_policy(InterruptPolicy::Confirm);
-        handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
-        assert!(app.confirm_interrupt_pending, "Confirm policy must open dialog");
+        handle_event(
+            &key_event(KeyCode::Char('i'), KeyModifiers::CONTROL),
+            &mut app,
+        );
+        assert!(
+            app.confirm_interrupt_pending,
+            "Confirm policy must open dialog"
+        );
         assert_eq!(app.status_message.as_deref(), Some("Send interrupt? [y/N]"));
-        assert!(app.pending_control.is_none(), "Control must not be dispatched yet");
+        assert!(
+            app.pending_control.is_none(),
+            "Control must not be dispatched yet"
+        );
     }
 
     #[test]
@@ -475,7 +520,10 @@ mod tests {
             "y must dispatch interrupt"
         );
         assert!(!app.confirm_interrupt_pending, "dialog must be cleared");
-        assert!(app.status_message.is_none(), "status message must be cleared");
+        assert!(
+            app.status_message.is_none(),
+            "status message must be cleared"
+        );
     }
 
     #[test]
@@ -483,7 +531,10 @@ mod tests {
         let mut app = app_with_policy(InterruptPolicy::Confirm);
         app.confirm_interrupt_pending = true;
         handle_event(&key_event(KeyCode::Char('Y'), KeyModifiers::NONE), &mut app);
-        assert!(matches!(app.pending_control, Some(PendingControl::Interrupt)));
+        assert!(matches!(
+            app.pending_control,
+            Some(PendingControl::Interrupt)
+        ));
         assert!(!app.confirm_interrupt_pending);
     }
 
@@ -492,7 +543,10 @@ mod tests {
         let mut app = app_with_policy(InterruptPolicy::Confirm);
         app.confirm_interrupt_pending = true;
         handle_event(&key_event(KeyCode::Enter, KeyModifiers::NONE), &mut app);
-        assert!(matches!(app.pending_control, Some(PendingControl::Interrupt)));
+        assert!(matches!(
+            app.pending_control,
+            Some(PendingControl::Interrupt)
+        ));
         assert!(!app.confirm_interrupt_pending);
     }
 
@@ -504,7 +558,10 @@ mod tests {
         handle_event(&key_event(KeyCode::Char('n'), KeyModifiers::NONE), &mut app);
         assert!(app.pending_control.is_none(), "n must cancel interrupt");
         assert!(!app.confirm_interrupt_pending, "dialog must be cleared");
-        assert!(app.status_message.is_none(), "status message must be cleared");
+        assert!(
+            app.status_message.is_none(),
+            "status message must be cleared"
+        );
     }
 
     #[test]
@@ -521,7 +578,10 @@ mod tests {
         let mut app = app_with_policy(InterruptPolicy::Confirm);
         app.confirm_interrupt_pending = true;
         handle_event(&key_event(KeyCode::Esc, KeyModifiers::NONE), &mut app);
-        assert!(app.pending_control.is_none(), "Esc must cancel interrupt confirmation");
+        assert!(
+            app.pending_control.is_none(),
+            "Esc must cancel interrupt confirmation"
+        );
         assert!(!app.confirm_interrupt_pending);
     }
 
@@ -531,7 +591,10 @@ mod tests {
         app.confirm_interrupt_pending = true;
         handle_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE), &mut app);
         // Dialog stays open; no control dispatched.
-        assert!(app.confirm_interrupt_pending, "unrecognised key must leave dialog open");
+        assert!(
+            app.confirm_interrupt_pending,
+            "unrecognised key must leave dialog open"
+        );
         assert!(app.pending_control.is_none());
     }
 
@@ -543,9 +606,15 @@ mod tests {
         let mut app = app_with_members();
         app.focus = FocusPanel::AgentTerminal;
         app.selected_index = 1; // "b" is "busy"
-        handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
+        handle_event(
+            &key_event(KeyCode::Char('i'), KeyModifiers::CONTROL),
+            &mut app,
+        );
         // With Confirm policy, dialog opens rather than dispatching directly.
-        assert!(app.confirm_interrupt_pending, "default Confirm policy must open dialog");
+        assert!(
+            app.confirm_interrupt_pending,
+            "default Confirm policy must open dialog"
+        );
     }
 
     #[test]
@@ -554,9 +623,18 @@ mod tests {
         app.focus = FocusPanel::AgentTerminal;
         app.members[0].state = "killed".to_string();
         app.selected_index = 0;
-        handle_event(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL), &mut app);
-        assert!(app.pending_control.is_none(), "Interrupt should not be set for non-live agent");
-        assert!(!app.confirm_interrupt_pending, "dialog must not open for non-live agent");
+        handle_event(
+            &key_event(KeyCode::Char('i'), KeyModifiers::CONTROL),
+            &mut app,
+        );
+        assert!(
+            app.pending_control.is_none(),
+            "Interrupt should not be set for non-live agent"
+        );
+        assert!(
+            !app.confirm_interrupt_pending,
+            "dialog must not open for non-live agent"
+        );
     }
 
     #[test]
@@ -579,7 +657,10 @@ mod tests {
         let mut app = new_app();
         assert!(!app.log_viewer_visible);
         handle_event(&key_event(KeyCode::Char('L'), KeyModifiers::NONE), &mut app);
-        assert!(app.log_viewer_visible, "L must enable log viewer when it was off");
+        assert!(
+            app.log_viewer_visible,
+            "L must enable log viewer when it was off"
+        );
     }
 
     #[test]
@@ -587,7 +668,10 @@ mod tests {
         let mut app = new_app();
         app.log_viewer_visible = true;
         handle_event(&key_event(KeyCode::Char('L'), KeyModifiers::NONE), &mut app);
-        assert!(!app.log_viewer_visible, "L must disable log viewer when it was on");
+        assert!(
+            !app.log_viewer_visible,
+            "L must disable log viewer when it was on"
+        );
     }
 
     #[test]
@@ -604,7 +688,10 @@ mod tests {
         let mut app = new_app();
         app.log_viewer_visible = false;
         handle_event(&key_event(KeyCode::Char('G'), KeyModifiers::NONE), &mut app);
-        assert!(app.log_level_filter.is_none(), "G must be ignored when viewer is not visible");
+        assert!(
+            app.log_level_filter.is_none(),
+            "G must be ignored when viewer is not visible"
+        );
     }
 
     #[test]
@@ -619,7 +706,10 @@ mod tests {
         app.append_log_events(events);
         app.log_scroll_offset = 20;
         handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE), &mut app);
-        assert_eq!(app.log_scroll_offset, 10, "PageUp must decrease offset by 10");
+        assert_eq!(
+            app.log_scroll_offset, 10,
+            "PageUp must decrease offset by 10"
+        );
     }
 
     #[test]
@@ -643,7 +733,10 @@ mod tests {
         app.log_follow_mode = false;
         app.log_scroll_offset = 0;
         handle_event(&key_event(KeyCode::PageDown, KeyModifiers::NONE), &mut app);
-        assert_eq!(app.log_scroll_offset, 10, "PageDown must increase offset by 10");
+        assert_eq!(
+            app.log_scroll_offset, 10,
+            "PageDown must increase offset by 10"
+        );
     }
 
     #[test]
@@ -658,7 +751,10 @@ mod tests {
         app.log_follow_mode = false;
         app.log_scroll_offset = 0;
         handle_event(&key_event(KeyCode::PageDown, KeyModifiers::NONE), &mut app);
-        assert_eq!(app.log_scroll_offset, 5, "PageDown must clamp at log_events.len()");
+        assert_eq!(
+            app.log_scroll_offset, 5,
+            "PageDown must clamp at log_events.len()"
+        );
     }
 
     #[test]

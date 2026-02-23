@@ -2,7 +2,7 @@
 
 **Version**: 0.3
 **Date**: 2026-02-22
-**Status**: Phase G complete (v0.16.0). Phase L in progress.
+**Status**: Phase G complete (v0.16.0). Phase L in planning.
 
 ---
 
@@ -153,7 +153,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | E | ATM Core Bug Fixes | Resume fix, read scoping, hooks, TUI hardening | COMPLETE |
 | F | Team Installer | `atm team init` package installer | PLANNED |
 | G | Codex Multi-Transport Hardening | App-server, unified turns, mail injection parity | COMPLETE |
-| L | Logging Overhaul | Daemon fan-in architecture, unified JSONL writer | IN PROGRESS |
+| L | Logging Overhaul | Daemon fan-in architecture, unified JSONL writer | PLANNING |
 
 ---
 
@@ -472,12 +472,15 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| L.1a | Sink architecture + API structs (LogEventV1) | — | COMPLETE |
-| L.1b | `init_unified` + bridge to daemon socket | L.1a | COMPLETE |
-| L.2 | Coverage — instrument all crates | L.1b | COMPLETE |
-| L.3 | `atm logs` CLI command | L.2 | COMPLETE |
-| L.4 | TUI log viewer + legacy sunset | L.3 | COMPLETE |
-| L.5 | Direct session watch stream for TUI (phase 2 hardening) | L.4 | IN REVIEW (PR #201) |
+| L.1a | Sink architecture + API structs (LogEventV1) | — | IN REVIEW (PR pending) |
+| L.1b | `init_unified` + bridge to daemon socket | L.1a | PLANNING |
+| L.2 | Coverage — instrument all crates | L.1b | PLANNING |
+| L.3 | `atm logs` CLI command | L.2 | PLANNING |
+| L.4 | TUI log viewer + legacy sunset | L.3 | PLANNING |
+
+**Deferred (explicit)**: Dashboard mail compose workflow is out of scope for current L-series work; Dashboard remains preview/navigation-only until a dedicated composer sprint is scheduled.
+
+**Blocked by**: This is a blocking prerequisite for integration testing.
 
 ---
 
@@ -585,7 +588,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 **Completed**: 80+ sprints across 17 phases (CI green)
 **Current version**: v0.16.0
-**Next**: Complete Phase L (Logging Overhaul) hardening and close remaining review findings; Phase F (Team Installer) planned
+**Next**: Phase L (Logging Overhaul) planning; Phase F (Team Installer) planned
 
 ---
 
