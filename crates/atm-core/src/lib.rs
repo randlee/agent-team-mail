@@ -16,6 +16,7 @@ pub mod daemon_stream;
 pub mod event_log;
 pub mod home;
 pub mod io;
+pub mod log_reader;
 pub mod logging;
 pub mod logging_event;
 pub mod model_registry;
