@@ -94,7 +94,7 @@ pub async fn emit_lifecycle_event(
     process_id: Option<u32>,
 ) {
     // Emit structured log event for the lifecycle transition.
-    agent_team_mail_core::event_log::emit_event_best_effort(
+    agent_team_mail_core::event_log::emit_event_best_effort( // TODO(M.1b): remove emit_event_best_effort call
         agent_team_mail_core::event_log::EventFields {
             level: "info",
             source: "atm-agent-mcp",

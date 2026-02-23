@@ -129,7 +129,7 @@ impl AuditLog {
     ///
     /// Creates parent directories if needed. Swallows all errors.
     async fn append(&self, entry: &AuditEntry) {
-        emit_event_best_effort(EventFields {
+        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
             level: "info",
             source: "atm-agent-mcp",
             action: "audit_event",

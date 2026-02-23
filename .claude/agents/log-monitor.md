@@ -29,9 +29,12 @@ You are aware of the current logging design and paths:
 - **Note**: FR-9.3 does not define an ATM_HOME variant for this path.
 - **Note**: Path is emitted by `atm-agent-mcp` via `sessions_dir().join(team).join(\"audit.jsonl\")`.
 
-4. Watch-stream local feed:
-- `~/.config/atm/watch-stream/events.jsonl`
-- **Note**: This shared path is subject to change in Phase M.1 (migration to per-agent files). Treat as pre-M.1 path.
+4. Watch-stream local feed (per-agent, Phase M.1+):
+- `~/.config/atm/watch-stream/<agent-id>.jsonl` where `agent-id` is the agent's identifier
+- One file per agent; prevents cross-session ambiguity and makes per-agent inspection straightforward
+- Example: `~/.config/atm/watch-stream/arch-atm.jsonl`
+- Each file rotates to `<agent-id>.jsonl.1` when it exceeds the size cap (~10 MB)
+- When ATM_HOME is set: `${ATM_HOME}/watch-stream/<agent-id>.jsonl`
 
 5. Fallback spool directory:
 - `${ATM_HOME}/log-spool/*.jsonl` when ATM_HOME is set
@@ -79,6 +82,15 @@ LOG="${LOG:-$HOME/.config/atm/atm.log.jsonl}"
 SPOOL="${ATM_HOME:+$ATM_HOME/log-spool}"
 SPOOL="${SPOOL:-$HOME/.config/atm/log-spool}"
 (timeout 600 tail -F "$SPOOL"/*.jsonl 2>/dev/null | jq -c 'select(.level=="error") // empty' 2>/dev/null)
+
+# Tail per-agent watch-stream feed (Phase M.1+)
+AGENT_ID="arch-atm"
+if [ -n "$ATM_HOME" ]; then
+  WATCH_FILE="$ATM_HOME/watch-stream/${AGENT_ID}.jsonl"
+else
+  WATCH_FILE="$HOME/.config/atm/watch-stream/${AGENT_ID}.jsonl"
+fi
+(timeout 600 tail -F "$WATCH_FILE" | jq -c 'select(.rendered != null)' 2>/dev/null)
 ```
 
 If `jq` is unavailable, fall back to `rg`/substring filters.
@@ -114,6 +126,6 @@ When reporting findings:
 
 ## Known Design Caveats
 
-- Watch-stream cache path is shared (`watch-stream/events.jsonl`), not per-agent/per-session. Treat as local UI stream feed, not canonical history. Phase M.1 will migrate to per-agent files.
+- Watch-stream files are per-agent (`watch-stream/<agent-id>.jsonl`) as of Phase M.1. Treat as local UI stream feed, not canonical history.
 - Legacy bridge log (surface 6) is conditionally present based on ATM_LOG_BRIDGE setting.
 - Spool files may contain incomplete records; always use error-tolerant jq invocations.
