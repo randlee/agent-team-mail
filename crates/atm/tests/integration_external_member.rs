@@ -138,7 +138,7 @@ fn test_send_empty_message_rejected() {
         "agentType": "general-purpose",
         "model": "unknown",
         "joinedAt": 1739284800000i64,
-        "cwd": "/tmp",
+        "cwd": ".",
         "subscriptions": []
     }));
     fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
@@ -169,7 +169,7 @@ fn test_send_empty_string_message_rejected() {
         "agentType": "general-purpose",
         "model": "unknown",
         "joinedAt": 1739284800000i64,
-        "cwd": "/tmp",
+        "cwd": ".",
         "subscriptions": []
     }));
     fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();

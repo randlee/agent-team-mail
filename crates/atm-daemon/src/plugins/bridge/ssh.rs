@@ -558,7 +558,8 @@ mod tests {
         let test_content = b"Hello from SSH transport test!";
         tokio::fs::write(&local_file, test_content).await.unwrap();
 
-        let remote_path = Path::new("/tmp/atm-ssh-test.txt");
+        let remote_path_buf = std::env::temp_dir().join("atm-ssh-test.txt");
+        let remote_path = remote_path_buf.as_path();
 
         let config = SshConfig {
             address: format!("{}@localhost", std::env::var("USER").unwrap_or_else(|_| "root".to_string())),
@@ -602,8 +603,10 @@ mod tests {
         let local_file = temp_dir.path().join("test.txt");
         tokio::fs::write(&local_file, b"content").await.unwrap();
 
-        let from_path = Path::new("/tmp/atm-test-temp.txt");
-        let to_path = Path::new("/tmp/atm-test-final.txt");
+        let from_path_buf = std::env::temp_dir().join("atm-test-temp.txt");
+        let to_path_buf = std::env::temp_dir().join("atm-test-final.txt");
+        let from_path = from_path_buf.as_path();
+        let to_path = to_path_buf.as_path();
 
         let config = SshConfig {
             address: format!("{}@localhost", std::env::var("USER").unwrap_or_else(|_| "root".to_string())),

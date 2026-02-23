@@ -484,7 +484,45 @@ async fn test_child_crash_includes_exit_code() {
         "params": {"name": "crash", "arguments": {}}
     });
     send_newline(&mut writer, &crash_req).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Wait for the proxy to detect the child crash and populate exit_status.
+    //
+    // The child exits immediately on "crash" without sending any response, so
+    // there is no id:2 response to wait for.  Instead, poll by sending probe
+    // requests until the proxy returns a "child dead" error that includes the
+    // exit code, which confirms exit_status is populated.  Bound the polling
+    // loop with a 10-second deadline so the test fails fast on genuine bugs
+    // rather than hanging indefinitely.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut probe_id: u64 = 100;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for proxy to detect child crash (exit code 42)");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Send a probe request.
+        let probe = json!({
+            "jsonrpc": "2.0",
+            "id": probe_id,
+            "method": "tools/call",
+            "params": {"name": "codex", "arguments": {"prompt": "probe"}}
+        });
+        send_newline(&mut writer, &probe).await;
+
+        // Collect all responses that arrive within a short window.
+        let got = read_all_responses(&mut reader, Duration::from_millis(200)).await;
+        let found = got.iter().find(|r| {
+            r.get("id") == Some(&json!(probe_id))
+                && r.pointer("/error/data/exit_code")
+                    .and_then(|v| v.as_i64())
+                    == Some(42)
+        });
+        if found.is_some() {
+            break;
+        }
+        probe_id += 1;
+    }
 
     // Send another request
     let req = json!({

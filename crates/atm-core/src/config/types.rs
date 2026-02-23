@@ -291,7 +291,7 @@ identity = "test-user"
 max_age = "7d"
 max_count = 1000
 strategy = "archive"
-archive_dir = "/tmp/archive"
+archive_dir = "tmp/archive"
 enabled = true
 interval_secs = 600
 "#;
@@ -300,7 +300,7 @@ interval_secs = 600
         assert_eq!(config.retention.max_age, Some("7d".to_string()));
         assert_eq!(config.retention.max_count, Some(1000));
         assert_eq!(config.retention.strategy, CleanupStrategy::Archive);
-        assert_eq!(config.retention.archive_dir, Some("/tmp/archive".to_string()));
+        assert_eq!(config.retention.archive_dir, Some("tmp/archive".to_string()));
         assert!(config.retention.enabled);
         assert_eq!(config.retention.interval_secs, 600);
     }

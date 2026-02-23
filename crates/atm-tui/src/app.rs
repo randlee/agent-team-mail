@@ -103,6 +103,13 @@ pub struct App {
     /// call so the view stays pinned to the bottom. When follow mode is off the
     /// value is preserved, allowing the user to read earlier output.
     pub stream_scroll_offset: usize,
+    /// Turn state for the currently streaming agent, sourced from the daemon's
+    /// normalised stream event pipeline.
+    ///
+    /// Updated during the 2-second daemon refresh cycle via the
+    /// `"agent-stream-state"` socket command. `None` when the daemon has no
+    /// stream state recorded for the agent.
+    pub daemon_turn_state: Option<agent_team_mail_core::daemon_stream::AgentStreamState>,
 }
 
 impl App {
@@ -131,6 +138,7 @@ impl App {
             confirm_interrupt_pending: false,
             follow_mode,
             stream_scroll_offset: 0,
+            daemon_turn_state: None,
         }
     }
 
@@ -449,5 +457,59 @@ mod tests {
             elapsed.as_millis() < 200,
             "10k line stress append must complete in <200ms, took {elapsed:?}"
         );
+    }
+
+    // ── G.7 daemon_turn_state tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_daemon_turn_state_defaults_to_none() {
+        let app = new_app("test");
+        assert!(
+            app.daemon_turn_state.is_none(),
+            "daemon_turn_state should default to None"
+        );
+    }
+
+    #[test]
+    fn test_daemon_turn_state_busy_display() {
+        use agent_team_mail_core::daemon_stream::{AgentStreamState, StreamTurnStatus};
+        let mut app = new_app("test");
+        app.daemon_turn_state = Some(AgentStreamState {
+            turn_id: Some("t-1".to_string()),
+            thread_id: Some("th-1".to_string()),
+            transport: Some("app-server".to_string()),
+            turn_status: StreamTurnStatus::Busy,
+        });
+        let state = app.daemon_turn_state.as_ref().unwrap();
+        assert_eq!(state.turn_status, StreamTurnStatus::Busy);
+        assert_eq!(format!("{}", state.turn_status), "busy");
+    }
+
+    #[test]
+    fn test_daemon_turn_state_terminal_display() {
+        use agent_team_mail_core::daemon_stream::{AgentStreamState, StreamTurnStatus};
+        let mut app = new_app("test");
+        app.daemon_turn_state = Some(AgentStreamState {
+            turn_id: Some("t-2".to_string()),
+            thread_id: None,
+            transport: Some("cli-json".to_string()),
+            turn_status: StreamTurnStatus::Terminal,
+        });
+        let state = app.daemon_turn_state.as_ref().unwrap();
+        assert_eq!(state.turn_status, StreamTurnStatus::Terminal);
+        assert_eq!(format!("{}", state.turn_status), "terminal");
+    }
+
+    #[test]
+    fn test_daemon_turn_state_idle_display() {
+        use agent_team_mail_core::daemon_stream::{AgentStreamState, StreamTurnStatus};
+        let mut app = new_app("test");
+        app.daemon_turn_state = Some(AgentStreamState {
+            turn_status: StreamTurnStatus::Idle,
+            ..Default::default()
+        });
+        let state = app.daemon_turn_state.as_ref().unwrap();
+        assert_eq!(state.turn_status, StreamTurnStatus::Idle);
+        assert_eq!(format!("{}", state.turn_status), "idle");
     }
 }

@@ -943,7 +943,7 @@ mod tests {
                     "agentType": "general-purpose",
                     "model": "claude-sonnet-4-6",
                     "joinedAt": 1000000u64,
-                    "cwd": "/tmp"
+                    "cwd": "."
                 })
             })
             .collect();
@@ -1682,7 +1682,7 @@ mod tests {
                 .register(
                     "arch-ctm".to_string(),
                     "atm-dev".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1708,7 +1708,7 @@ mod tests {
                 .register(
                     "dev-agent".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1736,7 +1736,7 @@ mod tests {
                 .register(
                     "no-thread".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1761,7 +1761,7 @@ mod tests {
                 .register(
                     "active-agent".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1771,7 +1771,7 @@ mod tests {
                 .register(
                     "closed-agent".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1782,7 +1782,7 @@ mod tests {
                 .register(
                     "stale-agent".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1799,7 +1799,7 @@ mod tests {
                 .register(
                     "active-agent".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1809,7 +1809,7 @@ mod tests {
                 .register(
                     "closed-agent".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1861,7 +1861,7 @@ mod tests {
                 .register(
                     "arch-ctm".to_string(),
                     "atm-dev".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1902,7 +1902,7 @@ mod tests {
                 .register(
                     "stale-agent".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1935,7 +1935,7 @@ mod tests {
                 .register(
                     "close-me".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1967,7 +1967,7 @@ mod tests {
                 .register(
                     "already-closed".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -1998,7 +1998,7 @@ mod tests {
                 .register(
                     "busy-agent".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -2043,7 +2043,7 @@ mod tests {
                 .register(
                     "elicit-agent".to_string(),
                     "team".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -2102,7 +2102,7 @@ mod tests {
                 .register(
                     "lock-release".to_string(),
                     "team-lock".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,
@@ -2142,7 +2142,7 @@ mod tests {
                 .register(
                     "lock-release-closed".to_string(),
                     "team-lock".to_string(),
-                    "/tmp".to_string(),
+                    ".".to_string(),
                     None,
                     None,
                     None,

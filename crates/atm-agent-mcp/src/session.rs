@@ -522,7 +522,7 @@ mod tests {
         registry.register(
             identity.to_string(),
             "atm-dev".to_string(),
-            "/tmp".to_string(),
+            ".".to_string(),
             None,
             None,
             None,
@@ -689,7 +689,7 @@ mod tests {
         r.register(
             identity.to_string(),
             "atm-dev".to_string(),
-            "/tmp".to_string(),
+            ".".to_string(),
             None,
             None,
             None,
@@ -707,7 +707,7 @@ mod tests {
             identity: "arch-ctm".to_string(),
             team: "atm-dev".to_string(),
             thread_id: None,
-            cwd: "/tmp".to_string(),
+            cwd: ".".to_string(),
             repo_root: None,
             repo_name: None,
             branch: None,
@@ -744,7 +744,7 @@ mod tests {
     fn set_cwd_nonexistent_agent_is_noop() {
         let mut r = make_registry(10);
         // Should not panic
-        r.set_cwd("codex:no-such-agent", "/tmp".to_string());
+        r.set_cwd("codex:no-such-agent", ".".to_string());
     }
 
     // ─── RegistrySnapshot / to_snapshot / load_from_snapshot ────────────────
@@ -796,7 +796,7 @@ mod tests {
             identity: "arch-ctm".to_string(),
             team: "atm-dev".to_string(),
             thread_id: Some("thread-xyz".to_string()),
-            cwd: "/tmp".to_string(),
+            cwd: ".".to_string(),
             repo_root: None,
             repo_name: None,
             branch: None,
@@ -826,7 +826,7 @@ mod tests {
             identity: "stale-agent".to_string(),
             team: "atm-dev".to_string(),
             thread_id: None,
-            cwd: "/tmp".to_string(),
+            cwd: ".".to_string(),
             repo_root: None,
             repo_name: None,
             branch: None,
@@ -842,7 +842,7 @@ mod tests {
             identity: "closed-agent".to_string(),
             team: "atm-dev".to_string(),
             thread_id: None,
-            cwd: "/tmp".to_string(),
+            cwd: ".".to_string(),
             repo_root: None,
             repo_name: None,
             branch: None,
@@ -974,7 +974,7 @@ mod tests {
             "identity": "legacy",
             "team": "atm-dev",
             "thread_id": null,
-            "cwd": "/tmp",
+            "cwd": ".",
             "repo_root": null,
             "repo_name": null,
             "branch": null,

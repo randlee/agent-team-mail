@@ -266,7 +266,6 @@ mod tests {
     use agent_team_mail_core::context::{Platform, SystemContext};
     use crate::plugin::MailService;
     use crate::roster::RosterService;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -277,7 +276,7 @@ mod tests {
         let system = SystemContext::new(
             "test-hostname".to_string(),
             Platform::Linux,
-            PathBuf::from("/tmp/.claude"),
+            std::env::temp_dir().join(".claude"),
             "0.1.0".to_string(),
             "test-team".to_string(),
         );

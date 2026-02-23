@@ -218,7 +218,7 @@ fn team_config_json(team: &str, agent: &str) -> String {
       "planModeRequired": null,
       "joinedAt": 1234567890,
       "tmuxPaneId": null,
-      "cwd": "/tmp",
+      "cwd": ".",
       "subscriptions": [],
       "backendType": null,
       "isActive": null,

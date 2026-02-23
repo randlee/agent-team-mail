@@ -1,0 +1,559 @@
+//! Shared streaming event abstractions for JSONL-based transport notification parsing.
+//!
+//! This module defines types and functions that normalize JSONL notification streams
+//! into higher-level lifecycle events.
+//!
+//! # Shared abstraction
+//!
+//! These types are protocol-agnostic. [`crate::transport::AppServerTransport`] uses
+//! them directly. [`crate::transport::JsonCodecTransport`] has a separate notification
+//! parser (using a `type` field rather than `method`) but expresses its
+//! turn-lifecycle transitions as [`TurnState`] mutations from this module.
+//!
+//! # Protocol model
+//!
+//! The app-server protocol uses JSONL notifications (one JSON object per line).
+//! Each notification has a `method` field and optional `params`. This module
+//! maps the raw notification stream into [`AppServerNotification`] values,
+//! and then maps those into coarser [`SessionEvent`] lifecycle signals.
+//!
+//! # Turn state machine
+//!
+//! ```text
+//! Idle ──(turn/started)──► Busy ──(turn/completed)──► Terminal
+//!                                └──(process crash)──► Terminal
+//! ```
+
+use serde_json::Value;
+
+// ─── TurnStatus ───────────────────────────────────────────────────────────────
+
+/// The final outcome of a turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnStatus {
+    /// The turn completed normally.
+    Completed,
+    /// The turn was interrupted (e.g. by a cancellation notification).
+    Interrupted,
+    /// The turn failed (e.g. process crash or protocol error).
+    Failed,
+}
+
+impl From<TurnStatus> for agent_team_mail_core::daemon_stream::TurnStatusWire {
+    fn from(status: TurnStatus) -> Self {
+        match status {
+            TurnStatus::Completed => Self::Completed,
+            TurnStatus::Interrupted => Self::Interrupted,
+            TurnStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+// ─── TurnState ────────────────────────────────────────────────────────────────
+
+/// Per-thread turn state, tracking the current lifecycle stage.
+#[derive(Debug, Clone)]
+pub enum TurnState {
+    /// No turn is in progress.
+    Idle,
+    /// A turn is in progress with the given turn identifier.
+    Busy { turn_id: String },
+    /// The turn has ended (completed, interrupted, or failed).
+    Terminal { turn_id: String, status: TurnStatus },
+}
+
+impl TurnState {
+    /// Returns `true` if the state is [`TurnState::Idle`].
+    pub fn is_idle(&self) -> bool {
+        matches!(self, TurnState::Idle)
+    }
+}
+
+// ─── AppServerNotification ────────────────────────────────────────────────────
+
+/// A parsed app-server protocol notification.
+///
+/// This is the normalized view of a single JSONL line received from the
+/// app-server child process.  Unknown methods are represented as
+/// [`AppServerNotification::Unknown`] rather than causing errors.
+#[derive(Debug)]
+pub enum AppServerNotification {
+    /// A new turn has begun (`turn/started`).
+    ///
+    /// `thread_id` identifies the thread on which the turn is running.
+    /// `turn_id` is the unique identifier for this specific turn.
+    /// A single thread may have multiple sequential turns.
+    TurnStarted { thread_id: String, turn_id: String },
+    /// The current turn has ended (`turn/completed`).
+    ///
+    /// `thread_id` identifies the thread on which the turn ran.
+    /// `turn_id` is the unique identifier for the completed turn.
+    TurnCompleted { thread_id: String, turn_id: String, status: TurnStatus },
+    /// A content item within a turn has started (`item/started`).
+    ItemStarted { item_id: String },
+    /// A content item within a turn has completed (`item/completed`).
+    ItemCompleted { item_id: String },
+    /// A streaming delta for a content item (`item/delta`).
+    ItemDelta { method: String, params: Value },
+    /// The agent has entered review mode, requesting approval (`item/enteredReviewMode`).
+    ///
+    /// Emitted by the app-server when the agent is waiting for the user to
+    /// approve or reject a tool call.  `item_id` is the correlation key for
+    /// the corresponding [`AppServerNotification::ExitedReviewMode`] event.
+    /// `params` contains the full notification params (tool call details, etc.)
+    /// and is forwarded upstream in the bridged `elicitation/create` request.
+    ///
+    /// Sprint G.5: bridged upstream via [`crate::elicitation::ElicitationRegistry`]
+    /// so that the upstream client (Claude) can approve or reject the call.
+    EnteredReviewMode { item_id: String, params: Value },
+    /// The agent has exited review mode (`item/exitedReviewMode`).
+    ///
+    /// Emitted after an approval decision has been delivered to the agent
+    /// (either approve or reject).  `item_id` correlates with the preceding
+    /// [`AppServerNotification::EnteredReviewMode`] event.
+    ExitedReviewMode { item_id: String },
+    /// An unrecognised notification method.  Non-fatal; callers should
+    /// log at `debug` level and continue processing.
+    Unknown { method: String },
+}
+
+/// Parse a single JSONL line into an [`AppServerNotification`].
+///
+/// Returns `None` if the line cannot be parsed as a JSON-RPC notification
+/// (e.g. blank line, malformed JSON, or missing `method` field).
+///
+/// Unknown methods produce [`AppServerNotification::Unknown`] rather than
+/// returning `None`, so callers can log them explicitly.
+pub fn parse_app_server_notification(line: &str) -> Option<AppServerNotification> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let v: Value = serde_json::from_str(line).ok()?;
+    let method = v.get("method")?.as_str()?.to_string();
+    let params = v.get("params").cloned().unwrap_or(Value::Null);
+
+    let notification = match method.as_str() {
+        "turn/started" => {
+            let thread_id = params
+                .get("threadId")
+                .or_else(|| params.get("thread_id"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let turn_id = params
+                .get("turnId")
+                .or_else(|| params.get("turn_id"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) else {
+                tracing::warn!(
+                    method = "turn/started",
+                    "missing required threadId/turnId in notification; dropping"
+                );
+                return None;
+            };
+            AppServerNotification::TurnStarted { thread_id, turn_id }
+        }
+        "turn/completed" => {
+            let thread_id = params
+                .get("threadId")
+                .or_else(|| params.get("thread_id"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let turn_id = params
+                .get("turnId")
+                .or_else(|| params.get("turn_id"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) else {
+                tracing::warn!(
+                    method = "turn/completed",
+                    "missing required threadId/turnId in notification; dropping"
+                );
+                return None;
+            };
+            let status_str = params
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("completed");
+            let status = match status_str {
+                "interrupted" => TurnStatus::Interrupted,
+                "failed" => TurnStatus::Failed,
+                _ => TurnStatus::Completed,
+            };
+            AppServerNotification::TurnCompleted { thread_id, turn_id, status }
+        }
+        "item/started" => {
+            let item_id = params
+                .get("itemId")
+                .or_else(|| params.get("item_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            AppServerNotification::ItemStarted { item_id }
+        }
+        "item/completed" => {
+            let item_id = params
+                .get("itemId")
+                .or_else(|| params.get("item_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            AppServerNotification::ItemCompleted { item_id }
+        }
+        // Approval gate notifications (app-server protocol Section 6:
+        // `EnteredReviewMode` and `ExitedReviewMode` ThreadItem variants).
+        // These are matched before the ItemDelta catch-all so they are never
+        // misrouted as delta events.
+        "item/enteredReviewMode" => {
+            let item_id = params
+                .get("itemId")
+                .or_else(|| params.get("item_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            AppServerNotification::EnteredReviewMode {
+                item_id,
+                params: params.clone(),
+            }
+        }
+        "item/exitedReviewMode" => {
+            let item_id = params
+                .get("itemId")
+                .or_else(|| params.get("item_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            AppServerNotification::ExitedReviewMode { item_id }
+        }
+        // Delta method patterns from app-server protocol reference Section 5.
+        // The protocol uses specific compound method names rather than a single
+        // "item/delta" method.  Known delta variants include:
+        //   item/agentMessage/delta, item/plan/delta,
+        //   item/commandExecution/outputDelta, item/text/TextDelta,
+        //   item/toolUse/PartAdded, item/thinking/delta, item/progress
+        // The method name is preserved in ItemDelta { method } so downstream
+        // consumers can dispatch on the specific variant if needed.
+        // G.7 will refine TUI fanout routing based on the specific method variants.
+        m if m.starts_with("item/")
+            && (m.ends_with("/delta")
+                || m.ends_with("/outputDelta")
+                || m.ends_with("/progress")
+                || m.ends_with("TextDelta")
+                || m.ends_with("PartAdded")) =>
+        {
+            AppServerNotification::ItemDelta { method: m.to_string(), params }
+        }
+        _ => AppServerNotification::Unknown { method },
+    };
+
+    Some(notification)
+}
+
+// ─── SessionEvent ─────────────────────────────────────────────────────────────
+
+/// Normalized lifecycle event for downstream consumers (proxy, daemon).
+///
+/// Currently defined but not yet wired to a channel — the downstream wiring
+/// (proxy observing turn transitions from app-server and emitting daemon
+/// lifecycle events via `lifecycle_emit`) is a Sprint G.4 deliverable.
+/// This type is defined here so G.4 can use it without changing stream_norm.rs.
+///
+/// These are coarser-grained than [`AppServerNotification`] and represent
+/// the transitions that the daemon cares about: whether the agent is
+/// processing a turn, has finished, or has failed.
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    /// The agent has begun processing a turn.
+    TurnBusy { turn_id: String },
+    /// The agent has returned to idle (turn completed normally or interrupted).
+    TurnIdle { turn_id: String },
+    /// The turn has entered a terminal state (completed, interrupted, or failed).
+    TurnTerminal { turn_id: String, status: TurnStatus },
+}
+
+/// Checks whether a JSON-RPC response value indicates a server overload error
+/// (error code `-32001`).
+///
+/// This is used by the backpressure retry logic in [`crate::transport::AppServerTransport`].
+pub fn is_overload_error(response: &Value) -> bool {
+    response
+        .get("error")
+        .and_then(|e| e.get("code"))
+        .and_then(|c| c.as_i64())
+        .map(|code| code == -32001)
+        .unwrap_or(false)
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_turn_started() {
+        let line = r#"{"method":"turn/started","params":{"threadId":"th1","turnId":"t1"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            matches!(&n, AppServerNotification::TurnStarted { thread_id, turn_id }
+                if thread_id == "th1" && turn_id == "t1"),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_turn_started_fallback_snake_case() {
+        // Dual-key fallback: thread_id / turn_id (snake_case).
+        let line = r#"{"method":"turn/started","params":{"thread_id":"th2","turn_id":"t2"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            matches!(&n, AppServerNotification::TurnStarted { thread_id, turn_id }
+                if thread_id == "th2" && turn_id == "t2"),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_turn_started_missing_thread_id_returns_none() {
+        // When threadId is absent, the notification is dropped (returns None).
+        let line = r#"{"method":"turn/started","params":{"turnId":"t1"}}"#;
+        assert!(
+            parse_app_server_notification(line).is_none(),
+            "expected None when threadId is missing"
+        );
+    }
+
+    #[test]
+    fn parse_turn_completed_default_status() {
+        let line = r#"{"method":"turn/completed","params":{"threadId":"th1","turnId":"t1"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            matches!(&n, AppServerNotification::TurnCompleted { thread_id, turn_id, status: TurnStatus::Completed }
+                if thread_id == "th1" && turn_id == "t1"),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_turn_completed_interrupted() {
+        let line = r#"{"method":"turn/completed","params":{"threadId":"th2","turnId":"t2","status":"interrupted"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(matches!(
+            n,
+            AppServerNotification::TurnCompleted { status: TurnStatus::Interrupted, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_turn_completed_preserves_thread_and_turn_ids() {
+        let line = r#"{"method":"turn/completed","params":{"threadId":"thread-x","turnId":"turn-y","status":"failed"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            matches!(&n, AppServerNotification::TurnCompleted { thread_id, turn_id, status: TurnStatus::Failed }
+                if thread_id == "thread-x" && turn_id == "turn-y"),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_item_started() {
+        let line = r#"{"method":"item/started","params":{"itemId":"i1"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(matches!(n, AppServerNotification::ItemStarted { item_id } if item_id == "i1"));
+    }
+
+    #[test]
+    fn parse_item_completed() {
+        let line = r#"{"method":"item/completed","params":{"itemId":"i1"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(matches!(n, AppServerNotification::ItemCompleted { item_id } if item_id == "i1"));
+    }
+
+    #[test]
+    fn parse_item_delta_legacy() {
+        // The legacy "item/delta" literal also matches because it starts with
+        // "item/" and ends with "/delta".
+        let line = r#"{"method":"item/delta","params":{"delta":"hello"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(matches!(n, AppServerNotification::ItemDelta { .. }));
+    }
+
+    #[test]
+    fn parse_item_agent_message_delta() {
+        // Actual app-server protocol delta method: item/agentMessage/delta
+        // (Section 5 of the protocol reference).
+        let line = r#"{"method":"item/agentMessage/delta","params":{"text":"hello"}}"#;
+        let n = parse_app_server_notification(line)
+            .expect("item/agentMessage/delta should parse as ItemDelta");
+        assert!(
+            matches!(
+                &n,
+                AppServerNotification::ItemDelta { method, .. } if method == "item/agentMessage/delta"
+            ),
+            "expected ItemDelta with method item/agentMessage/delta, got: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_item_command_execution_output_delta() {
+        // Actual app-server protocol delta method: item/commandExecution/outputDelta
+        // (Section 5 of the protocol reference).
+        let line = r#"{"method":"item/commandExecution/outputDelta","params":{"output":"ls\n"}}"#;
+        let n = parse_app_server_notification(line)
+            .expect("item/commandExecution/outputDelta should parse as ItemDelta");
+        assert!(
+            matches!(
+                &n,
+                AppServerNotification::ItemDelta { method, .. }
+                    if method == "item/commandExecution/outputDelta"
+            ),
+            "expected ItemDelta with method item/commandExecution/outputDelta, got: {n:?}"
+        );
+    }
+
+    // ── EnteredReviewMode / ExitedReviewMode (G.5) ──────────────────────────
+
+    #[test]
+    fn parse_entered_review_mode_camel_case_item_id() {
+        let line = r#"{"method":"item/enteredReviewMode","params":{"itemId":"item-1","toolName":"bash"}}"#;
+        let n = parse_app_server_notification(line)
+            .expect("item/enteredReviewMode should parse");
+        assert!(
+            matches!(
+                &n,
+                AppServerNotification::EnteredReviewMode { item_id, params }
+                    if item_id == "item-1"
+                    && params.get("toolName").and_then(|v| v.as_str()) == Some("bash")
+            ),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_entered_review_mode_snake_case_item_id_fallback() {
+        let line = r#"{"method":"item/enteredReviewMode","params":{"item_id":"item-2"}}"#;
+        let n = parse_app_server_notification(line)
+            .expect("item/enteredReviewMode with snake_case item_id should parse");
+        assert!(
+            matches!(
+                &n,
+                AppServerNotification::EnteredReviewMode { item_id, .. }
+                    if item_id == "item-2"
+            ),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_entered_review_mode_missing_item_id_defaults_empty() {
+        let line = r#"{"method":"item/enteredReviewMode","params":{}}"#;
+        let n = parse_app_server_notification(line)
+            .expect("item/enteredReviewMode with no itemId should parse");
+        assert!(
+            matches!(
+                &n,
+                AppServerNotification::EnteredReviewMode { item_id, .. }
+                    if item_id.is_empty()
+            ),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_exited_review_mode() {
+        let line = r#"{"method":"item/exitedReviewMode","params":{"itemId":"item-1"}}"#;
+        let n = parse_app_server_notification(line)
+            .expect("item/exitedReviewMode should parse");
+        assert!(
+            matches!(
+                &n,
+                AppServerNotification::ExitedReviewMode { item_id }
+                    if item_id == "item-1"
+            ),
+            "unexpected: {n:?}"
+        );
+    }
+
+    #[test]
+    fn parse_entered_review_mode_not_classified_as_item_delta() {
+        // Ensure the dedicated match arm fires before the ItemDelta catch-all.
+        let line = r#"{"method":"item/enteredReviewMode","params":{"itemId":"x"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            !matches!(n, AppServerNotification::ItemDelta { .. }),
+            "item/enteredReviewMode must not be classified as ItemDelta"
+        );
+    }
+
+    #[test]
+    fn parse_exited_review_mode_not_classified_as_item_delta() {
+        // Ensure the dedicated match arm fires before the ItemDelta catch-all.
+        let line = r#"{"method":"item/exitedReviewMode","params":{"itemId":"x"}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(
+            !matches!(n, AppServerNotification::ItemDelta { .. }),
+            "item/exitedReviewMode must not be classified as ItemDelta"
+        );
+    }
+
+    #[test]
+    fn parse_unknown_method() {
+        let line = r#"{"method":"unknown/event","params":{}}"#;
+        let n = parse_app_server_notification(line).unwrap();
+        assert!(matches!(
+            n,
+            AppServerNotification::Unknown { method } if method == "unknown/event"
+        ));
+    }
+
+    #[test]
+    fn parse_empty_line_returns_none() {
+        assert!(parse_app_server_notification("").is_none());
+        assert!(parse_app_server_notification("   ").is_none());
+    }
+
+    #[test]
+    fn parse_malformed_json_returns_none() {
+        assert!(parse_app_server_notification("{not valid json").is_none());
+    }
+
+    #[test]
+    fn parse_missing_method_returns_none() {
+        assert!(parse_app_server_notification(r#"{"params":{}}"#).is_none());
+    }
+
+    #[test]
+    fn is_overload_error_detects_minus_32001() {
+        let v = serde_json::json!({"error":{"code":-32001,"message":"overloaded"}});
+        assert!(is_overload_error(&v));
+    }
+
+    #[test]
+    fn is_overload_error_false_for_other_codes() {
+        let v = serde_json::json!({"error":{"code":-32600,"message":"invalid request"}});
+        assert!(!is_overload_error(&v));
+    }
+
+    #[test]
+    fn is_overload_error_false_for_success() {
+        let v = serde_json::json!({"result":{}});
+        assert!(!is_overload_error(&v));
+    }
+
+    #[test]
+    fn turn_state_is_idle_only_for_idle_variant() {
+        assert!(TurnState::Idle.is_idle());
+        assert!(!TurnState::Busy { turn_id: "t1".into() }.is_idle());
+        assert!(!TurnState::Terminal {
+            turn_id: "t1".into(),
+            status: TurnStatus::Completed
+        }
+        .is_idle());
+    }
+}

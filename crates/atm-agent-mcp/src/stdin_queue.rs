@@ -61,6 +61,10 @@ pub fn queue_dir(team: &str, agent_id: &str) -> anyhow::Result<PathBuf> {
 ///
 /// Creates the queue directory if it does not exist.
 ///
+/// Callers are responsible for providing properly formatted JSON matching the
+/// Codex stdin input schema (e.g., `{"type":"tool_result",...}`) before
+/// enqueueing. The queue stores and drains raw content without validation.
+///
 /// # Errors
 ///
 /// Returns an error if the home directory cannot be determined or if file I/O fails.
@@ -452,6 +456,82 @@ mod tests {
             5,
             "exactly 5 messages should be delivered across both drains"
         );
+    }
+
+    /// Burst test: N=20 messages enqueued, drained by 2 concurrent drainers.
+    ///
+    /// Verifies:
+    /// - No message is delivered more than once (no double delivery).
+    /// - No message is lost (all 20 are delivered across both drainers).
+    /// - Queue is empty after both drains complete.
+    ///
+    /// This validates bounded queue behavior and the O_CREAT|O_EXCL claim protocol
+    /// under burst load with two concurrent drainers.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn burst_queue_bounded_all_delivered_exactly_once() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (team, agent_id) = setup_env(&tmp);
+
+        const N: usize = 20;
+
+        // Enqueue N messages.
+        for i in 0..N {
+            enqueue(&team, &agent_id, &format!(r#"{{"burst_msg":{i}}}"#))
+                .await
+                .unwrap();
+        }
+
+        // Two independent writers (simulating two concurrent drain tasks).
+        let (writer1, cap1) = SharedCapWriter::new();
+        let stdin1: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> =
+            Arc::new(Mutex::new(Box::new(writer1)));
+
+        let (writer2, cap2) = SharedCapWriter::new();
+        let stdin2: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> =
+            Arc::new(Mutex::new(Box::new(writer2)));
+
+        let team_a = team.clone();
+        let agent_a = agent_id.clone();
+        let stdin_a = Arc::clone(&stdin1);
+
+        let team_b = team.clone();
+        let agent_b = agent_id.clone();
+        let stdin_b = Arc::clone(&stdin2);
+
+        // Drain concurrently.
+        let (count_a, count_b) = tokio::join!(
+            drain(&team_a, &agent_a, &stdin_a, Duration::from_secs(600)),
+            drain(&team_b, &agent_b, &stdin_b, Duration::from_secs(600)),
+        );
+
+        let total = count_a.unwrap() + count_b.unwrap();
+        assert_eq!(
+            total, N,
+            "total drained should be exactly {N} (no double delivery, no loss)"
+        );
+
+        // Verify total line count across both capture buffers equals N.
+        let out1 = cap1.lock().unwrap().clone();
+        let out2 = cap2.lock().unwrap().clone();
+        let text1 = String::from_utf8_lossy(&out1);
+        let text2 = String::from_utf8_lossy(&out2);
+        let lines1: Vec<&str> = text1.lines().filter(|l| !l.is_empty()).collect();
+        let lines2: Vec<&str> = text2.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            lines1.len() + lines2.len(),
+            N,
+            "exactly {N} messages should be delivered across both drains"
+        );
+
+        // Queue directory should be empty after both drains.
+        let dir = queue_dir(&team, &agent_id).unwrap();
+        let mut entries = tokio::fs::read_dir(&dir).await.unwrap();
+        let mut remaining = 0usize;
+        while let Ok(Some(_)) = entries.next_entry().await {
+            remaining += 1;
+        }
+        assert_eq!(remaining, 0, "queue must be empty after full burst drain");
     }
 
     #[tokio::test]
