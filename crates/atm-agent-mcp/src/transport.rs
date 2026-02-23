@@ -536,6 +536,41 @@ impl CodexTransport for JsonCodecTransport {
 /// failure is permitted.
 const MIN_SUPPORTED_PROTOCOL_VERSION: &str = "2.0";
 
+/// Compare two dot-separated version strings numerically.
+///
+/// Parses each segment as `u64`; segments that fail to parse are compared
+/// lexicographically as a fallback.  Returns `true` when `version` is
+/// *at least* `min_version`.
+///
+/// # Examples
+/// ```ignore
+/// assert!(version_gte("2.0", "2.0"));
+/// assert!(version_gte("10.0", "2.0"));
+/// assert!(!version_gte("1.9", "2.0"));
+/// ```
+fn version_gte(version: &str, min_version: &str) -> bool {
+    let a: Vec<&str> = version.split('.').collect();
+    let b: Vec<&str> = min_version.split('.').collect();
+    let len = a.len().max(b.len());
+    for i in 0..len {
+        let seg_a = a.get(i).copied().unwrap_or("0");
+        let seg_b = b.get(i).copied().unwrap_or("0");
+        match (seg_a.parse::<u64>(), seg_b.parse::<u64>()) {
+            (Ok(na), Ok(nb)) => match na.cmp(&nb) {
+                std::cmp::Ordering::Greater => return true,
+                std::cmp::Ordering::Less => return false,
+                std::cmp::Ordering::Equal => continue,
+            },
+            _ => match seg_a.cmp(seg_b) {
+                std::cmp::Ordering::Greater => return true,
+                std::cmp::Ordering::Less => return false,
+                std::cmp::Ordering::Equal => continue,
+            },
+        }
+    }
+    true // all segments equal
+}
+
 /// Transport that spawns `codex app-server` and communicates via the app-server
 /// JSON-RPC 2.0 JSONL protocol.
 ///
@@ -892,7 +927,7 @@ impl AppServerTransport {
 
         if let Some(ref ver) = negotiated_version {
             *self.protocol_version.lock().await = Some(ver.clone());
-            if ver.as_str() < MIN_SUPPORTED_PROTOCOL_VERSION {
+            if !version_gte(ver.as_str(), MIN_SUPPORTED_PROTOCOL_VERSION) {
                 tracing::warn!(
                     version = %ver,
                     min_required = MIN_SUPPORTED_PROTOCOL_VERSION,
@@ -1572,7 +1607,7 @@ impl CodexTransport for AppServerTransport {
                 result: Some(ver.clone()),
                 ..Default::default()
             });
-            if ver.as_str() < MIN_SUPPORTED_PROTOCOL_VERSION {
+            if !version_gte(ver.as_str(), MIN_SUPPORTED_PROTOCOL_VERSION) {
                 tracing::warn!(
                     version = %ver,
                     min_required = MIN_SUPPORTED_PROTOCOL_VERSION,
