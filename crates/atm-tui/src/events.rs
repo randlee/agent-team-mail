@@ -15,6 +15,10 @@
 //! | `↓` | Move selection down |
 //! | `Tab` | Cycle panel focus |
 //! | `F` | Toggle follow mode (uppercase) |
+//! | `L` | Toggle log viewer panel (uppercase) |
+//! | `G` | Cycle log level filter (uppercase, only when log viewer is visible) |
+//! | `PageUp` | Scroll log viewer up 10 lines (when log viewer is visible) |
+//! | `PageDown` | Scroll log viewer down 10 lines (when log viewer is visible) |
 //!
 //! ## Agent Terminal panel (when selected agent is live)
 //!
@@ -83,6 +87,33 @@ pub fn handle_event(event: &Event, app: &mut App) -> bool {
                 app.follow_mode = !app.follow_mode;
                 return false;
             }
+            // 'L' (uppercase) toggles the log viewer panel.
+            (KeyCode::Char('L'), m) if !m.contains(KeyModifiers::CONTROL) => {
+                app.log_viewer_visible = !app.log_viewer_visible;
+                // When turning on with follow mode, pin scroll to bottom.
+                if app.log_viewer_visible && app.log_follow_mode {
+                    app.log_scroll_offset = app.log_events.len();
+                }
+                return false;
+            }
+            // 'G' (uppercase) cycles the log level filter (only when viewer visible).
+            (KeyCode::Char('G'), m) if !m.contains(KeyModifiers::CONTROL) => {
+                if app.log_viewer_visible {
+                    app.cycle_log_level_filter();
+                }
+                return false;
+            }
+            // PageUp scrolls the log viewer up 10 lines.
+            (KeyCode::PageUp, _) if app.log_viewer_visible => {
+                app.log_scroll_offset = app.log_scroll_offset.saturating_sub(10);
+                return false;
+            }
+            // PageDown scrolls the log viewer down 10 lines.
+            (KeyCode::PageDown, _) if app.log_viewer_visible => {
+                let max = app.log_events.len();
+                app.log_scroll_offset = (app.log_scroll_offset + 10).min(max);
+                return false;
+            }
             _ => {}
         }
 
@@ -90,6 +121,8 @@ pub fn handle_event(event: &Event, app: &mut App) -> bool {
         return match app.focus {
             FocusPanel::AgentTerminal => handle_agent_terminal_key(code, modifiers, app),
             FocusPanel::Dashboard => handle_dashboard_key(code, app),
+            // Log viewer panel uses navigation keys only (handled globally above).
+            FocusPanel::LogViewer => handle_log_viewer_key(code, app),
         };
     }
     false
@@ -198,6 +231,18 @@ fn handle_dashboard_key(code: &KeyCode, app: &mut App) -> bool {
     false
 }
 
+/// Handle keys while the Log Viewer panel is focused.
+///
+/// Navigation (PageUp/PageDown) is handled globally. Only `q` is handled here
+/// to allow quitting from within the viewer.
+fn handle_log_viewer_key(code: &KeyCode, app: &mut App) -> bool {
+    if let KeyCode::Char('q') = code {
+        app.should_quit = true;
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +335,8 @@ mod tests {
         assert_eq!(app.focus, FocusPanel::Dashboard);
         handle_event(&key_event(KeyCode::Tab, KeyModifiers::NONE), &mut app);
         assert_eq!(app.focus, FocusPanel::AgentTerminal);
+        handle_event(&key_event(KeyCode::Tab, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.focus, FocusPanel::LogViewer);
         handle_event(&key_event(KeyCode::Tab, KeyModifiers::NONE), &mut app);
         assert_eq!(app.focus, FocusPanel::Dashboard);
     }
@@ -523,6 +570,95 @@ mod tests {
             app.control_input.is_empty(),
             "Char input should not append when agent is not live"
         );
+    }
+
+    // ── Log viewer key bindings ───────────────────────────────────────────────
+
+    #[test]
+    fn test_uppercase_l_toggles_log_viewer_on() {
+        let mut app = new_app();
+        assert!(!app.log_viewer_visible);
+        handle_event(&key_event(KeyCode::Char('L'), KeyModifiers::NONE), &mut app);
+        assert!(app.log_viewer_visible, "L must enable log viewer when it was off");
+    }
+
+    #[test]
+    fn test_uppercase_l_toggles_log_viewer_off() {
+        let mut app = new_app();
+        app.log_viewer_visible = true;
+        handle_event(&key_event(KeyCode::Char('L'), KeyModifiers::NONE), &mut app);
+        assert!(!app.log_viewer_visible, "L must disable log viewer when it was on");
+    }
+
+    #[test]
+    fn test_uppercase_g_cycles_log_level_filter_when_viewer_visible() {
+        let mut app = new_app();
+        app.log_viewer_visible = true;
+        assert!(app.log_level_filter.is_none());
+        handle_event(&key_event(KeyCode::Char('G'), KeyModifiers::NONE), &mut app);
+        assert_eq!(app.log_level_filter.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn test_uppercase_g_ignored_when_viewer_not_visible() {
+        let mut app = new_app();
+        app.log_viewer_visible = false;
+        handle_event(&key_event(KeyCode::Char('G'), KeyModifiers::NONE), &mut app);
+        assert!(app.log_level_filter.is_none(), "G must be ignored when viewer is not visible");
+    }
+
+    #[test]
+    fn test_page_up_scrolls_log_viewer() {
+        use agent_team_mail_core::logging_event::new_log_event;
+        let mut app = new_app();
+        app.log_viewer_visible = true;
+        // Seed some events so we have room to scroll.
+        let events: Vec<_> = (0..30)
+            .map(|i| new_log_event("atm", &format!("a_{i}"), "atm::t", "info"))
+            .collect();
+        app.append_log_events(events);
+        app.log_scroll_offset = 20;
+        handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.log_scroll_offset, 10, "PageUp must decrease offset by 10");
+    }
+
+    #[test]
+    fn test_page_up_clamps_at_zero() {
+        let mut app = new_app();
+        app.log_viewer_visible = true;
+        app.log_scroll_offset = 3;
+        handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.log_scroll_offset, 0, "PageUp must clamp at 0");
+    }
+
+    #[test]
+    fn test_page_down_scrolls_log_viewer() {
+        use agent_team_mail_core::logging_event::new_log_event;
+        let mut app = new_app();
+        app.log_viewer_visible = true;
+        let events: Vec<_> = (0..30)
+            .map(|i| new_log_event("atm", &format!("a_{i}"), "atm::t", "info"))
+            .collect();
+        app.append_log_events(events);
+        app.log_follow_mode = false;
+        app.log_scroll_offset = 0;
+        handle_event(&key_event(KeyCode::PageDown, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.log_scroll_offset, 10, "PageDown must increase offset by 10");
+    }
+
+    #[test]
+    fn test_page_down_clamps_at_len() {
+        use agent_team_mail_core::logging_event::new_log_event;
+        let mut app = new_app();
+        app.log_viewer_visible = true;
+        let events: Vec<_> = (0..5)
+            .map(|i| new_log_event("atm", &format!("a_{i}"), "atm::t", "info"))
+            .collect();
+        app.append_log_events(events);
+        app.log_follow_mode = false;
+        app.log_scroll_offset = 0;
+        handle_event(&key_event(KeyCode::PageDown, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.log_scroll_offset, 5, "PageDown must clamp at log_events.len()");
     }
 
     #[test]

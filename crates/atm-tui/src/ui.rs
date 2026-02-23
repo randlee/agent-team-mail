@@ -73,7 +73,11 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     draw_dashboard(frame, columns[0], app);
-    draw_agent_terminal(frame, columns[1], app);
+    if app.log_viewer_visible {
+        draw_log_viewer(frame, columns[1], app);
+    } else {
+        draw_agent_terminal(frame, columns[1], app);
+    }
 }
 
 // ── Dashboard panel ───────────────────────────────────────────────────────────
@@ -326,6 +330,120 @@ fn draw_control_input(frame: &mut Frame, area: Rect, app: &App, border_style: St
     }
 }
 
+// ── Log Viewer panel ──────────────────────────────────────────────────────────
+
+/// Format a single [`LogEventV1`] into a display line and the color to render it with.
+///
+/// Format: `{ts}  {LEVEL:<5}  [{source_binary}{/agent}] {action}{suffix}`
+/// where suffix is `: {error}` or ` ({outcome})` when those fields are present.
+fn format_log_event_line(
+    event: &agent_team_mail_core::logging_event::LogEventV1,
+) -> (String, ratatui::style::Color) {
+    // Choose a color based on the log level.
+    let color = match event.level.to_lowercase().as_str() {
+        "error" => Color::Red,
+        "warn" => Color::Yellow,
+        "info" => Color::Green,
+        "debug" | "trace" => Color::DarkGray,
+        _ => Color::White,
+    };
+
+    // Build the source label: `source_binary` or `source_binary/agent`.
+    let source_label = match event.agent.as_deref() {
+        Some(agent) => format!("{}/{}", event.source_binary, agent),
+        None => event.source_binary.clone(),
+    };
+
+    // Build optional suffix.
+    let suffix = if let Some(ref err) = event.error {
+        format!(": {err}")
+    } else if let Some(ref outcome) = event.outcome {
+        format!(" ({outcome})")
+    } else {
+        String::new()
+    };
+
+    let line = format!(
+        "{}  {:<5}  [{}] {}{}",
+        event.ts,
+        event.level.to_uppercase(),
+        source_label,
+        event.action,
+        suffix,
+    );
+
+    (line, color)
+}
+
+/// Render the Log Viewer panel.
+fn draw_log_viewer(frame: &mut Frame, area: Rect, app: &App) {
+    let focused = app.focus == FocusPanel::LogViewer;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    // Build the title with optional level filter and follow badge.
+    let level_label = match app.log_level_filter.as_deref() {
+        Some(l) => format!(" Log Viewer [level: {l}]"),
+        None => " Log Viewer [level: all]".to_string(),
+    };
+    let title_text = if app.log_follow_mode {
+        format!("{level_label} [FOLLOW] ")
+    } else {
+        format!("{level_label} ")
+    };
+
+    let block = Block::default()
+        .title(title_text)
+        .borders(Borders::ALL)
+        .border_type(if focused { BorderType::Rounded } else { BorderType::Plain })
+        .border_style(border_style);
+
+    // Account for top/bottom borders.
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    if app.log_events.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No log events — start atm-daemon to see logs")
+                .block(block)
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    // Filter events by active level filter before windowing.
+    let filtered: Vec<&agent_team_mail_core::logging_event::LogEventV1> = app
+        .log_events
+        .iter()
+        .filter(|e| {
+            app.log_level_filter
+                .as_deref()
+                .is_none_or(|f| e.level.eq_ignore_ascii_case(f))
+        })
+        .collect();
+
+    let bottom = app.log_scroll_offset.min(filtered.len());
+    let start = bottom.saturating_sub(inner_height.max(1));
+    let visible: Vec<Line> = filtered[start..bottom]
+        .iter()
+        .map(|event| {
+            let (text, color) = format_log_event_line(event);
+            Line::from(Span::styled(text, Style::default().fg(color)))
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(visible)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
@@ -368,7 +486,11 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Span::raw(": interrupt  "),
             Span::styled("F", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(format!(": {follow_label}")),
+            Span::raw(format!(": {follow_label}  ")),
+            Span::styled("L", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(": log  "),
+            Span::styled("G", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(": filter"),
         ])
     };
     frame.render_widget(

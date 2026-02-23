@@ -67,6 +67,12 @@ use app::{App, MemberRow, PendingControl};
 use config::{TuiConfig, load_tui_config};
 use dashboard::{get_inbox_count, session_log_path};
 
+// ── Module-level statics ──────────────────────────────────────────────────────
+
+/// Guards the one-time deprecation warning for `ATM_LOG_PATH`.
+static ATM_LOG_PATH_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 /// ATM TUI — live dashboard and agent stream viewer.
@@ -107,6 +113,21 @@ async fn main() -> Result<()> {
         ..Default::default()
     });
 
+    // Resolve unified log file path BEFORE terminal setup so any eprintln! warnings
+    // reach the user's terminal (stderr) before the alternate screen is activated.
+    let log_file_path: std::path::PathBuf = if let Ok(p) = std::env::var("ATM_LOG_FILE") {
+        std::path::PathBuf::from(p)
+    } else if let Ok(p) = std::env::var("ATM_LOG_PATH") {
+        if !ATM_LOG_PATH_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("atm-tui: warning: ATM_LOG_PATH is deprecated; use ATM_LOG_FILE instead");
+        }
+        std::path::PathBuf::from(p)
+    } else {
+        get_home_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(".config/atm/atm.log.jsonl")
+    };
+
     // Set up terminal
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
@@ -115,7 +136,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let result = run_app(&mut terminal, team.clone(), config).await;
+    let result = run_app(&mut terminal, team.clone(), config, log_file_path).await;
 
     // Restore terminal on exit (even on error)
     disable_raw_mode().ok();
@@ -145,6 +166,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     team: String,
     config: TuiConfig,
+    log_file_path: std::path::PathBuf,
 ) -> Result<()> {
     let mut app = App::new(team.clone(), config);
 
@@ -155,7 +177,6 @@ async fn run_app<B: ratatui::backend::Backend>(
     // Resolve ATM home once for inbox reads.
     let home: PathBuf = get_home_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    // Resolve home for inbox reads (used in the loop closure below)
     let mut tick = interval(Duration::from_millis(100));
 
     loop {
@@ -289,6 +310,22 @@ async fn run_app<B: ratatui::backend::Backend>(
             }
         }
 
+        // ── Log viewer tail (100 ms) ─────────────────────────────────────────
+        if app.log_viewer_visible {
+            let (new_events, new_pos) = tail_log_events(
+                &log_file_path,
+                app.log_viewer_pos,
+                app.log_agent_filter.as_deref(),
+                app.log_level_filter.as_deref(),
+            )
+            .await
+            .unwrap_or_default();
+            if new_pos > app.log_viewer_pos {
+                app.log_viewer_pos = new_pos;
+                app.append_log_events(new_events);
+            }
+        }
+
         // ── Input event handling ──────────────────────────────────────────────
         if event::poll(Duration::from_millis(0))? {
             let ev = event::read()?;
@@ -388,6 +425,59 @@ async fn tail_log_file(path: &std::path::Path, pos: u64) -> Result<(Vec<String>,
         .collect();
 
     Ok((lines, pos + n as u64))
+}
+
+/// Read new [`LogEventV1`] events from a JSONL log file since `pos`.
+///
+/// Returns matching events and the updated byte position.
+/// Returns `Ok((vec![], pos))` when the file is missing, empty, or has no new data.
+///
+/// # Filtering
+///
+/// * `agent_filter` — when `Some`, only events where `event.agent == Some(filter)` are included.
+/// * `level_filter` — when `Some`, only events where `event.level` matches (case-insensitive).
+async fn tail_log_events(
+    path: &std::path::Path,
+    pos: u64,
+    agent_filter: Option<&str>,
+    level_filter: Option<&str>,
+) -> anyhow::Result<(Vec<agent_team_mail_core::logging_event::LogEventV1>, u64)> {
+    use tokio::fs::File;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    if !path.exists() {
+        return Ok((Vec::new(), pos));
+    }
+
+    let mut file = File::open(path).await?;
+    let metadata = file.metadata().await?;
+    let file_len = metadata.len();
+
+    if file_len <= pos {
+        return Ok((Vec::new(), pos));
+    }
+
+    file.seek(std::io::SeekFrom::Start(pos)).await?;
+
+    let read_len = (file_len - pos).min(256 * 1024) as usize; // cap at 256 KiB per tick
+    let mut buf = vec![0u8; read_len];
+    let n = file.read(&mut buf).await?;
+    buf.truncate(n);
+
+    let chunk = String::from_utf8_lossy(&buf);
+    let events: Vec<agent_team_mail_core::logging_event::LogEventV1> = chunk
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter(|ev: &agent_team_mail_core::logging_event::LogEventV1| {
+            agent_filter.is_none_or(|f| ev.agent.as_deref() == Some(f))
+        })
+        .filter(|ev: &agent_team_mail_core::logging_event::LogEventV1| {
+            level_filter.is_none_or(|f| ev.level.eq_ignore_ascii_case(f))
+        })
+        .collect();
+
+    Ok((events, pos + n as u64))
 }
 
 fn emit_stream_detach_event(team: &str, agent: &str) {
@@ -734,6 +824,66 @@ mod tests {
             lines.is_empty(),
             "no lines should be returned on truncation signal"
         );
+    }
+
+    // ── tail_log_events tests ─────────────────────────────────────────────────
+
+    fn make_jsonl_event(agent: Option<&str>, level: &str, action: &str) -> String {
+        use agent_team_mail_core::logging_event::new_log_event;
+        let mut ev = new_log_event("atm", action, "atm::test", level);
+        if let Some(a) = agent {
+            ev.agent = Some(a.to_string());
+        }
+        serde_json::to_string(&ev).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_tail_log_events_missing_file_returns_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("missing.log.jsonl");
+        let (events, new_pos) = tail_log_events(&path, 0, None, None).await.unwrap();
+        assert!(events.is_empty());
+        assert_eq!(new_pos, 0);
+    }
+
+    #[tokio::test]
+    async fn test_tail_log_events_reads_new_events() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("atm.log.jsonl");
+        let line = make_jsonl_event(None, "info", "daemon_start");
+        tokio::fs::write(&path, format!("{line}\n")).await.unwrap();
+        let (events, new_pos) = tail_log_events(&path, 0, None, None).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "daemon_start");
+        assert!(new_pos > 0);
+    }
+
+    #[tokio::test]
+    async fn test_tail_log_events_filters_by_level() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("atm.log.jsonl");
+        let info_line = make_jsonl_event(None, "info", "info_action");
+        let warn_line = make_jsonl_event(None, "warn", "warn_action");
+        tokio::fs::write(&path, format!("{info_line}\n{warn_line}\n"))
+            .await
+            .unwrap();
+        let (events, _) = tail_log_events(&path, 0, None, Some("warn")).await.unwrap();
+        assert_eq!(events.len(), 1, "only warn events should be returned");
+        assert_eq!(events[0].action, "warn_action");
+    }
+
+    #[tokio::test]
+    async fn test_tail_log_events_filters_by_agent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("atm.log.jsonl");
+        let line_a = make_jsonl_event(Some("agent-a"), "info", "action_a");
+        let line_b = make_jsonl_event(Some("agent-b"), "info", "action_b");
+        tokio::fs::write(&path, format!("{line_a}\n{line_b}\n"))
+            .await
+            .unwrap();
+        let (events, _) = tail_log_events(&path, 0, Some("agent-a"), None).await.unwrap();
+        assert_eq!(events.len(), 1, "only agent-a events should be returned");
+        assert_eq!(events[0].action, "action_a");
     }
 
     /// Test that the stream source error freeze-then-clear cycle works at the
