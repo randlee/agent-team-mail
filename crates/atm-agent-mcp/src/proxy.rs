@@ -2508,16 +2508,6 @@ Session ending. Write a concise summary of:\n\
                     match event_type {
                         JsonlEventType::Idle => {
                             idle_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                            agent_team_mail_core::event_log::emit_event_best_effort( // TODO(M.1b): remove emit_event_best_effort call
-                                agent_team_mail_core::event_log::EventFields {
-                                    level: "info",
-                                    source: "atm-agent-mcp",
-                                    action: "idle_detected",
-                                    team: Some(team_for_reader.clone()),
-                                    result: Some("cli-json".to_string()),
-                                    ..Default::default()
-                                },
-                            );
 
                             // Drain for all active agent sessions (keyed by actual agent_id).
                             let agent_ids: Vec<String> = {
@@ -2543,16 +2533,6 @@ Session ending. Write a concise summary of:\n\
                             continue;
                         }
                         JsonlEventType::Done => {
-                            agent_team_mail_core::event_log::emit_event_best_effort( // TODO(M.1b): remove emit_event_best_effort call
-                                agent_team_mail_core::event_log::EventFields {
-                                    level: "info",
-                                    source: "atm-agent-mcp",
-                                    action: "codex_done",
-                                    team: Some(team_for_reader.clone()),
-                                    result: Some("cli-json".to_string()),
-                                    ..Default::default()
-                                },
-                            );
                             // Don't forward the done event upstream as a JSON-RPC message
                             continue;
                         }
@@ -2813,15 +2793,6 @@ async fn forward_event(
         && !kind.is_empty()
     {
         WATCH_UNKNOWN_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
-        agent_team_mail_core::event_log::emit_event_best_effort( // TODO(M.1b): remove emit_event_best_effort call
-            agent_team_mail_core::event_log::EventFields {
-                level: "debug",
-                source: "atm-agent-mcp",
-                action: "watch_event_ignored_unknown",
-                result: Some(kind.to_string()),
-                ..Default::default()
-            },
-        );
     }
 
     match upstream_tx.try_send(event.clone()) {

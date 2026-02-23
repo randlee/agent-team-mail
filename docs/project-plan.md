@@ -492,7 +492,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
 | M.1 | Watch-stream file naming/scoping cleanup | L.5 | PLANNED |
-| M.1b | Legacy bridge removal (`emit_event_best_effort` sunset) | M.1 | PLANNED |
+| M.1b | Legacy bridge removal (`emit_event_best_effort` sunset) | M.1 | IN PROGRESS |
 | M.2 | Codex watch-pane UI import baseline (copy-first) | L.5 | PLANNED |
 | M.3 | Event adapter parity (`CodexAdapter`) | M.2 | PLANNED |
 | M.4 | Input/approval/interrupt parity | M.3 | PLANNED |
