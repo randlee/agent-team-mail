@@ -492,6 +492,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
 | M.1 | Watch-stream file naming/scoping cleanup | L.5 | PLANNED |
+| M.1b | Legacy bridge removal (`emit_event_best_effort` sunset) | M.1 | PLANNED |
 | M.2 | Codex watch-pane UI import baseline (copy-first) | L.5 | PLANNED |
 | M.3 | Event adapter parity (`CodexAdapter`) | M.2 | PLANNED |
 | M.4 | Input/approval/interrupt parity | M.3 | PLANNED |
@@ -499,12 +500,19 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | M.6 | Replay/reconnect hardening | M.5 | PLANNED |
 | M.7 | Golden parity test harness + rollout gate | M.6 | PLANNED |
 
-**Parallel tracks**: M.1 and M.2 can execute concurrently (both depend only on L.5). M.3+ is sequential after M.2.
+**Parallel tracks**: M.1 and M.2 can execute concurrently (both depend only on L.5). M.1b depends on M.1 but is independent of M.2-M.7 and can run in parallel with the Codex parity track. M.3+ is sequential after M.2.
 
 **M.1 scope**:
 - Replace shared `~/.config/atm/watch-stream/events.jsonl` with per-agent or per-session files (for example `watch-stream/<agent-id>.jsonl`).
 - Clarify naming semantics so watch-stream cache is not confused with canonical log/audit streams.
 - Update `.claude/agents/log-monitor.md` to match final Phase M.1 log-path semantics and monitoring rules.
+
+**M.1b scope** (legacy bridge removal):
+- Remove `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var support from all crates.
+- Remove legacy `events.jsonl` sink code from CLI, daemon, MCP proxy, and TUI.
+- Remove legacy bridge log surface (surface 6) from `.claude/agents/log-monitor.md`.
+- Update `docs/logging-l1a-spec.md` and `docs/requirements.md` to mark bridge as removed.
+- Verify no external consumers depend on the old format before removal.
 
 **M.2-M.7 scope (Codex parity)**:
 - Copy Codex CLI rendering/runtime elements first and adapt only integration seams.
