@@ -131,6 +131,12 @@ impl CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn adapter_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parity/adapter")
+    }
 
     #[test]
     fn maps_core_lifecycle_sequence() {
@@ -211,5 +217,47 @@ mod tests {
         let line = adapter.adapt_frame(&interrupted).line;
         assert!(line.contains("turn.interrupted"));
         assert_eq!(adapter.unknown_events(), 0);
+    }
+
+    #[test]
+    fn parity_adapter_fixture_golden_scenarios() {
+        let base = adapter_fixture_dir();
+        let scenarios = [
+            "prompt-basic",
+            "tool-stream",
+            "approval-flow",
+            "error-flow",
+            "cancel-flow",
+        ];
+
+        for scenario in scenarios {
+            let input_path = base.join(scenario).join("input.events.jsonl");
+            let expected_path = base.join(scenario).join("expected.normalized.jsonl");
+
+            let input_raw = fs::read_to_string(&input_path).expect("input fixture");
+            let expected_raw = fs::read_to_string(&expected_path).expect("expected fixture");
+
+            let mut adapter = CodexAdapter::new();
+            let actual: Vec<serde_json::Value> = input_raw
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("valid input frame"))
+                .map(|frame| {
+                    let out = adapter.adapt_frame(&frame);
+                    serde_json::json!({
+                        "line": out.line,
+                        "is_turn_boundary": out.is_turn_boundary
+                    })
+                })
+                .collect();
+
+            let expected: Vec<serde_json::Value> = expected_raw
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("valid expected line"))
+                .collect();
+
+            assert_eq!(actual, expected, "adapter parity mismatch in scenario {scenario}");
+        }
     }
 }

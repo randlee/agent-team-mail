@@ -84,9 +84,9 @@ crates/atm-tui/tests/fixtures/parity/
 ```
 
 Placement rationale:
-- Layer A contract fixtures remain in `atm-agent-mcp` (transport boundary).
-- Layer B adapter fixtures live in `atm-tui` because `CodexAdapter` is implemented there.
-- Layer C renderer snapshots also live in `atm-tui` with the watch UI implementation.
+- Layer A contract fixtures live in `atm-agent-mcp` because transport-shape validation belongs at the proxy boundary.
+- Layer B adapter fixtures live in `atm-tui` because `CodexAdapter` is implemented and tested in `atm-tui`.
+- Layer C renderer fixtures live in `atm-tui` because watch rendering (`codex_watch`) is owned by `atm-tui`.
 
 `meta.toml` minimum fields:
 
@@ -171,3 +171,11 @@ Only after these are green should subjective user validation begin.
 - Keep fixture payloads minimal but semantically complete.
 - Keep deterministic sanitization rules in one helper module to avoid fixture churn.
 - Do not route continuous stream through daemon for parity tests; keep MCP->TUI stream path direct per Phase L/M architecture.
+
+## 9. M.7 Deviation Log
+
+- Current approved deviation: renderer parity snapshots are line-level textual snapshots derived from `codex_watch::render_stream_line`, not full terminal-buffer frame dumps.
+- Rationale: provides deterministic, cross-platform parity checks in CI while preserving a clear upgrade path to full-frame snapshotting in follow-up parity expansion work.
+- Delivered fixture scenarios for M.7 baseline: `prompt-basic`, `tool-stream`, `approval-flow`, `error-flow`, `cancel-flow`.
+- Deferred scenario deviations (approved for future parity expansion): `multi-item`, `fatal-error`, `unknown-event`, `atm-mail`, `user-steer`, `session-attach`, `detach-reattach`, `cross-transport`.
+- Viewport reflow deviation: current renderer parity checks are viewport-width-independent line snapshots. `viewport-120x36` and `viewport-80x24` remain intentionally identical baseline fixtures until full frame-buffer snapshot testing is added.
