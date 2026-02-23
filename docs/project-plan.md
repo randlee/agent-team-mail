@@ -478,6 +478,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | L.3 | `atm logs` CLI command | L.2 | PLANNING |
 | L.4 | TUI log viewer + legacy sunset | L.3 | PLANNING |
 
+**Deferred (explicit)**: Dashboard mail compose workflow is out of scope for current L-series work; Dashboard remains preview/navigation-only until a dedicated composer sprint is scheduled.
+
 **Blocked by**: This is a blocking prerequisite for integration testing.
 
 ---

@@ -40,6 +40,7 @@ mod ui;
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use std::{collections::BTreeMap, process::Stdio};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -54,8 +55,8 @@ use tokio::time::interval;
 use agent_team_mail_core::{
     control::{ControlAck, ControlAction, ControlRequest, ControlResult, CONTROL_SCHEMA_VERSION},
     daemon_client::{
-        AgentSummary, query_agent_stream_state, query_list_agents, send_control,
-        subscribe_stream_events,
+        AgentSummary, daemon_is_running, daemon_socket_path, query_agent_stream_state,
+        query_list_agents, send_control, subscribe_stream_events,
     },
     daemon_stream::{DaemonStreamEvent, TurnStatusWire},
     event_log::{EventFields, emit_event_best_effort},
@@ -65,7 +66,7 @@ use agent_team_mail_core::{
 
 use app::{App, MemberRow, PendingControl};
 use config::{TuiConfig, load_tui_config};
-use dashboard::{get_inbox_count, session_log_path};
+use dashboard::{get_inbox_count, read_inbox_preview, read_team_members, session_log_path};
 
 // ── Module-level statics ──────────────────────────────────────────────────────
 
@@ -101,6 +102,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let team = cli.team.clone();
+    let daemon_warning = ensure_daemon_running(&team);
 
     // Load user preferences before terminal setup so parse warnings go to stderr.
     let config = load_tui_config();
@@ -136,7 +138,14 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let result = run_app(&mut terminal, team.clone(), config, log_file_path).await;
+    let result = run_app(
+        &mut terminal,
+        team.clone(),
+        config,
+        log_file_path,
+        daemon_warning,
+    )
+    .await;
 
     // Restore terminal on exit (even on error)
     disable_raw_mode().ok();
@@ -167,8 +176,12 @@ async fn run_app<B: ratatui::backend::Backend>(
     team: String,
     config: TuiConfig,
     log_file_path: std::path::PathBuf,
+    daemon_warning: Option<String>,
 ) -> Result<()> {
     let mut app = App::new(team.clone(), config);
+    if let Some(w) = daemon_warning {
+        app.status_message = Some(w);
+    }
 
     // Rate-limit daemon/inbox queries to 2-second intervals.
     const DAEMON_REFRESH: Duration = Duration::from_secs(2);
@@ -188,7 +201,8 @@ async fn run_app<B: ratatui::backend::Backend>(
             last_daemon_refresh = Instant::now();
 
             let agent_list = refresh_agent_list();
-            let members = build_member_rows(&agent_list, &home, &team);
+            let configured_members = read_team_members(&home, &team);
+            let members = build_member_rows(&agent_list, &configured_members, &home, &team);
 
             // Detect if the currently streaming agent has changed identity.
             if let Some(ref name) = app.streaming_agent.clone()
@@ -206,6 +220,11 @@ async fn run_app<B: ratatui::backend::Backend>(
             if !app.members.is_empty() && app.selected_index >= app.members.len() {
                 app.selected_index = app.members.len() - 1;
             }
+
+            app.inbox_preview = app
+                .selected_agent()
+                .map(|agent| read_inbox_preview(&home, &team, agent, 5))
+                .unwrap_or_default();
 
             // Resolve streaming agent from selection.
             if let Some(agent_name) = app.selected_agent().map(str::to_owned)
@@ -362,15 +381,64 @@ fn refresh_agent_list() -> Vec<AgentSummary> {
 }
 
 /// Build [`MemberRow`] entries from the agent list with current inbox counts.
-fn build_member_rows(agents: &[AgentSummary], home: &std::path::Path, team: &str) -> Vec<MemberRow> {
-    agents
+fn build_member_rows(
+    daemon_agents: &[AgentSummary],
+    configured_members: &[String],
+    home: &std::path::Path,
+    team: &str,
+) -> Vec<MemberRow> {
+    let mut states_by_agent: BTreeMap<String, String> = daemon_agents
         .iter()
-        .map(|a| MemberRow {
-            agent: a.agent.clone(),
-            state: a.state.clone(),
-            inbox_count: get_inbox_count(home, team, &a.agent),
+        .map(|a| (a.agent.clone(), a.state.clone()))
+        .collect();
+
+    // Ensure configured members appear even if daemon state store is empty.
+    for member in configured_members {
+        states_by_agent
+            .entry(member.clone())
+            .or_insert_with(|| "unknown".to_string());
+    }
+
+    states_by_agent
+        .into_iter()
+        .map(|(agent, state)| {
+            MemberRow {
+                inbox_count: get_inbox_count(home, team, &agent),
+                agent,
+                state,
+            }
         })
         .collect()
+}
+
+fn ensure_daemon_running(team: &str) -> Option<String> {
+    let socket_path = daemon_socket_path()
+        .unwrap_or_else(|_| std::env::temp_dir().join("atm-daemon.sock"));
+    if daemon_is_running() && socket_path.exists() {
+        return None;
+    }
+
+    let spawn = std::process::Command::new("atm-daemon")
+        .arg("--team")
+        .arg(team)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    if spawn.is_err() {
+        return Some(format!(
+            "daemon unavailable: failed to start; run `atm-daemon --team {team}`"
+        ));
+    }
+
+    for _ in 0..20 {
+        if daemon_is_running() && socket_path.exists() {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Some("daemon startup incomplete: socket unavailable".to_string())
 }
 
 /// Read new bytes from a log file since `pos`, returning new lines and the

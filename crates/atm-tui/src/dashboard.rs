@@ -6,6 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::io::lock::acquire_lock;
+use agent_team_mail_core::schema::InboxMessage;
+use serde_json::Value;
 
 /// Read the number of messages in an agent's inbox file.
 ///
@@ -36,6 +39,79 @@ pub fn get_inbox_count(home: &Path, team: &str, agent: &str) -> usize {
         }
         _ => 0,
     }
+}
+
+/// Read team member names from `~/.claude/teams/{team}/config.json`.
+///
+/// Returns an empty vector when the config is missing or malformed.
+pub fn read_team_members(home: &Path, team: &str) -> Vec<String> {
+    let config_path = home.join(".claude/teams").join(team).join("config.json");
+    let lock_path = config_path.with_extension("lock");
+    let _lock = match acquire_lock(&lock_path, 5) {
+        Ok(lock) => lock,
+        Err(_) => return Vec::new(),
+    };
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let root: Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    root.get("members")
+        .and_then(|v| v.as_array())
+        .map(|members| {
+            members
+                .iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Read recent inbox message previews for an agent.
+///
+/// Returns up to `max_items` lines formatted for compact dashboard display.
+pub fn read_inbox_preview(home: &Path, team: &str, agent: &str, max_items: usize) -> Vec<String> {
+    let inbox_path = home
+        .join(".claude/teams")
+        .join(team)
+        .join("inboxes")
+        .join(format!("{agent}.json"));
+    let lock_path = inbox_path.with_extension("lock");
+    let _lock = match acquire_lock(&lock_path, 5) {
+        Ok(lock) => lock,
+        Err(_) => return Vec::new(),
+    };
+    let content = match std::fs::read(&inbox_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let messages: Vec<InboxMessage> = match serde_json::from_slice(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    messages
+        .iter()
+        .rev()
+        .take(max_items)
+        .map(|m| {
+            let from = m.from.as_str();
+            let summary = m.summary.as_deref().unwrap_or(m.text.as_str());
+            let mut line = format!("{from}: {summary}");
+            if line.len() > 100 {
+                line.truncate(97);
+                line.push_str("...");
+            }
+            line
+        })
+        .collect()
 }
 
 /// Construct the expected path for an agent's raw Claude Code session transcript.
@@ -142,6 +218,40 @@ mod tests {
 
             let count = get_inbox_count(home, "atm-dev", "arch-ctm");
             assert_eq!(count, 3, "expected 3 messages in inbox");
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_read_team_members_from_config() {
+        with_tmp_home(|home| {
+            let team_dir = home.join(".claude/teams/atm-dev");
+            fs::create_dir_all(&team_dir).unwrap();
+            fs::write(
+                team_dir.join("config.json"),
+                r#"{"members":[{"name":"team-lead"},{"name":"arch-ctm"}]}"#,
+            )
+            .unwrap();
+
+            let members = read_team_members(home, "atm-dev");
+            assert_eq!(members, vec!["team-lead", "arch-ctm"]);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_read_inbox_preview_returns_recent_messages() {
+        with_tmp_home(|home| {
+            let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");
+            fs::create_dir_all(&inbox_dir).unwrap();
+            fs::write(
+                inbox_dir.join("arch-ctm.json"),
+                r#"[{"from":"a","text":"one","timestamp":"2026-01-01T00:00:00Z","read":false,"summary":"one"},{"from":"b","text":"two","timestamp":"2026-01-01T00:00:01Z","read":false,"summary":"two"},{"from":"c","text":"three","timestamp":"2026-01-01T00:00:02Z","read":false,"summary":"three"}]"#,
+            )
+            .unwrap();
+
+            let preview = read_inbox_preview(home, "atm-dev", "arch-ctm", 2);
+            assert_eq!(preview, vec!["c: three", "b: two"]);
         });
     }
 }
