@@ -43,7 +43,10 @@ mod ui;
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use std::{collections::BTreeMap, process::Stdio};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    process::Stdio,
+};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -76,6 +79,10 @@ use dashboard::{get_inbox_count, read_inbox_preview, read_team_members, session_
 /// Guards the one-time deprecation warning for `ATM_LOG_PATH`.
 static ATM_LOG_PATH_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+/// Replay window size used when attaching/reconnecting to watch feed.
+const WATCH_ATTACH_REPLAY_MAX_FRAMES: usize = 50;
+/// Max bytes scanned from the watch file tail to build attach replay.
+const WATCH_ATTACH_REPLAY_SCAN_BYTES: u64 = 512 * 1024;
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -266,25 +273,27 @@ async fn run_app<B: ratatui::backend::Backend>(
         if let (Some(agent), Some(path)) = (current_agent, current_watch_path) {
             match tail_watch_stream_file(&path, app.watch_stream_pos, &agent).await {
                 Ok((frames, new_pos)) => {
-                    if new_pos == 0 && app.watch_stream_pos > 0 {
-                        app.watch_stream_pos = 0;
-                        app.stream_lines.clear();
-                        app.stream_source_error =
-                            Some("stream reset: watch feed truncated".to_string());
-                    } else if new_pos > app.watch_stream_pos {
+                    let rewound = new_pos < app.watch_stream_pos;
+                    if rewound || new_pos > app.watch_stream_pos {
                         app.stream_source_error = None;
                         app.watch_stream_pos = new_pos;
-                        let mut lines: Vec<String> = Vec::new();
-                        for frame in &frames {
-                            app.apply_watch_frame(frame);
-                            let adapted = codex_adapter.adapt_frame(frame);
-                            if adapted.is_turn_boundary && !app.stream_lines.is_empty() {
+                        if !frames.is_empty() {
+                            let mut lines: Vec<String> = Vec::new();
+                            if rewound && !app.stream_lines.is_empty() {
+                                // Reconnect continuity: keep existing transcript and append replay.
                                 lines.push(String::new());
                             }
-                            lines.push(adapted.line);
+                            for frame in &frames {
+                                app.apply_watch_frame(frame);
+                                let adapted = codex_adapter.adapt_frame(frame);
+                                if adapted.is_turn_boundary && !app.stream_lines.is_empty() {
+                                    lines.push(String::new());
+                                }
+                                lines.push(adapted.line);
+                            }
+                            app.watch_unknown = codex_adapter.unknown_events();
+                            app.append_stream_lines(lines);
                         }
-                        app.watch_unknown = codex_adapter.unknown_events();
-                        app.append_stream_lines(lines);
                     }
                 }
                 Err(_) => {
@@ -528,8 +537,8 @@ async fn tail_watch_stream_file(
     let mut file = File::open(path).await?;
     let metadata = file.metadata().await?;
     let file_len = metadata.len();
-    if file_len < pos {
-        return Ok((Vec::new(), 0));
+    if pos == 0 || file_len < pos {
+        return read_watch_replay_for_attach(path, &mut file, file_len, agent_id).await;
     }
     if file_len == pos {
         return Ok((Vec::new(), pos));
@@ -554,6 +563,50 @@ async fn tail_watch_stream_file(
         }
     }
     Ok((out, pos + n as u64))
+}
+
+async fn read_watch_replay_for_attach(
+    path: &std::path::Path,
+    file: &mut tokio::fs::File,
+    file_len: u64,
+    agent_id: &str,
+) -> Result<(Vec<serde_json::Value>, u64)> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    if !path.exists() || file_len == 0 {
+        return Ok((Vec::new(), 0));
+    }
+
+    let start = file_len.saturating_sub(WATCH_ATTACH_REPLAY_SCAN_BYTES);
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let mut buf = vec![0u8; (file_len - start) as usize];
+    let n = file.read(&mut buf).await?;
+    buf.truncate(n);
+
+    let chunk = String::from_utf8_lossy(&buf);
+    let mut lines = chunk.lines();
+    // Tail replay can start mid-line; drop the first partial line.
+    if start > 0 {
+        let _ = lines.next();
+    }
+
+    let mut replay: VecDeque<serde_json::Value> =
+        VecDeque::with_capacity(WATCH_ATTACH_REPLAY_MAX_FRAMES);
+    for line in lines.filter(|l| !l.trim().is_empty()) {
+        if let Ok(frame) = serde_json::from_str::<serde_json::Value>(line)
+            && frame
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| id == agent_id)
+        {
+            if replay.len() >= WATCH_ATTACH_REPLAY_MAX_FRAMES {
+                let _ = replay.pop_front();
+            }
+            replay.push_back(frame);
+        }
+    }
+
+    Ok((replay.into_iter().collect(), file_len))
 }
 
 /// Read new [`LogEventV1`] events from a JSONL log file since `pos`.
@@ -1010,5 +1063,84 @@ mod tests {
             "should read new content after recovery (stream_source_error cleared)"
         );
         assert!(new_pos > 0, "position must advance after recovery read");
+    }
+
+    #[tokio::test]
+    async fn test_tail_watch_stream_file_attach_replay_bounded_to_50() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch_path = dir.path().join("events.jsonl");
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..80 {
+            let frame = serde_json::json!({
+                "agent_id": "agent-a",
+                "event": {"params": {"type": "item_delta", "delta": format!("a-{i}")}}
+            });
+            lines.push(serde_json::to_string(&frame).unwrap());
+        }
+        for i in 0..10 {
+            let frame = serde_json::json!({
+                "agent_id": "agent-b",
+                "event": {"params": {"type": "item_delta", "delta": format!("b-{i}")}}
+            });
+            lines.push(serde_json::to_string(&frame).unwrap());
+        }
+        tokio::fs::write(&watch_path, format!("{}\n", lines.join("\n")))
+            .await
+            .unwrap();
+
+        let (frames, new_pos) = tail_watch_stream_file(&watch_path, 0, "agent-a").await.unwrap();
+        assert_eq!(
+            frames.len(),
+            50,
+            "attach replay must be bounded to last 50 frames"
+        );
+        assert!(
+            new_pos > 0,
+            "attach replay should advance position to current file length"
+        );
+        let last_delta = frames
+            .last()
+            .and_then(|f| f.pointer("/event/params/delta"))
+            .and_then(|v| v.as_str());
+        assert_eq!(last_delta, Some("a-79"));
+    }
+
+    #[tokio::test]
+    async fn test_tail_watch_stream_file_truncation_returns_reconnect_replay() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch_path = dir.path().join("events.jsonl");
+        let initial = serde_json::json!({
+            "agent_id": "agent-a",
+            "event": {"params": {"type": "item_delta", "delta": "old-old-old-old-old-old-old-old"}}
+        });
+        tokio::fs::write(&watch_path, format!("{}\n", serde_json::to_string(&initial).unwrap()))
+            .await
+            .unwrap();
+        let (_, pos_after_first) = tail_watch_stream_file(&watch_path, 0, "agent-a").await.unwrap();
+        assert!(pos_after_first > 0);
+
+        let replacement = serde_json::json!({
+            "agent_id": "agent-a",
+            "event": {"params": {"type": "item_delta", "delta": "new"}}
+        });
+        tokio::fs::write(
+            &watch_path,
+            format!("{}\n", serde_json::to_string(&replacement).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let (frames, new_pos) = tail_watch_stream_file(&watch_path, pos_after_first, "agent-a")
+            .await
+            .unwrap();
+        assert!(
+            new_pos <= pos_after_first,
+            "reconnect replay should not advance past prior position after truncation/rotation"
+        );
+        let first_delta = frames
+            .first()
+            .and_then(|f| f.pointer("/event/params/delta"))
+            .and_then(|v| v.as_str());
+        assert_eq!(first_delta, Some("new"));
     }
 }
