@@ -220,11 +220,11 @@ async fn run_app<B: ratatui::backend::Backend>(
         }
 
         // ── Live daemon stream drain (100 ms) ─────────────────────────────────
-        if let (Some(agent), Some(rx)) = (&app.streaming_agent, &app.daemon_stream_rx) {
+        if let (Some(agent), Some(sub)) = (&app.streaming_agent, &app.daemon_stream_rx) {
             let mut lines = Vec::new();
             let mut disconnected = false;
             loop {
-                match rx.try_recv() {
+                match sub.rx.try_recv() {
                     Ok(event) => {
                         if event.agent() == agent {
                             lines.push(format_stream_event_line(&event));

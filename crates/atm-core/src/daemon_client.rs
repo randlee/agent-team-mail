@@ -585,13 +585,28 @@ pub fn query_agent_stream_state(
     }
 }
 
+/// Handle for an active daemon stream subscription.
+///
+/// Dropping this value requests the background reader thread to stop.
+pub struct StreamSubscription {
+    /// Receiver of daemon stream events.
+    pub rx: std::sync::mpsc::Receiver<crate::daemon_stream::DaemonStreamEvent>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for StreamSubscription {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Subscribe to daemon stream events over a long-lived socket connection.
 ///
 /// Returns:
 /// - `Ok(Some(rx))` when subscription succeeds.
 /// - `Ok(None)` when daemon/socket is unavailable on this platform/session.
 pub fn subscribe_stream_events(
-) -> anyhow::Result<Option<std::sync::mpsc::Receiver<crate::daemon_stream::DaemonStreamEvent>>> {
+) -> anyhow::Result<Option<StreamSubscription>> {
     #[cfg(unix)]
     {
         subscribe_stream_events_unix()
@@ -723,7 +738,7 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
 
 #[cfg(unix)]
 fn subscribe_stream_events_unix(
-) -> anyhow::Result<Option<std::sync::mpsc::Receiver<crate::daemon_stream::DaemonStreamEvent>>> {
+) -> anyhow::Result<Option<StreamSubscription>> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
 
@@ -770,12 +785,27 @@ fn subscribe_stream_events_unix(
     }
 
     let (tx, rx) = std::sync::mpsc::channel::<crate::daemon_stream::DaemonStreamEvent>();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_thread = std::sync::Arc::clone(&stop);
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .ok();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stream);
         loop {
-            let mut line = String::new();
-            let Ok(n) = reader.read_line(&mut line) else {
+            if stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
+            }
+            let mut line = String::new();
+            let n = match reader.read_line(&mut line) {
+                Ok(n) => n,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(_) => break,
             };
             if n == 0 {
                 break;
@@ -794,7 +824,7 @@ fn subscribe_stream_events_unix(
         }
     });
 
-    Ok(Some(rx))
+    Ok(Some(StreamSubscription { rx, stop }))
 }
 
 /// Check whether a Unix PID is alive using `kill -0`.
