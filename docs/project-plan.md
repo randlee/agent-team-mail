@@ -485,6 +485,21 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
+## 17.1 Phase M: Log & Stream Cleanup — PLANNED
+
+**Goal**: Close post-Phase-L logging/streaming gaps and tighten operator semantics.
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| M.1 | Watch-stream file naming/scoping cleanup | L.5 | PLANNED |
+
+**M.1 scope**:
+- Replace shared `~/.config/atm/watch-stream/events.jsonl` with per-agent or per-session files (for example `watch-stream/<agent-id>.jsonl`).
+- Clarify naming semantics so watch-stream cache is not confused with canonical log/audit streams.
+- Update `.claude/agents/log-monitor.md` to match final Phase M.1 log-path semantics and monitoring rules.
+
+---
+
 ## 18. Future Plugins
 
 | Plugin | Priority | Notes |

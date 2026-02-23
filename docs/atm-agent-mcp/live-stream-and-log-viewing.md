@@ -151,3 +151,11 @@ Operational model:
 - `docs/project-plan.md` (Phase L / Sprint L.5 direct watch-stream implementation slot)
 - `docs/tui-mvp-architecture.md` (approved exception language)
 - `docs/atm-agent-mcp/requirements.md` (FR-21, FR-22)
+
+## 10. Follow-up Backlog (Phase M planning input)
+
+1. Watch-stream file naming and scope
+   - Current path is a shared local feed: `~/.config/atm/watch-stream/events.jsonl`.
+   - Issue: filename implies generic global events and is ambiguous for multi-agent sessions.
+   - Follow-up: migrate to per-agent (or per-session) files, e.g. `watch-stream/<agent-id>.jsonl` (or `<session-id>.jsonl`), and reserve a separate optional aggregate file if needed.
+   - Goal: reduce cross-session ambiguity/collision risk and make operational inspection obvious.
