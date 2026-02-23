@@ -510,6 +510,13 @@ fn retention_work(
         Ok(entries) => entries,
         Err(e) => {
             tracing::error!("Failed to read teams directory {}: {}", teams_root.display(), e);
+            emit_event_best_effort(EventFields {
+                level: "error",
+                source: "atm-daemon",
+                action: "retention_dir_read_error",
+                error: Some(format!("Failed to read teams directory: {e}")),
+                ..Default::default()
+            });
             return;
         }
     };
@@ -544,6 +551,14 @@ fn retention_work(
             Ok(entries) => entries,
             Err(e) => {
                 tracing::warn!("Failed to read inboxes directory {}: {}", inboxes_path.display(), e);
+                emit_event_best_effort(EventFields {
+                    level: "error",
+                    source: "atm-daemon",
+                    action: "retention_inbox_read_error",
+                    team: Some(team_name.clone()),
+                    error: Some(format!("Failed to read inboxes directory: {e}")),
+                    ..Default::default()
+                });
                 continue;
             }
         };
@@ -611,6 +626,16 @@ fn retention_work(
                             team_name, agent_name, file_name,
                             result.kept, result.removed, result.archived
                         );
+                        emit_event_best_effort(EventFields {
+                            level: "info",
+                            source: "atm-daemon",
+                            action: "retention_applied",
+                            team: Some(team_name.clone()),
+                            agent_id: Some(agent_name.clone()),
+                            count: Some(result.removed as u64),
+                            result: Some("ok".to_string()),
+                            ..Default::default()
+                        });
                     }
                 }
                 Err(e) => {
@@ -618,6 +643,15 @@ fn retention_work(
                         "Retention failed for {}/{}/{}: {}",
                         team_name, agent_name, file_name, e
                     );
+                    emit_event_best_effort(EventFields {
+                        level: "error",
+                        source: "atm-daemon",
+                        action: "retention_error",
+                        team: Some(team_name.clone()),
+                        agent_id: Some(agent_name.clone()),
+                        error: Some(format!("Retention failed: {e}")),
+                        ..Default::default()
+                    });
                 }
             }
         }
@@ -644,10 +678,25 @@ fn retention_work(
                         "Report cleanup: deleted={}, skipped={}",
                         result.deleted_count, result.skipped_count
                     );
+                    emit_event_best_effort(EventFields {
+                        level: "info",
+                        source: "atm-daemon",
+                        action: "report_cleanup",
+                        count: Some(result.deleted_count as u64),
+                        result: Some("ok".to_string()),
+                        ..Default::default()
+                    });
                 }
             }
             Err(e) => {
                 tracing::error!("Report cleanup failed: {}", e);
+                emit_event_best_effort(EventFields {
+                    level: "error",
+                    source: "atm-daemon",
+                    action: "report_cleanup_error",
+                    error: Some(format!("Report cleanup failed: {e}")),
+                    ..Default::default()
+                });
             }
         }
     }
