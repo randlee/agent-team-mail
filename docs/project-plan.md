@@ -463,7 +463,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17. Phase L: Logging Overhaul — PLANNING
+## 17. Phase L: Logging Overhaul — IN PROGRESS
 
 **GitHub Issue**: [#188](https://github.com/randlee/agent-team-mail/issues/188)
 **Goal**: Daemon fan-in architecture — all binaries emit to daemon socket, single JSONL writer.
@@ -472,7 +472,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| L.1a | Sink architecture + API structs (LogEventV1) | — | PLANNING |
+| L.1a | Sink architecture + API structs (LogEventV1) | — | IN REVIEW (PR pending) |
 | L.1b | `init_unified` + bridge to daemon socket | L.1a | PLANNING |
 | L.2 | Coverage — instrument all crates | L.1b | PLANNING |
 | L.3 | `atm logs` CLI command | L.2 | PLANNING |

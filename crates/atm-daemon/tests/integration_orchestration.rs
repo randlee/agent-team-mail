@@ -9,6 +9,7 @@
 use agent_team_mail_core::config::aliases::resolve_alias;
 use agent_team_mail_core::config::Config;
 use agent_team_mail_daemon::daemon::session_registry::new_session_registry;
+use agent_team_mail_daemon::daemon::log_writer::new_log_event_queue;
 use agent_team_mail_daemon::daemon::socket::{
     new_dedup_store, new_launch_sender, new_pubsub_store, new_state_store,
     new_stream_event_sender, new_stream_state_store, start_socket_server,
@@ -112,6 +113,7 @@ async fn test_socket_query_agent_state() {
         new_dedup_store(&home_dir).unwrap(),
         new_stream_state_store(),
         new_stream_event_sender(),
+        new_log_event_queue(),
         cancel.clone(),
     )
     .await
@@ -166,6 +168,7 @@ async fn test_socket_query_agent_not_found() {
         new_dedup_store(&home_dir).unwrap(),
         new_stream_state_store(),
         new_stream_event_sender(),
+        new_log_event_queue(),
         cancel.clone(),
     )
     .await
@@ -222,6 +225,7 @@ async fn test_pubsub_subscription_roundtrip() {
         new_dedup_store(&home_dir).unwrap(),
         new_stream_state_store(),
         new_stream_event_sender(),
+        new_log_event_queue(),
         cancel.clone(),
     )
     .await

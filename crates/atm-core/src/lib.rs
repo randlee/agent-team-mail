@@ -17,6 +17,7 @@ pub mod event_log;
 pub mod home;
 pub mod io;
 pub mod logging;
+pub mod logging_event;
 pub mod model_registry;
 pub mod retention;
 pub mod schema;

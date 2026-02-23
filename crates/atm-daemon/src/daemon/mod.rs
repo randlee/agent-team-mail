@@ -1,5 +1,6 @@
 pub mod dedup;
 pub mod event_loop;
+pub mod log_writer;
 pub mod session_registry;
 pub mod shutdown;
 pub mod socket;
@@ -8,6 +9,9 @@ pub mod status;
 pub mod watcher;
 
 pub use event_loop::run;
+pub use log_writer::{
+    BoundedQueue, LogEventQueue, LogWriterConfig, new_log_event_queue, run_log_writer_task,
+};
 pub use session_registry::{
     SessionRecord, SessionRegistry, SessionState, SharedSessionRegistry, is_pid_alive,
     new_session_registry,

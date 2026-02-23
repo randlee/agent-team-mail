@@ -3,7 +3,7 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
 use agent_team_mail_daemon::daemon;
-use agent_team_mail_daemon::daemon::{new_dedup_store, new_launch_sender, new_pubsub_store, new_session_registry, new_state_store, new_stream_event_sender, new_stream_state_store, StatusWriter};
+use agent_team_mail_daemon::daemon::{new_dedup_store, new_launch_sender, new_log_event_queue, new_pubsub_store, new_session_registry, new_state_store, new_stream_event_sender, new_stream_state_store, StatusWriter};
 use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
@@ -146,7 +146,7 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
 
     // Run daemon in background, cancel after a short delay
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone, status_writer, new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender()).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer, new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender(), new_log_event_queue()).await
     });
 
     // Wait a bit for daemon to start
@@ -195,7 +195,7 @@ async fn test_signal_triggers_graceful_shutdown() {
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender()).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender(), new_log_event_queue()).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -227,7 +227,7 @@ async fn test_plugin_lifecycle_order() {
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender()).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender(), new_log_event_queue()).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -261,7 +261,7 @@ async fn test_spool_drain_runs_on_interval() {
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender()).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender(), new_log_event_queue()).await
     });
 
     // Let the daemon run for a bit to allow spool drain to run
@@ -296,7 +296,7 @@ async fn test_graceful_shutdown_with_timeout() {
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender()).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender(), new_log_event_queue()).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -338,7 +338,7 @@ async fn test_empty_registry_runs_successfully() {
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender()).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender(), new_log_event_queue()).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -365,7 +365,7 @@ async fn test_multiple_plugins_run_concurrently() {
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender()).await
+        daemon::run(&mut registry, &ctx, cancel_clone, status_writer.clone(), new_state_store(), new_pubsub_store(), new_launch_sender(), new_session_registry(), dedup_store, new_stream_state_store(), new_stream_event_sender(), new_log_event_queue()).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
