@@ -151,6 +151,7 @@ Operational model:
 - `docs/project-plan.md` (Phase L / Sprint L.5 direct watch-stream implementation slot)
 - `docs/tui-mvp-architecture.md` (approved exception language)
 - `docs/atm-agent-mcp/requirements.md` (FR-21, FR-22)
+- `docs/atm-agent-mcp/codex-parity-test-plan.md` (M.3/M.7 contract, golden, and renderer parity gates)
 
 ## 10. Follow-up Backlog (Phase M planning input)
 

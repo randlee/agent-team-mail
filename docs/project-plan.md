@@ -510,6 +510,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - Achieve parity for core flows: prompt, tool stream, approval/reject, interrupt/cancel, errors, reconnect.
 - Add golden transcript/frame parity tests as a merge gate.
 - Keep ATM source attribution visible (`client_prompt`, `atm_mail`, `user_steer`) without altering Codex rendering semantics.
+- Use `docs/atm-agent-mcp/codex-parity-test-plan.md` as the baseline matrix and fixture contract for M.3/M.7.
 
 ---
 
