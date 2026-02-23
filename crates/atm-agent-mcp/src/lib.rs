@@ -26,6 +26,7 @@ pub mod summary;
 pub mod tools;
 pub mod transport;
 pub mod turn_control;
+pub mod watch_stream;
 
 #[doc(inline)]
 pub use transport::{MockTransport, MockTransportHandle, RawChildIo};
