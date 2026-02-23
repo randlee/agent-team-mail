@@ -134,13 +134,20 @@ impl LogWriterConfig {
     ///
     /// | Variable              | Default                                  |
     /// |-----------------------|------------------------------------------|
+    /// | `ATM_LOG_FILE`        | `{home_dir}/.config/atm/atm.log.jsonl`  |
+    /// | `ATM_LOG_PATH`        | alias for `ATM_LOG_FILE` (compat)        |
     /// | `ATM_LOG_MAX_BYTES`   | 52428800 (50 MiB)                        |
     /// | `ATM_LOG_MAX_FILES`   | 5                                        |
     /// | `ATM_LOG_FLUSH_MS`    | 100                                      |
     ///
-    /// The log path is always `{home_dir}/.config/atm/atm.log.jsonl`.
+    /// `ATM_LOG_FILE` takes precedence over `ATM_LOG_PATH`. When neither is
+    /// set the log is written to `{home_dir}/.config/atm/atm.log.jsonl`.
     pub fn from_env(home_dir: &Path) -> Self {
-        let log_path = home_dir.join(".config/atm/atm.log.jsonl");
+        // Check ATM_LOG_FILE first (canonical), then ATM_LOG_PATH (compat alias).
+        let log_path = std::env::var("ATM_LOG_FILE")
+            .or_else(|_| std::env::var("ATM_LOG_PATH"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home_dir.join(".config/atm/atm.log.jsonl"));
 
         let max_bytes = std::env::var("ATM_LOG_MAX_BYTES")
             .ok()
@@ -252,7 +259,7 @@ fn write_events(config: &LogWriterConfig, events: &[LogEventV1]) {
             Ok(line) => {
                 if let Err(e) = writeln!(file, "{line}") {
                     warn!("log_writer: write error: {e}");
-                    return;
+                    continue;
                 }
             }
             Err(e) => {
@@ -297,6 +304,7 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
 mod tests {
     use super::*;
     use agent_team_mail_core::logging_event::new_log_event;
+    use serial_test::serial;
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
@@ -476,15 +484,65 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn test_log_writer_config_env_override() {
+        let dir = TempDir::new().expect("temp dir");
+        let custom_path = dir.path().join("custom.log.jsonl");
+
+        // Set ATM_LOG_FILE and verify it overrides the default path.
+        // SAFETY: single-threaded guard provided by #[serial].
+        unsafe {
+            std::env::set_var("ATM_LOG_FILE", custom_path.as_os_str());
+        }
+        let config = LogWriterConfig::from_env(dir.path());
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+        }
+
+        assert_eq!(
+            config.log_path, custom_path,
+            "ATM_LOG_FILE should override the default log path"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_log_writer_config_env_override_compat_alias() {
+        let dir = TempDir::new().expect("temp dir");
+        let custom_path = dir.path().join("compat.log.jsonl");
+
+        // ATM_LOG_PATH is the compat alias when ATM_LOG_FILE is absent.
+        unsafe {
+            std::env::set_var("ATM_LOG_PATH", custom_path.as_os_str());
+        }
+        let config = LogWriterConfig::from_env(dir.path());
+        unsafe {
+            std::env::remove_var("ATM_LOG_PATH");
+        }
+
+        assert_eq!(
+            config.log_path, custom_path,
+            "ATM_LOG_PATH should override the default log path when ATM_LOG_FILE is unset"
+        );
+    }
+
+    #[test]
     fn test_rotation_path() {
-        let base = PathBuf::from("/home/user/.config/atm/atm.log.jsonl");
-        assert_eq!(
-            rotation_path(&base, 1),
-            PathBuf::from("/home/user/.config/atm/atm.log.jsonl.1")
-        );
-        assert_eq!(
-            rotation_path(&base, 5),
-            PathBuf::from("/home/user/.config/atm/atm.log.jsonl.5")
-        );
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let base = dir.path().join("atm.log.jsonl");
+
+        let expected_1 = {
+            let mut s = base.as_os_str().to_os_string();
+            s.push(".1");
+            PathBuf::from(s)
+        };
+        let expected_5 = {
+            let mut s = base.as_os_str().to_os_string();
+            s.push(".5");
+            PathBuf::from(s)
+        };
+
+        assert_eq!(rotation_path(&base, 1), expected_1);
+        assert_eq!(rotation_path(&base, 5), expected_5);
     }
 }

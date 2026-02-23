@@ -717,7 +717,7 @@ async fn handle_stream_event_command(
 /// - On queue full: `{"accepted": false, "error": "QUEUE_FULL"}`
 /// - On validation failure: error response with code `INVALID_PAYLOAD`
 /// - On version mismatch: error response with code `VERSION_MISMATCH`
-/// - On parse failure: error response with code `INVALID_REQUEST`
+/// - On parse failure: error response with code `INVALID_PAYLOAD`
 #[cfg(unix)]
 async fn handle_log_event_command(
     request_str: &str,
@@ -730,7 +730,7 @@ async fn handle_log_event_command(
         Err(e) => {
             return make_error_response(
                 "unknown",
-                "INVALID_REQUEST",
+                "INVALID_PAYLOAD",
                 &format!("Failed to parse log-event request: {e}"),
             );
         }
@@ -4241,6 +4241,170 @@ mod tests {
                 if agent == "arch-ctm" && turn_id == "turn-bcast-1"
             ),
             "unexpected event: {event:?}"
+        );
+    }
+
+    // ── handle_log_event_command tests ───────────────────────────────────────
+
+    /// Build a valid log-event socket request JSON string.
+    #[cfg(unix)]
+    fn make_log_event_request(request_id: &str, payload: serde_json::Value) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "command": "log-event",
+            "payload": payload
+        }))
+        .unwrap()
+    }
+
+    /// A valid `LogEventV1` payload for use in tests.
+    #[cfg(unix)]
+    fn valid_log_event_payload() -> serde_json::Value {
+        serde_json::json!({
+            "v": 1,
+            "ts": "2026-02-23T00:00:00Z",
+            "level": "info",
+            "source_binary": "atm",
+            "hostname": "testhost",
+            "pid": 1234,
+            "target": "atm::test",
+            "action": "test_action",
+            "fields": {},
+            "spans": []
+        })
+    }
+
+    /// Valid event is accepted and response has `accepted: true`.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_handle_log_event_valid_accepted() {
+        use crate::daemon::log_writer::new_log_event_queue;
+
+        let queue = new_log_event_queue();
+        let req_str = make_log_event_request("test-1", valid_log_event_payload());
+
+        let resp = handle_log_event_command(&req_str, &queue).await;
+        assert_eq!(resp.status, "ok", "expected ok status, got: {resp:?}");
+        let payload = resp.payload.expect("response should have a payload");
+        assert_eq!(
+            payload["accepted"].as_bool(),
+            Some(true),
+            "event should be accepted"
+        );
+    }
+
+    /// When the queue is full, response has `accepted: false`.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_handle_log_event_queue_full_returns_accepted_false() {
+        use crate::daemon::log_writer::BoundedQueue;
+
+        // Build a tiny queue (capacity 1) and fill it.
+        let queue = std::sync::Arc::new(tokio::sync::Mutex::new(BoundedQueue::new(1)));
+        {
+            let event_payload = valid_log_event_payload();
+            let event: agent_team_mail_core::logging_event::LogEventV1 =
+                serde_json::from_value(event_payload).unwrap();
+            let mut q = queue.lock().await;
+            q.push(event);
+        }
+
+        let req_str = make_log_event_request("test-full", valid_log_event_payload());
+        let resp = handle_log_event_command(&req_str, &queue).await;
+        assert_eq!(resp.status, "ok", "status should be ok even on full queue");
+        let payload = resp.payload.expect("response should have a payload");
+        assert_eq!(
+            payload["accepted"].as_bool(),
+            Some(false),
+            "event should not be accepted when queue is full"
+        );
+    }
+
+    /// A `LogEventV1` with `v: 2` triggers a `VERSION_MISMATCH` error.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_handle_log_event_version_mismatch() {
+        use crate::daemon::log_writer::new_log_event_queue;
+
+        let queue = new_log_event_queue();
+        let mut payload = valid_log_event_payload();
+        payload["v"] = serde_json::json!(2); // unsupported schema version
+        let req_str = make_log_event_request("test-ver", payload);
+
+        let resp = handle_log_event_command(&req_str, &queue).await;
+        assert_eq!(resp.status, "error");
+        assert_eq!(
+            resp.error.unwrap().code,
+            "VERSION_MISMATCH",
+            "wrong schema version should produce VERSION_MISMATCH"
+        );
+    }
+
+    /// Malformed JSON (not a valid `SocketRequest`) triggers `INVALID_PAYLOAD`.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_handle_log_event_malformed_json() {
+        use crate::daemon::log_writer::new_log_event_queue;
+
+        let queue = new_log_event_queue();
+        let resp = handle_log_event_command("not-json{{", &queue).await;
+        assert_eq!(resp.status, "error");
+        assert_eq!(
+            resp.error.unwrap().code,
+            "INVALID_PAYLOAD",
+            "malformed JSON should produce INVALID_PAYLOAD"
+        );
+    }
+
+    /// A `SocketRequest` whose `payload` is missing the required `action` field
+    /// triggers `INVALID_PAYLOAD`.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_handle_log_event_missing_required_field() {
+        use crate::daemon::log_writer::new_log_event_queue;
+
+        let queue = new_log_event_queue();
+        // Build a payload without the required `action` field.
+        let payload = serde_json::json!({
+            "v": 1,
+            "ts": "2026-02-23T00:00:00Z",
+            "level": "info",
+            "source_binary": "atm",
+            "hostname": "testhost",
+            "pid": 1234,
+            "target": "atm::test"
+            // "action" intentionally omitted
+        });
+        let req_str = make_log_event_request("test-missing", payload);
+
+        let resp = handle_log_event_command(&req_str, &queue).await;
+        assert_eq!(resp.status, "error");
+        assert_eq!(
+            resp.error.unwrap().code,
+            "INVALID_PAYLOAD",
+            "missing required field should produce INVALID_PAYLOAD"
+        );
+    }
+
+    /// A `LogEventV1` with an empty `action` field fails validation and
+    /// triggers `INVALID_PAYLOAD`.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_handle_log_event_empty_action_fails_validation() {
+        use crate::daemon::log_writer::new_log_event_queue;
+
+        let queue = new_log_event_queue();
+        let mut payload = valid_log_event_payload();
+        payload["action"] = serde_json::json!(""); // empty action fails validate()
+        let req_str = make_log_event_request("test-empty-action", payload);
+
+        let resp = handle_log_event_command(&req_str, &queue).await;
+        assert_eq!(resp.status, "error");
+        assert_eq!(
+            resp.error.unwrap().code,
+            "INVALID_PAYLOAD",
+            "empty action should produce INVALID_PAYLOAD"
         );
     }
 }
