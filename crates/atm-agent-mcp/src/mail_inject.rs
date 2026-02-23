@@ -147,6 +147,71 @@ pub fn build_mail_envelopes(
 }
 
 // ---------------------------------------------------------------------------
+// InflightMailSet
+// ---------------------------------------------------------------------------
+
+/// Tracks message IDs that have been dispatched to a transport but whose
+/// `mark-read` acknowledgement has not yet been confirmed.
+///
+/// Used during the idle-poll cycle to skip messages that are already
+/// in-flight, preventing double-injection on retry when a poll fires before
+/// the previous dispatch is acknowledged.
+///
+/// Each agent/thread pair should maintain its own `InflightMailSet`; the
+/// set is not shared across agents.
+///
+/// # Thread safety
+///
+/// This type is not `Sync`.  Callers that need shared access across tasks
+/// should wrap it in an `Arc<Mutex<InflightMailSet>>`.
+#[derive(Debug, Default)]
+pub struct InflightMailSet(std::collections::HashSet<String>);
+
+impl InflightMailSet {
+    /// Create an empty `InflightMailSet`.
+    pub fn new() -> Self {
+        Self(std::collections::HashSet::new())
+    }
+
+    /// Returns `true` if `id` is currently tracked as in-flight.
+    ///
+    /// A message is in-flight after it has been written to the transport but
+    /// before `mark_messages_read` has been called for it.
+    pub fn is_inflight(&self, id: &str) -> bool {
+        self.0.contains(id)
+    }
+
+    /// Mark `ids` as in-flight (i.e. dispatched but not yet acknowledged).
+    pub fn mark_inflight(&mut self, ids: &[String]) {
+        self.0.extend(ids.iter().cloned());
+    }
+
+    /// Remove `ids` from the in-flight set.
+    ///
+    /// Called after `mark_messages_read` succeeds or after a failed dispatch
+    /// so the messages become eligible for re-injection on the next poll.
+    pub fn clear_inflight(&mut self, ids: &[String]) {
+        for id in ids {
+            self.0.remove(id);
+        }
+    }
+
+    /// Filter a slice of envelopes, returning only those whose `message_id`
+    /// is **not** currently in-flight.
+    ///
+    /// This is the primary dedup helper used by the idle-poll loop.
+    pub fn filter_injectable<'a>(
+        &self,
+        envelopes: &'a [crate::mail_inject::MailEnvelope],
+    ) -> Vec<&'a crate::mail_inject::MailEnvelope> {
+        envelopes
+            .iter()
+            .filter(|e| !self.0.contains(&e.message_id))
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MailPoller
 // ---------------------------------------------------------------------------
 
@@ -670,5 +735,98 @@ mod tests {
         let msgs = read_inbox_file(dir.path(), "team", "agent");
         unset_atm_home();
         assert!(msgs.iter().all(|m| m.read), "all messages should be marked read after delivery");
+    }
+
+    // -----------------------------------------------------------------------
+    // InflightMailSet
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn inflight_set_new_is_empty() {
+        let set = InflightMailSet::new();
+        assert!(!set.is_inflight("any-id"));
+    }
+
+    #[test]
+    fn inflight_set_dedup_prevents_double_inject() {
+        // Three envelopes; mark two as in-flight.
+        // filter_injectable should return only the one not in-flight.
+        let envelopes = vec![
+            MailEnvelope {
+                sender: "a".into(),
+                timestamp: "t".into(),
+                message_id: "id-1".into(),
+                text: "msg1".into(),
+            },
+            MailEnvelope {
+                sender: "b".into(),
+                timestamp: "t".into(),
+                message_id: "id-2".into(),
+                text: "msg2".into(),
+            },
+            MailEnvelope {
+                sender: "c".into(),
+                timestamp: "t".into(),
+                message_id: "id-3".into(),
+                text: "msg3".into(),
+            },
+        ];
+
+        let mut set = InflightMailSet::new();
+        set.mark_inflight(&["id-1".to_string(), "id-2".to_string()]);
+
+        let injectable = set.filter_injectable(&envelopes);
+        assert_eq!(injectable.len(), 1, "only id-3 should be injectable");
+        assert_eq!(injectable[0].message_id, "id-3");
+    }
+
+    #[test]
+    fn inflight_cleared_after_ack() {
+        let ids = vec!["id-1".to_string(), "id-2".to_string()];
+        let mut set = InflightMailSet::new();
+        set.mark_inflight(&ids);
+
+        assert!(set.is_inflight("id-1"));
+        assert!(set.is_inflight("id-2"));
+
+        set.clear_inflight(&ids);
+
+        assert!(!set.is_inflight("id-1"), "id-1 should be injectable again after clear");
+        assert!(!set.is_inflight("id-2"), "id-2 should be injectable again after clear");
+    }
+
+    #[test]
+    fn inflight_filter_injectable_returns_all_when_none_inflight() {
+        let envelopes = vec![
+            MailEnvelope {
+                sender: "a".into(),
+                timestamp: "t".into(),
+                message_id: "x-1".into(),
+                text: "m1".into(),
+            },
+            MailEnvelope {
+                sender: "b".into(),
+                timestamp: "t".into(),
+                message_id: "x-2".into(),
+                text: "m2".into(),
+            },
+        ];
+        let set = InflightMailSet::new();
+        let injectable = set.filter_injectable(&envelopes);
+        assert_eq!(injectable.len(), 2, "all envelopes injectable when set is empty");
+    }
+
+    #[test]
+    fn inflight_filter_injectable_returns_empty_when_all_inflight() {
+        let envelopes = vec![MailEnvelope {
+            sender: "a".into(),
+            timestamp: "t".into(),
+            message_id: "only-one".into(),
+            text: "m".into(),
+        }];
+        let mut set = InflightMailSet::new();
+        set.mark_inflight(&["only-one".to_string()]);
+        let injectable = set.filter_injectable(&envelopes);
+        assert!(injectable.is_empty(), "no envelopes injectable when all in-flight");
     }
 }

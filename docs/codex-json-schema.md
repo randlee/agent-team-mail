@@ -1,6 +1,11 @@
-# Codex JSON Event Schema
+# Codex CLI-JSON Event Schema
 
-The `codex exec --json` command communicates via a JSONL (newline-delimited JSON) event stream on stdout. Each line is a self-contained JSON object with a `type` field indicating the event kind.
+This document describes the `cli-json` transport mode (`codex exec --json`) used by `atm-agent-mcp`.
+Each line is a self-contained JSON object with a `type` field indicating the event kind.
+
+Related docs:
+- `docs/atm-agent-mcp/codex-execution-modes.md` (all Codex execution modes)
+- `docs/atm-agent-mcp/requirements.md` (proxy transport requirements)
 
 ## Event Types
 
@@ -96,6 +101,72 @@ newline-delimited JSON tool result objects:
 
 Each message is terminated with `\n`. The `drain()` function writes one JSON object per
 queued message. The `content` field contains the raw ATM message text.
+
+## Idle Detection Behavior
+
+The `idle` event is the primary trigger for draining the stdin queue.  Here is
+how the `JsonCodecTransport` background task handles it:
+
+### idle event processing
+
+When a line with `"type":"idle"` is received:
+
+1. `idle_flag` is set to `true` (an `Arc<AtomicBool>` shared between the
+   background task and the proxy).
+2. `cli_json_turn_state` transitions to `TurnState::Idle` (using the shared
+   `stream_norm::TurnState` type — not a parallel type).
+3. A `DaemonStreamEvent::TurnIdle { transport: "cli-json", ... }` is emitted
+   to the ATM daemon via `stream_emit::emit_stream_event` (best-effort).
+4. A C.1 structured log event (`action: "idle_detected"`) is emitted.
+5. The proxy's idle-poll loop detects `is_idle() == true` and drains the stdin
+   queue via `stdin_queue::drain`.
+
+Messages enqueued in the stdin queue before the `idle` event fires are
+guaranteed to be present in the drain on that idle cycle.
+
+### idle_flag reset on activity
+
+`idle_flag` is reset to `false` whenever any non-idle, non-done event arrives
+(`agent_message`, `tool_call`, `tool_result`, `file_change`).  This signals
+that the agent is processing again and the proxy must not drain until the next
+`idle` event.
+
+### Fallback drain: 30-second timeout
+
+In addition to idle-triggered drains, the proxy drains the stdin queue every
+30 seconds as a safety net.  This ensures messages are not indefinitely delayed
+when the agent does not reach an idle state (e.g. because of a long-running
+tool call).
+
+The timer is implemented in `proxy.rs` inside `spawn_child_from_io` (search for
+`periodic_drain_task`).  A `tokio::time::interval(Duration::from_secs(30))` is
+spawned as a background task when the transport provides an `idle_flag` (i.e.
+only for `JsonCodecTransport`).  The task calls the same `drain_queue_all_agents`
+helper that the idle-event handler calls — the two paths are identical.
+
+**Important**: The timer lives in the proxy run loop, not in the transport
+implementation, so it applies to `cli-json` mode regardless of which transport
+variant is active.  The 30-second tick fires when `is_idle()` has not returned
+`true` for the entire prior poll interval, ensuring at least one drain even when
+the agent never produces an `idle` event.
+
+### Note on `TurnState::Busy`
+
+The `cli-json` protocol does not emit `turn/started` notifications, so
+`cli_json_turn_state` can only reach `TurnState::Idle` (via `idle` event) or
+`TurnState::Terminal` (via `done` event).  The `Busy` variant is reserved for
+future protocol extensions when explicit turn start notifications are added.
+Activity events (`agent_message`, `tool_call`, `tool_result`, `file_change`)
+reset `idle_flag` to `false` but do **not** transition `cli_json_turn_state` to
+`Busy` — they only clear the idle signal.
+
+### `done` event shape
+
+The `done` event has no required additional fields beyond `"type":"done"`.  The
+parser is intentionally lenient: extra fields (if present) are ignored.  The
+`done` event resets `idle_flag` to `false` and transitions `cli_json_turn_state`
+to `TurnState::Terminal { status: TurnStatus::Completed }`, then emits
+`DaemonStreamEvent::TurnCompleted { transport: "cli-json", ... }`.
 
 ## Usage in atm-agent-mcp
 

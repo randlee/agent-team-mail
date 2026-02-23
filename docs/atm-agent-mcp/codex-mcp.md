@@ -2,6 +2,9 @@
 
 Codex CLI (`@openai/codex`) can run as an MCP server, exposing two tools for starting and continuing agentic coding sessions.
 
+This document is specific to MCP mode (`codex mcp-server`).
+For all Codex execution modes, see `docs/atm-agent-mcp/codex-execution-modes.md`.
+
 ## Starting the Server
 
 ```bash

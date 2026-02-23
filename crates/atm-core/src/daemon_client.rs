@@ -545,6 +545,46 @@ pub fn query_session(name: &str) -> anyhow::Result<Option<SessionQueryResult>> {
     }
 }
 
+/// Query the daemon for the stream turn state of a named agent.
+///
+/// Returns:
+/// - `Ok(Some(state))` when the daemon has stream state recorded for the agent.
+/// - `Ok(None)` when the daemon is not running, the agent has no stream state,
+///   or the platform does not support Unix sockets.
+///
+/// # Arguments
+///
+/// * `agent` - Agent name to look up (e.g., `"arch-ctm"`)
+pub fn query_agent_stream_state(
+    agent: &str,
+) -> anyhow::Result<Option<crate::daemon_stream::AgentStreamState>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "agent-stream-state".to_string(),
+        payload: serde_json::json!({ "agent": agent }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    if !response.is_ok() {
+        return Ok(None);
+    }
+
+    let payload = match response.payload {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    match serde_json::from_value::<crate::daemon_stream::AgentStreamState>(payload) {
+        Ok(state) => Ok(Some(state)),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Send a control request to the daemon and wait for an acknowledgement.
 ///
 /// Sends `command: "control"` with the given [`ControlRequest`] as payload.

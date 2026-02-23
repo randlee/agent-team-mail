@@ -140,7 +140,7 @@ mod tests {
             None,
             None,
             None,
-            "/tmp/workspace",
+            "workspace",
         );
         assert!(ctx.contains("Repo:      null (null)"));
         assert!(ctx.contains("Branch:    null"));
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn inject_null_repo_fields_when_not_in_git() {
-        let ctx = build_session_context("dev", "team", None, None, None, "/tmp");
+        let ctx = build_session_context("dev", "team", None, None, None, "workspace");
         let mut params = json!({});
         inject_developer_instructions(&mut params, &ctx);
         let di = params["developer-instructions"].as_str().unwrap();

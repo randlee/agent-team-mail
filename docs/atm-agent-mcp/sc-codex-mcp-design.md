@@ -3,6 +3,8 @@
 > **Synaptic Canvas plugin spec** — end-user integration guide for running Codex as a Claude subagent via `atm-agent-mcp`. See `codex-mcp-crate-design.md` for the internal implementation blueprint.
 
 Codex running as a Claude subagent via MCP, with access to native multi-agent tools and the `atm` CLI for cross-system communication with Claude agent teams.
+Downstream runtime mode can be `mcp`, `cli-json`, or `app-server` depending on reliability and control requirements.
+See `codex-execution-modes.md` for mode details.
 
 ---
 
@@ -134,7 +136,7 @@ atm members my-team
 Claude (orchestrator)
   │
   ├─► atm-agent-mcp (MCP proxy)
-  │     └─► codex mcp-server (single child process)
+  │     └─► codex child process (transport = mcp | cli-json | app-server)
   │           └─► 0..N sessions (`agent_id` -> `threadId`)
   │           ├─► spawn_agent(worker) ──► worker subagent
   │           ├─► spawn_agent(explorer) ► explorer subagent

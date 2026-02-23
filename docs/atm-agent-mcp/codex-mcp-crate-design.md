@@ -4,7 +4,7 @@
 
 A new crate in the `agent-team-mail` workspace: `crates/atm-agent-mcp`.
 
-A thin MCP proxy that wraps `codex mcp-server`, injects ATM identity/team/repo context, provides native ATM MCP tools, and manages 0..N Codex sessions through one proxy process.
+A thin MCP-facing proxy that supports multiple downstream execution modes (`mcp`, `cli-json`, `app-server`), injects ATM identity/team/repo context, provides native ATM MCP tools, and manages 0..N Codex sessions through one proxy process.
 
 ---
 
@@ -27,12 +27,12 @@ Dependencies: `atm-core`, `tokio`, `serde_json`, `rmcp` (or raw stdio MCP), `sig
 
 ## One-To-Many Session Model
 
-`atm-agent-mcp` is a single proxy that manages one Codex child process and many logical agent sessions.
+`atm-agent-mcp` is a single proxy that manages one Codex child process (selected execution mode) and many logical agent sessions.
 
 ```
 Claude MCP client
   -> atm-agent-mcp (single process)
-       -> codex mcp-server (single child process)
+       -> codex child process (`mcp` | `cli-json` | `app-server`)
        -> 0..N active sessions (agent_id -> codex threadId)
 ```
 
@@ -107,6 +107,10 @@ mail_poll_interval_ms = 5000
 
 # Idle polling runs while the MCP connection is open; no timeout needed.
 
+# Downstream transport mode (default: "mcp")
+# Supported: "mcp" | "cli-json" | "app-server"
+transport = "mcp"
+
 # Persist active thread IDs to disk for resume across restarts (default: true)
 persist_threads = true
 
@@ -129,6 +133,8 @@ Config resolution follows the same priority chain as `atm`:
 4. `[plugins.atm-agent-mcp]` in `~/.config/atm/config.toml`
 5. Defaults
 
+Mode reference: `docs/atm-agent-mcp/codex-execution-modes.md`
+
 ---
 
 ## Architecture
@@ -146,7 +152,10 @@ atm-agent-mcp (proxy)
     │     load_session_registry()   ← restore persisted sessions from disk
     │
     ├── on first codex request:
-    │     spawn codex mcp-server    ← lazy child process start
+    │     spawn downstream child per `transport`
+    │       mcp        -> codex mcp-server
+    │       cli-json   -> codex exec --json
+    │       app-server -> codex app-server
     │
     ├── MCP request intercept:
     │     tools/list      → pass through + add atm_send/atm_read/atm_broadcast
@@ -174,7 +183,7 @@ atm-agent-mcp (proxy)
           write summary files to disk
           persist final thread registry
           deregister from team
-          terminate codex mcp-server child
+          terminate downstream child
 ```
 
 ---

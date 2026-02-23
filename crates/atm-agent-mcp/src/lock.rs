@@ -70,12 +70,12 @@ struct LockPayload {
 /// 1. `$ATM_HOME/.config/atm/agent-sessions` (set in tests for isolation;
 ///    handled by [`get_home_dir`])
 /// 2. `<home_dir>/.config/atm/agent-sessions` (FR-20.1)
-/// 3. `/tmp/.config/atm/agent-sessions` (last-resort fallback)
+/// 3. `<temp_dir>/.config/atm/agent-sessions` (last-resort cross-platform fallback)
 pub fn sessions_dir() -> PathBuf {
     // get_home_dir() already handles ATM_HOME → platform home priority.
     // FR-20.1 specifies ~/.config/atm/agent-sessions as the canonical path.
     get_home_dir()
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .unwrap_or_else(|_| std::env::temp_dir())
         .join(".config")
         .join("atm")
         .join("agent-sessions")
@@ -342,7 +342,8 @@ mod tests {
         // This test manipulates env; run it without parallelism via serial_test.
         // When ATM_HOME is set, sessions_dir() returns
         // ATM_HOME/.config/atm/agent-sessions (FR-20.1).
-        let dir = "/tmp/test-atm-home-lock";
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         // SAFETY: serialised by `#[serial]`
         unsafe { std::env::set_var("ATM_HOME", dir) };
         let path = sessions_dir();

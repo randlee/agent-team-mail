@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn test_filter_register_and_check() {
         let mut filter = SelfWriteFilter::new(Duration::from_secs(5));
-        let path = PathBuf::from("/tmp/test.json");
+        let path = std::env::temp_dir().join("test.json");
 
         // Path not registered - should not filter
         assert!(!filter.should_filter(&path));
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn test_filter_ttl_expiration() {
         let mut filter = SelfWriteFilter::new(Duration::from_millis(100));
-        let path = PathBuf::from("/tmp/test.json");
+        let path = std::env::temp_dir().join("test.json");
 
         // Register path
         filter.register(path.clone());
@@ -130,9 +130,9 @@ mod tests {
     #[test]
     fn test_filter_multiple_paths() {
         let mut filter = SelfWriteFilter::new(Duration::from_secs(5));
-        let path1 = PathBuf::from("/tmp/file1.json");
-        let path2 = PathBuf::from("/tmp/file2.json");
-        let path3 = PathBuf::from("/tmp/file3.json");
+        let path1 = std::env::temp_dir().join("file1.json");
+        let path2 = std::env::temp_dir().join("file2.json");
+        let path3 = std::env::temp_dir().join("file3.json");
 
         // Register path1 and path2
         filter.register(path1.clone());
@@ -147,8 +147,8 @@ mod tests {
     #[test]
     fn test_filter_cleanup_expired() {
         let mut filter = SelfWriteFilter::new(Duration::from_millis(100));
-        let path1 = PathBuf::from("/tmp/file1.json");
-        let path2 = PathBuf::from("/tmp/file2.json");
+        let path1 = std::env::temp_dir().join("file1.json");
+        let path2 = std::env::temp_dir().join("file2.json");
 
         // Register both paths
         filter.register(path1.clone());
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn test_filter_reregister() {
         let mut filter = SelfWriteFilter::new(Duration::from_millis(500));
-        let path = PathBuf::from("/tmp/test.json");
+        let path = std::env::temp_dir().join("test.json");
 
         // Register path
         filter.register(path.clone());
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn test_filter_automatic_cleanup_on_check() {
         let mut filter = SelfWriteFilter::new(Duration::from_millis(100));
-        let path = PathBuf::from("/tmp/test.json");
+        let path = std::env::temp_dir().join("test.json");
 
         filter.register(path.clone());
         assert_eq!(filter.len(), 1);

@@ -53,7 +53,7 @@ use tokio::time::interval;
 
 use agent_team_mail_core::{
     control::{ControlAck, ControlAction, ControlRequest, ControlResult, CONTROL_SCHEMA_VERSION},
-    daemon_client::{AgentSummary, query_list_agents, send_control},
+    daemon_client::{AgentSummary, query_agent_stream_state, query_list_agents, send_control},
     event_log::{EventFields, emit_event_best_effort},
     home::get_home_dir,
     logging,
@@ -193,6 +193,15 @@ async fn run_app<B: ratatui::backend::Backend>(
                     agent_id: Some(agent_name.clone()),
                     ..Default::default()
                 });
+            }
+
+            // Poll daemon for normalised stream turn state of the current agent.
+            if let Some(ref agent_name) = app.streaming_agent {
+                app.daemon_turn_state = query_agent_stream_state(agent_name)
+                    .ok()
+                    .flatten();
+            } else {
+                app.daemon_turn_state = None;
             }
         }
 

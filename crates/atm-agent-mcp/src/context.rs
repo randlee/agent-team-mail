@@ -52,8 +52,8 @@ pub struct TurnContext {
 /// use atm_agent_mcp::context::detect_context;
 ///
 /// # async fn example() {
-/// let ctx = detect_context("/tmp").await;
-/// // /tmp is not a git repo, so git fields are None
+/// let ctx = detect_context(".").await;
+/// // "." is not necessarily a git repo, so git fields may be None
 /// assert!(ctx.repo_root.is_none());
 /// # }
 /// ```

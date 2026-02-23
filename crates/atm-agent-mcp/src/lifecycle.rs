@@ -331,4 +331,159 @@ mod tests {
             _ => panic!("expected AutoMailInject"),
         }
     }
+
+    // ─── Queue ordering: Close > ClaudeReply > AutoMailInject ─────────────────
+    //
+    // These tests validate the priority invariant (FR-17.10/FR-17.11) holds
+    // regardless of the insertion order of commands.  They are transport-
+    // independent: the queue is a pure data structure; no async I/O needed.
+
+    /// Insertion order: AutoMail → ClaudeReply → Close.
+    ///
+    /// AutoMail is accepted because it is pushed before any ClaudeReply.
+    /// ClaudeReply is appended next.  Close jumps to the front.
+    ///
+    /// Expected pop order: Close → AutoMail (FIFO) → ClaudeReply (FIFO).
+    ///
+    /// Note: the queue does NOT retroactively reorder items already enqueued.
+    /// The priority rule applies at *insertion* time:
+    /// - AutoMailInject is dropped only when a ClaudeReply is *already in the
+    ///   queue* at push time.  Here AutoMail was pushed first, so it stays.
+    /// - Close jumps to the front at push time regardless of what is queued.
+    #[test]
+    fn ordering_auto_mail_then_claude_reply_then_close_close_is_first() {
+        let mut q = make_queue();
+
+        // AutoMailInject first (accepted — no ClaudeReply pending yet).
+        let mail_queued = q.push_auto_mail("mail-1".to_string());
+        assert!(mail_queued, "AutoMail accepted before ClaudeReply");
+
+        // ClaudeReply second (appended after AutoMail).
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        q.push_claude_reply(serde_json::json!(1), serde_json::json!({}), reply_tx)
+            .unwrap();
+
+        // Close last — must jump to the front.
+        let (close_tx, _close_rx) = oneshot::channel::<CloseResult>();
+        assert!(q.push_close(close_tx));
+
+        // Pop 1: must be Close (always front).
+        let first = q.pop_next().unwrap();
+        assert!(
+            matches!(first, ThreadCommand::Close { .. }),
+            "first pop must be Close, got: {first:?}"
+        );
+
+        // Pop 2: AutoMail (was inserted before ClaudeReply — FIFO order retained).
+        let second = q.pop_next().unwrap();
+        assert!(
+            matches!(second, ThreadCommand::AutoMailInject { .. }),
+            "second pop must be AutoMailInject (FIFO after Close), got: {second:?}"
+        );
+
+        // Pop 3: ClaudeReply (was inserted after AutoMail).
+        let third = q.pop_next().unwrap();
+        assert!(
+            matches!(third, ThreadCommand::ClaudeReply { .. }),
+            "third pop must be ClaudeReply, got: {third:?}"
+        );
+
+        assert!(q.pop_next().is_none(), "queue must be empty");
+    }
+
+    /// Insertion order: ClaudeReply → Close.
+    /// AutoMailInject attempted AFTER ClaudeReply is already pending — must be
+    /// dropped (FR-8.10).  Expected pop order: Close → ClaudeReply.
+    #[test]
+    fn ordering_claude_reply_first_auto_mail_dropped_then_close_is_first() {
+        let mut q = make_queue();
+
+        // ClaudeReply first.
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        q.push_claude_reply(serde_json::json!(2), serde_json::json!({}), reply_tx)
+            .unwrap();
+
+        // AutoMail — rejected because ClaudeReply is pending (FR-8.10).
+        let mail_queued = q.push_auto_mail("should-be-dropped".to_string());
+        assert!(
+            !mail_queued,
+            "AutoMail must be dropped when ClaudeReply is pending"
+        );
+
+        // Close — must jump to front.
+        let (close_tx, _close_rx) = oneshot::channel::<CloseResult>();
+        assert!(q.push_close(close_tx));
+
+        // Pop 1: Close.
+        let first = q.pop_next().unwrap();
+        assert!(matches!(first, ThreadCommand::Close { .. }));
+
+        // Pop 2: ClaudeReply.
+        let second = q.pop_next().unwrap();
+        assert!(matches!(second, ThreadCommand::ClaudeReply { .. }));
+
+        // Queue empty — dropped AutoMail is never present.
+        assert!(q.pop_next().is_none());
+    }
+
+    /// Insertion order: Close only.
+    /// AutoMail and ClaudeReply pushed after close must both be rejected.
+    /// Pop order: Close only.
+    #[test]
+    fn ordering_close_only_subsequent_commands_rejected() {
+        let mut q = make_queue();
+
+        let (close_tx, _close_rx) = oneshot::channel::<CloseResult>();
+        assert!(q.push_close(close_tx));
+
+        // Both subsequent pushes must be rejected.
+        let mail_queued = q.push_auto_mail("rejected".to_string());
+        assert!(!mail_queued, "AutoMail must be rejected post-close");
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let reply_result =
+            q.push_claude_reply(serde_json::json!(3), serde_json::json!({}), reply_tx);
+        assert!(reply_result.is_err(), "ClaudeReply must be rejected post-close");
+
+        // Only the Close command is present.
+        assert!(matches!(q.pop_next().unwrap(), ThreadCommand::Close { .. }));
+        assert!(q.pop_next().is_none());
+    }
+
+    /// Insert multiple ClaudeReplies — they should drain FIFO (Close > each
+    /// ClaudeReply in order), AutoMail never enters after first ClaudeReply.
+    #[test]
+    fn ordering_multiple_claude_replies_drain_fifo_before_auto_mail() {
+        let mut q = make_queue();
+
+        // Two ClaudeReplies.
+        let (tx1, _rx1) = oneshot::channel();
+        let (tx2, _rx2) = oneshot::channel();
+        q.push_claude_reply(serde_json::json!(10), serde_json::json!({}), tx1)
+            .unwrap();
+        q.push_claude_reply(serde_json::json!(11), serde_json::json!({}), tx2)
+            .unwrap();
+
+        // AutoMail dropped (ClaudeReply pending).
+        assert!(!q.push_auto_mail("nope".to_string()));
+
+        // No close — just verify FIFO ordering of ClaudeReplies.
+        let first = q.pop_next().unwrap();
+        match first {
+            ThreadCommand::ClaudeReply { request_id, .. } => {
+                assert_eq!(request_id, serde_json::json!(10));
+            }
+            _ => panic!("expected first ClaudeReply with id=10"),
+        }
+
+        let second = q.pop_next().unwrap();
+        match second {
+            ThreadCommand::ClaudeReply { request_id, .. } => {
+                assert_eq!(request_id, serde_json::json!(11));
+            }
+            _ => panic!("expected second ClaudeReply with id=11"),
+        }
+
+        assert!(q.pop_next().is_none());
+    }
 }

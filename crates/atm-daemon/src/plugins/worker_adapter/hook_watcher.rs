@@ -851,7 +851,7 @@ mod tests {
                     "agentType": "codex",
                     "model": "gpt5.3-codex",
                     "joinedAt": 1739284800000i64,
-                    "cwd": "/tmp",
+                    "cwd": ".",
                     "subscriptions": [],
                     "externalBackendType": "codex",
                     "sessionId": "old-session-id"
@@ -906,7 +906,7 @@ mod tests {
                     "agentType": "general-purpose",
                     "model": "claude-opus-4-6",
                     "joinedAt": 1739284800000i64,
-                    "cwd": "/tmp",
+                    "cwd": ".",
                     "subscriptions": [],
                     "sessionId": "old-session"
                 }
@@ -953,7 +953,7 @@ mod tests {
                     "agentType": "codex",
                     "model": "gpt5.3-codex",
                     "joinedAt": 1739284800000i64,
-                    "cwd": "/tmp",
+                    "cwd": ".",
                     "subscriptions": [],
                     "externalBackendType": "codex",
                     "sessionId": "old-a"
@@ -972,7 +972,7 @@ mod tests {
                     "agentType": "codex",
                     "model": "gpt5.3-codex",
                     "joinedAt": 1739284800000i64,
-                    "cwd": "/tmp",
+                    "cwd": ".",
                     "subscriptions": [],
                     "externalBackendType": "codex",
                     "sessionId": "old-b"
