@@ -32,6 +32,7 @@
 
 mod agent_terminal;
 mod app;
+mod codex_adapter;
 mod codex_vendor;
 mod codex_watch;
 mod config;
@@ -66,7 +67,7 @@ use agent_team_mail_core::{
 };
 
 use app::{App, MemberRow, PendingControl};
-use codex_watch::format_watch_frame_line;
+use codex_adapter::CodexAdapter;
 use config::{TuiConfig, load_tui_config};
 use dashboard::{get_inbox_count, read_inbox_preview, read_team_members, session_log_path};
 
@@ -192,6 +193,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     let home: PathBuf = get_home_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let mut tick = interval(Duration::from_millis(100));
+    let mut codex_adapter = CodexAdapter::new();
 
     loop {
         // ── Draw ──────────────────────────────────────────────────────────────
@@ -272,13 +274,16 @@ async fn run_app<B: ratatui::backend::Backend>(
                     } else if new_pos > app.watch_stream_pos {
                         app.stream_source_error = None;
                         app.watch_stream_pos = new_pos;
-                        let lines: Vec<String> = frames
-                            .iter()
-                            .map(|frame| {
-                                app.apply_watch_frame(frame);
-                                format_watch_frame_line(frame)
-                            })
-                            .collect();
+                        let mut lines: Vec<String> = Vec::new();
+                        for frame in &frames {
+                            app.apply_watch_frame(frame);
+                            let adapted = codex_adapter.adapt_frame(frame);
+                            if adapted.is_turn_boundary && !app.stream_lines.is_empty() {
+                                lines.push(String::new());
+                            }
+                            lines.push(adapted.line);
+                        }
+                        app.watch_unknown = codex_adapter.unknown_events();
                         app.append_stream_lines(lines);
                     }
                 }
