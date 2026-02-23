@@ -153,7 +153,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | E | ATM Core Bug Fixes | Resume fix, read scoping, hooks, TUI hardening | COMPLETE |
 | F | Team Installer | `atm team init` package installer | PLANNED |
 | G | Codex Multi-Transport Hardening | App-server, unified turns, mail injection parity | COMPLETE |
-| L | Logging Overhaul | Daemon fan-in architecture, unified JSONL writer | PLANNING |
+| L | Logging Overhaul | Daemon fan-in architecture, unified JSONL writer | COMPLETE |
 
 ---
 
@@ -463,7 +463,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17. Phase L: Logging Overhaul — IN PROGRESS
+## 17. Phase L: Logging Overhaul — COMPLETE
 
 **GitHub Issue**: [#188](https://github.com/randlee/agent-team-mail/issues/188)
 **Goal**: Daemon fan-in architecture — all binaries emit to daemon socket, single JSONL writer.
