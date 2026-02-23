@@ -215,6 +215,16 @@ impl CodexTransport for McpTransport {
         // a background task. This keeps the trait method synchronous while
         // still allowing the async mutex inside TurnTracker to be updated.
         // This mirrors the analogous implementation in AppServerTransport.
+        //
+        // INTENTIONAL: McpTransport emits zero DaemonStreamEvents under normal
+        // operation.  The MCP protocol has no explicit `turn/started` or
+        // `turn/completed` notifications, so `TurnStarted`, `TurnCompleted`,
+        // and `TurnIdle` are never emitted for MCP sessions.  As a result, the
+        // TUI will show no stream state (no [BUSY]/[DONE] badge) for MCP
+        // sessions.  This is consistent with the G.4 scope note that deferred
+        // explicit MCP turn tracking.  The only emission path that exists is
+        // `TurnTracker::emit_idle`, which fires on `interrupt_turn` (i.e. on
+        // crash/interrupt) — not on normal turn completion.
         let tracker = self.turn_tracker.clone();
         tokio::spawn(async move {
             tracker.set_session_context(ctx).await;
@@ -1278,8 +1288,11 @@ pub async fn drive_notification_task(
                     // all transports.  Pass thread_id as the first argument
                     // (key for per-thread tracking) and turn_id as the second
                     // (unique turn identifier within the thread).
+                    // Use start_turn_no_emit to avoid double-emitting TurnStarted
+                    // — AppServerTransport emits the stream event directly below
+                    // with the correct transport="app-server" label.
                     if let Some(ref tracker) = turn_tracker {
-                        tracker.start_turn(&thread_id, &turn_id).await;
+                        tracker.start_turn_no_emit(&thread_id, &turn_id).await;
                     }
                     // Emit normalized stream event to the daemon (best-effort).
                     {
@@ -1326,13 +1339,16 @@ pub async fn drive_notification_task(
                             idle_flag.store(true, Ordering::SeqCst);
                         }
                     }
-                    // Notify the unified turn tracker (if wired).  Pass thread_id
-                    // as the per-thread key and turn_id as the completed turn identifier.
-                    // This emits a `teammate_idle` daemon lifecycle event via the single
-                    // normalised path in `TurnTracker::on_turn_completed`.
+                    // Notify the unified turn tracker (if wired).  Use
+                    // on_turn_completed_no_emit to update internal per-thread
+                    // turn state and emit the TeammateIdle lifecycle event,
+                    // but skip DaemonStreamEvent emission — AppServerTransport
+                    // emits TurnCompleted and TurnIdle directly below with the
+                    // correct transport="app-server" label, avoiding
+                    // double-emission.
                     if let Some(ref tracker) = turn_tracker {
                         tracker
-                            .on_turn_completed(&thread_id, &turn_id, status_for_tracker)
+                            .on_turn_completed_no_emit(&thread_id, &turn_id, status_for_tracker)
                             .await;
                     }
                     // Emit normalized stream event to the daemon (best-effort).
@@ -1346,6 +1362,21 @@ pub async fn drive_notification_task(
                         };
                         tokio::spawn(async move {
                             crate::stream_emit::emit_stream_event(&event).await;
+                        });
+                    }
+                    // Immediately follow TurnCompleted with TurnIdle so the TUI
+                    // badge transitions from [DONE] back to idle and does not
+                    // remain stuck in the Terminal state until the next turn
+                    // starts.  The turn_id for TurnIdle is left empty because
+                    // there is no active turn at this point.
+                    {
+                        let idle_event = DaemonStreamEvent::TurnIdle {
+                            agent: agent_name.clone(),
+                            turn_id: String::new(),
+                            transport: "app-server".to_string(),
+                        };
+                        tokio::spawn(async move {
+                            crate::stream_emit::emit_stream_event(&idle_event).await;
                         });
                     }
                     emit_event_best_effort(EventFields {
