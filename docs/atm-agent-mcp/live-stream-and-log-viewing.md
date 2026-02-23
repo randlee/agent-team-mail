@@ -146,3 +146,9 @@ Operational model:
 1. Should replay buffer be line-based, event-based, or dual-mode?
 2. Do we expose context-window usage in MVP if not uniformly available across transports?
 3. Should `atm-tui` retain a local ephemeral buffer per viewed session in addition to proxy replay?
+
+## 9. References
+
+- `docs/project-plan.md` (Phase L / Sprint L.5 direct watch-stream implementation slot)
+- `docs/tui-mvp-architecture.md` (approved exception language)
+- `docs/atm-agent-mcp/requirements.md` (FR-21, FR-22)

@@ -3298,6 +3298,39 @@ Design references:
 
 ---
 
+## 16.7 Phase L: Logging Overhaul + Live Stream Exception Work
+
+**Status**: PLANNED
+
+**Goal**: Preserve daemon-owned structured logging while explicitly implementing the approved direct watch-stream exception for active `atm-tui` session viewing.
+
+### Phase L Sprint Summary
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| L.1a | LogEventV1 schema + daemon writer hardening | G.9 | ⏳ PLANNED |
+| L.1b | Unified log init + producer fan-in bridge | L.1a | ⏳ PLANNED |
+| L.2 | Cross-crate event coverage + validation tests | L.1b | ⏳ PLANNED |
+| L.3 | `atm logs` CLI and operator views | L.2 | ⏳ PLANNED |
+| L.4 | TUI log viewer + legacy sink sunset | L.3 | ⏳ PLANNED |
+| L.5 | Direct watch-stream path (`atm-agent-mcp` -> `atm-tui`) for active session | L.2 | ⏳ PLANNED |
+
+### Sprint L.5 — Direct Watch-Stream Path (Approved Exception)
+
+**Branch**: `feature/pL-s5-direct-watch-stream`
+**Crate(s)**: `crates/atm-agent-mcp`, `crates/atm-tui`
+**Depends on**: L.2
+
+#### Exit Criteria
+
+- [ ] `atm-agent-mcp` exposes watcher attach/detach for active session stream viewing
+- [ ] Per-session replay buffer defaults to 50 rendered lines/events on attach
+- [ ] Watch stream events preserve source attribution (`client_prompt`, `atm_mail`, `user_steer`)
+- [ ] Daemon continues receiving lifecycle/status events; continuous render deltas are not routed through daemon
+- [ ] Integration tests cover attach/replay/detach and watcher handoff behavior
+
+---
+
 ## 17. Future Plugins
 
 Additional plugins planned (each is a self-contained sprint series):
