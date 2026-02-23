@@ -62,6 +62,14 @@ const UPSTREAM_CHANNEL_CAPACITY: usize = 256;
 
 /// Grace period in ms after dropping child stdin before force-kill, giving child time to flush output.
 const CHILD_DRAIN_GRACE_MS: u64 = 100;
+/// Maximum rendered watch line length retained in TUI feed records.
+const WATCH_RENDER_MAX_CHARS: usize = 200;
+/// Truncated prefix length before appending ellipsis (`...`).
+const WATCH_RENDER_TRUNCATE_AT: usize = WATCH_RENDER_MAX_CHARS - 3;
+/// Hard cap for `~/.config/atm/watch-stream/events.jsonl` before rotation.
+const WATCH_FEED_MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// Counter for unknown watch event kinds skipped by the MVP publisher gate.
+static WATCH_UNKNOWN_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// JSON-RPC error code: child process has died.
 pub const ERR_CHILD_DEAD: i64 = -32005;
@@ -360,10 +368,7 @@ impl ProxyServer {
     /// Subscribe to an agent's direct watch stream.
     ///
     /// Returns a bounded replay snapshot plus a live receiver.
-    pub async fn subscribe_watch_stream(
-        &self,
-        agent_id: &str,
-    ) -> WatchSubscription {
+    pub async fn subscribe_watch_stream(&self, agent_id: &str) -> WatchSubscription {
         self.watch_stream_hub.lock().await.subscribe(agent_id)
     }
 
@@ -2350,7 +2355,12 @@ Session ending. Write a concise summary of:\n\
                         "agent_watch_detach: 'agent_id' is required",
                     );
                 };
-                let detached = self.watch_subscriptions.lock().await.remove(agent_id).is_some();
+                let detached = self
+                    .watch_subscriptions
+                    .lock()
+                    .await
+                    .remove(agent_id)
+                    .is_some();
                 let _ = self.detach_watch_stream(agent_id).await;
                 let watcher_count = self.watch_stream_hub.lock().await.watcher_count(agent_id);
                 json!({
@@ -2772,8 +2782,24 @@ async fn forward_event(
     if should_publish_watch_event(event) {
         let source = infer_source_envelope(event, &agent_id, pending).await;
         let frame = build_watch_frame(&agent_id, &source, event.clone());
-        watch_stream_hub.lock().await.publish(&agent_id, frame.clone());
+        watch_stream_hub
+            .lock()
+            .await
+            .publish(&agent_id, frame.clone());
         append_watch_frame_for_tui(&frame);
+    } else if let Some(kind) = event.pointer("/params/type").and_then(|v| v.as_str())
+        && !kind.is_empty()
+    {
+        WATCH_UNKNOWN_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
+        agent_team_mail_core::event_log::emit_event_best_effort(
+            agent_team_mail_core::event_log::EventFields {
+                level: "debug",
+                source: "atm-agent-mcp",
+                action: "watch_event_ignored_unknown",
+                result: Some(kind.to_string()),
+                ..Default::default()
+            },
+        );
     }
 
     match upstream_tx.try_send(event.clone()) {
@@ -2834,8 +2860,8 @@ fn format_watch_frame(frame: &Value) -> String {
         .or_else(|| event.pointer("/params/output").and_then(|v| v.as_str()))
         .or_else(|| event.pointer("/params/message").and_then(|v| v.as_str()))
         .unwrap_or("");
-    let text = if text.len() > 200 {
-        format!("{}...", &text[..197])
+    let text = if text.len() > WATCH_RENDER_MAX_CHARS {
+        format!("{}...", &text[..WATCH_RENDER_TRUNCATE_AT])
     } else {
         text.to_string()
     };
@@ -2868,9 +2894,21 @@ fn format_watch_frame(frame: &Value) -> String {
     if let Some(pct) = event
         .pointer("/params/usage/context_window_pct")
         .and_then(|v| v.as_f64())
-        .or_else(|| event.pointer("/params/contextWindowPct").and_then(|v| v.as_f64()))
-        .or_else(|| event.pointer("/params/usage/contextWindowPct").and_then(|v| v.as_f64()))
-        .or_else(|| event.pointer("/params/context_window_pct").and_then(|v| v.as_f64()))
+        .or_else(|| {
+            event
+                .pointer("/params/contextWindowPct")
+                .and_then(|v| v.as_f64())
+        })
+        .or_else(|| {
+            event
+                .pointer("/params/usage/contextWindowPct")
+                .and_then(|v| v.as_f64())
+        })
+        .or_else(|| {
+            event
+                .pointer("/params/context_window_pct")
+                .and_then(|v| v.as_f64())
+        })
     {
         base.push_str(&format!(" | ctx {:.0}%", pct));
     }
@@ -2883,11 +2921,25 @@ fn watch_feed_path() -> Option<std::path::PathBuf> {
 }
 
 fn append_watch_frame_for_tui(frame: &Value) {
+    append_watch_frame_for_tui_with_cap(frame, WATCH_FEED_MAX_BYTES);
+}
+
+fn append_watch_frame_for_tui_with_cap(frame: &Value, max_bytes: u64) {
     let Some(path) = watch_feed_path() else {
         return;
     };
     if let Some(parent) = path.parent() {
+        // Best-effort: streaming still functions without local file fanout.
         let _ = std::fs::create_dir_all(parent);
+    }
+    if max_bytes > 0
+        && let Ok(meta) = std::fs::metadata(&path)
+        && meta.len() >= max_bytes
+    {
+        let rotated_path = path.with_extension("jsonl.1");
+        // Best-effort rotation: failures should not break live stream publishing.
+        let _ = std::fs::remove_file(&rotated_path);
+        let _ = std::fs::rename(&path, rotated_path);
     }
     let rendered = format_watch_frame(frame);
     let ts = std::time::SystemTime::now()
@@ -2899,8 +2951,13 @@ fn append_watch_frame_for_tui(frame: &Value) {
         "frame": frame,
         "rendered": rendered,
     });
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         use std::io::Write;
+        // Best-effort append: watcher UX is non-critical compared to proxy traffic.
         let _ = writeln!(file, "{}", record);
     }
 }
@@ -3847,21 +3904,36 @@ mod tests {
 
     #[test]
     fn test_should_publish_watch_event_protocol_drift_matrix() {
-        let cases = vec![
-            ("agent_message_delta", true),
-            ("agent_message_chunk", true),
-            ("exec_command_completed", true),
-            ("thread_status_changed", true),
-            ("unknown_new_event_kind", false),
+        let canonical_kinds = vec![
+            "task_started",
+            "task_complete",
+            "agent_message_delta",
+            "agent_message",
+            "agent_message_completed",
+            "agent_message_chunk",
+            "reasoning_content_delta",
+            "agent_reasoning_delta",
+            "reasoning_content",
+            "exec_command_output_delta",
+            "exec_command_started",
+            "exec_command_completed",
+            "exec_command_error",
+            "item_started",
+            "item_completed",
+            "thread_status_changed",
+            "turn_started",
+            "turn_completed",
+            "idle",
+            "done",
+            "stream_error",
         ];
-        for (kind, expected) in cases {
+        for kind in canonical_kinds {
             let event = json!({"params":{"type":kind}});
-            assert_eq!(
-                should_publish_watch_event(&event),
-                expected,
-                "kind={kind}"
-            );
+            assert_eq!(should_publish_watch_event(&event), true, "kind={kind}");
         }
+        assert!(!should_publish_watch_event(
+            &json!({"params":{"type":"unknown_new_event_kind"}})
+        ));
     }
 
     #[test]
@@ -3903,6 +3975,93 @@ mod tests {
         assert!(rendered.contains("assistant(code):"));
         assert!(rendered.contains("```rust"));
         assert!(rendered.contains("ctx 72%"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_append_watch_frame_for_tui_with_cap_rotates_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: serial test isolates process env mutation.
+        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+
+        let watch_path = dir.path().join(".config/atm/watch-stream/events.jsonl");
+        std::fs::create_dir_all(
+            watch_path
+                .parent()
+                .expect("watch feed path should have parent directory"),
+        )
+        .unwrap();
+        std::fs::write(&watch_path, "x".repeat(256)).unwrap();
+
+        let frame = json!({
+            "source": {"kind": "client_prompt"},
+            "event": {"params": {"type": "agent_message_delta", "delta": "hello"}}
+        });
+        append_watch_frame_for_tui_with_cap(&frame, 64);
+
+        let rotated_path = watch_path.with_extension("jsonl.1");
+        assert!(rotated_path.exists(), "rotation should create .jsonl.1");
+        let content = std::fs::read_to_string(&watch_path).expect("new feed file should exist");
+        assert!(
+            content.contains("\"rendered\""),
+            "new feed file should contain appended rendered record"
+        );
+        assert!(
+            content.contains("assistant"),
+            "rendered line should include formatted message class"
+        );
+
+        // SAFETY: restore process env after test.
+        unsafe { std::env::remove_var("ATM_HOME") };
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_forward_event_unknown_watch_kind_records_telemetry() {
+        let before = WATCH_UNKNOWN_EVENT_COUNT.load(Ordering::Relaxed);
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert(
+            "thread-unknown".to_string(),
+            "codex:unknown-agent".to_string(),
+        );
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+        let mut event = json!({
+            "jsonrpc": "2.0",
+            "method": "codex/event",
+            "params": {"type": "brand_new_kind", "threadId": "thread-unknown"}
+        });
+
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should still forward upstream");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        let after = WATCH_UNKNOWN_EVENT_COUNT.load(Ordering::Relaxed);
+        assert_eq!(
+            after,
+            before + 1,
+            "unknown kind should bump telemetry counter"
+        );
+
+        let sub = watch_stream_hub
+            .lock()
+            .await
+            .subscribe("codex:unknown-agent");
+        assert!(
+            sub.replay.is_empty(),
+            "unknown watch events should not be published to replay"
+        );
     }
 
     #[test]
@@ -3988,10 +4147,7 @@ mod tests {
         assert_eq!(received["params"]["agent_id"], "codex:abc-agent");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
 
-        let sub = watch_stream_hub
-            .lock()
-            .await
-            .subscribe("codex:abc-agent");
+        let sub = watch_stream_hub.lock().await.subscribe("codex:abc-agent");
         assert_eq!(sub.replay.len(), 1, "watch hub should retain replay event");
     }
 
@@ -4031,10 +4187,7 @@ mod tests {
         let _ = rx.try_recv().expect("event should be forwarded");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
 
-        let sub = watch_stream_hub
-            .lock()
-            .await
-            .subscribe("codex:abc-agent");
+        let sub = watch_stream_hub.lock().await.subscribe("codex:abc-agent");
         let replay0 = sub.replay.first().expect("replay event");
         assert_eq!(
             replay0.pointer("/source/kind").and_then(|v| v.as_str()),
@@ -4082,10 +4235,7 @@ mod tests {
         let _ = rx.try_recv().expect("event should be forwarded");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
 
-        let sub = watch_stream_hub
-            .lock()
-            .await
-            .subscribe("codex:abc-agent");
+        let sub = watch_stream_hub.lock().await.subscribe("codex:abc-agent");
         let replay0 = sub.replay.first().expect("replay event");
         assert_eq!(
             replay0.pointer("/source/kind").and_then(|v| v.as_str()),

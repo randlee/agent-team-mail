@@ -52,7 +52,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::time::interval;
 
 use agent_team_mail_core::{
-    control::{ControlAck, ControlAction, ControlRequest, ControlResult, CONTROL_SCHEMA_VERSION},
+    control::{CONTROL_SCHEMA_VERSION, ControlAck, ControlAction, ControlRequest, ControlResult},
     daemon_client::{
         AgentSummary, query_agent_stream_state, query_list_agents, send_control,
         subscribe_stream_events,
@@ -131,8 +131,7 @@ async fn main() -> Result<()> {
     // Set up terminal
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("enter alternate screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("enter alternate screen")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
@@ -170,7 +169,9 @@ async fn run_app<B: ratatui::backend::Backend>(
 ) -> Result<()> {
     let mut app = App::new(team.clone(), config);
     let watch_feed_path = watch_feed_path();
-    let mut watch_feed_pos = std::fs::metadata(&watch_feed_path).map(|m| m.len()).unwrap_or(0);
+    let mut watch_feed_pos = std::fs::metadata(&watch_feed_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     // Rate-limit daemon/inbox queries to 2-second intervals.
     const DAEMON_REFRESH: Duration = Duration::from_secs(2);
@@ -234,9 +235,7 @@ async fn run_app<B: ratatui::backend::Backend>(
 
             // Poll daemon for normalised stream turn state of the current agent.
             if let Some(ref agent_name) = app.streaming_agent {
-                app.daemon_turn_state = query_agent_stream_state(agent_name)
-                    .ok()
-                    .flatten();
+                app.daemon_turn_state = query_agent_stream_state(agent_name).ok().flatten();
             } else {
                 app.daemon_turn_state = None;
             }
@@ -276,13 +275,15 @@ async fn run_app<B: ratatui::backend::Backend>(
                 app.append_stream_lines(lines);
             }
             if disconnected {
-                app.stream_source_error = Some("live stream disconnected; using log replay".to_string());
+                app.stream_source_error =
+                    Some("live stream disconnected; using log replay".to_string());
                 app.daemon_stream_rx = None;
             }
         }
 
         // ── Session log tail (100 ms) ─────────────────────────────────────────
-        if app.daemon_stream_rx.is_none() && let Some(ref log_path) = app.session_log_path.clone()
+        if app.daemon_stream_rx.is_none()
+            && let Some(ref log_path) = app.session_log_path.clone()
         {
             match tail_log_file(log_path, app.stream_pos).await {
                 Ok((new_lines, new_pos)) => {
@@ -317,8 +318,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                 Err(_) => {
                     // File unreadable (permissions changed, filesystem error, etc.).
                     if app.stream_pos > 0 {
-                        app.stream_source_error =
-                            Some("stream frozen: log unreadable".to_string());
+                        app.stream_source_error = Some("stream frozen: log unreadable".to_string());
                     }
                 }
             }
@@ -352,9 +352,14 @@ async fn run_app<B: ratatui::backend::Backend>(
         if let Some(pending) = app.pending_control.take() {
             let stdin_timeout = app.config.stdin_timeout_secs;
             let interrupt_timeout = app.config.interrupt_timeout_secs;
-            let result =
-                execute_control(&team, &app.streaming_agent, pending, stdin_timeout, interrupt_timeout)
-                    .await;
+            let result = execute_control(
+                &team,
+                &app.streaming_agent,
+                pending,
+                stdin_timeout,
+                interrupt_timeout,
+            )
+            .await;
             app.status_message = Some(result);
         }
 
@@ -376,7 +381,11 @@ fn refresh_agent_list() -> Vec<AgentSummary> {
 }
 
 /// Build [`MemberRow`] entries from the agent list with current inbox counts.
-fn build_member_rows(agents: &[AgentSummary], home: &std::path::Path, team: &str) -> Vec<MemberRow> {
+fn build_member_rows(
+    agents: &[AgentSummary],
+    home: &std::path::Path,
+    team: &str,
+) -> Vec<MemberRow> {
     agents
         .iter()
         .map(|a| MemberRow {
@@ -525,7 +534,9 @@ fn format_stream_event_line(event: &DaemonStreamEvent) -> String {
             };
             format!("[live] turn {status_s} ({transport}) id={turn_id}")
         }
-        DaemonStreamEvent::TurnIdle { turn_id, transport, .. } => {
+        DaemonStreamEvent::TurnIdle {
+            turn_id, transport, ..
+        } => {
             format!("[live] turn idle ({transport}) id={turn_id}")
         }
     }
@@ -569,7 +580,11 @@ async fn tail_watch_feed_file(
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter(|v| watch_record_matches_agent(v, selected_agent))
-        .filter_map(|v| v.get("rendered").and_then(|r| r.as_str()).map(str::to_string))
+        .filter_map(|v| {
+            v.get("rendered")
+                .and_then(|r| r.as_str())
+                .map(str::to_string)
+        })
         .map(|s| format!("[direct] {s}"))
         .collect();
 
@@ -688,7 +703,10 @@ async fn execute_control(
 /// seconds before issuing one retry with the same idempotency key. The
 /// `timeout_secs` value comes from the per-action TUI config fields
 /// (`stdin_timeout_secs` or `interrupt_timeout_secs`).
-async fn send_with_retry(request: &ControlRequest, timeout_secs: u64) -> anyhow::Result<ControlAck> {
+async fn send_with_retry(
+    request: &ControlRequest,
+    timeout_secs: u64,
+) -> anyhow::Result<ControlAck> {
     let req1 = request.clone();
     let result = tokio::task::spawn_blocking(move || send_control(&req1)).await??;
 
@@ -836,7 +854,10 @@ mod tests {
             5,
         )
         .await;
-        assert!(!result.is_empty(), "result should be non-empty on daemon error");
+        assert!(
+            !result.is_empty(),
+            "result should be non-empty on daemon error"
+        );
     }
 
     // ── tail_log_file tests ───────────────────────────────────────────────────
@@ -854,7 +875,9 @@ mod tests {
     async fn test_tail_log_file_reads_new_data() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("agent.log");
-        tokio::fs::write(&path, b"line one\nline two\n").await.unwrap();
+        tokio::fs::write(&path, b"line one\nline two\n")
+            .await
+            .unwrap();
         let (lines, new_pos) = tail_log_file(&path, 0).await.unwrap();
         assert!(!lines.is_empty());
         assert!(new_pos > 0);
@@ -889,10 +912,7 @@ mod tests {
         tokio::fs::write(&path, b"new").await.unwrap();
 
         let (lines, new_pos) = tail_log_file(&path, pos_after_first).await.unwrap();
-        assert_eq!(
-            new_pos, 0,
-            "new_pos should be 0 to signal truncation/reset"
-        );
+        assert_eq!(new_pos, 0, "new_pos should be 0 to signal truncation/reset");
         assert!(
             lines.is_empty(),
             "no lines should be returned on truncation signal"
@@ -954,7 +974,9 @@ mod tests {
         tokio::fs::write(&path, format!("{line_a}\n{line_b}\n"))
             .await
             .unwrap();
-        let (events, _) = tail_log_events(&path, 0, Some("agent-a"), None).await.unwrap();
+        let (events, _) = tail_log_events(&path, 0, Some("agent-a"), None)
+            .await
+            .unwrap();
         assert_eq!(events.len(), 1, "only agent-a events should be returned");
         assert_eq!(events[0].action, "action_a");
     }
@@ -973,7 +995,9 @@ mod tests {
         let log_path = dir.path().join("agent.log");
 
         // Step 1: file exists, first read succeeds and advances position.
-        tokio::fs::write(&log_path, b"line one\nline two\n").await.unwrap();
+        tokio::fs::write(&log_path, b"line one\nline two\n")
+            .await
+            .unwrap();
         let (lines, pos1) = tail_log_file(&log_path, 0).await.unwrap();
         assert!(!lines.is_empty(), "should read initial content");
         assert!(pos1 > 0, "position must advance after first read");
@@ -982,17 +1006,113 @@ mod tests {
         // tail_log_file must return new_pos=0 to signal the caller to reset.
         tokio::fs::write(&log_path, b"x").await.unwrap(); // 1 byte < pos1
         let (trunc_lines, trunc_pos) = tail_log_file(&log_path, pos1).await.unwrap();
-        assert_eq!(trunc_pos, 0, "truncation must return new_pos=0 (reset signal)");
+        assert_eq!(
+            trunc_pos, 0,
+            "truncation must return new_pos=0 (reset signal)"
+        );
         assert!(trunc_lines.is_empty(), "no lines on truncation signal");
 
         // Step 3: caller simulates clearing stream_source_error by resetting pos to 0.
         // File now has new content after the restart.
-        tokio::fs::write(&log_path, b"new content after restart\n").await.unwrap();
+        tokio::fs::write(&log_path, b"new content after restart\n")
+            .await
+            .unwrap();
         let (new_lines, new_pos) = tail_log_file(&log_path, 0).await.unwrap();
         assert!(
             !new_lines.is_empty(),
             "should read new content after recovery (stream_source_error cleared)"
         );
         assert!(new_pos > 0, "position must advance after recovery read");
+    }
+
+    #[test]
+    fn test_watch_record_matches_agent_variants() {
+        let exact_actor = serde_json::json!({
+            "frame": { "source": { "actor": "arch-ctm" }, "agent_id": "codex:arch-ctm-1" }
+        });
+        assert!(watch_record_matches_agent(&exact_actor, "arch-ctm"));
+
+        let actor_with_team = serde_json::json!({
+            "frame": { "source": { "actor": "arch-ctm@atm-dev" }, "agent_id": "codex:other-1" }
+        });
+        assert!(watch_record_matches_agent(&actor_with_team, "arch-ctm"));
+
+        let agent_id_contains = serde_json::json!({
+            "frame": { "source": { "actor": "other" }, "agent_id": "codex:arch-ctm-999" }
+        });
+        assert!(watch_record_matches_agent(&agent_id_contains, "arch-ctm"));
+
+        let mismatch = serde_json::json!({
+            "frame": { "source": { "actor": "other@atm-dev" }, "agent_id": "codex:other-1" }
+        });
+        assert!(!watch_record_matches_agent(&mismatch, "arch-ctm"));
+    }
+
+    #[tokio::test]
+    async fn test_tail_watch_feed_file_filters_selected_agent_and_prefixes_direct() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("events.jsonl");
+
+        let record_match = serde_json::json!({
+            "frame": {
+                "source": {"actor": "arch-ctm@atm-dev"},
+                "agent_id": "codex:arch-ctm-1"
+            },
+            "rendered": "[client_prompt] assistant: hello"
+        });
+        let record_other = serde_json::json!({
+            "frame": {
+                "source": {"actor": "someone-else@atm-dev"},
+                "agent_id": "codex:someone-else-1"
+            },
+            "rendered": "[client_prompt] assistant: should-not-appear"
+        });
+        let invalid_json = "{not-json}";
+        let payload = format!(
+            "{}\n{}\n{}\n",
+            serde_json::to_string(&record_match).unwrap(),
+            invalid_json,
+            serde_json::to_string(&record_other).unwrap()
+        );
+        tokio::fs::write(&path, payload).await.unwrap();
+
+        let (lines, new_pos) = tail_watch_feed_file(&path, 0, "arch-ctm").await.unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "[direct] [client_prompt] assistant: hello");
+        assert!(new_pos > 0);
+    }
+
+    #[tokio::test]
+    async fn test_tail_watch_feed_file_handles_missing_and_truncated_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("events.jsonl");
+
+        let (missing_lines, missing_pos) =
+            tail_watch_feed_file(&path, 7, "arch-ctm").await.unwrap();
+        assert!(missing_lines.is_empty());
+        assert_eq!(missing_pos, 7);
+
+        tokio::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&serde_json::json!({
+                    "frame": {"source": {"actor": "arch-ctm"}, "agent_id": "codex:arch-ctm"},
+                    "rendered": "line"
+                }))
+                .unwrap()
+            ),
+        )
+        .await
+        .unwrap();
+        let (_, pos_after_first) = tail_watch_feed_file(&path, 0, "arch-ctm").await.unwrap();
+        assert!(pos_after_first > 0);
+
+        tokio::fs::write(&path, b"{}").await.unwrap();
+        let (trunc_lines, trunc_pos) = tail_watch_feed_file(&path, pos_after_first, "arch-ctm")
+            .await
+            .unwrap();
+        assert!(trunc_lines.is_empty());
+        assert_eq!(trunc_pos, 0, "truncation should signal reset to 0");
     }
 }
