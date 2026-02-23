@@ -45,6 +45,7 @@ use crate::mail_inject::{
 };
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
+use crate::watch_stream::{SourceEnvelope, WatchAttachError, WatchStreamHub, WatchSubscription};
 
 /// Type alias for the shared child stdin writer.
 ///
@@ -121,6 +122,8 @@ pub struct ProxyServer {
     pub team: String,
     /// Maps Codex `threadId` → `agent_id` for event attribution.
     thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    /// Direct watch-stream hub for active session viewing (Sprint L.5 groundwork).
+    watch_stream_hub: Arc<tokio::sync::Mutex<WatchStreamHub>>,
     /// UTC ISO 8601 timestamp of when this proxy process started.
     started_at: String,
     /// Unix epoch seconds when this proxy process started (for uptime calc).
@@ -310,6 +313,7 @@ impl ProxyServer {
             elicitation_counter: Arc::new(AtomicU64::new(1)),
             team: team_str,
             thread_to_agent: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            watch_stream_hub: Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default())),
             started_at,
             started_epoch_secs,
             queues: Arc::new(Mutex::new(HashMap::new())),
@@ -320,6 +324,21 @@ impl ProxyServer {
             resume_context: None,
             transport,
         }
+    }
+
+    /// Subscribe to an agent's direct watch stream.
+    ///
+    /// Returns a bounded replay snapshot plus a live receiver.
+    pub async fn subscribe_watch_stream(
+        &self,
+        agent_id: &str,
+    ) -> Result<WatchSubscription, WatchAttachError> {
+        self.watch_stream_hub.lock().await.subscribe(agent_id)
+    }
+
+    /// Detach active watcher for a session (MVP: one watcher per session).
+    pub async fn detach_watch_stream(&self, agent_id: &str) -> bool {
+        self.watch_stream_hub.lock().await.detach(agent_id)
     }
 
     /// Create a proxy server with resume context (FR-6).
@@ -432,6 +451,7 @@ impl ProxyServer {
         let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let dropped = Arc::clone(&self.dropped_events);
         let thread_to_agent = Arc::clone(&self.thread_to_agent);
+        let watch_stream_hub = Arc::clone(&self.watch_stream_hub);
 
         // Emit proxy_start lifecycle event.
         agent_team_mail_core::event_log::emit_event_best_effort(
@@ -712,6 +732,7 @@ impl ProxyServer {
                             &upstream_tx,
                             &dropped,
                             &thread_to_agent,
+                            &watch_stream_hub,
                             &self.elicitation_registry,
                             &self.elicitation_counter,
                         )
@@ -2329,6 +2350,7 @@ Session ending. Write a concise summary of:\n\
         let upstream_tx_clone = upstream_tx.clone();
         let dropped_clone = Arc::clone(dropped);
         let thread_to_agent_clone = Arc::clone(&self.thread_to_agent);
+        let watch_stream_hub = Arc::clone(&self.watch_stream_hub);
         let registry_for_reader = Arc::clone(&self.registry);
         let shared_stdin_for_reader = Arc::clone(&self.shared_child_stdin);
         let queues_for_reader = Arc::clone(&self.queues);
@@ -2428,6 +2450,7 @@ Session ending. Write a concise summary of:\n\
                         &mut event,
                         &pending_clone,
                         &thread_to_agent_clone,
+                        &watch_stream_hub,
                         &upstream_tx_clone,
                         &dropped_clone,
                     )
@@ -2596,6 +2619,7 @@ async fn forward_event(
     event: &mut Value,
     pending: &Arc<Mutex<PendingRequests>>,
     thread_to_agent: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    watch_stream_hub: &Arc<tokio::sync::Mutex<WatchStreamHub>>,
     upstream_tx: &mpsc::Sender<Value>,
     dropped_events: &Arc<AtomicU64>,
 ) {
@@ -2627,15 +2651,71 @@ async fn forward_event(
 
     if let Some(params) = event.get_mut("params") {
         if let Some(obj) = params.as_object_mut() {
-            obj.insert("agent_id".to_string(), Value::String(agent_id));
+            obj.insert("agent_id".to_string(), Value::String(agent_id.clone()));
         }
     }
+    // Publish to direct watch-stream hub using MVP subset + source envelope.
+    if should_publish_watch_event(event) {
+        let source = infer_source_envelope(event, &agent_id);
+        watch_stream_hub
+            .lock()
+            .await
+            .publish_frame(&agent_id, source, event.clone());
+    }
+
     match upstream_tx.try_send(event.clone()) {
         Ok(()) => {}
         Err(_) => {
             dropped_events.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// MVP subset gate for watch-stream fanout (FR-21.5 + docs Section 3.3).
+fn should_publish_watch_event(event: &Value) -> bool {
+    let kind = event
+        .pointer("/params/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    matches!(
+        kind,
+        "task_started"
+            | "task_complete"
+            | "agent_message_delta"
+            | "agent_message"
+            | "reasoning_content_delta"
+            | "agent_reasoning_delta"
+            | "exec_command_output_delta"
+            | "item_started"
+            | "item_completed"
+            | "idle"
+            | "done"
+            | "stream_error"
+    )
+}
+
+/// Infer source attribution for watch-stream frames (FR-22 baseline).
+fn infer_source_envelope(event: &Value, agent_id: &str) -> SourceEnvelope {
+    let src_kind = event
+        .pointer("/params/source/kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let kind = match src_kind {
+        // daemon lifecycle source value reused for mail injection origin mapping
+        "atm_mcp" | "atm_mail" => "atm_mail",
+        "user_steer" | "tui_user" => "user_steer",
+        _ => "client_prompt",
+    };
+    let actor = event
+        .pointer("/params/source/actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or(agent_id);
+    let channel = match kind {
+        "atm_mail" => "mail_injector",
+        "user_steer" => "tui_user",
+        _ => "mcp_primary",
+    };
+    SourceEnvelope::new(kind, actor, channel)
 }
 
 /// JSONL event type as parsed from a raw event line.
@@ -3126,12 +3206,17 @@ async fn try_reserve_thread_for_auto_mail(
 /// Handles `elicitation/create` requests by bridging them upstream with a new
 /// proxy-assigned request ID, registering correlation in [`ElicitationRegistry`]
 /// (FR-18).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "routing needs shared pending/thread/watch/elicitation state passed explicitly"
+)]
 async fn route_child_message(
     msg: Value,
     pending: &Arc<Mutex<PendingRequests>>,
     upstream_tx: &mpsc::Sender<Value>,
     dropped: &Arc<AtomicU64>,
     thread_to_agent: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    watch_stream_hub: &Arc<tokio::sync::Mutex<WatchStreamHub>>,
     elicitation_registry: &Arc<Mutex<ElicitationRegistry>>,
     elicitation_counter: &Arc<AtomicU64>,
 ) {
@@ -3139,7 +3224,15 @@ async fn route_child_message(
 
     if method == Some("codex/event") {
         let mut event = msg;
-        forward_event(&mut event, pending, thread_to_agent, upstream_tx, dropped).await;
+        forward_event(
+            &mut event,
+            pending,
+            thread_to_agent,
+            watch_stream_hub,
+            upstream_tx,
+            dropped,
+        )
+        .await;
         return;
     }
 
@@ -3398,13 +3491,22 @@ mod tests {
         let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
         let mut event = json!({
             "jsonrpc": "2.0",
             "method": "codex/event",
             "params": {"type": "task_started"}
         });
         // No threadId in the event → falls back to "proxy:unknown"
-        forward_event(&mut event, &pending, &thread_to_agent, &tx, &dropped).await;
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
         let received = rx.try_recv().expect("event should be forwarded");
         assert_eq!(received["params"]["agent_id"], "proxy:unknown");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
@@ -3419,15 +3521,31 @@ mod tests {
         map.insert("thread-123".to_string(), "codex:abc-agent".to_string());
         let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
             Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
         let mut event = json!({
             "jsonrpc": "2.0",
             "method": "codex/event",
             "params": {"type": "task_started", "threadId": "thread-123"}
         });
-        forward_event(&mut event, &pending, &thread_to_agent, &tx, &dropped).await;
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
         let received = rx.try_recv().expect("event should be forwarded");
         assert_eq!(received["params"]["agent_id"], "codex:abc-agent");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        let sub = watch_stream_hub
+            .lock()
+            .await
+            .subscribe("codex:abc-agent")
+            .expect("attach");
+        assert_eq!(sub.replay.len(), 1, "watch hub should retain replay event");
     }
 
     #[tokio::test]
@@ -3437,6 +3555,7 @@ mod tests {
         let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
 
         // Fill the channel
         let _ = tx.try_send(json!({"fill": true}));
@@ -3447,7 +3566,15 @@ mod tests {
             "method": "codex/event",
             "params": {"type": "task_started"}
         });
-        forward_event(&mut event, &pending, &thread_to_agent, &tx, &dropped).await;
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 
