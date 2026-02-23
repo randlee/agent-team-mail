@@ -177,7 +177,7 @@ impl McpTransport {
     /// Emits a `transport_init` structured log event.
     pub fn new(config: AgentMcpConfig, team: impl Into<String>) -> Self {
         let team = team.into();
-        emit_event_best_effort(EventFields {
+        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
             level: "info",
             source: "atm-agent-mcp",
             action: "transport_init",
@@ -197,7 +197,7 @@ impl Drop for McpTransport {
     /// Emits a `transport_shutdown` structured log event when the transport
     /// is dropped (i.e. when the proxy shuts down).
     fn drop(&mut self) {
-        emit_event_best_effort(EventFields {
+        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
             level: "info",
             source: "atm-agent-mcp",
             action: "transport_shutdown",
@@ -317,7 +317,7 @@ impl JsonCodecTransport {
     /// Emits a `transport_init` structured log event.
     pub fn new(config: AgentMcpConfig, team: impl Into<String>) -> Self {
         let team = team.into();
-        emit_event_best_effort(EventFields {
+        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
             level: "info",
             source: "atm-agent-mcp",
             action: "transport_init",
@@ -337,7 +337,7 @@ impl JsonCodecTransport {
 
 impl Drop for JsonCodecTransport {
     fn drop(&mut self) {
-        emit_event_best_effort(EventFields {
+        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
             level: "info",
             source: "atm-agent-mcp",
             action: "transport_shutdown",
@@ -458,7 +458,7 @@ impl CodexTransport for JsonCodecTransport {
                                 crate::stream_emit::emit_stream_event(&event).await;
                             });
                         }
-                        emit_event_best_effort(EventFields {
+                        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
                             level: "info",
                             source: "atm-agent-mcp",
                             action: "idle_detected",
@@ -468,7 +468,7 @@ impl CodexTransport for JsonCodecTransport {
                         });
                     }
                     TransportEventType::Done => {
-                        emit_event_best_effort(EventFields {
+                        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
                             level: "info",
                             source: "atm-agent-mcp",
                             action: "codex_done",
@@ -670,7 +670,7 @@ impl AppServerTransport {
     /// Emits a `transport_init` structured log event.
     pub fn new(config: AgentMcpConfig, team: impl Into<String>) -> Self {
         let team = team.into();
-        emit_event_best_effort(EventFields {
+        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
             level: "info",
             source: "atm-agent-mcp",
             action: "transport_init",
@@ -1007,7 +1007,7 @@ impl AppServerTransport {
 
 impl Drop for AppServerTransport {
     fn drop(&mut self) {
-        emit_event_best_effort(EventFields {
+        emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
             level: "info",
             source: "atm-agent-mcp",
             action: "transport_shutdown",
@@ -1349,7 +1349,7 @@ pub async fn drive_notification_task(
                             crate::stream_emit::emit_stream_event(&event).await;
                         });
                     }
-                    emit_event_best_effort(EventFields {
+                    emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
                         level: "info",
                         source: "atm-agent-mcp",
                         action: "turn_started",
@@ -1426,7 +1426,7 @@ pub async fn drive_notification_task(
                             crate::stream_emit::emit_stream_event(&idle_event).await;
                         });
                     }
-                    emit_event_best_effort(EventFields {
+                    emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
                         level: "info",
                         source: "atm-agent-mcp",
                         action: "turn_completed",
@@ -1503,7 +1503,7 @@ pub async fn drive_notification_task(
                     turn_id: terminal_turn_id,
                     status: TurnStatus::Failed,
                 };
-                emit_event_best_effort(EventFields {
+                emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
                     level: "warn",
                     source: "atm-agent-mcp",
                     action: "turn_terminal_crash",
@@ -1611,7 +1611,7 @@ impl CodexTransport for AppServerTransport {
 
         if let Some(ref ver) = negotiated_version {
             *self.protocol_version.lock().await = Some(ver.clone());
-            emit_event_best_effort(EventFields {
+            emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
                 level: "info",
                 source: "atm-agent-mcp",
                 action: "protocol_version_negotiated",

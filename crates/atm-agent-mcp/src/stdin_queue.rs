@@ -76,7 +76,7 @@ pub async fn enqueue(team: &str, agent_id: &str, content: &str) -> anyhow::Resul
     let path = dir.join(format!("{id}.json"));
     tokio::fs::write(&path, content.as_bytes()).await?;
 
-    emit_event_best_effort(EventFields {
+    emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
         level: "info",
         source: "atm-agent-mcp",
         action: "stdin_queue_enqueue",
@@ -222,7 +222,7 @@ pub async fn drain(
         }
     }
 
-    emit_event_best_effort(EventFields {
+    emit_event_best_effort(EventFields { // TODO(M.1b): remove emit_event_best_effort call
         level: "info",
         source: "atm-agent-mcp",
         action: "stdin_queue_drain",
