@@ -118,3 +118,54 @@ pub mod app_server_test {
         }
     }
 }
+
+/// Test-only helpers for exercising `JsonCodecTransport` cli-json state machine
+/// from integration tests.
+///
+/// `parse_event_type` and `TransportEventType` are `pub(crate)`, so integration
+/// tests cannot call them directly.  This module re-exports thin wrappers so
+/// the integration test can drive the state machine without coupling to internal
+/// type names.
+///
+/// Do NOT use in production code paths.
+#[doc(hidden)]
+pub mod cli_json_test {
+    /// Re-export of the cli-json event classification result.
+    ///
+    /// The variants mirror [`crate::transport::TransportEventType`] exactly.
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum CliJsonEventKind {
+        /// `{"type":"agent_message"}`
+        AgentMessage,
+        /// `{"type":"tool_call"}`
+        ToolCall,
+        /// `{"type":"tool_result"}`
+        ToolResult,
+        /// `{"type":"file_change"}`
+        FileChange,
+        /// `{"type":"idle"}`
+        Idle,
+        /// `{"type":"done"}`
+        Done,
+        /// Any unrecognised or malformed event.
+        Unknown,
+    }
+
+    /// Classify a JSONL line from a `codex exec --json` child process.
+    ///
+    /// This is a thin public wrapper around `crate::transport::parse_event_type`
+    /// intended exclusively for integration-test use.  Returns the classification
+    /// as a [`CliJsonEventKind`] so tests do not depend on the internal enum.
+    pub fn classify_event(line: &str) -> CliJsonEventKind {
+        use crate::transport::TransportEventType;
+        match crate::transport::parse_event_type(line) {
+            TransportEventType::AgentMessage => CliJsonEventKind::AgentMessage,
+            TransportEventType::ToolCall => CliJsonEventKind::ToolCall,
+            TransportEventType::ToolResult => CliJsonEventKind::ToolResult,
+            TransportEventType::FileChange => CliJsonEventKind::FileChange,
+            TransportEventType::Idle => CliJsonEventKind::Idle,
+            TransportEventType::Done => CliJsonEventKind::Done,
+            TransportEventType::Unknown => CliJsonEventKind::Unknown,
+        }
+    }
+}

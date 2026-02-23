@@ -167,9 +167,9 @@ impl SessionContext {
 /// emission is a no-op. This allows transports to hold a `TurnTracker` before
 /// session information is available.
 ///
-/// The `transport` label embedded in emitted [`DaemonStreamEvent`]s defaults to
-/// `"mcp"`. Call [`TurnTracker::set_transport`] to override this for non-MCP
-/// transports (e.g. `"app-server"` or `"cli-json"`).
+/// The `transport` field identifies which transport owns this tracker (e.g.
+/// `"mcp"`, `"cli-json"`, `"app-server"`). It is included in every daemon
+/// stream event so that TUI consumers can distinguish turn events by transport.
 ///
 /// # Thread safety
 ///
@@ -187,50 +187,42 @@ pub struct TurnTracker {
     /// [`TurnTracker::set_session_context`] has not yet been called.
     /// Daemon emission is a no-op when `None`.
     ctx: Arc<Mutex<Option<SessionContext>>>,
-    /// Transport label embedded in all emitted [`DaemonStreamEvent`]s.
+    /// Transport identifier included in every daemon stream event.
     ///
-    /// Defaults to `"mcp"`. Override with [`TurnTracker::set_transport`].
-    transport: Arc<Mutex<String>>,
+    /// Set at construction via [`TurnTracker::new`] or
+    /// [`TurnTracker::new_deferred`]. Defaults to `"unknown"` for deferred
+    /// trackers so that events emitted before the transport is identified are
+    /// still distinguishable from silence.
+    transport: Arc<String>,
 }
 
 impl TurnTracker {
-    /// Create a new, empty [`TurnTracker`] bound to the given session.
+    /// Create a new, empty [`TurnTracker`] bound to the given session and transport.
     ///
-    /// The transport label defaults to `"mcp"`. Call [`Self::set_transport`]
-    /// after construction to override for non-MCP transports.
-    pub fn new(ctx: SessionContext) -> Self {
+    /// `transport` identifies which transport owns this tracker (e.g. `"mcp"`,
+    /// `"cli-json"`, `"app-server"`). It is included in every daemon stream event.
+    pub fn new(ctx: SessionContext, transport: impl Into<String>) -> Self {
         Self {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             ctx: Arc::new(Mutex::new(Some(ctx))),
-            transport: Arc::new(Mutex::new("mcp".to_string())),
+            transport: Arc::new(transport.into()),
         }
     }
 
     /// Create a new, empty [`TurnTracker`] with no session context.
     ///
+    /// `transport` identifies which transport owns this tracker (e.g. `"mcp"`,
+    /// `"cli-json"`, `"app-server"`). Defaults to `"unknown"` if not known at
+    /// construction time — pass the correct transport name when available.
+    ///
     /// Daemon lifecycle emission is a no-op until [`Self::set_session_context`]
     /// is called. This constructor is used when transports are created before
     /// session information (identity, team, session_id) is available.
-    ///
-    /// The transport label defaults to `"mcp"`. Call [`Self::set_transport`]
-    /// after construction to override for non-MCP transports, or use
-    /// [`Self::new_deferred_with_transport`] to set the label at construction time.
-    pub fn new_deferred() -> Self {
-        Self::new_deferred_with_transport("mcp")
-    }
-
-    /// Create a new, empty [`TurnTracker`] with no session context and an
-    /// explicit transport label.
-    ///
-    /// Equivalent to calling [`Self::new_deferred`] followed by
-    /// [`Self::set_transport`], but avoids the need for an async call at
-    /// construction time. Use this when the transport kind is known at the
-    /// call site (e.g. `AppServerTransport::new` passes `"app-server"`).
-    pub fn new_deferred_with_transport(transport: impl Into<String>) -> Self {
+    pub fn new_deferred(transport: impl Into<String>) -> Self {
         Self {
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             ctx: Arc::new(Mutex::new(None)),
-            transport: Arc::new(Mutex::new(transport.into())),
+            transport: Arc::new(transport.into()),
         }
     }
 
@@ -244,15 +236,6 @@ impl TurnTracker {
         *self.ctx.lock().await = Some(ctx);
     }
 
-    /// Override the transport label embedded in all emitted [`DaemonStreamEvent`]s.
-    ///
-    /// Defaults to `"mcp"`. Call this method for non-MCP transports (e.g.
-    /// `"app-server"` or `"cli-json"`) so that stream events carry the correct
-    /// transport identifier. May be called at any time after construction.
-    pub async fn set_transport(&self, transport: impl Into<String>) {
-        *self.transport.lock().await = transport.into();
-    }
-
     /// Emit a [`EventKind::TeammateIdle`] event to the daemon (best-effort).
     ///
     /// Also emits a [`DaemonStreamEvent::TurnIdle`] stream event so that the
@@ -262,7 +245,6 @@ impl TurnTracker {
     async fn emit_idle(&self) {
         let guard = self.ctx.lock().await;
         if let Some(ref ctx) = *guard {
-            let transport = self.transport.lock().await.clone();
             emit_lifecycle_event(
                 EventKind::TeammateIdle,
                 &ctx.identity,
@@ -274,7 +256,7 @@ impl TurnTracker {
             crate::stream_emit::emit_stream_event(&DaemonStreamEvent::TurnIdle {
                 agent: ctx.identity.clone(),
                 turn_id: String::new(),
-                transport,
+                transport: (*self.transport).clone(),
             })
             .await;
         }
@@ -351,12 +333,11 @@ impl TurnControl for TurnTracker {
         // Emit stream event (best-effort, fire-and-forget).
         let guard = self.ctx.lock().await;
         if let Some(ref ctx) = *guard {
-            let transport = self.transport.lock().await.clone();
             crate::stream_emit::emit_stream_event(&DaemonStreamEvent::TurnStarted {
                 agent: ctx.identity.clone(),
                 thread_id: thread_id.to_string(),
                 turn_id: turn_id.to_string(),
-                transport,
+                transport: (*self.transport).clone(),
             })
             .await;
         }
@@ -397,13 +378,12 @@ impl TurnControl for TurnTracker {
         {
             let guard = self.ctx.lock().await;
             if let Some(ref ctx) = *guard {
-                let transport = self.transport.lock().await.clone();
                 crate::stream_emit::emit_stream_event(&DaemonStreamEvent::TurnCompleted {
                     agent: ctx.identity.clone(),
                     thread_id: thread_id.to_string(),
                     turn_id: turn_id.to_string(),
                     status: agent_team_mail_core::daemon_stream::TurnStatusWire::from(status),
-                    transport,
+                    transport: (*self.transport).clone(),
                 })
                 .await;
             }
@@ -438,11 +418,10 @@ mod tests {
     use tempfile::tempdir;
 
     fn make_tracker() -> TurnTracker {
-        TurnTracker::new(SessionContext::new(
-            "arch-ctm",
-            "atm-dev",
-            "codex:test-1234",
-        ))
+        TurnTracker::new(
+            SessionContext::new("arch-ctm", "atm-dev", "codex:test-1234"),
+            "mcp",
+        )
     }
 
     // ── StaleTurnError display ────────────────────────────────────────────────
@@ -484,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_deferred_creates_tracker_without_context() {
-        let tracker = TurnTracker::new_deferred();
+        let tracker = TurnTracker::new_deferred("mcp");
         // Should work without panic — no context means no daemon emission.
         tracker.start_turn("t1", "turn-def").await;
         assert_eq!(
@@ -503,7 +482,7 @@ mod tests {
             std::env::set_var("ATM_HOME", dir.path());
         }
 
-        let tracker = TurnTracker::new_deferred();
+        let tracker = TurnTracker::new_deferred("mcp");
         tracker
             .set_session_context(SessionContext::new("arch-ctm", "atm-dev", "codex:test"))
             .await;
