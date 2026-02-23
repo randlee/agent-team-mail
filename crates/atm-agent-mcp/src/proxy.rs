@@ -124,6 +124,9 @@ pub struct ProxyServer {
     thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
     /// Direct watch-stream hub for active session viewing (Sprint L.5 groundwork).
     watch_stream_hub: Arc<tokio::sync::Mutex<WatchStreamHub>>,
+    /// Active watch subscriptions keyed by `agent_id` for synthetic polling tools.
+    watch_subscriptions:
+        Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::broadcast::Receiver<Value>>>>,
     /// UTC ISO 8601 timestamp of when this proxy process started.
     started_at: String,
     /// Unix epoch seconds when this proxy process started (for uptime calc).
@@ -341,6 +344,7 @@ impl ProxyServer {
             team: team_str,
             thread_to_agent: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             watch_stream_hub: Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default())),
+            watch_subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             started_at,
             started_epoch_secs,
             queues: Arc::new(Mutex::new(HashMap::new())),
@@ -2258,6 +2262,109 @@ Session ending. Write a concise summary of:\n\
                 }
                 resp
             }
+            "agent_watch_attach" => {
+                let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        "agent_watch_attach: 'agent_id' is required",
+                    );
+                };
+
+                match self.subscribe_watch_stream(agent_id).await {
+                    Ok(sub) => {
+                        self.watch_subscriptions
+                            .lock()
+                            .await
+                            .insert(agent_id.to_string(), sub.rx);
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": json!({
+                                        "agent_id": agent_id,
+                                        "attached": true,
+                                        "replay": sub.replay,
+                                    }).to_string()
+                                }]
+                            }
+                        })
+                    }
+                    Err(WatchAttachError::AlreadyAttached) => atm_tools::make_mcp_error_result(
+                        id,
+                        &format!("agent_watch_attach: watcher already attached for '{agent_id}'"),
+                    ),
+                }
+            }
+            "agent_watch_poll" => {
+                let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        "agent_watch_poll: 'agent_id' is required",
+                    );
+                };
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.clamp(1, 200) as usize)
+                    .unwrap_or(50);
+
+                let mut subs = self.watch_subscriptions.lock().await;
+                let Some(rx) = subs.get_mut(agent_id) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        &format!("agent_watch_poll: no active watcher for '{agent_id}'"),
+                    );
+                };
+
+                let mut events = Vec::new();
+                for _ in 0..limit {
+                    match rx.try_recv() {
+                        Ok(v) => events.push(v),
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    }
+                }
+
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "agent_id": agent_id,
+                                "events": events,
+                            }).to_string()
+                        }]
+                    }
+                })
+            }
+            "agent_watch_detach" => {
+                let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        "agent_watch_detach: 'agent_id' is required",
+                    );
+                };
+                self.watch_subscriptions.lock().await.remove(agent_id);
+                let detached = self.detach_watch_stream(agent_id).await;
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "agent_id": agent_id,
+                                "detached": detached,
+                            }).to_string()
+                        }]
+                    }
+                })
+            }
             _ => atm_tools::make_mcp_error_result(
                 id,
                 &format!("Unknown synthetic tool: {tool_name}"),
@@ -3403,6 +3510,9 @@ fn is_synthetic_tool(name: &str) -> bool {
             | "agent_sessions"
             | "agent_status"
             | "agent_close"
+            | "agent_watch_attach"
+            | "agent_watch_poll"
+            | "agent_watch_detach"
     )
 }
 
@@ -3468,8 +3578,8 @@ mod tests {
         });
         intercept_tools_list(&mut response);
         let tools = response["result"]["tools"].as_array().unwrap();
-        // 2 original + 7 synthetic
-        assert_eq!(tools.len(), 9);
+        // 2 original + synthetic ATM tools
+        assert_eq!(tools.len(), 2 + crate::tools::SYNTHETIC_TOOL_COUNT);
     }
 
     #[test]
@@ -3499,9 +3609,85 @@ mod tests {
         assert!(is_synthetic_tool("atm_send"));
         assert!(is_synthetic_tool("atm_read"));
         assert!(is_synthetic_tool("agent_close"));
+        assert!(is_synthetic_tool("agent_watch_attach"));
+        assert!(is_synthetic_tool("agent_watch_poll"));
+        assert!(is_synthetic_tool("agent_watch_detach"));
         assert!(!is_synthetic_tool("codex"));
         assert!(!is_synthetic_tool("codex-reply"));
         assert!(!is_synthetic_tool("unknown"));
+    }
+
+    #[tokio::test]
+    async fn test_watch_attach_poll_detach_synthetic_tools() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let agent_id = "codex:test-agent";
+
+        proxy.watch_stream_hub.lock().await.publish_frame(
+            agent_id,
+            SourceEnvelope::new("client_prompt", "arch-atm", "mcp_primary"),
+            json!({"type":"task_started"}),
+        );
+
+        let attach = proxy
+            .handle_synthetic_tool(
+                &json!(1),
+                "agent_watch_attach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            attach.get("error").is_none(),
+            "attach should succeed: {attach}"
+        );
+        let attach_text = attach
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("attach text");
+        let attach_json: Value = serde_json::from_str(attach_text).expect("valid attach payload");
+        assert_eq!(attach_json["attached"], true);
+        assert_eq!(attach_json["replay"].as_array().map(|a| a.len()), Some(1));
+
+        proxy.watch_stream_hub.lock().await.publish_frame(
+            agent_id,
+            SourceEnvelope::new("atm_mail", "arch-atm@atm-dev", "mail_injector"),
+            json!({"type":"agent_message_delta"}),
+        );
+
+        let poll = proxy
+            .handle_synthetic_tool(
+                &json!(2),
+                "agent_watch_poll",
+                &json!({"agent_id": agent_id, "limit": 10}),
+                None,
+            )
+            .await;
+        assert!(poll.get("error").is_none(), "poll should succeed: {poll}");
+        let poll_text = poll
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("poll text");
+        let poll_json: Value = serde_json::from_str(poll_text).expect("valid poll payload");
+        assert_eq!(poll_json["events"].as_array().map(|a| a.len()), Some(1));
+
+        let detach = proxy
+            .handle_synthetic_tool(
+                &json!(3),
+                "agent_watch_detach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            detach.get("error").is_none(),
+            "detach should succeed: {detach}"
+        );
+        let detach_text = detach
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("detach text");
+        let detach_json: Value = serde_json::from_str(detach_text).expect("valid detach payload");
+        assert_eq!(detach_json["detached"], true);
     }
 
     #[test]
