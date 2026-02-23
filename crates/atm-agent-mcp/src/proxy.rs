@@ -33,7 +33,6 @@ use tracing::Instrument;
 
 use crate::audit::AuditLog;
 use crate::config::AgentMcpConfig;
-use crate::transport::{CodexTransport, make_transport};
 use crate::context::detect_context;
 use crate::elicitation::ElicitationRegistry;
 use crate::framing::{UpstreamReader, write_newline_delimited};
@@ -45,6 +44,7 @@ use crate::mail_inject::{
 };
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
+use crate::transport::{CodexTransport, make_transport};
 use crate::watch_stream::{SourceEnvelope, WatchAttachError, WatchStreamHub, WatchSubscription};
 
 /// Type alias for the shared child stdin writer.
@@ -124,6 +124,9 @@ pub struct ProxyServer {
     thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
     /// Direct watch-stream hub for active session viewing (Sprint L.5 groundwork).
     watch_stream_hub: Arc<tokio::sync::Mutex<WatchStreamHub>>,
+    /// Active watch subscriptions keyed by `agent_id` for synthetic polling tools.
+    watch_subscriptions:
+        Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::broadcast::Receiver<Value>>>>,
     /// UTC ISO 8601 timestamp of when this proxy process started.
     started_at: String,
     /// Unix epoch seconds when this proxy process started (for uptime calc).
@@ -203,7 +206,10 @@ impl std::fmt::Debug for ChildHandle {
             .field("response_rx", &"<Receiver>")
             .field("exit_status", &"<Mutex<Option<ExitStatus>>>")
             .field("process", &"<Mutex<Option<Child>>>")
-            .field("drain_task", &self.drain_task.as_ref().map(|_| "<JoinHandle>"))
+            .field(
+                "drain_task",
+                &self.drain_task.as_ref().map(|_| "<JoinHandle>"),
+            )
             .finish()
     }
 }
@@ -221,6 +227,11 @@ pub(crate) struct PendingRequests {
     /// map to resolve the agent_id, transition the thread Busy -> Idle, and
     /// trigger the next post-turn mail check (FR-8.1 chaining).
     auto_mail_pending: HashMap<Value, String>,
+    /// Request IDs mapped to source envelopes for watch-stream attribution.
+    request_sources: HashMap<Value, SourceEnvelope>,
+    /// Last-known source envelope for each agent_id, used as fallback when
+    /// child events do not carry a request-id correlation token.
+    last_agent_source: HashMap<String, SourceEnvelope>,
 }
 
 impl PendingRequests {
@@ -230,6 +241,8 @@ impl PendingRequests {
             tools_list_ids: std::collections::HashSet::new(),
             codex_create_ids: HashMap::new(),
             auto_mail_pending: HashMap::new(),
+            request_sources: HashMap::new(),
+            last_agent_source: HashMap::new(),
         }
     }
 
@@ -247,6 +260,7 @@ impl PendingRequests {
 
     fn complete(&mut self, id: &Value) -> Option<oneshot::Sender<Value>> {
         self.tools_list_ids.remove(id);
+        self.request_sources.remove(id);
         self.map.remove(id)
     }
 
@@ -270,6 +284,22 @@ impl PendingRequests {
     /// Take the agent_id for a completed auto-mail turn, removing it from the map.
     fn take_auto_mail(&mut self, id: &Value) -> Option<String> {
         self.auto_mail_pending.remove(id)
+    }
+
+    fn mark_request_source(&mut self, id: Value, source: SourceEnvelope) {
+        self.request_sources.insert(id, source);
+    }
+
+    fn source_for_request(&self, id: &Value) -> Option<SourceEnvelope> {
+        self.request_sources.get(id).cloned()
+    }
+
+    fn set_last_agent_source(&mut self, agent_id: String, source: SourceEnvelope) {
+        self.last_agent_source.insert(agent_id, source);
+    }
+
+    fn last_source_for_agent(&self, agent_id: &str) -> Option<SourceEnvelope> {
+        self.last_agent_source.get(agent_id).cloned()
     }
 }
 
@@ -314,6 +344,7 @@ impl ProxyServer {
             team: team_str,
             thread_to_agent: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             watch_stream_hub: Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default())),
+            watch_subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             started_at,
             started_epoch_secs,
             queues: Arc::new(Mutex::new(HashMap::new())),
@@ -1485,6 +1516,14 @@ Session ending. Write a concise summary of:\n\
             if let Some(aid) = expected_agent_id.clone() {
                 p.mark_codex_create(id.clone(), aid);
             }
+            if effective_tool_name == "codex" || effective_tool_name == "codex-reply" {
+                let actor_fallback = self.config.identity.as_deref().unwrap_or("upstream-client");
+                let source = infer_upstream_request_source(&msg_to_forward, actor_fallback);
+                p.mark_request_source(id.clone(), source.clone());
+                if let Some(ref aid) = state_agent_id {
+                    p.set_last_agent_source(aid.clone(), source);
+                }
+            }
         }
 
         // Mark the session as Busy while the codex/codex-reply turn is in progress.
@@ -1859,11 +1898,8 @@ Session ending. Write a concise summary of:\n\
         // events to the daemon. McpTransport and JsonCodecTransport use the
         // default no-op implementation of set_turn_session_context.
         {
-            let turn_ctx = crate::turn_control::SessionContext::new(
-                &identity,
-                &team,
-                &entry.agent_id,
-            );
+            let turn_ctx =
+                crate::turn_control::SessionContext::new(&identity, &team, &entry.agent_id);
             self.transport.set_turn_session_context(turn_ctx);
         }
 
@@ -2263,6 +2299,10 @@ Session ending. Write a concise summary of:\n\
                 let is_success = resp.get("error").is_none()
                     && resp.pointer("/result/isError").and_then(|v| v.as_bool()) != Some(true);
                 if is_success {
+                    if let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) {
+                        self.watch_subscriptions.lock().await.remove(agent_id);
+                        let _ = self.detach_watch_stream(agent_id).await;
+                    }
                     let sessions_path = crate::lock::sessions_dir()
                         .join(&self.team)
                         .join("registry.json");
@@ -2271,6 +2311,166 @@ Session ending. Write a concise summary of:\n\
                     }
                 }
                 resp
+            }
+            "agent_watch_attach" => {
+                let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        "agent_watch_attach: 'agent_id' is required",
+                    );
+                };
+
+                match self.subscribe_watch_stream(agent_id).await {
+                    Ok(sub) => {
+                        self.watch_subscriptions
+                            .lock()
+                            .await
+                            .insert(agent_id.to_string(), sub.rx);
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": json!({
+                                        "agent_id": agent_id,
+                                        "attached": true,
+                                        "replay": sub.replay,
+                                    }).to_string()
+                                }]
+                            }
+                        })
+                    }
+                    Err(WatchAttachError::AlreadyAttached) => {
+                        // Primary happy path: this proxy process already owns the watcher.
+                        if self.watch_subscriptions.lock().await.contains_key(agent_id) {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "content": [{
+                                        "type": "text",
+                                        "text": json!({
+                                            "agent_id": agent_id,
+                                            "attached": true,
+                                            "already_attached": true,
+                                            "replay": [],
+                                        }).to_string()
+                                    }]
+                                }
+                            })
+                        } else {
+                            // Out-of-sync recovery path:
+                            // hub says attached, but local receiver map is missing.
+                            // Force-detach hub state once, then re-attach and store receiver.
+                            let _ = self.detach_watch_stream(agent_id).await;
+                            match self.subscribe_watch_stream(agent_id).await {
+                                Ok(sub) => {
+                                    self.watch_subscriptions
+                                        .lock()
+                                        .await
+                                        .insert(agent_id.to_string(), sub.rx);
+                                    json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "content": [{
+                                                "type": "text",
+                                                "text": json!({
+                                                    "agent_id": agent_id,
+                                                    "attached": true,
+                                                    "recovered_from_desync": true,
+                                                    "replay": sub.replay,
+                                                }).to_string()
+                                            }]
+                                        }
+                                    })
+                                }
+                                Err(WatchAttachError::AlreadyAttached) => atm_tools::make_mcp_error_result(
+                                    id,
+                                    &format!("agent_watch_attach: watcher already attached for '{agent_id}'"),
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+            "agent_watch_poll" => {
+                let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        "agent_watch_poll: 'agent_id' is required",
+                    );
+                };
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.clamp(1, 200) as usize)
+                    .unwrap_or(50);
+
+                let mut subs = self.watch_subscriptions.lock().await;
+                let Some(rx) = subs.get_mut(agent_id) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        &format!("agent_watch_poll: no active watcher for '{agent_id}'"),
+                    );
+                };
+
+                let mut events = Vec::new();
+                for _ in 0..limit {
+                    match rx.try_recv() {
+                        Ok(v) => events.push(v),
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    }
+                }
+
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "agent_id": agent_id,
+                                "events": events,
+                            }).to_string()
+                        }]
+                    }
+                })
+            }
+            "agent_watch_detach" => {
+                let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        "agent_watch_detach: 'agent_id' is required",
+                    );
+                };
+                let removed_local = self.watch_subscriptions.lock().await.remove(agent_id).is_some();
+                let removed_hub = self.detach_watch_stream(agent_id).await;
+                if removed_local != removed_hub {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        removed_local,
+                        removed_hub,
+                        "watch detach resolved out-of-sync local/hub watcher state"
+                    );
+                }
+                let detached = removed_local || removed_hub;
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "agent_id": agent_id,
+                                "detached": detached,
+                            }).to_string()
+                        }]
+                    }
+                })
             }
             _ => atm_tools::make_mcp_error_result(
                 id,
@@ -2580,6 +2780,8 @@ Session ending. Write a concise summary of:\n\
             guard.map.clear();
             guard.codex_create_ids.clear();
             guard.auto_mail_pending.clear();
+            guard.request_sources.clear();
+            guard.last_agent_source.clear();
         });
 
         // Populate the shared child stdin reference for the idle poller.
@@ -2606,6 +2808,22 @@ enum PrepareResult {
     },
     /// Validation failed; an error response has already been sent upstream.
     Error,
+}
+
+fn infer_upstream_request_source(msg: &Value, actor_fallback: &str) -> SourceEnvelope {
+    let kind = msg
+        .pointer("/params/source/kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("client_prompt");
+    let actor = msg
+        .pointer("/params/source/actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or(actor_fallback);
+    let channel = msg
+        .pointer("/params/source/channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mcp_primary");
+    SourceEnvelope::new(kind, actor, channel)
 }
 
 /// Forward a `codex/event` notification upstream, injecting `agent_id` into params.
@@ -2656,7 +2874,7 @@ async fn forward_event(
     }
     // Publish to direct watch-stream hub using MVP subset + source envelope.
     if should_publish_watch_event(event) {
-        let source = infer_source_envelope(event, &agent_id);
+        let source = infer_source_envelope(event, &agent_id, pending).await;
         watch_stream_hub
             .lock()
             .await
@@ -2695,7 +2913,11 @@ fn should_publish_watch_event(event: &Value) -> bool {
 }
 
 /// Infer source attribution for watch-stream frames (FR-22 baseline).
-fn infer_source_envelope(event: &Value, agent_id: &str) -> SourceEnvelope {
+async fn infer_source_envelope(
+    event: &Value,
+    agent_id: &str,
+    pending: &Arc<Mutex<PendingRequests>>,
+) -> SourceEnvelope {
     let src_kind = event
         .pointer("/params/source/kind")
         .and_then(|v| v.as_str())
@@ -2715,6 +2937,24 @@ fn infer_source_envelope(event: &Value, agent_id: &str) -> SourceEnvelope {
         "user_steer" => "tui_user",
         _ => "mcp_primary",
     };
+    if !src_kind.is_empty() {
+        return SourceEnvelope::new(kind, actor, channel);
+    }
+
+    // Fall back to per-request source attribution when child events include a
+    // correlating request id in `_meta.requestId`.
+    if let Some(req_id) = event.pointer("/params/_meta/requestId") {
+        if let Some(src) = pending.lock().await.source_for_request(req_id) {
+            return src;
+        }
+    }
+
+    // If request-id correlation is missing, use the latest source seen for the
+    // current agent session.
+    if let Some(src) = pending.lock().await.last_source_for_agent(agent_id) {
+        return src;
+    }
+
     SourceEnvelope::new(kind, actor, channel)
 }
 
@@ -2746,7 +2986,11 @@ enum JsonlEventType {
 fn parse_jsonl_event_type(line: &str) -> JsonlEventType {
     serde_json::from_str::<serde_json::Value>(line)
         .ok()
-        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .and_then(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
         .map(|t| match t.as_str() {
             "agent_message" => JsonlEventType::AgentMessage,
             "tool_call" => JsonlEventType::ToolCall,
@@ -2916,6 +3160,7 @@ async fn dispatch_auto_mail_if_available(
                     registry,
                     shared_stdin,
                     request_counter,
+                    pending,
                     active_turn_id,
                     inf,
                 )
@@ -2996,6 +3241,13 @@ async fn dispatch_auto_mail_if_available(
             let mut p = pending.lock().await;
             p.insert(auto_req_id_val.clone(), tx);
             p.mark_auto_mail(auto_req_id_val, agent_id.to_string());
+            let source =
+                SourceEnvelope::new("atm_mail", format!("{identity}@{team}"), "mail_injector");
+            p.mark_request_source(
+                serde_json::Value::Number(auto_req_id.into()),
+                source.clone(),
+            );
+            p.set_last_agent_source(agent_id.to_string(), source);
         }
         // FR-8.12: mark read only after successful dispatch.
         let ids: Vec<String> = envelopes.iter().map(|e| e.message_id.clone()).collect();
@@ -3053,6 +3305,7 @@ async fn dispatch_auto_mail_app_server(
     registry: &Arc<Mutex<SessionRegistry>>,
     shared_stdin: &SharedChildStdin,
     request_counter: &Arc<AtomicU64>,
+    pending: &Arc<Mutex<PendingRequests>>,
     active_turn_id: Option<String>,
     inflight: &Arc<Mutex<InflightMailSet>>,
 ) {
@@ -3154,6 +3407,14 @@ async fn dispatch_auto_mail_app_server(
     };
 
     if write_ok {
+        // Track source attribution for downstream event correlation.
+        {
+            let source =
+                SourceEnvelope::new("atm_mail", format!("{identity}@{team}"), "mail_injector");
+            let mut p = pending.lock().await;
+            p.mark_request_source(serde_json::Value::Number(req_id.into()), source.clone());
+            p.set_last_agent_source(agent_id.to_string(), source);
+        }
         // FR-8.12: mark-read only after successful dispatch.
         mark_messages_read(identity, team, &dispatched_ids);
         tracing::info!(
@@ -3356,6 +3617,9 @@ fn is_synthetic_tool(name: &str) -> bool {
             | "agent_sessions"
             | "agent_status"
             | "agent_close"
+            | "agent_watch_attach"
+            | "agent_watch_poll"
+            | "agent_watch_detach"
     )
 }
 
@@ -3421,8 +3685,8 @@ mod tests {
         });
         intercept_tools_list(&mut response);
         let tools = response["result"]["tools"].as_array().unwrap();
-        // 2 original + 7 synthetic
-        assert_eq!(tools.len(), 9);
+        // 2 original + synthetic ATM tools
+        assert_eq!(tools.len(), 2 + crate::tools::SYNTHETIC_TOOL_COUNT);
     }
 
     #[test]
@@ -3452,9 +3716,201 @@ mod tests {
         assert!(is_synthetic_tool("atm_send"));
         assert!(is_synthetic_tool("atm_read"));
         assert!(is_synthetic_tool("agent_close"));
+        assert!(is_synthetic_tool("agent_watch_attach"));
+        assert!(is_synthetic_tool("agent_watch_poll"));
+        assert!(is_synthetic_tool("agent_watch_detach"));
         assert!(!is_synthetic_tool("codex"));
         assert!(!is_synthetic_tool("codex-reply"));
         assert!(!is_synthetic_tool("unknown"));
+    }
+
+    #[tokio::test]
+    async fn test_watch_attach_poll_detach_synthetic_tools() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let agent_id = "codex:test-agent";
+
+        proxy.watch_stream_hub.lock().await.publish_frame(
+            agent_id,
+            SourceEnvelope::new("client_prompt", "arch-atm", "mcp_primary"),
+            json!({"type":"task_started"}),
+        );
+
+        let attach = proxy
+            .handle_synthetic_tool(
+                &json!(1),
+                "agent_watch_attach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            attach.get("error").is_none(),
+            "attach should succeed: {attach}"
+        );
+        let attach_text = attach
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("attach text");
+        let attach_json: Value = serde_json::from_str(attach_text).expect("valid attach payload");
+        assert_eq!(attach_json["attached"], true);
+        assert_eq!(attach_json["replay"].as_array().map(|a| a.len()), Some(1));
+
+        let attach_again = proxy
+            .handle_synthetic_tool(
+                &json!(11),
+                "agent_watch_attach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            attach_again.get("error").is_none(),
+            "second attach should be idempotent: {attach_again}"
+        );
+        let attach_again_text = attach_again
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("attach_again text");
+        let attach_again_json: Value =
+            serde_json::from_str(attach_again_text).expect("valid attach_again payload");
+        assert_eq!(attach_again_json["already_attached"], true);
+
+        proxy.watch_stream_hub.lock().await.publish_frame(
+            agent_id,
+            SourceEnvelope::new("atm_mail", "arch-atm@atm-dev", "mail_injector"),
+            json!({"type":"agent_message_delta"}),
+        );
+
+        let poll = proxy
+            .handle_synthetic_tool(
+                &json!(2),
+                "agent_watch_poll",
+                &json!({"agent_id": agent_id, "limit": 10}),
+                None,
+            )
+            .await;
+        assert!(poll.get("error").is_none(), "poll should succeed: {poll}");
+        let poll_text = poll
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("poll text");
+        let poll_json: Value = serde_json::from_str(poll_text).expect("valid poll payload");
+        assert_eq!(poll_json["events"].as_array().map(|a| a.len()), Some(1));
+
+        let detach = proxy
+            .handle_synthetic_tool(
+                &json!(3),
+                "agent_watch_detach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            detach.get("error").is_none(),
+            "detach should succeed: {detach}"
+        );
+        let detach_text = detach
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("detach text");
+        let detach_json: Value = serde_json::from_str(detach_text).expect("valid detach payload");
+        assert_eq!(detach_json["detached"], true);
+    }
+
+    #[tokio::test]
+    async fn test_watch_poll_without_attach_returns_error_result() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let resp = proxy
+            .handle_synthetic_tool(
+                &json!(1),
+                "agent_watch_poll",
+                &json!({"agent_id": "codex:not-attached"}),
+                None,
+            )
+            .await;
+        assert_eq!(
+            resp.pointer("/result/isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "poll without attach must return isError=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watch_attach_requires_agent_id() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let resp = proxy
+            .handle_synthetic_tool(&json!(1), "agent_watch_attach", &json!({}), None)
+            .await;
+        assert_eq!(
+            resp.pointer("/result/isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "attach without agent_id must return isError=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watch_attach_recovers_when_hub_and_local_map_desync() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let agent_id = "codex:desync-agent";
+
+        // Simulate hub-only attachment without a local receiver entry.
+        let _ = proxy.subscribe_watch_stream(agent_id).await.expect("seed hub attach");
+        assert!(
+            !proxy.watch_subscriptions.lock().await.contains_key(agent_id),
+            "local watch map intentionally empty for desync scenario"
+        );
+
+        let attach = proxy
+            .handle_synthetic_tool(
+                &json!(1),
+                "agent_watch_attach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            attach.get("error").is_none(),
+            "attach should recover from desync: {attach}"
+        );
+        let text = attach
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("attach text");
+        let payload: Value = serde_json::from_str(text).expect("attach payload json");
+        assert_eq!(payload["attached"], true);
+        assert_eq!(payload["recovered_from_desync"], true);
+        assert!(
+            proxy.watch_subscriptions.lock().await.contains_key(agent_id),
+            "local map should be restored after recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watch_detach_returns_true_when_local_map_only() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let agent_id = "codex:local-only";
+        let (_tx, rx) = tokio::sync::broadcast::channel::<Value>(8);
+        proxy
+            .watch_subscriptions
+            .lock()
+            .await
+            .insert(agent_id.to_string(), rx);
+
+        let detach = proxy
+            .handle_synthetic_tool(
+                &json!(2),
+                "agent_watch_detach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(detach.get("error").is_none(), "detach should succeed: {detach}");
+        let text = detach
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("detach text");
+        let payload: Value = serde_json::from_str(text).expect("detach payload json");
+        assert_eq!(payload["detached"], true);
     }
 
     #[test]
@@ -3546,6 +4002,110 @@ mod tests {
             .subscribe("codex:abc-agent")
             .expect("attach");
         assert_eq!(sub.replay.len(), 1, "watch hub should retain replay event");
+    }
+
+    #[tokio::test]
+    async fn test_forward_event_source_from_request_id_correlation() {
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert("thread-123".to_string(), "codex:abc-agent".to_string());
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+
+        {
+            let mut p = pending.lock().await;
+            p.mark_request_source(
+                json!(99),
+                SourceEnvelope::new("atm_mail", "arch-atm@atm-dev", "mail_injector"),
+            );
+        }
+
+        let mut event = json!({
+            "jsonrpc": "2.0",
+            "method": "codex/event",
+            "params": {"type": "task_started", "threadId": "thread-123", "_meta": {"requestId": 99}}
+        });
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should be forwarded");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        let sub = watch_stream_hub
+            .lock()
+            .await
+            .subscribe("codex:abc-agent")
+            .expect("attach");
+        let replay0 = sub.replay.first().expect("replay event");
+        assert_eq!(
+            replay0.pointer("/source/kind").and_then(|v| v.as_str()),
+            Some("atm_mail")
+        );
+        assert_eq!(
+            replay0.pointer("/source/channel").and_then(|v| v.as_str()),
+            Some("mail_injector")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forward_event_source_falls_back_to_last_agent_source() {
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert("thread-123".to_string(), "codex:abc-agent".to_string());
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+
+        {
+            let mut p = pending.lock().await;
+            p.set_last_agent_source(
+                "codex:abc-agent".to_string(),
+                SourceEnvelope::new("user_steer", "randlee", "tui_user"),
+            );
+        }
+
+        let mut event = json!({
+            "jsonrpc": "2.0",
+            "method": "codex/event",
+            "params": {"type": "task_started", "threadId": "thread-123"}
+        });
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should be forwarded");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        let sub = watch_stream_hub
+            .lock()
+            .await
+            .subscribe("codex:abc-agent")
+            .expect("attach");
+        let replay0 = sub.replay.first().expect("replay event");
+        assert_eq!(
+            replay0.pointer("/source/kind").and_then(|v| v.as_str()),
+            Some("user_steer")
+        );
+        assert_eq!(
+            replay0.pointer("/source/actor").and_then(|v| v.as_str()),
+            Some("randlee")
+        );
     }
 
     #[tokio::test]
@@ -4076,8 +4636,8 @@ mod tests {
         intercept_tools_list(&mut response);
         let tools = response["result"]["tools"].as_array().unwrap();
 
-        // 2 original (codex replaced + codex-reply) + 7 synthetic
-        assert_eq!(tools.len(), 9);
+        // 2 original (codex replaced + codex-reply) + synthetic ATM tools
+        assert_eq!(tools.len(), 2 + crate::tools::SYNTHETIC_TOOL_COUNT);
 
         // The codex entry should now have the extended schema with identity property
         let codex_tool = tools
@@ -4274,11 +4834,7 @@ mod tests {
         // Seed inbox with one unread message.
         let team = "test-team";
         let identity = "test-agent";
-        let inbox_dir = dir
-            .path()
-            .join(".claude/teams")
-            .join(team)
-            .join("inboxes");
+        let inbox_dir = dir.path().join(".claude/teams").join(team).join("inboxes");
         std::fs::create_dir_all(&inbox_dir).unwrap();
         let inbox_path = inbox_dir.join(format!("{identity}.json"));
         let msg = agent_team_mail_core::InboxMessage {
@@ -4301,8 +4857,9 @@ mod tests {
         // Drop the read half immediately — writes will fail with broken pipe.
         drop(_read_half_dropped);
 
-        let broken_stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> =
-            Arc::new(Mutex::new(Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>));
+        let broken_stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> = Arc::new(Mutex::new(
+            Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+        ));
 
         // Wrap in the SharedChildStdin type.
         let shared_stdin: SharedChildStdin = Arc::new(Mutex::new(Some(broken_stdin)));
@@ -4326,6 +4883,7 @@ mod tests {
         };
 
         let request_counter = Arc::new(AtomicU64::new(1));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let inflight = Arc::new(Mutex::new(InflightMailSet::new()));
 
         // Reserve the thread (Idle -> Busy) as dispatch_auto_mail_app_server expects.
@@ -4342,6 +4900,7 @@ mod tests {
             &registry,
             &shared_stdin,
             &request_counter,
+            &pending,
             None, // Idle: use turn/start
             &inflight,
         )
