@@ -487,16 +487,29 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ## 17.1 Phase M: Log & Stream Cleanup — PLANNED
 
-**Goal**: Close post-Phase-L logging/streaming gaps and tighten operator semantics.
+**Goal**: Close post-Phase-L logging/streaming gaps, then deliver Codex CLI look-and-feel parity in ATM watch mode.
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
 | M.1 | Watch-stream file naming/scoping cleanup | L.5 | PLANNED |
+| M.2 | Codex watch-pane UI import baseline (copy-first) | M.1 | PLANNED |
+| M.3 | Event adapter parity (`CodexAdapter`) | M.2 | PLANNED |
+| M.4 | Input/approval/interrupt parity | M.3 | PLANNED |
+| M.5 | Session/status surface parity | M.4 | PLANNED |
+| M.6 | Replay/reconnect hardening | M.5 | PLANNED |
+| M.7 | Golden parity test harness + rollout gate | M.6 | PLANNED |
 
 **M.1 scope**:
 - Replace shared `~/.config/atm/watch-stream/events.jsonl` with per-agent or per-session files (for example `watch-stream/<agent-id>.jsonl`).
 - Clarify naming semantics so watch-stream cache is not confused with canonical log/audit streams.
 - Update `.claude/agents/log-monitor.md` to match final Phase M.1 log-path semantics and monitoring rules.
+
+**M.2-M.7 scope (Codex parity)**:
+- Copy Codex CLI rendering/runtime elements first and adapt only integration seams.
+- Preserve daemon boundary: lifecycle/state events to daemon, continuous stream stays MCP->TUI.
+- Achieve parity for core flows: prompt, tool stream, approval/reject, interrupt/cancel, errors, reconnect.
+- Add golden transcript/frame parity tests as a merge gate.
+- Keep ATM source attribution visible (`client_prompt`, `atm_mail`, `user_steer`) without altering Codex rendering semantics.
 
 ---
 
