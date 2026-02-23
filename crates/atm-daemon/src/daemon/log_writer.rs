@@ -470,6 +470,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_log_writer_config_from_env() {
         // Use a temp dir as the home dir.
         let dir = TempDir::new().expect("temp dir");
