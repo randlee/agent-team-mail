@@ -132,15 +132,18 @@ fn test_send_empty_message_rejected() {
     let config_path = team_dir.join("config.json");
     let mut config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["members"].as_array_mut().unwrap().push(serde_json::json!({
-        "agentId": "target@send-test",
-        "name": "target",
-        "agentType": "general-purpose",
-        "model": "unknown",
-        "joinedAt": 1739284800000i64,
-        "cwd": ".",
-        "subscriptions": []
-    }));
+    config["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "agentId": "target@send-test",
+            "name": "target",
+            "agentType": "general-purpose",
+            "model": "unknown",
+            "joinedAt": 1739284800000i64,
+            "cwd": ".",
+            "subscriptions": []
+        }));
     fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
@@ -163,15 +166,18 @@ fn test_send_empty_string_message_rejected() {
     let config_path = team_dir.join("config.json");
     let mut config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["members"].as_array_mut().unwrap().push(serde_json::json!({
-        "agentId": "target@send-test2",
-        "name": "target",
-        "agentType": "general-purpose",
-        "model": "unknown",
-        "joinedAt": 1739284800000i64,
-        "cwd": ".",
-        "subscriptions": []
-    }));
+    config["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "agentId": "target@send-test2",
+            "name": "target",
+            "agentType": "general-purpose",
+            "model": "unknown",
+            "joinedAt": 1739284800000i64,
+            "cwd": ".",
+            "subscriptions": []
+        }));
     fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
@@ -645,18 +651,21 @@ fn test_cleanup_skips_external_agent_without_session_confirmation() {
     let config_path = team_dir.join("config.json");
     let mut config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["members"].as_array_mut().unwrap().push(serde_json::json!({
-        "agentId": "arch-ctm@cleanup-ext-team",
-        "name": "arch-ctm",
-        "agentType": "codex",
-        "model": "gpt5.3-codex",
-        "joinedAt": 1739284800000i64,
-        "cwd": temp_dir.path().to_str().unwrap(),
-        "subscriptions": [],
-        "externalBackendType": "codex",
-        "sessionId": "test-session-123",
-        "isActive": true
-    }));
+    config["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "agentId": "arch-ctm@cleanup-ext-team",
+            "name": "arch-ctm",
+            "agentType": "codex",
+            "model": "gpt5.3-codex",
+            "joinedAt": 1739284800000i64,
+            "cwd": temp_dir.path().to_str().unwrap(),
+            "subscriptions": [],
+            "externalBackendType": "codex",
+            "sessionId": "test-session-123",
+            "isActive": true
+        }));
     fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
     // Ensure no ATM_HOME socket or daemon process is reachable.

@@ -53,7 +53,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::time::interval;
 
 use agent_team_mail_core::{
-    control::{ControlAck, ControlAction, ControlRequest, ControlResult, CONTROL_SCHEMA_VERSION},
+    control::{CONTROL_SCHEMA_VERSION, ControlAck, ControlAction, ControlRequest, ControlResult},
     daemon_client::{
         AgentSummary, daemon_is_running, daemon_socket_path, query_agent_stream_state,
         query_list_agents, send_control, subscribe_stream_events,
@@ -133,8 +133,7 @@ async fn main() -> Result<()> {
     // Set up terminal
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("enter alternate screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("enter alternate screen")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
@@ -251,9 +250,7 @@ async fn run_app<B: ratatui::backend::Backend>(
 
             // Poll daemon for normalised stream turn state of the current agent.
             if let Some(ref agent_name) = app.streaming_agent {
-                app.daemon_turn_state = query_agent_stream_state(agent_name)
-                    .ok()
-                    .flatten();
+                app.daemon_turn_state = query_agent_stream_state(agent_name).ok().flatten();
             } else {
                 app.daemon_turn_state = None;
             }
@@ -281,13 +278,15 @@ async fn run_app<B: ratatui::backend::Backend>(
                 app.append_stream_lines(lines);
             }
             if disconnected {
-                app.stream_source_error = Some("live stream disconnected; using log replay".to_string());
+                app.stream_source_error =
+                    Some("live stream disconnected; using log replay".to_string());
                 app.daemon_stream_rx = None;
             }
         }
 
         // ── Session log tail (100 ms) ─────────────────────────────────────────
-        if app.daemon_stream_rx.is_none() && let Some(ref log_path) = app.session_log_path.clone()
+        if app.daemon_stream_rx.is_none()
+            && let Some(ref log_path) = app.session_log_path.clone()
         {
             match tail_log_file(log_path, app.stream_pos).await {
                 Ok((new_lines, new_pos)) => {
@@ -322,8 +321,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                 Err(_) => {
                     // File unreadable (permissions changed, filesystem error, etc.).
                     if app.stream_pos > 0 {
-                        app.stream_source_error =
-                            Some("stream frozen: log unreadable".to_string());
+                        app.stream_source_error = Some("stream frozen: log unreadable".to_string());
                     }
                 }
             }
@@ -357,9 +355,14 @@ async fn run_app<B: ratatui::backend::Backend>(
         if let Some(pending) = app.pending_control.take() {
             let stdin_timeout = app.config.stdin_timeout_secs;
             let interrupt_timeout = app.config.interrupt_timeout_secs;
-            let result =
-                execute_control(&team, &app.streaming_agent, pending, stdin_timeout, interrupt_timeout)
-                    .await;
+            let result = execute_control(
+                &team,
+                &app.streaming_agent,
+                pending,
+                stdin_timeout,
+                interrupt_timeout,
+            )
+            .await;
             app.status_message = Some(result);
         }
 
@@ -401,19 +404,17 @@ fn build_member_rows(
 
     states_by_agent
         .into_iter()
-        .map(|(agent, state)| {
-            MemberRow {
-                inbox_count: get_inbox_count(home, team, &agent),
-                agent,
-                state,
-            }
+        .map(|(agent, state)| MemberRow {
+            inbox_count: get_inbox_count(home, team, &agent),
+            agent,
+            state,
         })
         .collect()
 }
 
 fn ensure_daemon_running(team: &str) -> Option<String> {
-    let socket_path = daemon_socket_path()
-        .unwrap_or_else(|_| std::env::temp_dir().join("atm-daemon.sock"));
+    let socket_path =
+        daemon_socket_path().unwrap_or_else(|_| std::env::temp_dir().join("atm-daemon.sock"));
     if daemon_is_running() && socket_path.exists() {
         return None;
     }
@@ -579,9 +580,19 @@ fn format_stream_event_line(event: &DaemonStreamEvent) -> String {
             };
             format!("[live] turn {status_s} ({transport}) id={turn_id}")
         }
-        DaemonStreamEvent::TurnIdle { turn_id, transport, .. } => {
+        DaemonStreamEvent::TurnIdle {
+            turn_id, transport, ..
+        } => {
             format!("[live] turn idle ({transport}) id={turn_id}")
         }
+        DaemonStreamEvent::StreamError {
+            session_id,
+            error_summary,
+            ..
+        } => format!("[live] stream error session={session_id}: {error_summary}"),
+        DaemonStreamEvent::DroppedCounters {
+            dropped, unknown, ..
+        } => format!("[live] dropped counters dropped={dropped} unknown={unknown}"),
     }
 }
 
@@ -683,7 +694,10 @@ async fn execute_control(
 /// seconds before issuing one retry with the same idempotency key. The
 /// `timeout_secs` value comes from the per-action TUI config fields
 /// (`stdin_timeout_secs` or `interrupt_timeout_secs`).
-async fn send_with_retry(request: &ControlRequest, timeout_secs: u64) -> anyhow::Result<ControlAck> {
+async fn send_with_retry(
+    request: &ControlRequest,
+    timeout_secs: u64,
+) -> anyhow::Result<ControlAck> {
     let req1 = request.clone();
     let result = tokio::task::spawn_blocking(move || send_control(&req1)).await??;
 
@@ -831,7 +845,10 @@ mod tests {
             5,
         )
         .await;
-        assert!(!result.is_empty(), "result should be non-empty on daemon error");
+        assert!(
+            !result.is_empty(),
+            "result should be non-empty on daemon error"
+        );
     }
 
     // ── tail_log_file tests ───────────────────────────────────────────────────
@@ -849,7 +866,9 @@ mod tests {
     async fn test_tail_log_file_reads_new_data() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("agent.log");
-        tokio::fs::write(&path, b"line one\nline two\n").await.unwrap();
+        tokio::fs::write(&path, b"line one\nline two\n")
+            .await
+            .unwrap();
         let (lines, new_pos) = tail_log_file(&path, 0).await.unwrap();
         assert!(!lines.is_empty());
         assert!(new_pos > 0);
@@ -884,10 +903,7 @@ mod tests {
         tokio::fs::write(&path, b"new").await.unwrap();
 
         let (lines, new_pos) = tail_log_file(&path, pos_after_first).await.unwrap();
-        assert_eq!(
-            new_pos, 0,
-            "new_pos should be 0 to signal truncation/reset"
-        );
+        assert_eq!(new_pos, 0, "new_pos should be 0 to signal truncation/reset");
         assert!(
             lines.is_empty(),
             "no lines should be returned on truncation signal"
@@ -949,7 +965,9 @@ mod tests {
         tokio::fs::write(&path, format!("{line_a}\n{line_b}\n"))
             .await
             .unwrap();
-        let (events, _) = tail_log_events(&path, 0, Some("agent-a"), None).await.unwrap();
+        let (events, _) = tail_log_events(&path, 0, Some("agent-a"), None)
+            .await
+            .unwrap();
         assert_eq!(events.len(), 1, "only agent-a events should be returned");
         assert_eq!(events[0].action, "action_a");
     }
@@ -968,7 +986,9 @@ mod tests {
         let log_path = dir.path().join("agent.log");
 
         // Step 1: file exists, first read succeeds and advances position.
-        tokio::fs::write(&log_path, b"line one\nline two\n").await.unwrap();
+        tokio::fs::write(&log_path, b"line one\nline two\n")
+            .await
+            .unwrap();
         let (lines, pos1) = tail_log_file(&log_path, 0).await.unwrap();
         assert!(!lines.is_empty(), "should read initial content");
         assert!(pos1 > 0, "position must advance after first read");
@@ -977,12 +997,17 @@ mod tests {
         // tail_log_file must return new_pos=0 to signal the caller to reset.
         tokio::fs::write(&log_path, b"x").await.unwrap(); // 1 byte < pos1
         let (trunc_lines, trunc_pos) = tail_log_file(&log_path, pos1).await.unwrap();
-        assert_eq!(trunc_pos, 0, "truncation must return new_pos=0 (reset signal)");
+        assert_eq!(
+            trunc_pos, 0,
+            "truncation must return new_pos=0 (reset signal)"
+        );
         assert!(trunc_lines.is_empty(), "no lines on truncation signal");
 
         // Step 3: caller simulates clearing stream_source_error by resetting pos to 0.
         // File now has new content after the restart.
-        tokio::fs::write(&log_path, b"new content after restart\n").await.unwrap();
+        tokio::fs::write(&log_path, b"new content after restart\n")
+            .await
+            .unwrap();
         let (new_lines, new_pos) = tail_log_file(&log_path, 0).await.unwrap();
         assert!(
             !new_lines.is_empty(),

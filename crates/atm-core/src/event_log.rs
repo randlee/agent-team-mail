@@ -262,7 +262,10 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
         target: fields.target.clone().unwrap_or_default(),
         action: fields.action.to_string(),
         team: fields.team.clone(),
-        agent: fields.agent_id.clone().or_else(|| fields.agent_name.clone()),
+        agent: fields
+            .agent_id
+            .clone()
+            .or_else(|| fields.agent_name.clone()),
         session_id: fields.session_id.clone(),
         request_id: fields.request_id.clone(),
         correlation_id: None,
@@ -271,7 +274,10 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
         fields: {
             let mut map = serde_json::Map::new();
             if let Some(mid) = &fields.message_id {
-                map.insert("message_id".to_string(), serde_json::Value::String(mid.clone()));
+                map.insert(
+                    "message_id".to_string(),
+                    serde_json::Value::String(mid.clone()),
+                );
             }
             if let Some(cnt) = fields.count {
                 map.insert("count".to_string(), serde_json::Value::Number(cnt.into()));
@@ -325,7 +331,11 @@ fn emit_event_with_config(fields: EventFields, cfg: &EventLogConfig, bridge_mode
     emit_event_with_config_inner(fields, cfg, bridge_mode);
 }
 
-fn emit_event_with_config_inner(fields: EventFields, cfg: &EventLogConfig, bridge_mode: BridgeMode) {
+fn emit_event_with_config_inner(
+    fields: EventFields,
+    cfg: &EventLogConfig,
+    bridge_mode: BridgeMode,
+) {
     if fields.level.is_empty() || fields.source.is_empty() || fields.action.is_empty() {
         return;
     }
@@ -396,7 +406,10 @@ fn emit_event_with_config_inner(fields: EventFields, cfg: &EventLogConfig, bridg
         }
 
         let line = Value::Object(obj).to_string();
-        let mut file = OpenOptions::new().create(true).append(true).open(&cfg.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&cfg.path)?;
         file.write_all(line.as_bytes())?;
         file.write_all(b"\n")?;
         file.flush()?;
@@ -624,7 +637,10 @@ mod tests {
         let lines: Vec<&str> = content.lines().collect();
         let event: Value = serde_json::from_str(lines[1]).unwrap();
         // Legacy format always writes a sid field; "unknown" is the fallback.
-        assert_eq!(event["sid"], "unknown", "legacy sid should be 'unknown' when no session");
+        assert_eq!(
+            event["sid"], "unknown",
+            "legacy sid should be 'unknown' when no session"
+        );
     }
 
     // ── Bridge-mode routing tests (migrated from integration tests) ────────────

@@ -1,9 +1,9 @@
 //! Cleanup command implementation - apply retention policies to inboxes
 
-use anyhow::{Context, Result};
-use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::retention::apply_retention;
 use agent_team_mail_core::schema::TeamConfig;
+use anyhow::{Context, Result};
 use clap::Args;
 use std::path::Path;
 
@@ -45,7 +45,9 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
 
     // Check if retention policy is configured
     if config.retention.max_age.is_none() && config.retention.max_count.is_none() {
-        println!("No retention policy configured. Set retention.max_age and/or retention.max_count in .atm.toml");
+        println!(
+            "No retention policy configured. Set retention.max_age and/or retention.max_count in .atm.toml"
+        );
         return Ok(());
     }
 
@@ -103,11 +105,15 @@ fn cleanup_team(
         return Ok(());
     }
 
-    let team_config: TeamConfig = serde_json::from_str(&std::fs::read_to_string(&team_config_path)?)
-        .with_context(|| format!("Failed to parse team config for '{team_name}'"))?;
+    let team_config: TeamConfig =
+        serde_json::from_str(&std::fs::read_to_string(&team_config_path)?)
+            .with_context(|| format!("Failed to parse team config for '{team_name}'"))?;
 
     println!("Team: {team_name}\n");
-    println!("  {:<20} {:>8} {:>8} {:>10}", "Agent", "Kept", "Removed", "Archived");
+    println!(
+        "  {:<20} {:>8} {:>8} {:>10}",
+        "Agent", "Kept", "Removed", "Archived"
+    );
     println!("  {}", "─".repeat(50));
 
     let mut total_kept = 0;
@@ -116,7 +122,9 @@ fn cleanup_team(
 
     // Apply retention to each agent's inbox (local files)
     for member in &team_config.members {
-        let inbox_path = team_dir.join("inboxes").join(format!("{}.json", member.name));
+        let inbox_path = team_dir
+            .join("inboxes")
+            .join(format!("{}.json", member.name));
 
         if !inbox_path.exists() {
             // Skip agents with no inbox file
@@ -146,7 +154,9 @@ fn cleanup_team(
 
     // Also clean up per-origin inbox files (format: agent.hostname.json)
     let inboxes_dir = team_dir.join("inboxes");
-    if inboxes_dir.exists() && let Ok(entries) = std::fs::read_dir(&inboxes_dir) {
+    if inboxes_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&inboxes_dir)
+    {
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() {
@@ -180,13 +190,8 @@ fn cleanup_team(
             let agent_name = parts[1];
             let display_name = format!("{agent_name}@{hostname}");
 
-            let result = apply_retention(
-                &path,
-                team_name,
-                &display_name,
-                retention_config,
-                dry_run,
-            )?;
+            let result =
+                apply_retention(&path, team_name, &display_name, retention_config, dry_run)?;
 
             if result.removed > 0 || result.kept > 0 {
                 println!(

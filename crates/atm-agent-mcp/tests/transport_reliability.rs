@@ -19,8 +19,8 @@
 use atm_agent_mcp::{MockTransport, MockTransportHandle};
 use serde_json::json;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use tokio::io::AsyncWriteExt;
 
@@ -58,7 +58,11 @@ fn make_turn_completed(thread_id: &str, turn_id: &str, status: &str) -> String {
 /// All optional fields (elicitation, upstream, child_stdin) are set to `None`
 /// so the state drives only turn-tracking and response-correlation logic.
 fn make_task_state(
-    turn_state: Arc<tokio::sync::Mutex<std::collections::HashMap<String, atm_agent_mcp::stream_norm::TurnState>>>,
+    turn_state: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, atm_agent_mcp::stream_norm::TurnState>,
+        >,
+    >,
     idle_flag: Arc<AtomicBool>,
     pending_responses: Arc<
         tokio::sync::Mutex<
@@ -125,8 +129,8 @@ async fn test_soak_repeated_round_trips() {
         .unwrap_or_else(|_| panic!("round {i}: timeout reading response"))
         .unwrap_or_else(|e| panic!("round {i}: I/O error: {e}"));
 
-        let v: serde_json::Value =
-            serde_json::from_str(line.trim()).unwrap_or_else(|e| panic!("round {i}: bad JSON: {e}"));
+        let v: serde_json::Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("round {i}: bad JSON: {e}"));
 
         assert_eq!(
             v["result"]["threadId"],
@@ -187,7 +191,10 @@ async fn test_connection_drop_eof() {
     .expect("should not timeout — EOF should be immediate after all senders are dropped")
     .expect("should not return an I/O error on EOF");
 
-    assert_eq!(n, 0, "read_line on EOF should return Ok(0), indicating no more data");
+    assert_eq!(
+        n, 0,
+        "read_line on EOF should return Ok(0), indicating no more data"
+    );
 }
 
 // ─── Test C: Malformed input handling ────────────────────────────────────────
@@ -203,8 +210,8 @@ async fn test_connection_drop_eof() {
 /// malformed one.
 #[tokio::test]
 async fn test_malformed_input_no_panic() {
-    use atm_agent_mcp::transport::{drive_notification_task, NotificationTaskState};
     use atm_agent_mcp::stream_norm::TurnState;
+    use atm_agent_mcp::transport::{NotificationTaskState, drive_notification_task};
 
     let (mut feed_write, feed_read) = tokio::io::duplex(4096);
     let (proxy_write, _proxy_read) = tokio::io::duplex(4096);
@@ -213,8 +220,11 @@ async fn test_malformed_input_no_panic() {
     let idle_flag = Arc::new(AtomicBool::new(true));
     let pending_responses = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
-    let state: NotificationTaskState =
-        make_task_state(Arc::clone(&turn_state), Arc::clone(&idle_flag), Arc::clone(&pending_responses));
+    let state: NotificationTaskState = make_task_state(
+        Arc::clone(&turn_state),
+        Arc::clone(&idle_flag),
+        Arc::clone(&pending_responses),
+    );
 
     tokio::task::spawn(drive_notification_task(feed_read, proxy_write, state));
 
@@ -266,11 +276,7 @@ async fn test_pending_response_timeout() {
 
     // Hold the tx without sending — simulates the background task never seeing
     // a response for this id (e.g., the child crashed before responding).
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        rx,
-    )
-    .await;
+    let result = tokio::time::timeout(std::time::Duration::from_millis(100), rx).await;
 
     assert!(
         result.is_err(),
@@ -290,8 +296,8 @@ async fn test_pending_response_timeout() {
 ///   4. Assert the turn state reflects the two turn/started notifications.
 #[tokio::test]
 async fn test_interleaved_notifications_and_responses() {
-    use atm_agent_mcp::transport::{drive_notification_task, NotificationTaskState};
     use atm_agent_mcp::stream_norm::TurnState;
+    use atm_agent_mcp::transport::{NotificationTaskState, drive_notification_task};
 
     let (mut feed_write, feed_read) = tokio::io::duplex(4096);
     let (proxy_write, _proxy_read) = tokio::io::duplex(4096);
@@ -313,8 +319,11 @@ async fn test_interleaved_notifications_and_responses() {
         map.insert(20, tx20);
     }
 
-    let state: NotificationTaskState =
-        make_task_state(Arc::clone(&turn_state), Arc::clone(&idle_flag), Arc::clone(&pending_responses));
+    let state: NotificationTaskState = make_task_state(
+        Arc::clone(&turn_state),
+        Arc::clone(&idle_flag),
+        Arc::clone(&pending_responses),
+    );
 
     tokio::task::spawn(drive_notification_task(feed_read, proxy_write, state));
 
@@ -322,7 +331,10 @@ async fn test_interleaved_notifications_and_responses() {
     let n1 = format!("{}\n", make_turn_started("thread-E1", "turn-E1"));
     let r10 = format!("{}\n", make_fork_response(10, "forked-10"));
     let n2 = format!("{}\n", make_turn_started("thread-E2", "turn-E2"));
-    let n3 = format!("{}\n", make_turn_completed("thread-E1", "turn-E1", "completed"));
+    let n3 = format!(
+        "{}\n",
+        make_turn_completed("thread-E1", "turn-E1", "completed")
+    );
     let r20 = format!("{}\n", make_fork_response(20, "forked-20"));
 
     feed_write.write_all(n1.as_bytes()).await.unwrap();

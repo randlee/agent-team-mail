@@ -25,7 +25,7 @@ use anyhow::Result;
 use clap::Args;
 use std::collections::HashMap;
 
-use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 
 use crate::util::settings::get_home_dir;
@@ -70,9 +70,7 @@ pub fn execute(args: LaunchArgs) -> Result<()> {
     #[cfg(not(unix))]
     {
         let _ = args;
-        eprintln!(
-            "Error: Agent launch requires Unix platform (tmux + Unix socket)"
-        );
+        eprintln!("Error: Agent launch requires Unix platform (tmux + Unix socket)");
         std::process::exit(1);
     }
 
@@ -117,9 +115,7 @@ fn execute_unix(args: LaunchArgs) -> Result<()> {
         Ok(Some(r)) => r,
         Ok(None) => {
             if args.json {
-                println!(
-                    "{{\"error\": \"Daemon is not running. Start it with: atm-daemon\"}}"
-                );
+                println!("{{\"error\": \"Daemon is not running. Start it with: atm-daemon\"}}");
             } else {
                 eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
             }
@@ -169,9 +165,7 @@ fn parse_env_vars(pairs: &[String]) -> Result<HashMap<String, String>> {
     let mut map = HashMap::new();
     for pair in pairs {
         let eq_pos = pair.find('=').ok_or_else(|| {
-            anyhow::anyhow!(
-                "Invalid --env value '{pair}': expected KEY=VALUE format"
-            )
+            anyhow::anyhow!("Invalid --env value '{pair}': expected KEY=VALUE format")
         })?;
         let key = &pair[..eq_pos];
         let value = &pair[eq_pos + 1..];
@@ -201,10 +195,7 @@ mod tests {
 
     #[test]
     fn test_parse_env_vars_multiple() {
-        let pairs = vec![
-            "FOO=bar".to_string(),
-            "BAZ=qux".to_string(),
-        ];
+        let pairs = vec!["FOO=bar".to_string(), "BAZ=qux".to_string()];
         let result = parse_env_vars(&pairs).unwrap();
         assert_eq!(result.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(result.get("BAZ").map(String::as_str), Some("qux"));

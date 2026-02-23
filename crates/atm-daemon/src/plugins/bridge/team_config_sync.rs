@@ -4,9 +4,9 @@
 //! config.json from hub and merge with local config, preserving local agent
 //! membership.
 
-use anyhow::{Context, Result};
 use agent_team_mail_core::config::HostnameRegistry;
 use agent_team_mail_core::schema::TeamConfig;
+use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::fs;
 use tracing::{info, warn};
@@ -53,8 +53,8 @@ pub async fn sync_team_config(
 
     // Parse hub config
     let hub_config_content = fs::read_to_string(&temp_path).await?;
-    let hub_config: TeamConfig = serde_json::from_str(&hub_config_content)
-        .context("Failed to parse hub team config")?;
+    let hub_config: TeamConfig =
+        serde_json::from_str(&hub_config_content).context("Failed to parse hub team config")?;
 
     // Read local config
     let local_config_path = team_dir.join("config.json");
@@ -101,9 +101,8 @@ fn merge_team_config(
 
     // Preserve local agent membership
     // Keep local members that are not in hub config
-    let hub_member_names: std::collections::HashSet<_> = hub.members.iter()
-        .map(|m| m.name.as_str())
-        .collect();
+    let hub_member_names: std::collections::HashSet<_> =
+        hub.members.iter().map(|m| m.name.as_str()).collect();
 
     for local_member in &local.members {
         if !hub_member_names.contains(local_member.name.as_str()) {
@@ -152,7 +151,11 @@ pub async fn cleanup_stale_tmp_files(team_dir: &Path) -> Result<usize> {
                         cleaned += 1;
                     }
                     Err(e) => {
-                        warn!("Failed to clean up stale temp file {}: {}", path.display(), e);
+                        warn!(
+                            "Failed to clean up stale temp file {}: {}",
+                            path.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -161,7 +164,9 @@ pub async fn cleanup_stale_tmp_files(team_dir: &Path) -> Result<usize> {
 
     // Check inboxes directory
     let inboxes_dir = team_dir.join("inboxes");
-    if inboxes_dir.exists() && let Ok(mut entries) = fs::read_dir(&inboxes_dir).await {
+    if inboxes_dir.exists()
+        && let Ok(mut entries) = fs::read_dir(&inboxes_dir).await
+    {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str())
@@ -173,7 +178,11 @@ pub async fn cleanup_stale_tmp_files(team_dir: &Path) -> Result<usize> {
                         cleaned += 1;
                     }
                     Err(e) => {
-                        warn!("Failed to clean up stale temp file {}: {}", path.display(), e);
+                        warn!(
+                            "Failed to clean up stale temp file {}: {}",
+                            path.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -260,7 +269,10 @@ mod tests {
 
         // Hub metadata should win
         assert_eq!(merged.name, "test-team-hub");
-        assert_eq!(merged.description, Some("Test team test-team-hub".to_string()));
+        assert_eq!(
+            merged.description,
+            Some("Test team test-team-hub".to_string())
+        );
     }
 
     #[test]
@@ -312,10 +324,18 @@ mod tests {
         let inboxes_dir = team_dir.join("inboxes");
         fs::create_dir_all(&inboxes_dir).await.unwrap();
 
-        fs::write(team_dir.join(".bridge-config-tmp"), b"stale").await.unwrap();
-        fs::write(team_dir.join(".bridge-state-tmp"), b"stale").await.unwrap();
-        fs::write(inboxes_dir.join(".bridge-tmp-agent.json"), b"stale").await.unwrap();
-        fs::write(team_dir.join("config.json"), b"valid").await.unwrap();
+        fs::write(team_dir.join(".bridge-config-tmp"), b"stale")
+            .await
+            .unwrap();
+        fs::write(team_dir.join(".bridge-state-tmp"), b"stale")
+            .await
+            .unwrap();
+        fs::write(inboxes_dir.join(".bridge-tmp-agent.json"), b"stale")
+            .await
+            .unwrap();
+        fs::write(team_dir.join("config.json"), b"valid")
+            .await
+            .unwrap();
 
         let cleaned = cleanup_stale_tmp_files(team_dir).await.unwrap();
         assert_eq!(cleaned, 3);

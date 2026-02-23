@@ -196,7 +196,10 @@ pub async fn run_log_writer_task(
     // Ensure the log directory exists.
     if let Some(dir) = config.log_path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            warn!("log_writer: failed to create log directory {}: {e}", dir.display());
+            warn!(
+                "log_writer: failed to create log directory {}: {e}",
+                dir.display()
+            );
         }
     }
 
@@ -249,7 +252,10 @@ fn write_events(config: &LogWriterConfig, events: &[LogEventV1]) {
     {
         Ok(f) => f,
         Err(e) => {
-            warn!("log_writer: failed to open log file {}: {e}", config.log_path.display());
+            warn!(
+                "log_writer: failed to open log file {}: {e}",
+                config.log_path.display()
+            );
             return;
         }
     };
@@ -353,7 +359,10 @@ mod tests {
         assert!(q.push(make_event()));
         assert!(q.push(make_event()));
         // Third push should fail.
-        assert!(!q.push(make_event()), "push to full queue should return false");
+        assert!(
+            !q.push(make_event()),
+            "push to full queue should return false"
+        );
         assert_eq!(q.dropped(), 1);
     }
 

@@ -1,8 +1,8 @@
 //! Status command implementation
 
-use anyhow::Result;
-use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
+use anyhow::Result;
 use clap::Args;
 use serde_json::json;
 use std::collections::HashMap;
@@ -95,7 +95,11 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         let member_count = team_config.members.len();
         println!("Members ({member_count}):");
         for member in &team_config.members {
-            let active_str = if member.is_active.unwrap_or(false) { "Online " } else { "Offline" };
+            let active_str = if member.is_active.unwrap_or(false) {
+                "Online "
+            } else {
+                "Offline"
+            };
             let unread = inbox_counts.get(&member.name).copied().unwrap_or(0);
             let name = &member.name;
             let agent_type = &member.agent_type;
@@ -112,7 +116,10 @@ pub fn execute(args: StatusArgs) -> Result<()> {
 }
 
 /// Count unread messages in inboxes
-fn count_inbox_messages(team_dir: &std::path::Path, team_config: &TeamConfig) -> Result<HashMap<String, usize>> {
+fn count_inbox_messages(
+    team_dir: &std::path::Path,
+    team_config: &TeamConfig,
+) -> Result<HashMap<String, usize>> {
     let mut counts = HashMap::new();
     let inboxes_dir = team_dir.join("inboxes");
 

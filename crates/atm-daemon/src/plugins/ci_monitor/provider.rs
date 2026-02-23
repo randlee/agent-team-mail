@@ -20,10 +20,7 @@ pub trait CiProvider: Send + Sync + std::fmt::Debug {
     fn get_run(&self, run_id: u64) -> impl Future<Output = Result<CiRun, PluginError>> + Send;
 
     /// Get job log output
-    fn get_job_log(
-        &self,
-        job_id: u64,
-    ) -> impl Future<Output = Result<String, PluginError>> + Send;
+    fn get_job_log(&self, job_id: u64) -> impl Future<Output = Result<String, PluginError>> + Send;
 
     /// Provider name for logging/display
     fn provider_name(&self) -> &str;

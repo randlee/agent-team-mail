@@ -120,7 +120,10 @@ fn test_merge_empty_spool_dir_returns_zero() {
 
     let merged = merge_spool_on_startup(&spool_dir, &log_path).unwrap();
     assert_eq!(merged, 0);
-    assert!(!log_path.exists(), "log should not be created when nothing to merge");
+    assert!(
+        !log_path.exists(),
+        "log should not be created when nothing to merge"
+    );
 }
 
 #[test]
@@ -239,7 +242,11 @@ fn test_merge_events_sorted_by_timestamp() {
     write_spool_file(
         &spool_dir,
         "atm-1-100.jsonl",
-        &[event_late.clone(), event_early.clone(), event_middle.clone()],
+        &[
+            event_late.clone(),
+            event_early.clone(),
+            event_middle.clone(),
+        ],
     );
 
     let merged = merge_spool_on_startup(&spool_dir, &log_path).unwrap();

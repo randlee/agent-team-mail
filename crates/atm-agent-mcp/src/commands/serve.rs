@@ -115,14 +115,8 @@ async fn load_resume_context(
     } else {
         // FR-6.1: most recent by last_active
         sessions.iter().max_by(|a, b| {
-            let a_ts = a
-                .get("last_active")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let b_ts = b
-                .get("last_active")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let a_ts = a.get("last_active").and_then(|v| v.as_str()).unwrap_or("");
+            let b_ts = b.get("last_active").and_then(|v| v.as_str()).unwrap_or("");
             a_ts.cmp(b_ts)
         })
     };

@@ -37,11 +37,9 @@ pub fn truncate_chars_slice(text: &str, max_chars: usize) -> &str {
 /// Returns `Err(String)` with a human-readable message on validation failure.
 pub fn validate_message_text(text: &str, max_bytes: usize) -> Result<(), String> {
     if text.contains('\0') {
-        return Err(
-            "Message contains null bytes (\\0) which are not allowed. \
+        return Err("Message contains null bytes (\\0) which are not allowed. \
              Remove null bytes and retry."
-                .to_string(),
-        );
+            .to_string());
     }
     if text.len() > max_bytes {
         return Err(format!(

@@ -3,8 +3,8 @@
 //! [`App`] is the single source of mutable state for the TUI. All panels read
 //! from it; the refresh loop writes to it. No I/O is performed in this module.
 
-use std::path::PathBuf;
 use agent_team_mail_core::daemon_client::AgentSummary;
+use std::path::PathBuf;
 
 use crate::config::TuiConfig;
 
@@ -76,7 +76,10 @@ pub struct App {
     ///
     /// Reserved for future use — the D.2 implementation does not yet differentiate
     /// between panel focus and explicit input activation within the Agent Terminal.
-    #[expect(dead_code, reason = "Reserved for D.3 input-activation UX; not yet wired to render")]
+    #[expect(
+        dead_code,
+        reason = "Reserved for D.3 input-activation UX; not yet wired to render"
+    )]
     pub control_input_active: bool,
     /// Message shown in the status bar (replaced on the next control result).
     pub status_message: Option<String>,
@@ -172,7 +175,9 @@ impl App {
 
     /// Return the agent name at the currently selected index, if any.
     pub fn selected_agent(&self) -> Option<&str> {
-        self.members.get(self.selected_index).map(|r| r.agent.as_str())
+        self.members
+            .get(self.selected_index)
+            .map(|r| r.agent.as_str())
     }
 
     /// Move selection up one row (wraps).
@@ -323,8 +328,16 @@ mod tests {
     fn test_select_next_wraps() {
         let mut app = new_app("atm-dev");
         app.members = vec![
-            MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 },
-            MemberRow { agent: "b".into(), state: "idle".into(), inbox_count: 0 },
+            MemberRow {
+                agent: "a".into(),
+                state: "idle".into(),
+                inbox_count: 0,
+            },
+            MemberRow {
+                agent: "b".into(),
+                state: "idle".into(),
+                inbox_count: 0,
+            },
         ];
         app.selected_index = 1;
         app.select_next();
@@ -335,8 +348,16 @@ mod tests {
     fn test_select_previous_wraps() {
         let mut app = new_app("atm-dev");
         app.members = vec![
-            MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 },
-            MemberRow { agent: "b".into(), state: "idle".into(), inbox_count: 0 },
+            MemberRow {
+                agent: "a".into(),
+                state: "idle".into(),
+                inbox_count: 0,
+            },
+            MemberRow {
+                agent: "b".into(),
+                state: "idle".into(),
+                inbox_count: 0,
+            },
         ];
         app.selected_index = 0;
         app.select_previous();
@@ -370,24 +391,33 @@ mod tests {
     #[test]
     fn test_is_live_idle() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "idle".into(),
+            inbox_count: 0,
+        }];
         assert!(app.is_live());
     }
 
     #[test]
     fn test_is_live_busy() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "busy".into(),
+            inbox_count: 0,
+        }];
         assert!(app.is_live());
     }
 
     #[test]
     fn test_not_live_launching() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "launching".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "launching".into(),
+            inbox_count: 0,
+        }];
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Launching"));
     }
@@ -395,8 +425,11 @@ mod tests {
     #[test]
     fn test_not_live_killed() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "killed".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "killed".into(),
+            inbox_count: 0,
+        }];
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Killed"));
     }
@@ -404,8 +437,11 @@ mod tests {
     #[test]
     fn test_not_live_stale() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "stale".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "stale".into(),
+            inbox_count: 0,
+        }];
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Stale"));
     }
@@ -413,8 +449,11 @@ mod tests {
     #[test]
     fn test_not_live_closed() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "closed".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "closed".into(),
+            inbox_count: 0,
+        }];
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Closed"));
     }
@@ -429,8 +468,11 @@ mod tests {
     #[test]
     fn test_not_live_unknown_state() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "unknown-state".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "unknown-state".into(),
+            inbox_count: 0,
+        }];
         assert!(!app.is_live());
         assert_eq!(app.not_live_reason(), Some("Not live"));
     }
@@ -438,16 +480,22 @@ mod tests {
     #[test]
     fn test_live_reason_is_none_for_idle() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "idle".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "idle".into(),
+            inbox_count: 0,
+        }];
         assert_eq!(app.not_live_reason(), None);
     }
 
     #[test]
     fn test_live_reason_is_none_for_busy() {
         let mut app = new_app("test");
-        app.members =
-            vec![MemberRow { agent: "a".into(), state: "busy".into(), inbox_count: 0 }];
+        app.members = vec![MemberRow {
+            agent: "a".into(),
+            state: "busy".into(),
+            inbox_count: 0,
+        }];
         assert_eq!(app.not_live_reason(), None);
     }
 
@@ -455,9 +503,11 @@ mod tests {
     #[test]
     fn test_is_live_returns_false_for_stale_state() {
         let mut app = new_app("atm-dev");
-        app.members = vec![
-            MemberRow { agent: "arch-ctm".into(), state: "stale".into(), inbox_count: 0 },
-        ];
+        app.members = vec![MemberRow {
+            agent: "arch-ctm".into(),
+            state: "stale".into(),
+            inbox_count: 0,
+        }];
         app.selected_index = 0;
         assert!(!app.is_live(), "stale agent must not be live");
     }
@@ -466,9 +516,11 @@ mod tests {
     #[test]
     fn test_is_live_returns_false_for_closed_state() {
         let mut app = new_app("atm-dev");
-        app.members = vec![
-            MemberRow { agent: "arch-ctm".into(), state: "closed".into(), inbox_count: 0 },
-        ];
+        app.members = vec![MemberRow {
+            agent: "arch-ctm".into(),
+            state: "closed".into(),
+            inbox_count: 0,
+        }];
         app.selected_index = 0;
         assert!(!app.is_live(), "closed agent must not be live");
     }
@@ -477,7 +529,10 @@ mod tests {
 
     #[test]
     fn test_follow_mode_initialized_from_config() {
-        let cfg = TuiConfig { follow_mode_default: false, ..Default::default() };
+        let cfg = TuiConfig {
+            follow_mode_default: false,
+            ..Default::default()
+        };
         let app = App::new("test".to_string(), cfg);
         assert!(!app.follow_mode, "follow_mode must reflect config default");
     }
@@ -512,7 +567,10 @@ mod tests {
         let mut app = new_app("test");
         app.stream_scroll_offset = 42;
         app.reset_stream();
-        assert_eq!(app.stream_scroll_offset, 0, "reset_stream must clear scroll offset");
+        assert_eq!(
+            app.stream_scroll_offset, 0,
+            "reset_stream must clear scroll offset"
+        );
     }
 
     /// Stress test: append 10,000 lines in rapid succession.
@@ -528,7 +586,11 @@ mod tests {
             app.append_stream_lines(chunk.to_vec());
         }
         let elapsed = start.elapsed();
-        assert_eq!(app.stream_lines.len(), 1000, "buffer must stay bounded at 1000");
+        assert_eq!(
+            app.stream_lines.len(),
+            1000,
+            "buffer must stay bounded at 1000"
+        );
         assert!(
             elapsed.as_millis() < 200,
             "10k line stress append must complete in <200ms, took {elapsed:?}"
@@ -594,7 +656,10 @@ mod tests {
     #[test]
     fn test_log_viewer_visible_defaults_false() {
         let app = new_app("test");
-        assert!(!app.log_viewer_visible, "log_viewer_visible must default to false");
+        assert!(
+            !app.log_viewer_visible,
+            "log_viewer_visible must default to false"
+        );
     }
 
     #[test]
@@ -605,7 +670,11 @@ mod tests {
             .map(|i| new_log_event("atm", &format!("action_{i}"), "atm::test", "info"))
             .collect();
         app.append_log_events(events);
-        assert_eq!(app.log_events.len(), 500, "log_events must be bounded to 500");
+        assert_eq!(
+            app.log_events.len(),
+            500,
+            "log_events must be bounded to 500"
+        );
         // Should keep the last 500 (indices 100..=599 → actions 100..=599).
         assert_eq!(app.log_events[0].action, "action_100");
         assert_eq!(app.log_events[499].action, "action_599");
@@ -614,7 +683,10 @@ mod tests {
     #[test]
     fn test_cycle_log_level_filter_cycles() {
         let mut app = new_app("test");
-        assert!(app.log_level_filter.is_none(), "initial filter must be None");
+        assert!(
+            app.log_level_filter.is_none(),
+            "initial filter must be None"
+        );
         app.cycle_log_level_filter();
         assert_eq!(app.log_level_filter.as_deref(), Some("error"));
         app.cycle_log_level_filter();
@@ -624,7 +696,10 @@ mod tests {
         app.cycle_log_level_filter();
         assert_eq!(app.log_level_filter.as_deref(), Some("debug"));
         app.cycle_log_level_filter();
-        assert!(app.log_level_filter.is_none(), "filter must wrap back to None");
+        assert!(
+            app.log_level_filter.is_none(),
+            "filter must wrap back to None"
+        );
     }
 
     #[test]
@@ -669,7 +744,10 @@ mod tests {
         app.reset_log_viewer();
         assert!(app.log_events.is_empty(), "reset must clear log_events");
         assert_eq!(app.log_viewer_pos, 0, "reset must clear log_viewer_pos");
-        assert_eq!(app.log_scroll_offset, 0, "reset must clear log_scroll_offset");
+        assert_eq!(
+            app.log_scroll_offset, 0,
+            "reset must clear log_scroll_offset"
+        );
     }
 
     #[test]
@@ -682,6 +760,10 @@ mod tests {
         app.cycle_focus();
         assert_eq!(app.focus, FocusPanel::LogViewer);
         app.cycle_focus();
-        assert_eq!(app.focus, FocusPanel::Dashboard, "must wrap back to Dashboard");
+        assert_eq!(
+            app.focus,
+            FocusPanel::Dashboard,
+            "must wrap back to Dashboard"
+        );
     }
 }

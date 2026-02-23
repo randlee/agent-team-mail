@@ -76,8 +76,8 @@ impl<R: AsyncRead + Unpin> UpstreamReader<R> {
                 // Read exactly `len` bytes of body
                 let mut body = vec![0u8; len];
                 self.reader.read_exact(&mut body).await?;
-                let msg =
-                    String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let msg = String::from_utf8(body)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 return Ok(Some(msg));
             }
 
@@ -163,18 +163,9 @@ mod tests {
     async fn test_parse_multiple_newline_messages() {
         let input = b"{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n";
         let mut reader = UpstreamReader::new(&input[..]);
-        assert_eq!(
-            reader.next_message().await.unwrap().unwrap(),
-            "{\"id\":1}"
-        );
-        assert_eq!(
-            reader.next_message().await.unwrap().unwrap(),
-            "{\"id\":2}"
-        );
-        assert_eq!(
-            reader.next_message().await.unwrap().unwrap(),
-            "{\"id\":3}"
-        );
+        assert_eq!(reader.next_message().await.unwrap().unwrap(), "{\"id\":1}");
+        assert_eq!(reader.next_message().await.unwrap().unwrap(), "{\"id\":2}");
+        assert_eq!(reader.next_message().await.unwrap().unwrap(), "{\"id\":3}");
         assert!(reader.next_message().await.unwrap().is_none());
     }
 

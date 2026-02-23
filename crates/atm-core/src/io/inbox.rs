@@ -148,11 +148,10 @@ where
     }
 
     // Step 4: Write to tmp file with fsync
-    let new_content =
-        serde_json::to_vec_pretty(&messages).map_err(|e| InboxError::Json {
-            path: tmp_path.clone(),
-            source: e,
-        })?;
+    let new_content = serde_json::to_vec_pretty(&messages).map_err(|e| InboxError::Json {
+        path: tmp_path.clone(),
+        source: e,
+    })?;
 
     {
         let mut tmp_file = fs::File::create(&tmp_path).map_err(|e| InboxError::Io {
@@ -194,8 +193,8 @@ where
 
     let outcome = if displaced_hash != original_hash {
         // Step 7: Conflict detected - merge and re-swap
-        let displaced_messages: Vec<InboxMessage> =
-            serde_json::from_slice(&displaced_content).map_err(|e| InboxError::Json {
+        let displaced_messages: Vec<InboxMessage> = serde_json::from_slice(&displaced_content)
+            .map_err(|e| InboxError::Json {
                 path: tmp_path.clone(),
                 source: e,
             })?;
@@ -205,11 +204,10 @@ where
         let merge_count = merged.len() - messages.len();
 
         // Write merged version back
-        let merged_content =
-            serde_json::to_vec_pretty(&merged).map_err(|e| InboxError::Json {
-                path: tmp_path.clone(),
-                source: e,
-            })?;
+        let merged_content = serde_json::to_vec_pretty(&merged).map_err(|e| InboxError::Json {
+            path: tmp_path.clone(),
+            source: e,
+        })?;
 
         fs::write(&tmp_path, &merged_content).map_err(|e| InboxError::Io {
             path: tmp_path.clone(),
@@ -396,7 +394,6 @@ fn merge_messages(
     merged
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,9 +484,21 @@ mod tests {
         let merged = merge_messages(&our_messages, &their_messages);
 
         assert_eq!(merged.len(), 3);
-        assert!(merged.iter().any(|m| m.message_id == Some("msg-001".to_string())));
-        assert!(merged.iter().any(|m| m.message_id == Some("msg-002".to_string())));
-        assert!(merged.iter().any(|m| m.message_id == Some("msg-003".to_string())));
+        assert!(
+            merged
+                .iter()
+                .any(|m| m.message_id == Some("msg-001".to_string()))
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|m| m.message_id == Some("msg-002".to_string()))
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|m| m.message_id == Some("msg-003".to_string()))
+        );
     }
 
     #[test]
@@ -549,7 +558,8 @@ mod tests {
         fs::write(&inbox_path, json).unwrap();
 
         // Append new message
-        let new_message = create_test_message("ci-agent", "New message", Some("msg-002".to_string()));
+        let new_message =
+            create_test_message("ci-agent", "New message", Some("msg-002".to_string()));
         inbox_append(&inbox_path, &new_message, "test-team", "test-agent").unwrap();
 
         // Verify unknown fields preserved
@@ -634,15 +644,21 @@ mod tests {
         let messages: Vec<InboxMessage> = serde_json::from_str(&content).unwrap();
         assert_eq!(messages.len(), 3, "No messages should be lost");
         assert!(
-            messages.iter().any(|m| m.message_id == Some("msg-001".to_string())),
+            messages
+                .iter()
+                .any(|m| m.message_id == Some("msg-001".to_string())),
             "msg-001 should be present"
         );
         assert!(
-            messages.iter().any(|m| m.message_id == Some("msg-002".to_string())),
+            messages
+                .iter()
+                .any(|m| m.message_id == Some("msg-002".to_string())),
             "msg-002 should be present"
         );
         assert!(
-            messages.iter().any(|m| m.message_id == Some("msg-003".to_string())),
+            messages
+                .iter()
+                .any(|m| m.message_id == Some("msg-003".to_string())),
             "msg-003 should be present"
         );
     }
@@ -710,19 +726,33 @@ mod tests {
         let local_path = inboxes_dir.join("agent-1.json");
         let mut msg1 = create_test_message("user-a", "Local message", Some("msg-001".to_string()));
         msg1.timestamp = "2026-02-11T10:00:00Z".to_string();
-        fs::write(&local_path, serde_json::to_string_pretty(&vec![msg1]).unwrap()).unwrap();
+        fs::write(
+            &local_path,
+            serde_json::to_string_pretty(&vec![msg1]).unwrap(),
+        )
+        .unwrap();
 
         // Create origin inbox from remote1
         let origin1_path = inboxes_dir.join("agent-1.remote1.json");
-        let mut msg2 = create_test_message("user-b", "Remote1 message", Some("msg-002".to_string()));
+        let mut msg2 =
+            create_test_message("user-b", "Remote1 message", Some("msg-002".to_string()));
         msg2.timestamp = "2026-02-11T10:05:00Z".to_string();
-        fs::write(&origin1_path, serde_json::to_string_pretty(&vec![msg2]).unwrap()).unwrap();
+        fs::write(
+            &origin1_path,
+            serde_json::to_string_pretty(&vec![msg2]).unwrap(),
+        )
+        .unwrap();
 
         // Create origin inbox from remote2
         let origin2_path = inboxes_dir.join("agent-1.remote2.json");
-        let mut msg3 = create_test_message("user-c", "Remote2 message", Some("msg-003".to_string()));
+        let mut msg3 =
+            create_test_message("user-c", "Remote2 message", Some("msg-003".to_string()));
         msg3.timestamp = "2026-02-11T10:10:00Z".to_string();
-        fs::write(&origin2_path, serde_json::to_string_pretty(&vec![msg3]).unwrap()).unwrap();
+        fs::write(
+            &origin2_path,
+            serde_json::to_string_pretty(&vec![msg3]).unwrap(),
+        )
+        .unwrap();
 
         // Read merged
         let messages = super::inbox_read_merged(team_dir, "agent-1", Some(&registry)).unwrap();
@@ -755,12 +785,24 @@ mod tests {
         // Create local inbox with duplicate message_id
         let local_path = inboxes_dir.join("agent-1.json");
         let msg1 = create_test_message("user-a", "First occurrence", Some("msg-001".to_string()));
-        fs::write(&local_path, serde_json::to_string_pretty(&vec![msg1]).unwrap()).unwrap();
+        fs::write(
+            &local_path,
+            serde_json::to_string_pretty(&vec![msg1]).unwrap(),
+        )
+        .unwrap();
 
         // Create origin inbox with same message_id
         let origin_path = inboxes_dir.join("agent-1.remote1.json");
-        let msg2 = create_test_message("user-b", "Duplicate (should be dropped)", Some("msg-001".to_string()));
-        fs::write(&origin_path, serde_json::to_string_pretty(&vec![msg2]).unwrap()).unwrap();
+        let msg2 = create_test_message(
+            "user-b",
+            "Duplicate (should be dropped)",
+            Some("msg-001".to_string()),
+        );
+        fs::write(
+            &origin_path,
+            serde_json::to_string_pretty(&vec![msg2]).unwrap(),
+        )
+        .unwrap();
 
         // Read merged - should deduplicate (directory order is not guaranteed)
         let messages = super::inbox_read_merged(team_dir, "agent-1", Some(&registry)).unwrap();
@@ -769,7 +811,8 @@ mod tests {
         // Text could be either "First occurrence" or "Duplicate (should be dropped)"
         // depending on directory read order (first occurrence wins)
         assert!(
-            messages[0].text == "First occurrence" || messages[0].text == "Duplicate (should be dropped)",
+            messages[0].text == "First occurrence"
+                || messages[0].text == "Duplicate (should be dropped)",
             "Expected one of the duplicate messages, got: {}",
             messages[0].text
         );
@@ -798,12 +841,20 @@ mod tests {
         // Create local inbox without message_id
         let local_path = inboxes_dir.join("agent-1.json");
         let msg1 = create_test_message("user-a", "Message without ID", None);
-        fs::write(&local_path, serde_json::to_string_pretty(&vec![msg1]).unwrap()).unwrap();
+        fs::write(
+            &local_path,
+            serde_json::to_string_pretty(&vec![msg1]).unwrap(),
+        )
+        .unwrap();
 
         // Create origin inbox without message_id
         let origin_path = inboxes_dir.join("agent-1.remote1.json");
         let msg2 = create_test_message("user-b", "Another without ID", None);
-        fs::write(&origin_path, serde_json::to_string_pretty(&vec![msg2]).unwrap()).unwrap();
+        fs::write(
+            &origin_path,
+            serde_json::to_string_pretty(&vec![msg2]).unwrap(),
+        )
+        .unwrap();
 
         // Read merged - both should be included (no dedup)
         let messages = super::inbox_read_merged(team_dir, "agent-1", Some(&registry)).unwrap();
@@ -836,12 +887,20 @@ mod tests {
         // Create local inbox
         let local_path = inboxes_dir.join(format!("{agent_name}.json"));
         let msg1 = create_test_message("user-a", "Local", Some("msg-001".to_string()));
-        fs::write(&local_path, serde_json::to_string_pretty(&vec![msg1]).unwrap()).unwrap();
+        fs::write(
+            &local_path,
+            serde_json::to_string_pretty(&vec![msg1]).unwrap(),
+        )
+        .unwrap();
 
         // Create origin inbox
         let origin_path = inboxes_dir.join(format!("{agent_name}.mac-studio.json"));
         let msg2 = create_test_message("user-b", "Remote", Some("msg-002".to_string()));
-        fs::write(&origin_path, serde_json::to_string_pretty(&vec![msg2]).unwrap()).unwrap();
+        fs::write(
+            &origin_path,
+            serde_json::to_string_pretty(&vec![msg2]).unwrap(),
+        )
+        .unwrap();
 
         // Read merged - should handle agent name with dots correctly
         let messages = super::inbox_read_merged(team_dir, agent_name, Some(&registry)).unwrap();
@@ -873,23 +932,43 @@ mod tests {
         // Create local inbox
         let local_path = inboxes_dir.join("agent-1.json");
         let msg1 = create_test_message("user-a", "Local", Some("msg-001".to_string()));
-        fs::write(&local_path, serde_json::to_string_pretty(&vec![msg1]).unwrap()).unwrap();
+        fs::write(
+            &local_path,
+            serde_json::to_string_pretty(&vec![msg1]).unwrap(),
+        )
+        .unwrap();
 
         // Create origin inbox from remote1 (known)
         let origin1_path = inboxes_dir.join("agent-1.remote1.json");
         let msg2 = create_test_message("user-b", "Remote1", Some("msg-002".to_string()));
-        fs::write(&origin1_path, serde_json::to_string_pretty(&vec![msg2]).unwrap()).unwrap();
+        fs::write(
+            &origin1_path,
+            serde_json::to_string_pretty(&vec![msg2]).unwrap(),
+        )
+        .unwrap();
 
         // Create origin inbox from unknown hostname
         let unknown_path = inboxes_dir.join("agent-1.unknown.json");
-        let msg3 = create_test_message("user-c", "Unknown (should be ignored)", Some("msg-003".to_string()));
-        fs::write(&unknown_path, serde_json::to_string_pretty(&vec![msg3]).unwrap()).unwrap();
+        let msg3 = create_test_message(
+            "user-c",
+            "Unknown (should be ignored)",
+            Some("msg-003".to_string()),
+        );
+        fs::write(
+            &unknown_path,
+            serde_json::to_string_pretty(&vec![msg3]).unwrap(),
+        )
+        .unwrap();
 
         // Read merged - should ignore unknown hostname
         let messages = super::inbox_read_merged(team_dir, "agent-1", Some(&registry)).unwrap();
         assert_eq!(messages.len(), 2);
         assert!(messages.iter().any(|m| m.text == "Local"));
         assert!(messages.iter().any(|m| m.text == "Remote1"));
-        assert!(!messages.iter().any(|m| m.text == "Unknown (should be ignored)"));
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.text == "Unknown (should be ignored)")
+        );
     }
 }

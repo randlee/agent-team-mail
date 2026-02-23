@@ -296,7 +296,6 @@ pub fn daemon_is_running() -> bool {
     }
 }
 
-
 /// Send a single request to the daemon and return the parsed response.
 ///
 /// Returns `Ok(None)` when the daemon is not running or the socket cannot be
@@ -605,8 +604,7 @@ impl Drop for StreamSubscription {
 /// Returns:
 /// - `Ok(Some(rx))` when subscription succeeds.
 /// - `Ok(None)` when daemon/socket is unavailable on this platform/session.
-pub fn subscribe_stream_events(
-) -> anyhow::Result<Option<StreamSubscription>> {
+pub fn subscribe_stream_events() -> anyhow::Result<Option<StreamSubscription>> {
     #[cfg(unix)]
     {
         subscribe_stream_events_unix()
@@ -737,8 +735,7 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
 }
 
 #[cfg(unix)]
-fn subscribe_stream_events_unix(
-) -> anyhow::Result<Option<StreamSubscription>> {
+fn subscribe_stream_events_unix() -> anyhow::Result<Option<StreamSubscription>> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
 
@@ -890,7 +887,10 @@ mod tests {
         let json = r#"{"state":"idle","last_transition":"2026-02-16T22:30:00Z"}"#;
         let info: AgentStateInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.state, "idle");
-        assert_eq!(info.last_transition.as_deref(), Some("2026-02-16T22:30:00Z"));
+        assert_eq!(
+            info.last_transition.as_deref(),
+            Some("2026-02-16T22:30:00Z")
+        );
     }
 
     #[test]
@@ -991,7 +991,10 @@ mod tests {
         assert_eq!(decoded.command, "codex --yolo");
         assert_eq!(decoded.prompt.as_deref(), Some("Review the bridge module"));
         assert_eq!(decoded.timeout_secs, 30);
-        assert_eq!(decoded.env_vars.get("EXTRA_VAR").map(String::as_str), Some("value"));
+        assert_eq!(
+            decoded.env_vars.get("EXTRA_VAR").map(String::as_str),
+            Some("value")
+        );
     }
 
     #[test]
@@ -1043,7 +1046,10 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         let decoded: LaunchResult = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(decoded.warning.as_deref(), Some("Readiness timeout reached"));
+        assert_eq!(
+            decoded.warning.as_deref(),
+            Some("Readiness timeout reached")
+        );
     }
 
     #[test]
@@ -1225,7 +1231,7 @@ mod tests {
             return;
         }
         // Without a running daemon, send_control must return Err (not None or panic).
-        use crate::control::{ControlAction, ControlRequest, CONTROL_SCHEMA_VERSION};
+        use crate::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
 
         let req = ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
@@ -1255,7 +1261,7 @@ mod tests {
     fn test_send_control_builds_correct_socket_request() {
         // Verify the SocketRequest built inside send_control has the right shape
         // by re-creating it manually and checking serialization.
-        use crate::control::{ControlAction, ControlRequest, CONTROL_SCHEMA_VERSION};
+        use crate::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
 
         let req = ControlRequest {
             v: CONTROL_SCHEMA_VERSION,
@@ -1294,7 +1300,10 @@ mod tests {
         let json = serde_json::to_string(&socket_req).expect("serialize SocketRequest");
 
         // Outer envelope fields.
-        assert!(json.contains("\"command\":\"control\""), "command field missing");
+        assert!(
+            json.contains("\"command\":\"control\""),
+            "command field missing"
+        );
 
         // The control payload's request_id must appear inside the serialized
         // payload body, not as the outer SocketRequest.request_id.

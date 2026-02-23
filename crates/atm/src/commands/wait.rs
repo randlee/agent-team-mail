@@ -3,7 +3,7 @@
 use anyhow::Result;
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
-use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 /// Result of waiting for a message
@@ -50,12 +50,24 @@ pub fn wait_for_message(
     let initial_count = count_messages(inbox_dir, agent_name, known_hostnames)?;
 
     // Try file watching first
-    match try_file_watching(inbox_dir, agent_name, timeout_secs, initial_count, known_hostnames) {
+    match try_file_watching(
+        inbox_dir,
+        agent_name,
+        timeout_secs,
+        initial_count,
+        known_hostnames,
+    ) {
         Ok(result) => Ok(result),
         Err(e) => {
             eprintln!("Warning: File watching failed ({e}), falling back to polling");
             // Fall back to polling
-            polling_wait(inbox_dir, agent_name, timeout_secs, initial_count, known_hostnames)
+            polling_wait(
+                inbox_dir,
+                agent_name,
+                timeout_secs,
+                initial_count,
+                known_hostnames,
+            )
         }
     }
 }
@@ -223,14 +235,22 @@ mod tests {
             {"from": "user1", "text": "msg1", "timestamp": "2026-01-01T00:00:00Z", "read": false},
             {"from": "user2", "text": "msg2", "timestamp": "2026-01-01T00:01:00Z", "read": false}
         ]);
-        fs::write(&local_inbox, serde_json::to_string(&local_messages).unwrap()).unwrap();
+        fs::write(
+            &local_inbox,
+            serde_json::to_string(&local_messages).unwrap(),
+        )
+        .unwrap();
 
         // Origin inbox with 1 message
         let origin_inbox = inbox_dir.join("test-agent.remote.json");
         let origin_messages = serde_json::json!([
             {"from": "user3", "text": "msg3", "timestamp": "2026-01-01T00:02:00Z", "read": false}
         ]);
-        fs::write(&origin_inbox, serde_json::to_string(&origin_messages).unwrap()).unwrap();
+        fs::write(
+            &origin_inbox,
+            serde_json::to_string(&origin_messages).unwrap(),
+        )
+        .unwrap();
 
         let hostnames = vec!["remote".to_string()];
         let count = count_messages(&inbox_dir, "test-agent", Some(&hostnames)).unwrap();
@@ -263,7 +283,11 @@ mod tests {
             let messages = serde_json::json!([
                 {"from": "user1", "text": "new message", "timestamp": "2026-01-01T00:00:00Z", "read": false}
             ]);
-            fs::write(inbox_dir_clone.join("test-agent.json"), serde_json::to_string(&messages).unwrap()).unwrap();
+            fs::write(
+                inbox_dir_clone.join("test-agent.json"),
+                serde_json::to_string(&messages).unwrap(),
+            )
+            .unwrap();
         });
 
         let result = polling_wait(&inbox_dir, "test-agent", 5, 0, None).unwrap();

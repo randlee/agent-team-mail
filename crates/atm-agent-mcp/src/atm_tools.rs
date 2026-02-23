@@ -30,8 +30,8 @@ use std::sync::Arc;
 
 use agent_team_mail_core::InboxMessage;
 use agent_team_mail_core::home::get_home_dir;
-use agent_team_mail_core::text::{truncate_chars, truncate_chars_slice};
 use agent_team_mail_core::io::{inbox_append, inbox_update};
+use agent_team_mail_core::text::{truncate_chars, truncate_chars_slice};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 

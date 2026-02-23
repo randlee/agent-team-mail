@@ -67,11 +67,7 @@ impl MessageRouter {
         agent_name: &str,
         message: InboxMessage,
     ) -> Result<Option<InboxMessage>, PluginError> {
-        let policy = self
-            .policies
-            .get(agent_name)
-            .copied()
-            .unwrap_or_default();
+        let policy = self.policies.get(agent_name).copied().unwrap_or_default();
 
         let is_busy = self.busy_agents.get(agent_name).copied().unwrap_or(false);
 
@@ -143,10 +139,7 @@ impl MessageRouter {
     ///
     /// * `agent_name` - Name of the agent
     pub fn queue_depth(&self, agent_name: &str) -> usize {
-        self.queues
-            .get(agent_name)
-            .map(|q| q.len())
-            .unwrap_or(0)
+        self.queues.get(agent_name).map(|q| q.len()).unwrap_or(0)
     }
 
     /// Check if an agent is currently busy

@@ -136,8 +136,8 @@ impl SyncState {
             .await
             .context("Failed to read sync state file")?;
 
-        let state: SyncState = serde_json::from_slice(&content)
-            .context("Failed to parse sync state file")?;
+        let state: SyncState =
+            serde_json::from_slice(&content).context("Failed to parse sync state file")?;
 
         Ok(state)
     }
@@ -158,8 +158,7 @@ impl SyncState {
         }
 
         // Serialize state
-        let content = serde_json::to_vec_pretty(self)
-            .context("Failed to serialize sync state")?;
+        let content = serde_json::to_vec_pretty(self).context("Failed to serialize sync state")?;
 
         // Write to temp file
         let temp_path = path.with_extension("tmp");
@@ -378,7 +377,10 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         let deserialized: SyncState = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(deserialized.get_cursor(Path::new("inboxes/agent-1.json")), 5);
+        assert_eq!(
+            deserialized.get_cursor(Path::new("inboxes/agent-1.json")),
+            5
+        );
         assert!(deserialized.is_synced("msg-001"));
     }
 

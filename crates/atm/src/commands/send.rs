@@ -1,12 +1,12 @@
 //! Send command implementation
 
-use anyhow::Result;
-use agent_team_mail_core::config::{resolve_identity, resolve_config, Config, ConfigOverrides};
+use agent_team_mail_core::config::{Config, ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
-use agent_team_mail_core::io::inbox::{inbox_append, WriteOutcome};
+use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
 use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
+use anyhow::Result;
 use chrono::Utc;
 use clap::Args;
 use std::collections::HashMap;
@@ -15,7 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use agent_team_mail_core::text::{truncate_chars_slice, validate_message_text, DEFAULT_MAX_MESSAGE_BYTES};
+use agent_team_mail_core::text::{
+    DEFAULT_MAX_MESSAGE_BYTES, truncate_chars_slice, validate_message_text,
+};
 
 use crate::util::addressing::parse_address;
 use crate::util::file_policy::check_file_reference;
@@ -88,7 +90,8 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     // Parse addressing (agent@team or just agent) first so alias lookup runs on
     // only the agent token, even when input uses @team suffix.
-    let (parsed_agent, team_name) = parse_address(&args.agent, &args.team, &config.core.default_team)?;
+    let (parsed_agent, team_name) =
+        parse_address(&args.agent, &args.team, &config.core.default_team)?;
     let agent_name = resolve_identity(&parsed_agent, &config.roles, &config.aliases);
     if agent_name != parsed_agent {
         eprintln!(
@@ -109,7 +112,8 @@ pub fn execute(args: SendArgs) -> Result<()> {
         anyhow::bail!("Team config not found at {team_config_path:?}");
     }
 
-    let team_config: TeamConfig = serde_json::from_str(&std::fs::read_to_string(&team_config_path)?)?;
+    let team_config: TeamConfig =
+        serde_json::from_str(&std::fs::read_to_string(&team_config_path)?)?;
 
     // Verify agent exists in team
     if !team_config.members.iter().any(|m| m.name == agent_name) {
@@ -121,7 +125,8 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     // Self-send check: warn and prepend warning when sender == recipient
     let message_text = if config.core.identity == agent_name {
-        let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "unknown".to_string());
+        let session_id =
+            std::env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "unknown".to_string());
         let session_short = &session_id[..8.min(session_id.len())];
         let warning = format!(
             "[WARNING: Sent to self — identity={}, session={}. Check ATM_IDENTITY.]",
@@ -135,7 +140,13 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     // Process file reference if provided
     let mut final_message_text = if let Some(ref file_path) = args.file {
-        process_file_reference(file_path, &message_text, &team_name, &current_dir, &home_dir)?
+        process_file_reference(
+            file_path,
+            &message_text,
+            &team_name,
+            &current_dir,
+            &home_dir,
+        )?
     } else {
         message_text
     };
@@ -171,7 +182,9 @@ pub fn execute(args: SendArgs) -> Result<()> {
     }
 
     // Generate summary
-    let summary = args.summary.unwrap_or_else(|| generate_summary(&final_message_text));
+    let summary = args
+        .summary
+        .unwrap_or_else(|| generate_summary(&final_message_text));
 
     // Create inbox message
     let inbox_message = InboxMessage {
@@ -266,11 +279,9 @@ pub fn execute(args: SendArgs) -> Result<()> {
     );
 
     // Query the daemon for agent state to enrich the output (best-effort, silent fallback).
-    let agent_state_info = agent_team_mail_core::daemon_client::query_agent_state(
-        &agent_name,
-        &team_name,
-    )
-    .unwrap_or(None); // Ignore errors; daemon may not be running
+    let agent_state_info =
+        agent_team_mail_core::daemon_client::query_agent_state(&agent_name, &team_name)
+            .unwrap_or(None); // Ignore errors; daemon may not be running
 
     // Output result
     if args.json {
@@ -298,10 +309,14 @@ pub fn execute(args: SendArgs) -> Result<()> {
                 println!("Message sent to {agent_name}@{team_name}");
             }
             WriteOutcome::ConflictResolved { merged_messages } => {
-                println!("Message sent to {agent_name}@{team_name} (merged {merged_messages} concurrent messages)");
+                println!(
+                    "Message sent to {agent_name}@{team_name} (merged {merged_messages} concurrent messages)"
+                );
             }
             WriteOutcome::Queued { ref spool_path } => {
-                eprintln!("Warning: Message queued for delivery (could not write to inbox immediately)");
+                eprintln!(
+                    "Warning: Message queued for delivery (could not write to inbox immediately)"
+                );
                 eprintln!("Spool path: {spool_path:?}");
             }
         }
@@ -350,20 +365,19 @@ fn process_file_reference(
     }
 
     // Check file reference policy
-    let (is_allowed, rewritten_message) = check_file_reference(
-        file_path,
-        message_text,
-        team_name,
-        current_dir,
-        home_dir,
-    )?;
+    let (is_allowed, rewritten_message) =
+        check_file_reference(file_path, message_text, team_name, current_dir, home_dir)?;
 
     if is_allowed {
         // File path is allowed - use as reference
         Ok(if message_text.is_empty() {
             format!("File reference: {}", file_path.display())
         } else {
-            format!("{}\n\nFile reference: {}", message_text, file_path.display())
+            format!(
+                "{}\n\nFile reference: {}",
+                message_text,
+                file_path.display()
+            )
         })
     } else {
         // File was copied to share directory - use rewritten message
@@ -419,18 +433,15 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     let lock_path = team_config_path.with_extension("lock");
 
     // Acquire lock with retry
-    let _lock = acquire_lock(&lock_path, 5).map_err(|e| {
-        anyhow::anyhow!("Failed to acquire lock for team config: {e}")
-    })?;
+    let _lock = acquire_lock(&lock_path, 5)
+        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
 
     // Read current config
     let content = std::fs::read(team_config_path)?;
     let mut config: TeamConfig = serde_json::from_slice(&content)?;
 
     // Update sender's activity
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_millis() as u64;
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 
     if let Some(member) = config.members.iter_mut().find(|m| m.name == sender_name) {
         member.is_active = Some(true);

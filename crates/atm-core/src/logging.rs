@@ -192,16 +192,12 @@ pub fn init_unified(
         UnifiedLogMode::ProducerFanIn {
             daemon_socket,
             fallback_spool_dir,
-        } => {
-            setup_producer_fan_in(source_binary, daemon_socket, fallback_spool_dir)
-        }
+        } => setup_producer_fan_in(source_binary, daemon_socket, fallback_spool_dir),
 
         UnifiedLogMode::DaemonWriter {
             file_path,
             rotation,
-        } => {
-            setup_daemon_writer(file_path, rotation)
-        }
+        } => setup_daemon_writer(file_path, rotation),
     }
 }
 
@@ -221,8 +217,8 @@ pub fn init_stderr_only() -> LoggingGuards {
 /// events through the unified channel.  Returns `None` when:
 /// - `init_unified` was not called with `ProducerFanIn`, or
 /// - The background thread has exited.
-pub fn producer_sender(
-) -> Option<&'static std::sync::mpsc::SyncSender<crate::logging_event::LogEventV1>> {
+pub fn producer_sender()
+-> Option<&'static std::sync::mpsc::SyncSender<crate::logging_event::LogEventV1>> {
     PRODUCER_TX.get()
 }
 

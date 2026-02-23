@@ -225,8 +225,7 @@ impl LogEventV1 {
         }
 
         // Size guard: serialize and check byte count.
-        let serialized = serde_json::to_string(self)
-            .unwrap_or_default();
+        let serialized = serde_json::to_string(self).unwrap_or_default();
         let size = serialized.len();
         if size > MAX_EVENT_BYTES {
             return Err(ValidationError::EventTooLarge { size });
@@ -261,7 +260,10 @@ fn is_denylist_key(key: &str) -> bool {
 
 fn is_bearer_token(value: &str) -> bool {
     // Matches "Bearer <token>" or "bearer <token>" at the start of the string.
-    if let Some(rest) = value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer ")) {
+    if let Some(rest) = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
+    {
         !rest.trim().is_empty()
     } else {
         false
@@ -270,11 +272,8 @@ fn is_bearer_token(value: &str) -> bool {
 
 fn redact_map(map: &mut serde_json::Map<String, serde_json::Value>) {
     for (key, value) in map.iter_mut() {
-        let should_redact = is_denylist_key(key)
-            || value
-                .as_str()
-                .map(is_bearer_token)
-                .unwrap_or(false);
+        let should_redact =
+            is_denylist_key(key) || value.as_str().map(is_bearer_token).unwrap_or(false);
         if should_redact {
             *value = serde_json::Value::String("[REDACTED]".to_string());
         }
@@ -439,12 +438,7 @@ impl LogEventV1Builder {
 /// assert_eq!(event.level, "info");
 /// assert_eq!(event.source_binary, "atm");
 /// ```
-pub fn new_log_event(
-    source_binary: &str,
-    action: &str,
-    target: &str,
-    level: &str,
-) -> LogEventV1 {
+pub fn new_log_event(source_binary: &str, action: &str, target: &str, level: &str) -> LogEventV1 {
     LogEventV1::builder(source_binary, action, target)
         .level(level)
         .build()
@@ -570,7 +564,10 @@ mod tests {
                 name: "daemon_dispatch".to_string(),
                 fields: {
                     let mut m = serde_json::Map::new();
-                    m.insert("team".to_string(), serde_json::Value::String("atm-dev".to_string()));
+                    m.insert(
+                        "team".to_string(),
+                        serde_json::Value::String("atm-dev".to_string()),
+                    );
                     m
                 },
             })
@@ -590,7 +587,10 @@ mod tests {
         assert_eq!(deserialized.outcome.as_deref(), Some("ok"));
         assert_eq!(deserialized.spans.len(), 1);
         assert_eq!(deserialized.spans[0].name, "daemon_dispatch");
-        assert_eq!(deserialized.fields.get("iteration"), event.fields.get("iteration"));
+        assert_eq!(
+            deserialized.fields.get("iteration"),
+            event.fields.get("iteration")
+        );
     }
 
     #[test]
@@ -621,7 +621,9 @@ mod tests {
         event.source_binary = String::new();
         assert!(matches!(
             event.validate().unwrap_err(),
-            ValidationError::RequiredFieldEmpty { field: "source_binary" }
+            ValidationError::RequiredFieldEmpty {
+                field: "source_binary"
+            }
         ));
     }
 
@@ -742,7 +744,10 @@ mod tests {
             "Bearer token should be redacted"
         );
         assert_eq!(
-            event.fields.get("lowercase_bearer").and_then(|v| v.as_str()),
+            event
+                .fields
+                .get("lowercase_bearer")
+                .and_then(|v| v.as_str()),
             Some("[REDACTED]"),
             "lowercase bearer token should be redacted"
         );
@@ -778,7 +783,10 @@ mod tests {
             "span token field should be redacted"
         );
         assert_eq!(
-            event.spans[0].fields.get("safe_field").and_then(|v| v.as_str()),
+            event.spans[0]
+                .fields
+                .get("safe_field")
+                .and_then(|v| v.as_str()),
             Some("visible"),
             "safe span field should be preserved"
         );
@@ -823,9 +831,18 @@ mod tests {
         let event = make_valid_event();
         let json = serde_json::to_string(&event).expect("serialize");
         // None fields should not appear in JSON output.
-        assert!(!json.contains("\"team\""), "team should be absent when None");
-        assert!(!json.contains("\"agent\""), "agent should be absent when None");
-        assert!(!json.contains("\"session_id\""), "session_id should be absent when None");
+        assert!(
+            !json.contains("\"team\""),
+            "team should be absent when None"
+        );
+        assert!(
+            !json.contains("\"agent\""),
+            "agent should be absent when None"
+        );
+        assert!(
+            !json.contains("\"session_id\""),
+            "session_id should be absent when None"
+        );
     }
 
     #[test]
@@ -842,7 +859,8 @@ mod tests {
         assert_eq!(entries.len(), 1, "expected one spool file");
 
         let content = std::fs::read_to_string(entries[0].path()).expect("read spool file");
-        let deserialized: LogEventV1 = serde_json::from_str(content.trim()).expect("parse spool JSONL");
+        let deserialized: LogEventV1 =
+            serde_json::from_str(content.trim()).expect("parse spool JSONL");
         assert_eq!(deserialized.action, event.action);
     }
 

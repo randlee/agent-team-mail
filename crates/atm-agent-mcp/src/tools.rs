@@ -239,7 +239,10 @@ mod tests {
     fn test_all_tools_have_name_and_schema() {
         for tool in synthetic_tools() {
             assert!(tool.get("name").is_some(), "tool missing name");
-            assert!(tool.get("description").is_some(), "tool missing description");
+            assert!(
+                tool.get("description").is_some(),
+                "tool missing description"
+            );
             let schema = tool.get("inputSchema").expect("tool missing inputSchema");
             assert_eq!(
                 schema.get("type").and_then(|v| v.as_str()),

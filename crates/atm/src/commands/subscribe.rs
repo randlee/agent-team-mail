@@ -20,10 +20,10 @@
 //! atm subscribe arch-ctm idle --json
 //! ```
 
+use crate::util::settings::get_home_dir;
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use anyhow::Result;
 use clap::Args;
-use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
-use crate::util::settings::get_home_dir;
 
 // ── SubscribeArgs ─────────────────────────────────────────────────────────────
 
@@ -129,8 +129,16 @@ pub fn execute_subscribe(args: SubscribeArgs) -> Result<()> {
         }
         Some(resp) => {
             // Daemon returned an error response
-            let code = resp.error.as_ref().map(|e| e.code.as_str()).unwrap_or("UNKNOWN");
-            let message = resp.error.as_ref().map(|e| e.message.as_str()).unwrap_or("Unknown error");
+            let code = resp
+                .error
+                .as_ref()
+                .map(|e| e.code.as_str())
+                .unwrap_or("UNKNOWN");
+            let message = resp
+                .error
+                .as_ref()
+                .map(|e| e.message.as_str())
+                .unwrap_or("Unknown error");
             if args.json {
                 let output = serde_json::json!({
                     "error": code,
@@ -164,11 +172,7 @@ pub fn execute_unsubscribe(args: UnsubscribeArgs) -> Result<()> {
     let agent = &args.agent;
     let team = args.team.as_deref().unwrap_or(&config.core.default_team);
 
-    match agent_team_mail_core::daemon_client::unsubscribe_from_agent(
-        subscriber,
-        agent,
-        team,
-    )? {
+    match agent_team_mail_core::daemon_client::unsubscribe_from_agent(subscriber, agent, team)? {
         None => {
             // Daemon not running
             if args.json {
@@ -193,12 +197,23 @@ pub fn execute_unsubscribe(args: UnsubscribeArgs) -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
-                println!("Unsubscribed: {} will no longer receive notifications for {}", subscriber, agent);
+                println!(
+                    "Unsubscribed: {} will no longer receive notifications for {}",
+                    subscriber, agent
+                );
             }
         }
         Some(resp) => {
-            let code = resp.error.as_ref().map(|e| e.code.as_str()).unwrap_or("UNKNOWN");
-            let message = resp.error.as_ref().map(|e| e.message.as_str()).unwrap_or("Unknown error");
+            let code = resp
+                .error
+                .as_ref()
+                .map(|e| e.code.as_str())
+                .unwrap_or("UNKNOWN");
+            let message = resp
+                .error
+                .as_ref()
+                .map(|e| e.message.as_str())
+                .unwrap_or("Unknown error");
             if args.json {
                 let output = serde_json::json!({
                     "error": code,

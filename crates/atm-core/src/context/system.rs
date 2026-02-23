@@ -88,10 +88,7 @@ mod tests {
 
     #[test]
     fn test_system_context_with_repo() {
-        let repo = RepoContext::new(
-            "test-repo".to_string(),
-            PathBuf::from("/path/to/repo"),
-        );
+        let repo = RepoContext::new("test-repo".to_string(), PathBuf::from("/path/to/repo"));
 
         let ctx = SystemContext::new(
             "test-host".to_string(),

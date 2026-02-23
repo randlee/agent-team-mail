@@ -136,9 +136,8 @@ impl LogReader {
         let mut matched: Vec<LogEventV1> = Vec::new();
 
         for line in reader.lines() {
-            let line = line.with_context(|| {
-                format!("Failed to read log file: {}", self.path.display())
-            })?;
+            let line =
+                line.with_context(|| format!("Failed to read log file: {}", self.path.display()))?;
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -180,8 +179,9 @@ impl LogReader {
         // Wait for the file to appear if it does not exist yet.
         let mut file = loop {
             if self.path.exists() {
-                break File::open(&self.path)
-                    .with_context(|| format!("Failed to open log file: {}", self.path.display()))?;
+                break File::open(&self.path).with_context(|| {
+                    format!("Failed to open log file: {}", self.path.display())
+                })?;
             }
             std::thread::sleep(Duration::from_millis(500));
         };
@@ -308,12 +308,7 @@ pub fn format_event_human(event: &LogEventV1) -> String {
 
     format!(
         "{}  {}  [{}{}] {}{}",
-        event.ts,
-        colored_level,
-        event.source_binary,
-        agent_suffix,
-        event.action,
-        msg_suffix,
+        event.ts, colored_level, event.source_binary, agent_suffix, event.action, msg_suffix,
     )
 }
 
@@ -341,9 +336,9 @@ pub fn parse_since(s: &str) -> Result<Duration> {
         "s" => Ok(Duration::from_secs(n)),
         "m" => Ok(Duration::from_secs(n * 60)),
         "h" => Ok(Duration::from_secs(n * 3600)),
-        other => anyhow::bail!(
-            "unknown duration unit '{other}' in '{s}'; expected 's', 'm', or 'h'"
-        ),
+        other => {
+            anyhow::bail!("unknown duration unit '{other}' in '{s}'; expected 's', 'm', or 'h'")
+        }
     }
 }
 
@@ -487,12 +482,12 @@ mod tests {
     #[test]
     fn test_filter_since() {
         let now = Utc::now();
-        let two_hours_ago = (now - ChronoDuration::hours(2))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let thirty_mins_ago = (now - ChronoDuration::minutes(30))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let one_min_ago = (now - ChronoDuration::minutes(1))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let two_hours_ago =
+            (now - ChronoDuration::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let thirty_mins_ago =
+            (now - ChronoDuration::minutes(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let one_min_ago =
+            (now - ChronoDuration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
         let events = vec![
             make_event_at_ts(&two_hours_ago, "info"),   // too old
@@ -508,7 +503,11 @@ mod tests {
         let reader = LogReader::new(f.path().to_path_buf(), filter);
         let results = reader.read_filtered().expect("read_filtered");
 
-        assert_eq!(results.len(), 2, "only events within the last hour should match");
+        assert_eq!(
+            results.len(),
+            2,
+            "only events within the last hour should match"
+        );
     }
 
     // ── test_limit ────────────────────────────────────────────────────────────
@@ -547,7 +546,10 @@ mod tests {
         ev.agent = Some("team-lead".to_string());
 
         let formatted = format_event_human(&ev);
-        assert!(formatted.contains("2026-02-23T10:30:00Z"), "must contain timestamp");
+        assert!(
+            formatted.contains("2026-02-23T10:30:00Z"),
+            "must contain timestamp"
+        );
         assert!(formatted.contains("INFO"), "must contain level");
         assert!(formatted.contains("send_message"), "must contain action");
     }
@@ -560,7 +562,10 @@ mod tests {
         ev.error = Some("connection refused".to_string());
 
         let formatted = format_event_human(&ev);
-        assert!(formatted.contains(": connection refused"), "must contain error suffix");
+        assert!(
+            formatted.contains(": connection refused"),
+            "must contain error suffix"
+        );
     }
 
     #[test]
@@ -593,7 +598,9 @@ mod tests {
 
         let filter = LogFilter::default();
         let reader = LogReader::new(path, filter);
-        let results = reader.read_filtered().expect("should return Ok on missing file");
+        let results = reader
+            .read_filtered()
+            .expect("should return Ok on missing file");
 
         assert!(results.is_empty(), "missing file should return empty vec");
     }
@@ -632,7 +639,8 @@ mod tests {
                 .open(&log_path_clone)
                 .expect("open for appending");
             for i in 0..3u32 {
-                let mut ev = new_log_event("atm", &format!("follow_event_{i}"), "atm::test", "info");
+                let mut ev =
+                    new_log_event("atm", &format!("follow_event_{i}"), "atm::test", "info");
                 ev.action = format!("follow_event_{i}");
                 writeln!(file, "{}", serde_json::to_string(&ev).unwrap()).unwrap();
                 file.flush().unwrap();
@@ -659,8 +667,15 @@ mod tests {
         follow_thread.join().expect("follow thread joined");
 
         let guard = collected.lock().unwrap();
-        assert_eq!(guard.len(), 3, "follow should have yielded exactly 3 new events");
-        assert!(guard[0].action.starts_with("follow_event_"), "actions should be follow events");
+        assert_eq!(
+            guard.len(),
+            3,
+            "follow should have yielded exactly 3 new events"
+        );
+        assert!(
+            guard[0].action.starts_with("follow_event_"),
+            "actions should be follow events"
+        );
     }
 
     // ── malformed lines are skipped ───────────────────────────────────────────

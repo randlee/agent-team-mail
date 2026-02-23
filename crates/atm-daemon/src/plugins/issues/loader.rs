@@ -248,10 +248,7 @@ mod tests {
         let mut loader = ProviderLoader::new();
         let result = loader.load_from_directory(&file_path);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not a directory"));
+        assert!(result.unwrap_err().to_string().contains("not a directory"));
     }
 
     #[test]

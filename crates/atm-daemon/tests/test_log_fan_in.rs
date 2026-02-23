@@ -70,8 +70,16 @@ fn test_spool_merge_global_sort_across_two_files() {
     ev_t05.ts = "2026-01-01T00:00:05Z".to_string();
 
     // Write events to two separate spool files with interleaved timestamps.
-    write_spool_file(&spool_dir, "atm-1-100.jsonl", &[ev_t02.clone(), ev_t10.clone()]);
-    write_spool_file(&spool_dir, "atm-tui-2-200.jsonl", &[ev_t01.clone(), ev_t05.clone()]);
+    write_spool_file(
+        &spool_dir,
+        "atm-1-100.jsonl",
+        &[ev_t02.clone(), ev_t10.clone()],
+    );
+    write_spool_file(
+        &spool_dir,
+        "atm-tui-2-200.jsonl",
+        &[ev_t01.clone(), ev_t05.clone()],
+    );
 
     let count = merge_spool_on_startup(&spool_dir, &log_path).unwrap();
     assert_eq!(count, 4, "should merge 4 events total");
@@ -84,14 +92,8 @@ fn test_spool_merge_global_sort_across_two_files() {
         events[0].action, "event_t01",
         "first event must be T=01 (globally earliest)"
     );
-    assert_eq!(
-        events[1].action, "event_t02",
-        "second event must be T=02"
-    );
-    assert_eq!(
-        events[2].action, "event_t05",
-        "third event must be T=05"
-    );
+    assert_eq!(events[1].action, "event_t02", "second event must be T=02");
+    assert_eq!(events[2].action, "event_t05", "third event must be T=05");
     assert_eq!(
         events[3].action, "event_t10",
         "fourth event must be T=10 (globally latest)"
@@ -136,16 +138,39 @@ fn test_spool_merge_global_sort_three_files() {
     ev_b2.ts = "2026-01-01T00:00:06Z".to_string();
 
     // atm-agent-mcp: T=02, T=04, T=05
-    let mut ev_c1 = new_log_event("atm-agent-mcp", "proxy_start", "atm_agent_mcp::proxy", "info");
+    let mut ev_c1 = new_log_event(
+        "atm-agent-mcp",
+        "proxy_start",
+        "atm_agent_mcp::proxy",
+        "info",
+    );
     ev_c1.ts = "2026-01-01T00:00:02Z".to_string();
-    let mut ev_c2 = new_log_event("atm-agent-mcp", "session_start", "atm_agent_mcp::session", "info");
+    let mut ev_c2 = new_log_event(
+        "atm-agent-mcp",
+        "session_start",
+        "atm_agent_mcp::session",
+        "info",
+    );
     ev_c2.ts = "2026-01-01T00:00:04Z".to_string();
-    let mut ev_c3 = new_log_event("atm-agent-mcp", "proxy_shutdown", "atm_agent_mcp::proxy", "info");
+    let mut ev_c3 = new_log_event(
+        "atm-agent-mcp",
+        "proxy_shutdown",
+        "atm_agent_mcp::proxy",
+        "info",
+    );
     ev_c3.ts = "2026-01-01T00:00:05Z".to_string();
 
     write_spool_file(&spool_dir, "atm-1-100.jsonl", &[ev_a.clone()]);
-    write_spool_file(&spool_dir, "atm-tui-2-200.jsonl", &[ev_b1.clone(), ev_b2.clone()]);
-    write_spool_file(&spool_dir, "atm-agent-mcp-3-300.jsonl", &[ev_c1.clone(), ev_c2.clone(), ev_c3.clone()]);
+    write_spool_file(
+        &spool_dir,
+        "atm-tui-2-200.jsonl",
+        &[ev_b1.clone(), ev_b2.clone()],
+    );
+    write_spool_file(
+        &spool_dir,
+        "atm-agent-mcp-3-300.jsonl",
+        &[ev_c1.clone(), ev_c2.clone(), ev_c3.clone()],
+    );
 
     let count = merge_spool_on_startup(&spool_dir, &log_path).unwrap();
     assert_eq!(count, 6, "should merge 6 events total");
@@ -181,7 +206,10 @@ fn test_spool_merge_missing_dir_returns_zero() {
 
     let count = merge_spool_on_startup(&spool_dir, &log_path).unwrap();
     assert_eq!(count, 0);
-    assert!(!log_path.exists(), "canonical log must not be created when spool is absent");
+    assert!(
+        !log_path.exists(),
+        "canonical log must not be created when spool is absent"
+    );
 }
 
 /// When all spool files contain events with the same timestamp, the merge
@@ -276,8 +304,8 @@ fn test_emit_event_reaches_spool_when_daemon_unavailable() {
     for file in &spool_files {
         let content = fs::read_to_string(file.path()).unwrap();
         for line in content.lines().filter(|l| !l.trim().is_empty()) {
-            let _event: LogEventV1 = serde_json::from_str(line)
-                .expect("spool file must contain valid LogEventV1 JSON");
+            let _event: LogEventV1 =
+                serde_json::from_str(line).expect("spool file must contain valid LogEventV1 JSON");
         }
     }
 }

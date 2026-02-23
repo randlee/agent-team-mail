@@ -1,12 +1,16 @@
 //! ATM Daemon - Background service for agent team mail plugins
 
-use anyhow::{Context, Result};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging;
 use agent_team_mail_daemon::daemon;
-use agent_team_mail_daemon::daemon::{new_dedup_store, new_launch_sender, new_log_event_queue, new_pubsub_store, new_session_registry, new_state_store, new_stream_event_sender, new_stream_state_store, run_log_writer_task, LogWriterConfig, StatusWriter};
+use agent_team_mail_daemon::daemon::{
+    LogWriterConfig, StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue,
+    new_pubsub_store, new_session_registry, new_state_store, new_stream_event_sender,
+    new_stream_state_store, run_log_writer_task,
+};
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
 use agent_team_mail_daemon::roster::RosterService;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,8 +73,8 @@ async fn main() -> Result<()> {
     }
 
     // Determine home and current directories for config resolution
-    let home_dir = agent_team_mail_core::home::get_home_dir()
-        .context("Failed to determine home directory")?;
+    let home_dir =
+        agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
 
     // Merge any spool files written by producers while the daemon was offline.
     // This runs before the socket server starts so no new spool files can arrive
@@ -78,8 +82,7 @@ async fn main() -> Result<()> {
     {
         let spool_dir = agent_team_mail_core::logging_event::spool_dir(&home_dir);
         match agent_team_mail_daemon::daemon::spool_merge::merge_spool_on_startup(
-            &spool_dir,
-            &log_file,
+            &spool_dir, &log_file,
         ) {
             Ok(count) if count > 0 => {
                 info!(count, "Merged spool events into canonical log");
@@ -91,8 +94,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let current_dir = std::env::current_dir()
-        .context("Failed to get current directory")?;
+    let current_dir = std::env::current_dir().context("Failed to get current directory")?;
 
     // Load configuration
     let config_overrides = agent_team_mail_core::config::ConfigOverrides {
@@ -101,8 +103,9 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let config = agent_team_mail_core::config::resolve_config(&config_overrides, &current_dir, &home_dir)
-        .context("Failed to resolve configuration")?;
+    let config =
+        agent_team_mail_core::config::resolve_config(&config_overrides, &current_dir, &home_dir)
+            .context("Failed to resolve configuration")?;
     emit_event_best_effort(EventFields {
         level: "info",
         source: "atm-daemon",
@@ -236,7 +239,9 @@ async fn main() -> Result<()> {
     let dedup_store = match new_dedup_store(&home_dir) {
         Ok(store) => store,
         Err(e) => {
-            tracing::warn!("Failed to initialise durable dedupe store, falling back to fresh empty store: {e}");
+            tracing::warn!(
+                "Failed to initialise durable dedupe store, falling back to fresh empty store: {e}"
+            );
             // Construct a fallback store pointing at the same default path.
             // If the error was a corrupted file, the subsequent write will
             // overwrite it; if the directory is inaccessible, we'll log on
@@ -266,7 +271,10 @@ async fn main() -> Result<()> {
         home_dir.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
     ));
-    info!("Status writer initialized: {}", status_writer.status_path().display());
+    info!(
+        "Status writer initialized: {}",
+        status_writer.status_path().display()
+    );
 
     // Create cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();
@@ -278,8 +286,9 @@ async fn main() -> Result<()> {
 
         #[cfg(unix)]
         {
-            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to create SIGTERM handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to create SIGTERM handler");
 
             tokio::select! {
                 _ = ctrl_c => {

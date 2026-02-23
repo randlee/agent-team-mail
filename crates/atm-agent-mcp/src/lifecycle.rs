@@ -144,8 +144,11 @@ impl ThreadCommandQueue {
         if self.close_requested {
             return Err(QueueClosedError);
         }
-        self.queue
-            .push_back(ThreadCommand::ClaudeReply { request_id, args, respond_tx });
+        self.queue.push_back(ThreadCommand::ClaudeReply {
+            request_id,
+            args,
+            respond_tx,
+        });
         Ok(())
     }
 
@@ -186,8 +189,7 @@ impl ThreadCommandQueue {
         }
         self.close_requested = true;
         // Close always jumps to the front of the queue
-        self.queue
-            .push_front(ThreadCommand::Close { respond_tx });
+        self.queue.push_front(ThreadCommand::Close { respond_tx });
         true
     }
 
@@ -217,7 +219,10 @@ mod tests {
         let (tx2, _rx2) = oneshot::channel::<CloseResult>();
 
         assert!(q.push_close(tx1), "first close should be accepted");
-        assert!(!q.push_close(tx2), "second close must return false (idempotent)");
+        assert!(
+            !q.push_close(tx2),
+            "second close must return false (idempotent)"
+        );
         // Only one Close command in the queue
         assert!(q.is_close_requested());
     }
@@ -232,7 +237,10 @@ mod tests {
 
         let (reply_tx, _reply_rx) = oneshot::channel();
         let result = q.push_claude_reply(serde_json::json!(1), serde_json::json!({}), reply_tx);
-        assert!(result.is_err(), "ClaudeReply must be rejected when close is pending");
+        assert!(
+            result.is_err(),
+            "ClaudeReply must be rejected when close is pending"
+        );
     }
 
     // ─── Auto mail rejected when close pending ────────────────────────────────
@@ -244,7 +252,10 @@ mod tests {
         q.push_close(tx);
 
         let queued = q.push_auto_mail("inject me".to_string());
-        assert!(!queued, "AutoMailInject must be rejected when close is pending");
+        assert!(
+            !queued,
+            "AutoMailInject must be rejected when close is pending"
+        );
     }
 
     // ─── Auto mail rejected when Claude reply queued ──────────────────────────
@@ -257,7 +268,10 @@ mod tests {
             .unwrap();
 
         let queued = q.push_auto_mail("inject me".to_string());
-        assert!(!queued, "AutoMailInject must be rejected when a ClaudeReply is pending (FR-8.10)");
+        assert!(
+            !queued,
+            "AutoMailInject must be rejected when a ClaudeReply is pending (FR-8.10)"
+        );
     }
 
     // ─── Close jumps to front ─────────────────────────────────────────────────
@@ -267,8 +281,12 @@ mod tests {
         let mut q = make_queue();
         // Push a ClaudeReply first
         let (reply_tx, _reply_rx) = oneshot::channel();
-        q.push_claude_reply(serde_json::json!(42), serde_json::json!({"prompt": "hello"}), reply_tx)
-            .unwrap();
+        q.push_claude_reply(
+            serde_json::json!(42),
+            serde_json::json!({"prompt": "hello"}),
+            reply_tx,
+        )
+        .unwrap();
 
         // Now push close — it should jump ahead
         let (tx, _rx) = oneshot::channel::<CloseResult>();
@@ -308,7 +326,9 @@ mod tests {
 
         let cmd = q.pop_next().unwrap();
         match cmd {
-            ThreadCommand::ClaudeReply { request_id, args, .. } => {
+            ThreadCommand::ClaudeReply {
+                request_id, args, ..
+            } => {
                 assert_eq!(request_id, serde_json::json!(99));
                 assert_eq!(args["x"], 1);
             }
@@ -443,7 +463,10 @@ mod tests {
         let (reply_tx, _reply_rx) = oneshot::channel();
         let reply_result =
             q.push_claude_reply(serde_json::json!(3), serde_json::json!({}), reply_tx);
-        assert!(reply_result.is_err(), "ClaudeReply must be rejected post-close");
+        assert!(
+            reply_result.is_err(),
+            "ClaudeReply must be rejected post-close"
+        );
 
         // Only the Close command is present.
         assert!(matches!(q.pop_next().unwrap(), ThreadCommand::Close { .. }));

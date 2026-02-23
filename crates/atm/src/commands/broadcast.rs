@@ -1,16 +1,18 @@
 //! Broadcast command implementation
 
-use anyhow::Result;
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
+use anyhow::Result;
 use chrono::Utc;
 use clap::Args;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use agent_team_mail_core::text::{truncate_chars_slice, validate_message_text, DEFAULT_MAX_MESSAGE_BYTES};
+use agent_team_mail_core::text::{
+    DEFAULT_MAX_MESSAGE_BYTES, truncate_chars_slice, validate_message_text,
+};
 
 use crate::util::settings::get_home_dir;
 

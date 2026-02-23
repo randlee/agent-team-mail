@@ -26,10 +26,10 @@ pub struct CaptureConfig {
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            timeout_ms: 60_000,         // 60 seconds
-            poll_interval_ms: 100,       // 100ms polling
+            timeout_ms: 60_000,            // 60 seconds
+            poll_interval_ms: 100,         // 100ms polling
             max_response_bytes: 1_048_576, // 1MB
-            idle_timeout_ms: 2_000,     // 2 seconds idle timeout
+            idle_timeout_ms: 2_000,        // 2 seconds idle timeout
         }
     }
 }
@@ -95,10 +95,12 @@ impl LogTailer {
         })?;
 
         // Seek to end to capture only new output
-        let start_pos = file.seek(SeekFrom::End(0)).map_err(|e| PluginError::Runtime {
-            message: format!("Failed to seek log file: {e}"),
-            source: Some(Box::new(e)),
-        })?;
+        let start_pos = file
+            .seek(SeekFrom::End(0))
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to seek log file: {e}"),
+                source: Some(Box::new(e)),
+            })?;
 
         debug!(
             "Tailing log file {} from position {}",
@@ -146,7 +148,8 @@ impl LogTailer {
             }
 
             // Check current file size
-            let current_size = file.metadata()
+            let current_size = file
+                .metadata()
                 .map_err(|e| PluginError::Runtime {
                     message: format!("Failed to read log file metadata: {e}"),
                     source: Some(Box::new(e)),
@@ -159,10 +162,11 @@ impl LogTailer {
                 let read_size = to_read.min(self.config.max_response_bytes - buffer.len());
 
                 let mut chunk = vec![0u8; read_size];
-                file.read_exact(&mut chunk).map_err(|e| PluginError::Runtime {
-                    message: format!("Failed to read log file: {e}"),
-                    source: Some(Box::new(e)),
-                })?;
+                file.read_exact(&mut chunk)
+                    .map_err(|e| PluginError::Runtime {
+                        message: format!("Failed to read log file: {e}"),
+                        source: Some(Box::new(e)),
+                    })?;
 
                 buffer.extend_from_slice(&chunk);
                 last_size = file.stream_position().map_err(|e| PluginError::Runtime {
@@ -173,7 +177,11 @@ impl LogTailer {
                 // Update last activity timestamp
                 last_activity = Instant::now();
 
-                debug!("Captured {} bytes (total {} bytes)", chunk.len(), buffer.len());
+                debug!(
+                    "Captured {} bytes (total {} bytes)",
+                    chunk.len(),
+                    buffer.len()
+                );
 
                 // Check if we've hit max size
                 if buffer.len() >= self.config.max_response_bytes {

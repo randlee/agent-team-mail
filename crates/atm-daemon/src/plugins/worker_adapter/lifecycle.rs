@@ -224,7 +224,9 @@ pub async fn auto_start_workers(
 
         let member_name = &agent_config.member_name;
         let command = config.resolve_command(config_key);
-        info!("Starting worker for agent {config_key} (member: {member_name}) with command: {command}");
+        info!(
+            "Starting worker for agent {config_key} (member: {member_name}) with command: {command}"
+        );
         match backend.spawn(member_name, command).await {
             Ok(handle) => {
                 lifecycle.register_worker(member_name);
@@ -301,9 +303,7 @@ pub async fn restart_worker(
     workers: &mut HashMap<String, WorkerHandle>,
 ) -> Result<(), PluginError> {
     if !lifecycle.can_restart(member_name) {
-        error!(
-            "Worker {member_name} exceeded max restart attempts, giving up"
-        );
+        error!("Worker {member_name} exceeded max restart attempts, giving up");
         lifecycle.set_state(member_name, WorkerState::Crashed);
         return Err(PluginError::Runtime {
             message: format!("Worker {member_name} exceeded max restart attempts"),
@@ -550,10 +550,7 @@ mod tests {
         let mut manager = LifecycleManager::new();
         manager.register_worker("test-agent");
 
-        assert_eq!(
-            manager.get_state("test-agent"),
-            Some(WorkerState::Running)
-        );
+        assert_eq!(manager.get_state("test-agent"), Some(WorkerState::Running));
     }
 
     #[test]

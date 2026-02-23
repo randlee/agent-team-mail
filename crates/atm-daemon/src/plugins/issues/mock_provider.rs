@@ -143,7 +143,11 @@ impl IssueProvider for MockProvider {
             })
     }
 
-    async fn add_comment(&self, issue_number: u64, body: &str) -> Result<IssueComment, PluginError> {
+    async fn add_comment(
+        &self,
+        issue_number: u64,
+        body: &str,
+    ) -> Result<IssueComment, PluginError> {
         self.log_call(MockCall::AddComment {
             issue_number,
             body: body.to_string(),
@@ -185,8 +189,8 @@ impl IssueProvider for MockProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::{IssueLabel, IssueState};
+    use super::*;
 
     #[test]
     fn test_mock_provider_new() {

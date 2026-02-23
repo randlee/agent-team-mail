@@ -1,10 +1,12 @@
 //! Request command implementation (send + wait for response)
 
-use anyhow::Result;
-use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::io::inbox::{inbox_append, inbox_update};
-use agent_team_mail_core::text::{truncate_chars, truncate_chars_slice, validate_message_text, DEFAULT_MAX_MESSAGE_BYTES};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::text::{
+    DEFAULT_MAX_MESSAGE_BYTES, truncate_chars, truncate_chars_slice, validate_message_text,
+};
+use anyhow::Result;
 use chrono::Utc;
 use clap::Args;
 use std::collections::HashMap;
@@ -62,8 +64,7 @@ pub fn execute(args: RequestArgs) -> Result<()> {
 
     let (from_agent, from_team) =
         parse_address(&args.from, &args.from_team, &config.core.default_team)?;
-    let (to_agent, to_team) =
-        parse_address(&args.to, &args.to_team, &config.core.default_team)?;
+    let (to_agent, to_team) = parse_address(&args.to, &args.to_team, &config.core.default_team)?;
 
     // Resolve team dirs and verify both members exist
     let from_team_dir = home_dir.join(".claude/teams").join(&from_team);
@@ -89,7 +90,11 @@ pub fn execute(args: RequestArgs) -> Result<()> {
     let to_team_config: TeamConfig =
         serde_json::from_str(&std::fs::read_to_string(&to_config_path)?)?;
 
-    if !from_team_config.members.iter().any(|m| m.name == from_agent) {
+    if !from_team_config
+        .members
+        .iter()
+        .any(|m| m.name == from_agent)
+    {
         anyhow::bail!("Sender '{from_agent}' not found in team '{from_team}'");
     }
     if !to_team_config.members.iter().any(|m| m.name == to_agent) {
@@ -360,7 +365,10 @@ mod tests {
         let inbox_path = temp.path().join("inbox.json");
 
         let mut fields = HashMap::new();
-        fields.insert("requestId".to_string(), serde_json::Value::String("req-123".to_string()));
+        fields.insert(
+            "requestId".to_string(),
+            serde_json::Value::String("req-123".to_string()),
+        );
 
         let msg = InboxMessage {
             from: "responder".to_string(),
@@ -374,14 +382,8 @@ mod tests {
 
         write_inbox(&inbox_path, &[msg]);
 
-        let found = read_and_mark_response(
-            &inbox_path,
-            "team",
-            "agent",
-            "responder",
-            "req-123",
-        )
-        .unwrap();
+        let found =
+            read_and_mark_response(&inbox_path, "team", "agent", "responder", "req-123").unwrap();
 
         assert!(found.is_some());
         assert!(found.unwrap().read);
@@ -404,14 +406,8 @@ mod tests {
 
         write_inbox(&inbox_path, &[msg]);
 
-        let found = read_and_mark_response(
-            &inbox_path,
-            "team",
-            "agent",
-            "responder",
-            "req-456",
-        )
-        .unwrap();
+        let found =
+            read_and_mark_response(&inbox_path, "team", "agent", "responder", "req-456").unwrap();
 
         assert!(found.is_some());
         assert!(found.unwrap().read);

@@ -251,13 +251,11 @@ impl CodexTransport for McpTransport {
         let stdin = child.stdin.take().expect("child stdin must be piped");
         let stdout = child.stdout.take().expect("child stdout must be piped");
 
-        let exit_status: Arc<Mutex<Option<std::process::ExitStatus>>> =
-            Arc::new(Mutex::new(None));
+        let exit_status: Arc<Mutex<Option<std::process::ExitStatus>>> = Arc::new(Mutex::new(None));
         let shared_stdin = Arc::new(Mutex::new(
             Box::new(stdin) as Box<dyn AsyncWrite + Send + Unpin>
         ));
-        let process: Arc<Mutex<Option<tokio::process::Child>>> =
-            Arc::new(Mutex::new(Some(child)));
+        let process: Arc<Mutex<Option<tokio::process::Child>>> = Arc::new(Mutex::new(Some(child)));
 
         Ok(RawChildIo {
             stdin: shared_stdin,
@@ -381,7 +379,11 @@ pub(crate) enum TransportEventType {
 pub(crate) fn parse_event_type(line: &str) -> TransportEventType {
     serde_json::from_str::<serde_json::Value>(line)
         .ok()
-        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .and_then(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
         .map(|t| match t.as_str() {
             "agent_message" => TransportEventType::AgentMessage,
             "tool_call" => TransportEventType::ToolCall,
@@ -424,14 +426,17 @@ impl CodexTransport for JsonCodecTransport {
         let idle_flag = Arc::clone(&self.idle_flag);
         let cli_json_turn_state = Arc::clone(&self.cli_json_turn_state);
         let team_for_task = self.team.clone();
-        let cli_json_agent_identity = self.config.identity.clone()
+        let cli_json_agent_identity = self
+            .config
+            .identity
+            .clone()
             .unwrap_or_else(|| "unknown".to_string());
 
         // Background task: read lines from the real child stdout, detect idle/done
         // events, and forward everything to the duplex write half.
         tokio::spawn(async move {
-            use agent_team_mail_core::daemon_stream::DaemonStreamEvent;
             use crate::stream_norm::{TurnState, TurnStatus};
+            use agent_team_mail_core::daemon_stream::DaemonStreamEvent;
 
             let reader = BufReader::new(child_stdout);
             let mut lines = reader.lines();
@@ -484,7 +489,8 @@ impl CodexTransport for JsonCodecTransport {
                                 agent: cli_json_agent_identity.clone(),
                                 thread_id: String::new(),
                                 turn_id: String::new(),
-                                status: agent_team_mail_core::daemon_stream::TurnStatusWire::Completed,
+                                status:
+                                    agent_team_mail_core::daemon_stream::TurnStatusWire::Completed,
                                 transport: "cli-json".to_string(),
                             };
                             tokio::spawn(async move {
@@ -631,7 +637,8 @@ pub(crate) struct AppServerTransport {
     /// When a request is sent that expects a response (e.g. `thread/fork`), a
     /// oneshot sender is inserted under the request ID. The background task
     /// routes incoming responses to the matching sender.
-    pending_responses: Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+    pending_responses:
+        Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
     /// Elicitation registry for approval-gate bridging (FR-18 / G.5).
     ///
     /// Shared with the notification background task so that when the app-server
@@ -768,7 +775,9 @@ impl AppServerTransport {
     /// closed, or a timeout occurs waiting for the response.
     async fn send_request_with_overload_retry(
         stdin: &Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
-        pending_responses: &Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+        pending_responses: &Arc<
+            Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>,
+        >,
         req_id: u64,
         request: &serde_json::Value,
         max_retries: u32,
@@ -782,22 +791,28 @@ impl AppServerTransport {
 
             Self::send_with_backoff(stdin, &line).await?;
 
-            let response = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                rx,
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("timeout waiting for response to request id={req_id}"))?
-            .map_err(|_| anyhow::anyhow!("response channel closed for request id={req_id}"))?;
+            let response = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("timeout waiting for response to request id={req_id}")
+                })?
+                .map_err(|_| anyhow::anyhow!("response channel closed for request id={req_id}"))?;
 
             if crate::stream_norm::is_overload_error(&response) {
                 if attempt < max_retries {
-                    tracing::warn!(req_id, attempt, delay_ms, "app-server returned -32001 overload; retrying");
+                    tracing::warn!(
+                        req_id,
+                        attempt,
+                        delay_ms,
+                        "app-server returned -32001 overload; retrying"
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     delay_ms = delay_ms.saturating_mul(2).min(5000);
                     continue;
                 }
-                anyhow::bail!("app-server overloaded after {max_retries} retries for request id={req_id}");
+                anyhow::bail!(
+                    "app-server overloaded after {max_retries} retries for request id={req_id}"
+                );
             }
 
             return Ok(response);
@@ -823,8 +838,7 @@ impl AppServerTransport {
         stdin: &Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
         thread_id: &str,
     ) -> anyhow::Result<serde_json::Value> {
-        static FORK_COUNTER: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(100);
+        static FORK_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(100);
         let req_id = FORK_COUNTER.fetch_add(1, Ordering::SeqCst);
 
         let request = serde_json::json!({
@@ -835,13 +849,10 @@ impl AppServerTransport {
 
         // Register a sentinel in session_registry. G.4 will populate the real
         // ATM session ID once session correlation is established.
-        self.session_registry
-            .lock()
-            .await
-            .insert(
-                thread_id.to_string(),
-                format!("pending-atm-session:{thread_id}"),
-            );
+        self.session_registry.lock().await.insert(
+            thread_id.to_string(),
+            format!("pending-atm-session:{thread_id}"),
+        );
 
         let response = Self::send_request_with_overload_retry(
             stdin,
@@ -1020,7 +1031,8 @@ pub struct NotificationTaskState {
     /// Whether the handshake has completed.
     pub initialized: Arc<AtomicBool>,
     /// Pending request-response correlation channels.
-    pub pending_responses: Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+    pub pending_responses:
+        Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
     /// Thread ID to ATM session mapping.
     pub session_registry: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// Team name for structured event logging.
@@ -1149,8 +1161,7 @@ async fn bridge_entered_review_mode(
             use tokio::io::AsyncWriteExt as _;
             // The registry's default timeout is 30 seconds.  Mirror that here
             // so the delivery task does not outlive the registry entry.
-            const DELIVERY_TIMEOUT: std::time::Duration =
-                std::time::Duration::from_secs(35);
+            const DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
             match tokio::time::timeout(DELIVERY_TIMEOUT, response_rx).await {
                 Ok(Ok(response)) => {
                     let line = match serde_json::to_string(&response) {
@@ -1269,10 +1280,10 @@ pub async fn drive_notification_task(
         child_stdin,
         agent_identity,
     } = state;
-    use agent_team_mail_core::daemon_stream::{DaemonStreamEvent, TurnStatusWire};
     use crate::stream_norm::{
         AppServerNotification, TurnState, TurnStatus, parse_app_server_notification,
     };
+    use agent_team_mail_core::daemon_stream::{DaemonStreamEvent, TurnStatusWire};
 
     let agent_name = agent_identity.unwrap_or_else(|| "unknown".to_string());
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1309,15 +1320,12 @@ pub async fn drive_notification_task(
             match notification {
                 AppServerNotification::TurnStarted { thread_id, turn_id } => {
                     idle_flag.store(false, Ordering::SeqCst);
-                    turn_state
-                        .lock()
-                        .await
-                        .insert(
-                            thread_id.clone(),
-                            TurnState::Busy {
-                                turn_id: turn_id.clone(),
-                            },
-                        );
+                    turn_state.lock().await.insert(
+                        thread_id.clone(),
+                        TurnState::Busy {
+                            turn_id: turn_id.clone(),
+                        },
+                    );
                     // Notify the unified turn tracker (if wired) so that
                     // per-thread active-turn state is kept consistent across
                     // all transports.  Pass thread_id as the first argument
@@ -1350,7 +1358,11 @@ pub async fn drive_notification_task(
                         ..Default::default()
                     });
                 }
-                AppServerNotification::TurnCompleted { thread_id, turn_id, status } => {
+                AppServerNotification::TurnCompleted {
+                    thread_id,
+                    turn_id,
+                    status,
+                } => {
                     let event_result = format!("{status:?}");
                     let status_for_tracker = status.clone();
                     let wire_status = match &status {
@@ -1977,7 +1989,10 @@ struct SniffWriter {
 
 impl SniffWriter {
     fn new(tx: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
-        Self { tx, buf: Vec::new() }
+        Self {
+            tx,
+            buf: Vec::new(),
+        }
     }
 }
 
@@ -2116,10 +2131,7 @@ mod tests {
             parse_event_type("not json"),
             TransportEventType::Unknown
         ));
-        assert!(matches!(
-            parse_event_type(""),
-            TransportEventType::Unknown
-        ));
+        assert!(matches!(parse_event_type(""), TransportEventType::Unknown));
     }
 
     #[test]
@@ -2180,15 +2192,20 @@ mod tests {
     #[tokio::test]
     async fn test_send_with_backoff_succeeds_on_first_try() {
         let (duplex_write, duplex_read) = tokio::io::duplex(4096);
-        let stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> =
-            Arc::new(Mutex::new(Box::new(duplex_write) as Box<dyn AsyncWrite + Send + Unpin>));
+        let stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> = Arc::new(Mutex::new(Box::new(
+            duplex_write,
+        )
+            as Box<dyn AsyncWrite + Send + Unpin>));
 
         let result = AppServerTransport::send_with_backoff(
             &stdin,
             r#"{"id":1,"method":"thread/fork","params":{"threadId":"t1"}}"#,
         )
         .await;
-        assert!(result.is_ok(), "send_with_backoff should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "send_with_backoff should succeed: {result:?}"
+        );
         // Clean up the read half.
         drop(duplex_read);
     }
@@ -2217,7 +2234,10 @@ mod tests {
         // Verify the tracker is usable: active_turn_id returns None for an
         // unknown thread (no active turn).
         let active = t.turn_tracker.active_turn_id("thread-1").await;
-        assert!(active.is_none(), "freshly initialised tracker must have no active turn");
+        assert!(
+            active.is_none(),
+            "freshly initialised tracker must have no active turn"
+        );
     }
 
     // ── bridge_entered_review_mode (G.5) ─────────────────────────────────────
@@ -2247,10 +2267,16 @@ mod tests {
         .await;
 
         // Registry must have exactly one pending entry.
-        assert_eq!(registry.lock().await.len(), 1, "one pending elicitation must be registered");
+        assert_eq!(
+            registry.lock().await.len(),
+            1,
+            "one pending elicitation must be registered"
+        );
 
         // Upstream channel must have received the elicitation/create request.
-        let msg = rx.try_recv().expect("upstream must have received a message");
+        let msg = rx
+            .try_recv()
+            .expect("upstream must have received a message");
         assert_eq!(
             msg.get("method").and_then(|v| v.as_str()),
             Some("elicitation/create"),
@@ -2369,10 +2395,12 @@ mod tests {
         use crate::stream_norm::TurnState;
         let t = AppServerTransport::new(AgentMcpConfig::default(), "test-team");
 
-        t.turn_state
-            .lock()
-            .await
-            .insert("thread-1".to_string(), TurnState::Busy { turn_id: "turn-abc".to_string() });
+        t.turn_state.lock().await.insert(
+            "thread-1".to_string(),
+            TurnState::Busy {
+                turn_id: "turn-abc".to_string(),
+            },
+        );
 
         assert_eq!(
             t.active_turn_id_for_thread("thread-1"),
@@ -2388,7 +2416,10 @@ mod tests {
 
         t.turn_state.lock().await.insert(
             "thread-1".to_string(),
-            TurnState::Terminal { turn_id: "turn-xyz".to_string(), status: TurnStatus::Completed },
+            TurnState::Terminal {
+                turn_id: "turn-xyz".to_string(),
+                status: TurnStatus::Completed,
+            },
         );
 
         assert!(
@@ -2416,7 +2447,10 @@ mod tests {
             }
         });
 
-        assert!(msg.get("jsonrpc").is_none(), "jsonrpc must be omitted per protocol spec");
+        assert!(
+            msg.get("jsonrpc").is_none(),
+            "jsonrpc must be omitted per protocol spec"
+        );
         assert_eq!(msg["method"].as_str().unwrap(), "turn/start");
         assert_eq!(msg["params"]["threadId"].as_str().unwrap(), thread_id);
         assert_eq!(msg["params"]["input"][0]["type"].as_str().unwrap(), "text");
@@ -2445,13 +2479,18 @@ mod tests {
             }
         });
 
-        assert!(msg.get("jsonrpc").is_none(), "jsonrpc must be omitted per protocol spec");
+        assert!(
+            msg.get("jsonrpc").is_none(),
+            "jsonrpc must be omitted per protocol spec"
+        );
         assert_eq!(msg["method"].as_str().unwrap(), "turn/steer");
         assert_eq!(msg["params"]["threadId"].as_str().unwrap(), thread_id);
-        assert_eq!(msg["params"]["expectedTurnId"].as_str().unwrap(), active_turn_id);
-        assert_eq!(msg["params"]["input"][0]["type"].as_str().unwrap(), "text");
-        assert_eq!(msg["params"]["input"][0]["text"].as_str().unwrap(), content
+        assert_eq!(
+            msg["params"]["expectedTurnId"].as_str().unwrap(),
+            active_turn_id
         );
+        assert_eq!(msg["params"]["input"][0]["type"].as_str().unwrap(), "text");
+        assert_eq!(msg["params"]["input"][0]["text"].as_str().unwrap(), content);
     }
 
     // ── AC2: idle_flag and cli_json_turn_state transitions ───────────────────
@@ -2500,7 +2539,10 @@ mod tests {
         // background task match).
         t.idle_flag.store(false, Ordering::SeqCst);
 
-        assert!(!t.is_idle(), "idle_flag must be false after any activity event");
+        assert!(
+            !t.is_idle(),
+            "idle_flag must be false after any activity event"
+        );
     }
 
     /// `done` event transitions `cli_json_turn_state` to `TurnState::Terminal`
@@ -2526,7 +2568,10 @@ mod tests {
         assert!(
             matches!(
                 state,
-                TurnState::Terminal { status: TurnStatus::Completed, .. }
+                TurnState::Terminal {
+                    status: TurnStatus::Completed,
+                    ..
+                }
             ),
             "cli_json_turn_state must be Terminal(Completed) after done event: {state:?}"
         );
@@ -2562,7 +2607,13 @@ mod tests {
         assert!(!t.is_idle(), "idle_flag must remain false at done");
         let state = t.cli_json_turn_state.lock().await.clone();
         assert!(
-            matches!(state, TurnState::Terminal { status: TurnStatus::Completed, .. }),
+            matches!(
+                state,
+                TurnState::Terminal {
+                    status: TurnStatus::Completed,
+                    ..
+                }
+            ),
             "must be Terminal(Completed) after done: {state:?}"
         );
     }
@@ -2674,8 +2725,7 @@ mod tests {
 
         for (line, is_state_changer) in only_idle_and_done_change_state {
             let et = parse_event_type(line);
-            let changes_state =
-                matches!(et, TransportEventType::Idle | TransportEventType::Done);
+            let changes_state = matches!(et, TransportEventType::Idle | TransportEventType::Done);
             assert_eq!(
                 changes_state, *is_state_changer,
                 "event {line:?}: expected is_state_changer={is_state_changer}, got {changes_state}"

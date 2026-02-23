@@ -37,7 +37,10 @@ impl CiProviderLoader {
     /// # Errors
     ///
     /// Returns `PluginError::Provider` if the directory cannot be read.
-    pub fn load_from_directory(&mut self, dir: &Path) -> Result<Vec<CiProviderFactory>, PluginError> {
+    pub fn load_from_directory(
+        &mut self,
+        dir: &Path,
+    ) -> Result<Vec<CiProviderFactory>, PluginError> {
         if !dir.exists() {
             debug!(
                 "CI provider directory does not exist, skipping: {}",
@@ -78,7 +81,11 @@ impl CiProviderLoader {
 
             match self.load_library(&path) {
                 Ok(factory) => {
-                    debug!("Loaded CI provider '{}' from {}", factory.name, path.display());
+                    debug!(
+                        "Loaded CI provider '{}' from {}",
+                        factory.name,
+                        path.display()
+                    );
                     factories.push(factory);
                 }
                 Err(e) => {
@@ -109,7 +116,11 @@ impl CiProviderLoader {
 
             match self.load_library(&expanded_path) {
                 Ok(factory) => {
-                    debug!("Loaded CI provider '{}' from {}", factory.name, path.display());
+                    debug!(
+                        "Loaded CI provider '{}' from {}",
+                        factory.name,
+                        path.display()
+                    );
                     factories.push(factory);
                 }
                 Err(e) => {
@@ -263,10 +274,7 @@ mod tests {
         let mut loader = CiProviderLoader::new();
         let result = loader.load_from_directory(&file_path);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not a directory"));
+        assert!(result.unwrap_err().to_string().contains("not a directory"));
     }
 
     #[test]

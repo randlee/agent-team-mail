@@ -8,6 +8,6 @@
 mod resolve;
 mod types;
 
-pub use resolve::{resolve_config, ResolvedConfig};
+pub use resolve::{ResolvedConfig, resolve_config};
 // Re-exported for use by command modules and future library consumers.
 pub use types::{AgentMcpConfig, RolePreset};

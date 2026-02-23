@@ -7,8 +7,8 @@
 //! - `sessions` — List and manage agent sessions (Sprint A.3+)
 //! - `summary`  — Display saved session summary (Sprint A.3+)
 
-use clap::Parser;
 use agent_team_mail_core::logging;
+use clap::Parser;
 
 use atm_agent_mcp::cli::{Cli, Commands};
 use atm_agent_mcp::commands;

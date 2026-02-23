@@ -47,10 +47,7 @@ impl MembershipTracker {
     ///
     /// Returns a vector of (team_name, agent_name) tuples for the given plugin.
     pub fn get_members(&self, plugin: &str) -> Vec<(String, String)> {
-        self.memberships
-            .get(plugin)
-            .cloned()
-            .unwrap_or_default()
+        self.memberships.get(plugin).cloned().unwrap_or_default()
     }
 
     /// Clear all tracking for a plugin
@@ -97,7 +94,10 @@ mod tests {
 
         let members = tracker.get_members("issues");
         assert_eq!(members.len(), 1);
-        assert_eq!(members[0], ("team-b".to_string(), "issues-watcher".to_string()));
+        assert_eq!(
+            members[0],
+            ("team-b".to_string(), "issues-watcher".to_string())
+        );
     }
 
     #[test]

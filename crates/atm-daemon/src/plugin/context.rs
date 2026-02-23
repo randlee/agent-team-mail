@@ -1,5 +1,5 @@
-use crate::roster::RosterService;
 use super::MailService;
+use crate::roster::RosterService;
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
 use agent_team_mail_core::toml;

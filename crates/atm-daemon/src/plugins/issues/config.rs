@@ -111,7 +111,6 @@ impl IssuesConfig {
             provider_libraries,
         })
     }
-
 }
 
 impl Default for IssuesConfig {

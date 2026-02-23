@@ -1,7 +1,7 @@
 //! Config command implementation
 
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use anyhow::Result;
-use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
 use clap::Args;
 use serde_json::json;
 
@@ -92,10 +92,18 @@ pub fn execute(args: ConfigArgs) -> Result<()> {
         println!();
         println!("Config files:");
         let global_display = global_config_path.display();
-        let global_status = if global_exists { "(found)" } else { "(not found)" };
+        let global_status = if global_exists {
+            "(found)"
+        } else {
+            "(not found)"
+        };
         println!("  Global: {global_display} {global_status}");
         let repo_display = repo_config_path.display();
-        let repo_status = if repo_exists { "(found)" } else { "(not found)" };
+        let repo_status = if repo_exists {
+            "(found)"
+        } else {
+            "(not found)"
+        };
         println!("  Repo: {repo_display} {repo_status}");
     }
 

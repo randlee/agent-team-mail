@@ -73,7 +73,10 @@ mod tests {
         assert_eq!(perms.allow.len(), 2);
         assert_eq!(perms.deny.len(), 2);
         assert_eq!(settings.env.len(), 2);
-        assert_eq!(settings.env.get("CLAUDE_CODE_ENABLE_TELEMETRY").unwrap(), "1");
+        assert_eq!(
+            settings.env.get("CLAUDE_CODE_ENABLE_TELEMETRY").unwrap(),
+            "1"
+        );
 
         let serialized = serde_json::to_string(&settings).unwrap();
         let reparsed: SettingsJson = serde_json::from_str(&serialized).unwrap();

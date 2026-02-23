@@ -107,7 +107,11 @@ impl ElicitationRegistry {
     /// the registry.
     ///
     /// Returns `true` if an entry was found and resolved, `false` otherwise.
-    pub fn resolve(&mut self, upstream_request_id: &serde_json::Value, response: serde_json::Value) -> bool {
+    pub fn resolve(
+        &mut self,
+        upstream_request_id: &serde_json::Value,
+        response: serde_json::Value,
+    ) -> bool {
         let key = upstream_request_id.to_string();
         if let Some(entry) = self.pending.remove(&key) {
             // Best-effort send — if the receiver was dropped, ignore the error.
@@ -268,9 +272,24 @@ mod tests {
         let (tx2, mut rx2) = oneshot::channel::<serde_json::Value>();
         let (tx3, mut rx3) = oneshot::channel::<serde_json::Value>();
 
-        reg.register("agent-a".to_string(), serde_json::json!(1), serde_json::json!(101), tx1);
-        reg.register("agent-a".to_string(), serde_json::json!(2), serde_json::json!(102), tx2);
-        reg.register("agent-b".to_string(), serde_json::json!(3), serde_json::json!(103), tx3);
+        reg.register(
+            "agent-a".to_string(),
+            serde_json::json!(1),
+            serde_json::json!(101),
+            tx1,
+        );
+        reg.register(
+            "agent-a".to_string(),
+            serde_json::json!(2),
+            serde_json::json!(102),
+            tx2,
+        );
+        reg.register(
+            "agent-b".to_string(),
+            serde_json::json!(3),
+            serde_json::json!(103),
+            tx3,
+        );
 
         let rejection = serde_json::json!({"error": "cancelled"});
         reg.cancel_for_agent("agent-a", rejection.clone());
@@ -285,7 +304,10 @@ mod tests {
         assert_eq!(r2, rejection);
 
         // agent-b entry must still be present and untouched
-        assert!(rx3.try_recv().is_err(), "rx3 must not have received anything");
+        assert!(
+            rx3.try_recv().is_err(),
+            "rx3 must not have received anything"
+        );
     }
 
     // ─── expire_timeouts ─────────────────────────────────────────────────────
@@ -298,8 +320,18 @@ mod tests {
         let (tx1, mut rx1) = oneshot::channel::<serde_json::Value>();
         let (tx2, mut rx2) = oneshot::channel::<serde_json::Value>();
 
-        reg.register("agent-x".to_string(), serde_json::json!(10), serde_json::json!(200), tx1);
-        reg.register("agent-y".to_string(), serde_json::json!(11), serde_json::json!(201), tx2);
+        reg.register(
+            "agent-x".to_string(),
+            serde_json::json!(10),
+            serde_json::json!(200),
+            tx1,
+        );
+        reg.register(
+            "agent-y".to_string(),
+            serde_json::json!(11),
+            serde_json::json!(201),
+            tx2,
+        );
 
         // Sleep briefly to ensure duration_since >= 0s threshold
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -309,8 +341,12 @@ mod tests {
         assert!(reg.is_empty(), "registry must be empty after expiry");
 
         // Both channels must have received the timeout rejection
-        let r1 = rx1.try_recv().expect("rx1 must have received timeout rejection");
-        let r2 = rx2.try_recv().expect("rx2 must have received timeout rejection");
+        let r1 = rx1
+            .try_recv()
+            .expect("rx1 must have received timeout rejection");
+        let r2 = rx2
+            .try_recv()
+            .expect("rx2 must have received timeout rejection");
 
         assert_eq!(r1["error"]["message"], "elicitation timeout");
         assert_eq!(r2["error"]["message"], "elicitation timeout");
@@ -321,7 +357,12 @@ mod tests {
         // Very long timeout (30s) — entries should not expire
         let mut reg = make_reg(30);
         let (tx, _rx) = oneshot::channel::<serde_json::Value>();
-        reg.register("agent-z".to_string(), serde_json::json!(20), serde_json::json!(300), tx);
+        reg.register(
+            "agent-z".to_string(),
+            serde_json::json!(20),
+            serde_json::json!(300),
+            tx,
+        );
 
         let expired = reg.expire_timeouts();
         assert!(expired.is_empty(), "fresh entries must not expire");
@@ -365,7 +406,9 @@ mod tests {
         );
 
         // error must be present.
-        let error = payload.get("error").expect("timed-out elicitation must have error field");
+        let error = payload
+            .get("error")
+            .expect("timed-out elicitation must have error field");
         assert_eq!(
             error.get("code").and_then(|c| c.as_i64()),
             Some(-32006),
