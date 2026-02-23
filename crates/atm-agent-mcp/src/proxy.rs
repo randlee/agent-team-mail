@@ -2946,6 +2946,7 @@ async fn dispatch_auto_mail_if_available(
                     registry,
                     shared_stdin,
                     request_counter,
+                    pending,
                     active_turn_id,
                     inf,
                 )
@@ -3090,6 +3091,7 @@ async fn dispatch_auto_mail_app_server(
     registry: &Arc<Mutex<SessionRegistry>>,
     shared_stdin: &SharedChildStdin,
     request_counter: &Arc<AtomicU64>,
+    pending: &Arc<Mutex<PendingRequests>>,
     active_turn_id: Option<String>,
     inflight: &Arc<Mutex<InflightMailSet>>,
 ) {
@@ -3191,6 +3193,14 @@ async fn dispatch_auto_mail_app_server(
     };
 
     if write_ok {
+        // Track source attribution for downstream event correlation.
+        {
+            let source =
+                SourceEnvelope::new("atm_mail", format!("{identity}@{team}"), "mail_injector");
+            let mut p = pending.lock().await;
+            p.mark_request_source(serde_json::Value::Number(req_id.into()), source.clone());
+            p.set_last_agent_source(agent_id.to_string(), source);
+        }
         // FR-8.12: mark-read only after successful dispatch.
         mark_messages_read(identity, team, &dispatched_ids);
         tracing::info!(
@@ -4464,6 +4474,7 @@ mod tests {
         };
 
         let request_counter = Arc::new(AtomicU64::new(1));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let inflight = Arc::new(Mutex::new(InflightMailSet::new()));
 
         // Reserve the thread (Idle -> Busy) as dispatch_auto_mail_app_server expects.
@@ -4480,6 +4491,7 @@ mod tests {
             &registry,
             &shared_stdin,
             &request_counter,
+            &pending,
             None, // Idle: use turn/start
             &inflight,
         )
