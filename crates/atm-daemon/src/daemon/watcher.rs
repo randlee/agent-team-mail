@@ -52,8 +52,8 @@ pub async fn watch_inboxes(
     let (tx, rx) = channel();
 
     // Create the watcher
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-        match res {
+    let mut watcher: RecommendedWatcher =
+        notify::recommended_watcher(move |res: notify::Result<Event>| match res {
             Ok(event) => {
                 if let Err(e) = tx.send(event) {
                     error!("Failed to send file system event: {}", e);
@@ -62,9 +62,8 @@ pub async fn watch_inboxes(
             Err(e) => {
                 error!("File system watcher error: {}", e);
             }
-        }
-    })
-    .context("Failed to create file system watcher")?;
+        })
+        .context("Failed to create file system watcher")?;
 
     // Start watching the teams root directory recursively
     watcher
@@ -91,7 +90,9 @@ pub async fn watch_inboxes(
                     debug!("File system event: {:?}", event);
 
                     // Parse the event and send to async channel if it's relevant
-                    if let Some(inbox_events) = parse_event(&teams_root_clone, event, registry_clone.as_deref()) {
+                    if let Some(inbox_events) =
+                        parse_event(&teams_root_clone, event, registry_clone.as_deref())
+                    {
                         for inbox_event in inbox_events {
                             // Use blocking_send since we're in a blocking task
                             if let Err(e) = event_tx.blocking_send(inbox_event) {
@@ -240,7 +241,6 @@ fn parse_agent_and_origin(
     (file_stem.to_string(), None)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,7 +276,9 @@ mod tests {
         let inbox_path = teams_root.join("team-2/inboxes/agent-x.json");
 
         let event = Event {
-            kind: EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Any)),
+            kind: EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )),
             paths: vec![inbox_path.clone()],
             attrs: Default::default(),
         };

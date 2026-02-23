@@ -65,8 +65,7 @@ fn test_durable_dedup_ttl_clears_after_restart() {
     std::fs::write(&path, format!("{expired_line}\n")).unwrap();
 
     // Load with a 600s TTL — the 2000-era timestamp is ancient, so expired.
-    let mut store =
-        DurableDedupeStore::new(path, Duration::from_secs(600), 1000).unwrap();
+    let mut store = DurableDedupeStore::new(path, Duration::from_secs(600), 1000).unwrap();
 
     let k = DedupeKey::new("atm-dev", "sess-1", "arch-ctm", "req-expired-restart");
     let is_dup = store.check_and_insert(k);
@@ -113,7 +112,10 @@ fn test_durable_dedup_missing_file_ok() {
 
     let k = dedup_key("req-missing-ok");
     assert!(!store.check_and_insert(k.clone()));
-    assert!(store.check_and_insert(k), "second insert should be duplicate");
+    assert!(
+        store.check_and_insert(k),
+        "second insert should be duplicate"
+    );
 }
 
 /// A backing file with one corrupt JSON line and one valid line must load
@@ -227,8 +229,14 @@ fn test_durable_dedup_all_expired_file_starts_empty() {
     // Both entries are expired — neither should be present.
     let k1 = DedupeKey::new("t", "s", "a", "r1");
     let k2 = DedupeKey::new("t", "s", "a", "r2");
-    assert!(!store.check_and_insert(k1), "expired entry r1 must not be duplicate");
-    assert!(!store.check_and_insert(k2), "expired entry r2 must not be duplicate");
+    assert!(
+        !store.check_and_insert(k1),
+        "expired entry r1 must not be duplicate"
+    );
+    assert!(
+        !store.check_and_insert(k2),
+        "expired entry r2 must not be duplicate"
+    );
 }
 
 /// Exit criterion: "send request, restart daemon, retry same request_id, get duplicate: true"
@@ -246,7 +254,12 @@ fn test_exit_criterion_dedup_survives_daemon_restart() {
     {
         let mut store =
             DurableDedupeStore::new(path.clone(), Duration::from_secs(600), 100).unwrap();
-        let key = DedupeKey::new("atm-dev", "sess-restart-test", "arch-ctm", "req-restart-dedup");
+        let key = DedupeKey::new(
+            "atm-dev",
+            "sess-restart-test",
+            "arch-ctm",
+            "req-restart-dedup",
+        );
         let was_dup = store.check_and_insert(key);
         assert!(!was_dup, "first insertion must not be a duplicate");
     }
@@ -254,9 +267,17 @@ fn test_exit_criterion_dedup_survives_daemon_restart() {
     {
         let mut store =
             DurableDedupeStore::new(path.clone(), Duration::from_secs(600), 100).unwrap();
-        let key = DedupeKey::new("atm-dev", "sess-restart-test", "arch-ctm", "req-restart-dedup");
+        let key = DedupeKey::new(
+            "atm-dev",
+            "sess-restart-test",
+            "arch-ctm",
+            "req-restart-dedup",
+        );
         let was_dup = store.check_and_insert(key);
-        assert!(was_dup, "retry after daemon restart must be detected as duplicate");
+        assert!(
+            was_dup,
+            "retry after daemon restart must be detected as duplicate"
+        );
     }
 }
 
@@ -269,9 +290,7 @@ fn test_exit_criterion_dedup_survives_daemon_restart() {
 /// input to stale agents.
 #[test]
 fn test_stale_session_state_tracking() {
-    use agent_team_mail_daemon::daemon::{
-        SessionState, new_session_registry,
-    };
+    use agent_team_mail_daemon::daemon::{SessionState, new_session_registry};
 
     let session_registry = new_session_registry();
 
@@ -285,7 +304,11 @@ fn test_stale_session_state_tracking() {
     {
         let registry = session_registry.lock().unwrap();
         let record = registry.query("arch-ctm").expect("record must exist");
-        assert_eq!(record.state, SessionState::Active, "initial state must be Active");
+        assert_eq!(
+            record.state,
+            SessionState::Active,
+            "initial state must be Active"
+        );
     }
 
     // Daemon detects stale session and marks it dead.
@@ -296,7 +319,9 @@ fn test_stale_session_state_tracking() {
     // Verify state is now Dead — the TUI will treat this as non-live.
     {
         let registry = session_registry.lock().unwrap();
-        let record = registry.query("arch-ctm").expect("record must still exist after mark_dead");
+        let record = registry
+            .query("arch-ctm")
+            .expect("record must still exist after mark_dead");
         assert_eq!(
             record.state,
             SessionState::Dead,
@@ -379,5 +404,8 @@ async fn test_queue_backlog_does_not_panic() {
     while entries.next_entry().await.unwrap().is_some() {
         count += 1;
     }
-    assert_eq!(count, 50, "all 50 backlog messages must be present in the queue");
+    assert_eq!(
+        count, 50,
+        "all 50 backlog messages must be present in the queue"
+    );
 }

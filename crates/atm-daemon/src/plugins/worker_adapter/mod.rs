@@ -41,7 +41,7 @@ pub use activity::ActivityTracker;
 pub use agent_state::{AgentPaneInfo, AgentState, AgentStateTracker};
 pub use capture::{CaptureConfig, CapturedResponse, LogTailer};
 pub use codex_tmux::CodexTmuxBackend;
-pub use config::{AgentConfig, NudgeConfig, WorkersConfig, DEFAULT_COMMAND, DEFAULT_NUDGE_TEXT};
+pub use config::{AgentConfig, DEFAULT_COMMAND, DEFAULT_NUDGE_TEXT, NudgeConfig, WorkersConfig};
 pub use hook_watcher::HookWatcher;
 pub use lifecycle::{LifecycleManager, WorkerState};
 pub use mock_backend::{MockCall, MockTmuxBackend};

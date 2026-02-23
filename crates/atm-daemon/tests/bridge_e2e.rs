@@ -3,8 +3,11 @@
 //! Tests a 3-node topology: hub + 2 spokes with mock transport
 
 use agent_team_mail_core::config::{BridgeConfig, BridgeRole, HostnameRegistry, RemoteConfig};
-use agent_team_mail_core::schema::{InboxMessage, TeamConfig, AgentMember};
-use agent_team_mail_daemon::plugins::bridge::{BridgePluginConfig, MockTransport, SharedMockTransport, SharedFilesystem, SyncEngine, SelfWriteFilter};
+use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
+use agent_team_mail_daemon::plugins::bridge::{
+    BridgePluginConfig, MockTransport, SelfWriteFilter, SharedFilesystem, SharedMockTransport,
+    SyncEngine,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,28 +35,26 @@ fn create_team_config(name: &str, hostname: &str) -> TeamConfig {
         created_at: 1000000,
         lead_agent_id: format!("team-lead@{name}"),
         lead_session_id: "test-session-id".to_string(),
-        members: vec![
-            AgentMember {
-                agent_id: format!("{agent_name}@{name}"),
-                name: agent_name,
-                agent_type: "general-purpose".to_string(),
-                model: "claude-sonnet-4-5".to_string(),
-                prompt: None,
-                color: None,
-                plan_mode_required: None,
-                joined_at: 1000000,
-                tmux_pane_id: None,
-                cwd: ".".to_string(),
-                subscriptions: Vec::new(),
-                backend_type: None,
-                is_active: Some(true),
-                last_active: None,
-                session_id: None,
-                external_backend_type: None,
-                external_model: None,
-                unknown_fields: HashMap::new(),
-            },
-        ],
+        members: vec![AgentMember {
+            agent_id: format!("{agent_name}@{name}"),
+            name: agent_name,
+            agent_type: "general-purpose".to_string(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1000000,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: Some(true),
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: HashMap::new(),
+        }],
         unknown_fields: HashMap::new(),
     }
 }
@@ -70,7 +71,9 @@ async fn setup_node(
     // Create team config
     let team_config = create_team_config("my-team", hostname);
     let config_json = serde_json::to_string_pretty(&team_config).unwrap();
-    fs::write(team_dir.join("config.json"), config_json).await.unwrap();
+    fs::write(team_dir.join("config.json"), config_json)
+        .await
+        .unwrap();
 
     // Create inboxes directory
     let inboxes_dir = team_dir.join("inboxes");
@@ -156,23 +159,49 @@ async fn test_bridge_e2e_spoke_to_spoke_via_hub() {
 
     // Create sync engines
     let mut hub_transports = HashMap::new();
-    hub_transports.insert("spoke-a".to_string(), Arc::new(tokio::sync::Mutex::new(hub_transport.clone())) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>);
-    hub_transports.insert("spoke-b".to_string(), Arc::new(tokio::sync::Mutex::new(hub_transport.clone())) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>);
+    hub_transports.insert(
+        "spoke-a".to_string(),
+        Arc::new(tokio::sync::Mutex::new(hub_transport.clone()))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+    );
+    hub_transports.insert(
+        "spoke-b".to_string(),
+        Arc::new(tokio::sync::Mutex::new(hub_transport.clone()))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+    );
     let mut hub_engine = SyncEngine::new(hub_config, hub_transports, hub_dir.clone(), new_filter())
         .await
         .unwrap();
 
     let mut spoke_a_transports = HashMap::new();
-    spoke_a_transports.insert("hub".to_string(), Arc::new(tokio::sync::Mutex::new(spoke_a_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>);
-    let mut spoke_a_engine = SyncEngine::new(spoke_a_config, spoke_a_transports, spoke_a_dir.clone(), new_filter())
-        .await
-        .unwrap();
+    spoke_a_transports.insert(
+        "hub".to_string(),
+        Arc::new(tokio::sync::Mutex::new(spoke_a_transport))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+    );
+    let mut spoke_a_engine = SyncEngine::new(
+        spoke_a_config,
+        spoke_a_transports,
+        spoke_a_dir.clone(),
+        new_filter(),
+    )
+    .await
+    .unwrap();
 
     let mut spoke_b_transports = HashMap::new();
-    spoke_b_transports.insert("hub".to_string(), Arc::new(tokio::sync::Mutex::new(spoke_b_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>);
-    let mut spoke_b_engine = SyncEngine::new(spoke_b_config, spoke_b_transports, spoke_b_dir.clone(), new_filter())
-        .await
-        .unwrap();
+    spoke_b_transports.insert(
+        "hub".to_string(),
+        Arc::new(tokio::sync::Mutex::new(spoke_b_transport))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+    );
+    let mut spoke_b_engine = SyncEngine::new(
+        spoke_b_config,
+        spoke_b_transports,
+        spoke_b_dir.clone(),
+        new_filter(),
+    )
+    .await
+    .unwrap();
 
     // Write a message on spoke-a
     let message = create_test_message("agent-spoke-a", "Hello from spoke A");
@@ -285,7 +314,11 @@ async fn test_circuit_breaker_disables_failing_remote() {
     .await;
 
     let mut transports = HashMap::new();
-    transports.insert("hub".to_string(), Arc::new(tokio::sync::Mutex::new(transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>);
+    transports.insert(
+        "hub".to_string(),
+        Arc::new(tokio::sync::Mutex::new(transport))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+    );
     let mut engine = SyncEngine::new(config, transports, team_dir.clone(), new_filter())
         .await
         .unwrap();
@@ -391,7 +424,8 @@ async fn test_shared_mock_transport_bidirectional_sync() {
     let mut hub_transports = HashMap::new();
     hub_transports.insert(
         "spoke".to_string(),
-        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_transport.clone())) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_transport.clone()))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     let mut hub_engine = SyncEngine::new(hub_config, hub_transports, hub_dir.clone(), new_filter())
         .await
@@ -400,12 +434,17 @@ async fn test_shared_mock_transport_bidirectional_sync() {
     let mut spoke_transports = HashMap::new();
     spoke_transports.insert(
         "hub".to_string(),
-        Arc::new(tokio::sync::Mutex::new(spoke_to_hub_transport.clone())) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(spoke_to_hub_transport.clone()))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
-    let mut spoke_engine =
-        SyncEngine::new(spoke_config, spoke_transports, spoke_dir.clone(), new_filter())
-            .await
-            .unwrap();
+    let mut spoke_engine = SyncEngine::new(
+        spoke_config,
+        spoke_transports,
+        spoke_dir.clone(),
+        new_filter(),
+    )
+    .await
+    .unwrap();
 
     // Write a message on spoke
     let message = create_test_message("agent-spoke", "Hello from spoke");
@@ -424,7 +463,11 @@ async fn test_shared_mock_transport_bidirectional_sync() {
     // For hub to pull from spoke, spoke must have the base inbox file on its filesystem
     // In real scenario, this would already exist. For test, we need to create it.
     let spoke_base_inbox_on_spoke_fs = PathBuf::from("my-team/inboxes/agent-spoke.json");
-    let message_content = serde_json::to_vec_pretty(&vec![create_test_message("agent-spoke", "Hello from spoke")]).unwrap();
+    let message_content = serde_json::to_vec_pretty(&vec![create_test_message(
+        "agent-spoke",
+        "Hello from spoke",
+    )])
+    .unwrap();
     spoke_fs.put(spoke_base_inbox_on_spoke_fs.clone(), message_content);
 
     // Hub pulls from spoke (should download the base file from spoke's filesystem)
@@ -508,11 +551,13 @@ async fn test_shared_mock_transport_3node_relay() {
     let mut hub_transports = HashMap::new();
     hub_transports.insert(
         "spoke-a".to_string(),
-        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_a_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_a_transport))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     hub_transports.insert(
         "spoke-b".to_string(),
-        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_b_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(hub_to_spoke_b_transport))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     let mut hub_engine = SyncEngine::new(hub_config, hub_transports, hub_dir.clone(), new_filter())
         .await
@@ -521,7 +566,8 @@ async fn test_shared_mock_transport_3node_relay() {
     let mut spoke_a_transports = HashMap::new();
     spoke_a_transports.insert(
         "hub".to_string(),
-        Arc::new(tokio::sync::Mutex::new(spoke_a_to_hub_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(spoke_a_to_hub_transport))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     let mut spoke_a_engine = SyncEngine::new(
         spoke_a_config,
@@ -535,7 +581,8 @@ async fn test_shared_mock_transport_3node_relay() {
     let mut spoke_b_transports = HashMap::new();
     spoke_b_transports.insert(
         "hub".to_string(),
-        Arc::new(tokio::sync::Mutex::new(spoke_b_to_hub_transport)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
+        Arc::new(tokio::sync::Mutex::new(spoke_b_to_hub_transport))
+            as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>,
     );
     let mut spoke_b_engine = SyncEngine::new(
         spoke_b_config,
@@ -558,7 +605,9 @@ async fn test_shared_mock_transport_3node_relay() {
 
     // For hub to pull from spoke-a, spoke-a must have the base inbox file on its filesystem
     let spoke_a_base_inbox = PathBuf::from("my-team/inboxes/agent-spoke-a.json");
-    let message_content = serde_json::to_vec_pretty(&vec![create_test_message("agent-spoke-a", "Hello from A")]).unwrap();
+    let message_content =
+        serde_json::to_vec_pretty(&vec![create_test_message("agent-spoke-a", "Hello from A")])
+            .unwrap();
     spoke_a_fs.put(spoke_a_base_inbox, message_content);
 
     // Step 2: Hub pulls from spoke A

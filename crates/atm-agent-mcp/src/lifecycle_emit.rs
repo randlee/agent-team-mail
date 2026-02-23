@@ -93,6 +93,20 @@ pub async fn emit_lifecycle_event(
     session_id: &str,
     process_id: Option<u32>,
 ) {
+    // Emit structured log event for the lifecycle transition.
+    agent_team_mail_core::event_log::emit_event_best_effort(
+        agent_team_mail_core::event_log::EventFields {
+            level: "info",
+            source: "atm-agent-mcp",
+            action: kind.as_str(),
+            team: Some(team.to_string()),
+            agent_id: Some(identity.to_string()),
+            session_id: Some(session_id.to_string()),
+            result: Some("ok".to_string()),
+            ..Default::default()
+        },
+    );
+
     #[cfg(unix)]
     {
         if let Err(e) =
@@ -126,8 +140,7 @@ async fn emit_lifecycle_event_unix(
     process_id: Option<u32>,
 ) -> anyhow::Result<()> {
     use agent_team_mail_core::daemon_client::{
-        PROTOCOL_VERSION, SocketRequest, SocketResponse,
-        LifecycleSource, LifecycleSourceKind,
+        LifecycleSource, LifecycleSourceKind, PROTOCOL_VERSION, SocketRequest, SocketResponse,
     };
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -174,15 +187,12 @@ async fn emit_lifecycle_event_unix(
     writer_half.flush().await?;
 
     // Read response with a short timeout so we do not block the proxy.
-    let read_result = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        async {
-            let mut reader = BufReader::new(reader_half);
-            let mut line = String::new();
-            reader.read_line(&mut line).await?;
-            Ok::<String, std::io::Error>(line)
-        },
-    )
+    let read_result = tokio::time::timeout(tokio::time::Duration::from_millis(500), async {
+        let mut reader = BufReader::new(reader_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        Ok::<String, std::io::Error>(line)
+    })
     .await;
 
     match read_result {
@@ -312,7 +322,7 @@ mod tests {
     #[test]
     fn session_start_payload_has_atm_mcp_source() {
         use agent_team_mail_core::daemon_client::{
-            PROTOCOL_VERSION, SocketRequest, LifecycleSource, LifecycleSourceKind,
+            LifecycleSource, LifecycleSourceKind, PROTOCOL_VERSION, SocketRequest,
         };
 
         // Build the same payload that emit_lifecycle_event_unix would build.
@@ -345,8 +355,7 @@ mod tests {
         );
 
         // Deserialize the source back and verify kind.
-        let source: LifecycleSource =
-            serde_json::from_value(payload["source"].clone()).unwrap();
+        let source: LifecycleSource = serde_json::from_value(payload["source"].clone()).unwrap();
         assert_eq!(source.kind, LifecycleSourceKind::AtmMcp);
     }
 
@@ -358,8 +367,7 @@ mod tests {
     #[test]
     fn teammate_idle_payload_structure_is_correct() {
         use agent_team_mail_core::daemon_client::{
-            LifecycleSource, LifecycleSourceKind, PROTOCOL_VERSION,
-            SocketRequest,
+            LifecycleSource, LifecycleSourceKind, PROTOCOL_VERSION, SocketRequest,
         };
 
         // Build the same payload that emit_lifecycle_event_unix constructs for
@@ -391,8 +399,7 @@ mod tests {
         );
 
         // Deserialize the source back and verify kind.
-        let source: LifecycleSource =
-            serde_json::from_value(payload["source"].clone()).unwrap();
+        let source: LifecycleSource = serde_json::from_value(payload["source"].clone()).unwrap();
         assert_eq!(source.kind, LifecycleSourceKind::AtmMcp);
     }
 
@@ -404,8 +411,7 @@ mod tests {
     #[test]
     fn session_end_payload_structure_is_correct() {
         use agent_team_mail_core::daemon_client::{
-            LifecycleSource, LifecycleSourceKind, PROTOCOL_VERSION,
-            SocketRequest,
+            LifecycleSource, LifecycleSourceKind, PROTOCOL_VERSION, SocketRequest,
         };
 
         // Build the same payload that emit_lifecycle_event_unix constructs for
@@ -437,8 +443,7 @@ mod tests {
         );
 
         // Deserialize the source back and verify kind.
-        let source: LifecycleSource =
-            serde_json::from_value(payload["source"].clone()).unwrap();
+        let source: LifecycleSource = serde_json::from_value(payload["source"].clone()).unwrap();
         assert_eq!(source.kind, LifecycleSourceKind::AtmMcp);
     }
 

@@ -132,7 +132,10 @@ impl PubSub {
             let entry = self.subscriptions.get_mut(&key).unwrap();
             entry.events = events;
             entry.created_at = Instant::now();
-            debug!("Refreshed subscription: {} watching {} events={:?}", subscriber, agent, entry.events);
+            debug!(
+                "Refreshed subscription: {} watching {} events={:?}",
+                subscriber, agent, entry.events
+            );
             return Ok(());
         }
 
@@ -166,15 +169,17 @@ impl PubSub {
     pub fn unsubscribe(&mut self, subscriber: &str, agent: &str) {
         let key = (subscriber.to_string(), agent.to_string());
         if self.subscriptions.remove(&key).is_some() {
-            debug!("Removed subscription: {} was watching {}", subscriber, agent);
+            debug!(
+                "Removed subscription: {} was watching {}",
+                subscriber, agent
+            );
         }
     }
 
     /// Remove all subscriptions for a subscriber.
     pub fn unsubscribe_all(&mut self, subscriber: &str) {
         let before = self.subscriptions.len();
-        self.subscriptions
-            .retain(|(sub, _), _| sub != subscriber);
+        self.subscriptions.retain(|(sub, _), _| sub != subscriber);
         let removed = before - self.subscriptions.len();
         if removed > 0 {
             debug!("Removed {} subscription(s) for {}", removed, subscriber);
@@ -189,11 +194,7 @@ impl PubSub {
     pub fn matching_subscribers(&self, agent: &str, state: &str) -> Vec<String> {
         self.subscriptions
             .values()
-            .filter(|sub| {
-                sub.agent == agent
-                    && sub.is_alive(self.ttl)
-                    && sub.matches_event(state)
-            })
+            .filter(|sub| sub.agent == agent && sub.is_alive(self.ttl) && sub.matches_event(state))
             .map(|sub| sub.subscriber.clone())
             .collect()
     }
@@ -247,9 +248,7 @@ impl Default for PubSub {
 #[derive(Debug, thiserror::Error)]
 pub enum PubSubError {
     /// The subscriber already holds the maximum number of subscriptions.
-    #[error(
-        "Subscription cap exceeded for '{subscriber}': max {max} subscriptions"
-    )]
+    #[error("Subscription cap exceeded for '{subscriber}': max {max} subscriptions")]
     CapExceeded {
         /// The subscriber identity that exceeded the cap.
         subscriber: String,
@@ -500,7 +499,8 @@ mod tests {
         assert!(ps.is_empty());
         assert_eq!(ps.len(), 0);
 
-        ps.subscribe("sub", "agent", vec!["idle".to_string()]).unwrap();
+        ps.subscribe("sub", "agent", vec!["idle".to_string()])
+            .unwrap();
         assert!(!ps.is_empty());
         assert_eq!(ps.len(), 1);
     }

@@ -214,16 +214,9 @@ impl NudgeEngine {
                 unread_count,
                 newest_message_id,
             } => {
-                info!(
-                    "Nudging {agent_id} ({unread_count} unread messages) via pane {pane_id}"
-                );
+                info!("Nudging {agent_id} ({unread_count} unread messages) via pane {pane_id}");
                 self.sender
-                    .send_text_and_enter(
-                        pane_id,
-                        &text,
-                        self.delivery_method,
-                        "nudge-primary",
-                    )
+                    .send_text_and_enter(pane_id, &text, self.delivery_method, "nudge-primary")
                     .await?;
                 self.record_nudge(agent_id, newest_message_id);
 

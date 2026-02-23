@@ -14,10 +14,8 @@ pub trait Plugin: Send + Sync {
     fn metadata(&self) -> PluginMetadata;
 
     /// One-time setup. Read config, establish connections.
-    fn init(
-        &mut self,
-        ctx: &PluginContext,
-    ) -> impl Future<Output = Result<(), PluginError>> + Send;
+    fn init(&mut self, ctx: &PluginContext)
+    -> impl Future<Output = Result<(), PluginError>> + Send;
 
     /// Long-running event loop. Must respect cancellation token.
     fn run(

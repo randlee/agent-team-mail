@@ -33,7 +33,6 @@ use tracing::Instrument;
 
 use crate::audit::AuditLog;
 use crate::config::AgentMcpConfig;
-use crate::transport::{CodexTransport, make_transport};
 use crate::context::detect_context;
 use crate::elicitation::ElicitationRegistry;
 use crate::framing::{UpstreamReader, write_newline_delimited};
@@ -45,6 +44,8 @@ use crate::mail_inject::{
 };
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
+use crate::transport::{CodexTransport, make_transport};
+use crate::watch_stream::{SourceEnvelope, WatchStreamHub, WatchSubscription, build_watch_frame};
 
 /// Type alias for the shared child stdin writer.
 ///
@@ -61,6 +62,18 @@ const UPSTREAM_CHANNEL_CAPACITY: usize = 256;
 
 /// Grace period in ms after dropping child stdin before force-kill, giving child time to flush output.
 const CHILD_DRAIN_GRACE_MS: u64 = 100;
+/// Maximum rendered watch line length retained in TUI feed records.
+const WATCH_RENDER_MAX_CHARS: usize = 200;
+/// Truncated prefix length before appending ellipsis (`...`).
+const WATCH_RENDER_TRUNCATE_AT: usize = WATCH_RENDER_MAX_CHARS - 3;
+/// Hard cap for `~/.config/atm/watch-stream/events.jsonl` before rotation.
+const WATCH_FEED_MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// Counter for unknown watch event kinds skipped by the MVP publisher gate.
+static WATCH_UNKNOWN_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Periodic flush interval for dropped/unknown stream counters.
+const WATCH_COUNTER_REPORT_INTERVAL_SECS: u64 = 60;
+#[cfg(test)]
+static STREAM_ERROR_EMIT_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 
 /// JSON-RPC error code: child process has died.
 pub const ERR_CHILD_DEAD: i64 = -32005;
@@ -121,6 +134,11 @@ pub struct ProxyServer {
     pub team: String,
     /// Maps Codex `threadId` → `agent_id` for event attribution.
     thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    /// Direct watch-stream hub for active session viewing (Sprint L.5 groundwork).
+    watch_stream_hub: Arc<tokio::sync::Mutex<WatchStreamHub>>,
+    /// Active watch subscriptions keyed by `agent_id` for synthetic polling tools.
+    watch_subscriptions:
+        Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::broadcast::Receiver<Value>>>>,
     /// UTC ISO 8601 timestamp of when this proxy process started.
     started_at: String,
     /// Unix epoch seconds when this proxy process started (for uptime calc).
@@ -200,7 +218,10 @@ impl std::fmt::Debug for ChildHandle {
             .field("response_rx", &"<Receiver>")
             .field("exit_status", &"<Mutex<Option<ExitStatus>>>")
             .field("process", &"<Mutex<Option<Child>>>")
-            .field("drain_task", &self.drain_task.as_ref().map(|_| "<JoinHandle>"))
+            .field(
+                "drain_task",
+                &self.drain_task.as_ref().map(|_| "<JoinHandle>"),
+            )
             .finish()
     }
 }
@@ -218,6 +239,11 @@ pub(crate) struct PendingRequests {
     /// map to resolve the agent_id, transition the thread Busy -> Idle, and
     /// trigger the next post-turn mail check (FR-8.1 chaining).
     auto_mail_pending: HashMap<Value, String>,
+    /// Request IDs mapped to source envelopes for watch-stream attribution.
+    request_sources: HashMap<Value, SourceEnvelope>,
+    /// Last-known source envelope for each agent_id, used as fallback when
+    /// child events do not carry a request-id correlation token.
+    last_agent_source: HashMap<String, SourceEnvelope>,
 }
 
 impl PendingRequests {
@@ -227,6 +253,8 @@ impl PendingRequests {
             tools_list_ids: std::collections::HashSet::new(),
             codex_create_ids: HashMap::new(),
             auto_mail_pending: HashMap::new(),
+            request_sources: HashMap::new(),
+            last_agent_source: HashMap::new(),
         }
     }
 
@@ -244,6 +272,7 @@ impl PendingRequests {
 
     fn complete(&mut self, id: &Value) -> Option<oneshot::Sender<Value>> {
         self.tools_list_ids.remove(id);
+        self.request_sources.remove(id);
         self.map.remove(id)
     }
 
@@ -267,6 +296,22 @@ impl PendingRequests {
     /// Take the agent_id for a completed auto-mail turn, removing it from the map.
     fn take_auto_mail(&mut self, id: &Value) -> Option<String> {
         self.auto_mail_pending.remove(id)
+    }
+
+    fn mark_request_source(&mut self, id: Value, source: SourceEnvelope) {
+        self.request_sources.insert(id, source);
+    }
+
+    fn source_for_request(&self, id: &Value) -> Option<SourceEnvelope> {
+        self.request_sources.get(id).cloned()
+    }
+
+    fn set_last_agent_source(&mut self, agent_id: String, source: SourceEnvelope) {
+        self.last_agent_source.insert(agent_id, source);
+    }
+
+    fn last_source_for_agent(&self, agent_id: &str) -> Option<SourceEnvelope> {
+        self.last_agent_source.get(agent_id).cloned()
     }
 }
 
@@ -310,6 +355,8 @@ impl ProxyServer {
             elicitation_counter: Arc::new(AtomicU64::new(1)),
             team: team_str,
             thread_to_agent: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            watch_stream_hub: Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default())),
+            watch_subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             started_at,
             started_epoch_secs,
             queues: Arc::new(Mutex::new(HashMap::new())),
@@ -320,6 +367,18 @@ impl ProxyServer {
             resume_context: None,
             transport,
         }
+    }
+
+    /// Subscribe to an agent's direct watch stream.
+    ///
+    /// Returns a bounded replay snapshot plus a live receiver.
+    pub async fn subscribe_watch_stream(&self, agent_id: &str) -> WatchSubscription {
+        self.watch_stream_hub.lock().await.subscribe(agent_id)
+    }
+
+    /// Detach active watcher for a session.
+    pub async fn detach_watch_stream(&self, agent_id: &str) -> bool {
+        self.watch_stream_hub.lock().await.detach(agent_id)
     }
 
     /// Create a proxy server with resume context (FR-6).
@@ -432,6 +491,7 @@ impl ProxyServer {
         let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let dropped = Arc::clone(&self.dropped_events);
         let thread_to_agent = Arc::clone(&self.thread_to_agent);
+        let watch_stream_hub = Arc::clone(&self.watch_stream_hub);
 
         // Channel for upstream writes (events + responses routed through the channel).
         // Bounded to prevent unbounded memory growth under backpressure.
@@ -452,6 +512,18 @@ impl ProxyServer {
                 }
             });
         }
+
+        // Periodic daemon-side observability flush for dropped/unknown counters.
+        let dropped_for_flush = Arc::clone(&self.dropped_events);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                WATCH_COUNTER_REPORT_INTERVAL_SECS,
+            ));
+            loop {
+                interval.tick().await;
+                flush_dropped_counters_to_daemon(&dropped_for_flush, "proxy:all").await;
+            }
+        });
 
         // Spawn the idle mail poller (FR-8.2): checks all idle sessions for unread
         // mail at the configured interval and injects auto-mail turns via the
@@ -678,6 +750,7 @@ impl ProxyServer {
                             &upstream_tx,
                             &dropped,
                             &thread_to_agent,
+                            &watch_stream_hub,
                             &self.elicitation_registry,
                             &self.elicitation_counter,
                         )
@@ -1418,6 +1491,14 @@ Session ending. Write a concise summary of:\n\
             if let Some(aid) = expected_agent_id.clone() {
                 p.mark_codex_create(id.clone(), aid);
             }
+            if effective_tool_name == "codex" || effective_tool_name == "codex-reply" {
+                let actor_fallback = self.config.identity.as_deref().unwrap_or("upstream-client");
+                let source = infer_upstream_request_source(&msg_to_forward, actor_fallback);
+                p.mark_request_source(id.clone(), source.clone());
+                if let Some(ref aid) = state_agent_id {
+                    p.set_last_agent_source(aid.clone(), source);
+                }
+            }
         }
 
         // Mark the session as Busy while the codex/codex-reply turn is in progress.
@@ -1792,11 +1873,8 @@ Session ending. Write a concise summary of:\n\
         // events to the daemon. McpTransport and JsonCodecTransport use the
         // default no-op implementation of set_turn_session_context.
         {
-            let turn_ctx = crate::turn_control::SessionContext::new(
-                &identity,
-                &team,
-                &entry.agent_id,
-            );
+            let turn_ctx =
+                crate::turn_control::SessionContext::new(&identity, &team, &entry.agent_id);
             self.transport.set_turn_session_context(turn_ctx);
         }
 
@@ -2196,6 +2274,10 @@ Session ending. Write a concise summary of:\n\
                 let is_success = resp.get("error").is_none()
                     && resp.pointer("/result/isError").and_then(|v| v.as_bool()) != Some(true);
                 if is_success {
+                    if let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) {
+                        self.watch_subscriptions.lock().await.remove(agent_id);
+                        let _ = self.detach_watch_stream(agent_id).await;
+                    }
                     let sessions_path = crate::lock::sessions_dir()
                         .join(&self.team)
                         .join("registry.json");
@@ -2204,6 +2286,113 @@ Session ending. Write a concise summary of:\n\
                     }
                 }
                 resp
+            }
+            "agent_watch_attach" => {
+                let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        "agent_watch_attach: 'agent_id' is required",
+                    );
+                };
+
+                let sub = self.subscribe_watch_stream(agent_id).await;
+                self.watch_subscriptions
+                    .lock()
+                    .await
+                    .insert(agent_id.to_string(), sub.rx);
+                let watcher_count = self.watch_stream_hub.lock().await.watcher_count(agent_id);
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "agent_id": agent_id,
+                                "attached": true,
+                                "watcher_count": watcher_count,
+                                "replay": sub.replay,
+                            }).to_string()
+                        }]
+                    }
+                })
+            }
+            "agent_watch_poll" => {
+                let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        "agent_watch_poll: 'agent_id' is required",
+                    );
+                };
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.clamp(1, 200) as usize)
+                    .unwrap_or(50);
+
+                let mut subs = self.watch_subscriptions.lock().await;
+                let Some(rx) = subs.get_mut(agent_id) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        &format!("agent_watch_poll: no active watcher for '{agent_id}'"),
+                    );
+                };
+
+                let mut events = Vec::new();
+                for _ in 0..limit {
+                    match rx.try_recv() {
+                        Ok(v) => events.push(v),
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    }
+                }
+                let rendered: Vec<String> = events.iter().map(format_watch_frame).collect();
+
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "agent_id": agent_id,
+                                "events": events,
+                                "rendered": rendered,
+                            }).to_string()
+                        }]
+                    }
+                })
+            }
+            "agent_watch_detach" => {
+                let Some(agent_id) = args.get("agent_id").and_then(|v| v.as_str()) else {
+                    return atm_tools::make_mcp_error_result(
+                        id,
+                        "agent_watch_detach: 'agent_id' is required",
+                    );
+                };
+                let detached = self
+                    .watch_subscriptions
+                    .lock()
+                    .await
+                    .remove(agent_id)
+                    .is_some();
+                let _ = self.detach_watch_stream(agent_id).await;
+                let watcher_count = self.watch_stream_hub.lock().await.watcher_count(agent_id);
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "agent_id": agent_id,
+                                "detached": detached,
+                                "watcher_count": watcher_count,
+                            }).to_string()
+                        }]
+                    }
+                })
             }
             _ => atm_tools::make_mcp_error_result(
                 id,
@@ -2283,6 +2472,7 @@ Session ending. Write a concise summary of:\n\
         let upstream_tx_clone = upstream_tx.clone();
         let dropped_clone = Arc::clone(dropped);
         let thread_to_agent_clone = Arc::clone(&self.thread_to_agent);
+        let watch_stream_hub = Arc::clone(&self.watch_stream_hub);
         let registry_for_reader = Arc::clone(&self.registry);
         let shared_stdin_for_reader = Arc::clone(&self.shared_child_stdin);
         let queues_for_reader = Arc::clone(&self.queues);
@@ -2382,6 +2572,7 @@ Session ending. Write a concise summary of:\n\
                         &mut event,
                         &pending_clone,
                         &thread_to_agent_clone,
+                        &watch_stream_hub,
                         &upstream_tx_clone,
                         &dropped_clone,
                     )
@@ -2511,6 +2702,8 @@ Session ending. Write a concise summary of:\n\
             guard.map.clear();
             guard.codex_create_ids.clear();
             guard.auto_mail_pending.clear();
+            guard.request_sources.clear();
+            guard.last_agent_source.clear();
         });
 
         // Populate the shared child stdin reference for the idle poller.
@@ -2539,6 +2732,22 @@ enum PrepareResult {
     Error,
 }
 
+fn infer_upstream_request_source(msg: &Value, actor_fallback: &str) -> SourceEnvelope {
+    let kind = msg
+        .pointer("/params/source/kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("client_prompt");
+    let actor = msg
+        .pointer("/params/source/actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or(actor_fallback);
+    let channel = msg
+        .pointer("/params/source/channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mcp_primary");
+    SourceEnvelope::new(kind, actor, channel)
+}
+
 /// Forward a `codex/event` notification upstream, injecting `agent_id` into params.
 ///
 /// Looks up the `agent_id` from `thread_to_agent` using the event's `threadId`
@@ -2550,6 +2759,7 @@ async fn forward_event(
     event: &mut Value,
     pending: &Arc<Mutex<PendingRequests>>,
     thread_to_agent: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    watch_stream_hub: &Arc<tokio::sync::Mutex<WatchStreamHub>>,
     upstream_tx: &mpsc::Sender<Value>,
     dropped_events: &Arc<AtomicU64>,
 ) {
@@ -2581,15 +2791,298 @@ async fn forward_event(
 
     if let Some(params) = event.get_mut("params") {
         if let Some(obj) = params.as_object_mut() {
-            obj.insert("agent_id".to_string(), Value::String(agent_id));
+            obj.insert("agent_id".to_string(), Value::String(agent_id.clone()));
         }
     }
+
+    // Forward stream-error summaries to daemon observability channel.
+    emit_stream_error_summary_to_daemon(event, &agent_id).await;
+
+    // Publish to direct watch-stream hub using MVP subset + source envelope.
+    if should_publish_watch_event(event) {
+        let source = infer_source_envelope(event, &agent_id, pending).await;
+        let frame = build_watch_frame(&agent_id, &source, event.clone());
+        watch_stream_hub
+            .lock()
+            .await
+            .publish(&agent_id, frame.clone());
+        append_watch_frame_for_tui(&frame);
+    } else if let Some(kind) = event.pointer("/params/type").and_then(|v| v.as_str())
+        && !kind.is_empty()
+    {
+        WATCH_UNKNOWN_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
+        agent_team_mail_core::event_log::emit_event_best_effort(
+            agent_team_mail_core::event_log::EventFields {
+                level: "debug",
+                source: "atm-agent-mcp",
+                action: "watch_event_ignored_unknown",
+                result: Some(kind.to_string()),
+                ..Default::default()
+            },
+        );
+    }
+
     match upstream_tx.try_send(event.clone()) {
         Ok(()) => {}
         Err(_) => {
             dropped_events.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// MVP subset gate for watch-stream fanout (FR-21.5 + docs Section 3.3).
+fn should_publish_watch_event(event: &Value) -> bool {
+    let kind = event
+        .pointer("/params/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    matches!(
+        kind,
+        "task_started"
+            | "task_complete"
+            | "agent_message_delta"
+            | "agent_message"
+            | "agent_message_completed"
+            | "agent_message_chunk"
+            | "reasoning_content_delta"
+            | "agent_reasoning_delta"
+            | "reasoning_content"
+            | "exec_command_output_delta"
+            | "exec_command_started"
+            | "exec_command_completed"
+            | "exec_command_error"
+            | "item_started"
+            | "item_completed"
+            | "thread_status_changed"
+            | "turn_started"
+            | "turn_completed"
+            | "idle"
+            | "done"
+            | "stream_error"
+    )
+}
+
+fn extract_stream_error_event(
+    event: &Value,
+    agent_id: &str,
+) -> Option<agent_team_mail_core::daemon_stream::DaemonStreamEvent> {
+    let kind = event.pointer("/params/type").and_then(|v| v.as_str())?;
+    if kind != "stream_error" {
+        return None;
+    }
+    let session_id = event
+        .pointer("/params/_meta/threadId")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/threadId").and_then(|v| v.as_str()))
+        .unwrap_or("unknown")
+        .to_string();
+    let error_summary = event
+        .pointer("/params/error")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/message").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/text").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/delta").and_then(|v| v.as_str()))
+        .unwrap_or("stream error")
+        .to_string();
+    Some(
+        agent_team_mail_core::daemon_stream::DaemonStreamEvent::StreamError {
+            agent_id: agent_id.to_string(),
+            session_id,
+            error_summary,
+        },
+    )
+}
+
+async fn emit_stream_error_summary_to_daemon(event: &Value, agent_id: &str) {
+    if let Some(daemon_event) = extract_stream_error_event(event, agent_id) {
+        #[cfg(test)]
+        STREAM_ERROR_EMIT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        crate::stream_emit::emit_stream_event(&daemon_event).await;
+    }
+}
+
+async fn flush_dropped_counters_to_daemon(dropped_events: &Arc<AtomicU64>, agent_id: &str) {
+    let dropped = dropped_events.swap(0, Ordering::Relaxed);
+    let unknown = WATCH_UNKNOWN_EVENT_COUNT.swap(0, Ordering::Relaxed);
+    if dropped == 0 && unknown == 0 {
+        return;
+    }
+    let event = agent_team_mail_core::daemon_stream::DaemonStreamEvent::DroppedCounters {
+        agent_id: agent_id.to_string(),
+        dropped,
+        unknown,
+    };
+    crate::stream_emit::emit_stream_event(&event).await;
+}
+
+fn format_watch_frame(frame: &Value) -> String {
+    let source = frame
+        .pointer("/source/kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("client_prompt");
+    let event = frame.get("event").unwrap_or(frame);
+    let kind = event
+        .pointer("/params/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let text = event
+        .pointer("/params/delta")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/text").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/output").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/message").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let text = if text.len() > WATCH_RENDER_MAX_CHARS {
+        format!("{}...", &text[..WATCH_RENDER_TRUNCATE_AT])
+    } else {
+        text.to_string()
+    };
+    let text = text.replace('\n', "\\n");
+    let has_code_fence = text.contains("```");
+
+    let mut base = match kind {
+        "agent_message_delta" | "agent_message" | "agent_message_chunk" => {
+            if has_code_fence {
+                format!("[{source}] assistant(code): {text}")
+            } else {
+                format!("[{source}] assistant: {text}")
+            }
+        }
+        "exec_command_output_delta" | "exec_command_completed" | "exec_command_error" => {
+            format!("[{source}] cmd: {text}")
+        }
+        "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
+            format!("[{source}] reasoning: {text}")
+        }
+        "item_started" | "item_completed" | "turn_started" | "turn_completed" => {
+            format!("[{source}] {kind}")
+        }
+        "task_started" | "task_complete" | "idle" | "done" | "stream_error" => {
+            format!("[{source}] {kind}")
+        }
+        _ => format!("[{source}] {kind}"),
+    };
+
+    if let Some(pct) = event
+        .pointer("/params/usage/context_window_pct")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            event
+                .pointer("/params/contextWindowPct")
+                .and_then(|v| v.as_f64())
+        })
+        .or_else(|| {
+            event
+                .pointer("/params/usage/contextWindowPct")
+                .and_then(|v| v.as_f64())
+        })
+        .or_else(|| {
+            event
+                .pointer("/params/context_window_pct")
+                .and_then(|v| v.as_f64())
+        })
+    {
+        base.push_str(&format!(" | ctx {:.0}%", pct));
+    }
+    base
+}
+
+fn watch_feed_path() -> Option<std::path::PathBuf> {
+    let home = agent_team_mail_core::home::get_home_dir().ok()?;
+    Some(home.join(".config/atm/watch-stream/events.jsonl"))
+}
+
+fn append_watch_frame_for_tui(frame: &Value) {
+    append_watch_frame_for_tui_with_cap(frame, WATCH_FEED_MAX_BYTES);
+}
+
+fn append_watch_frame_for_tui_with_cap(frame: &Value, max_bytes: u64) {
+    let Some(path) = watch_feed_path() else {
+        return;
+    };
+    append_watch_frame_for_tui_at_path(frame, max_bytes, &path);
+}
+
+fn append_watch_frame_for_tui_at_path(frame: &Value, max_bytes: u64, path: &std::path::Path) {
+    if let Some(parent) = path.parent() {
+        // Best-effort: streaming still functions without local file fanout.
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if max_bytes > 0
+        && let Ok(meta) = std::fs::metadata(path)
+        && meta.len() >= max_bytes
+    {
+        let rotated_path = path.with_extension("jsonl.1");
+        // Best-effort rotation: failures should not break live stream publishing.
+        let _ = std::fs::remove_file(&rotated_path);
+        let _ = std::fs::rename(path, rotated_path);
+    }
+    let rendered = format_watch_frame(frame);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let record = json!({
+        "ts_unix": ts,
+        "frame": frame,
+        "rendered": rendered,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        // Best-effort append: watcher UX is non-critical compared to proxy traffic.
+        let _ = writeln!(file, "{}", record);
+    }
+}
+
+/// Infer source attribution for watch-stream frames (FR-22 baseline).
+async fn infer_source_envelope(
+    event: &Value,
+    agent_id: &str,
+    pending: &Arc<Mutex<PendingRequests>>,
+) -> SourceEnvelope {
+    let src_kind = event
+        .pointer("/params/source/kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let kind = match src_kind {
+        // daemon lifecycle source value reused for mail injection origin mapping
+        "atm_mcp" | "atm_mail" => "atm_mail",
+        "user_steer" | "tui_user" => "user_steer",
+        _ => "client_prompt",
+    };
+    let actor = event
+        .pointer("/params/source/actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or(agent_id);
+    let channel = match kind {
+        "atm_mail" => "mail_injector",
+        "user_steer" => "tui_user",
+        _ => "mcp_primary",
+    };
+    if !src_kind.is_empty() {
+        return SourceEnvelope::new(kind, actor, channel);
+    }
+
+    // Fall back to per-request source attribution when child events include a
+    // correlating request id in `_meta.requestId`.
+    if let Some(req_id) = event.pointer("/params/_meta/requestId") {
+        if let Some(src) = pending.lock().await.source_for_request(req_id) {
+            return src;
+        }
+    }
+
+    // If request-id correlation is missing, use the latest source seen for the
+    // current agent session.
+    if let Some(src) = pending.lock().await.last_source_for_agent(agent_id) {
+        return src;
+    }
+
+    SourceEnvelope::new(kind, actor, channel)
 }
 
 /// JSONL event type as parsed from a raw event line.
@@ -2620,7 +3113,11 @@ enum JsonlEventType {
 fn parse_jsonl_event_type(line: &str) -> JsonlEventType {
     serde_json::from_str::<serde_json::Value>(line)
         .ok()
-        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .and_then(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
         .map(|t| match t.as_str() {
             "agent_message" => JsonlEventType::AgentMessage,
             "tool_call" => JsonlEventType::ToolCall,
@@ -2790,6 +3287,7 @@ async fn dispatch_auto_mail_if_available(
                     registry,
                     shared_stdin,
                     request_counter,
+                    pending,
                     active_turn_id,
                     inf,
                 )
@@ -2870,6 +3368,13 @@ async fn dispatch_auto_mail_if_available(
             let mut p = pending.lock().await;
             p.insert(auto_req_id_val.clone(), tx);
             p.mark_auto_mail(auto_req_id_val, agent_id.to_string());
+            let source =
+                SourceEnvelope::new("atm_mail", format!("{identity}@{team}"), "mail_injector");
+            p.mark_request_source(
+                serde_json::Value::Number(auto_req_id.into()),
+                source.clone(),
+            );
+            p.set_last_agent_source(agent_id.to_string(), source);
         }
         // FR-8.12: mark read only after successful dispatch.
         let ids: Vec<String> = envelopes.iter().map(|e| e.message_id.clone()).collect();
@@ -2927,6 +3432,7 @@ async fn dispatch_auto_mail_app_server(
     registry: &Arc<Mutex<SessionRegistry>>,
     shared_stdin: &SharedChildStdin,
     request_counter: &Arc<AtomicU64>,
+    pending: &Arc<Mutex<PendingRequests>>,
     active_turn_id: Option<String>,
     inflight: &Arc<Mutex<InflightMailSet>>,
 ) {
@@ -3028,6 +3534,14 @@ async fn dispatch_auto_mail_app_server(
     };
 
     if write_ok {
+        // Track source attribution for downstream event correlation.
+        {
+            let source =
+                SourceEnvelope::new("atm_mail", format!("{identity}@{team}"), "mail_injector");
+            let mut p = pending.lock().await;
+            p.mark_request_source(serde_json::Value::Number(req_id.into()), source.clone());
+            p.set_last_agent_source(agent_id.to_string(), source);
+        }
         // FR-8.12: mark-read only after successful dispatch.
         mark_messages_read(identity, team, &dispatched_ids);
         tracing::info!(
@@ -3080,12 +3594,17 @@ async fn try_reserve_thread_for_auto_mail(
 /// Handles `elicitation/create` requests by bridging them upstream with a new
 /// proxy-assigned request ID, registering correlation in [`ElicitationRegistry`]
 /// (FR-18).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "routing needs shared pending/thread/watch/elicitation state passed explicitly"
+)]
 async fn route_child_message(
     msg: Value,
     pending: &Arc<Mutex<PendingRequests>>,
     upstream_tx: &mpsc::Sender<Value>,
     dropped: &Arc<AtomicU64>,
     thread_to_agent: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    watch_stream_hub: &Arc<tokio::sync::Mutex<WatchStreamHub>>,
     elicitation_registry: &Arc<Mutex<ElicitationRegistry>>,
     elicitation_counter: &Arc<AtomicU64>,
 ) {
@@ -3093,7 +3612,15 @@ async fn route_child_message(
 
     if method == Some("codex/event") {
         let mut event = msg;
-        forward_event(&mut event, pending, thread_to_agent, upstream_tx, dropped).await;
+        forward_event(
+            &mut event,
+            pending,
+            thread_to_agent,
+            watch_stream_hub,
+            upstream_tx,
+            dropped,
+        )
+        .await;
         return;
     }
 
@@ -3217,6 +3744,9 @@ fn is_synthetic_tool(name: &str) -> bool {
             | "agent_sessions"
             | "agent_status"
             | "agent_close"
+            | "agent_watch_attach"
+            | "agent_watch_poll"
+            | "agent_watch_detach"
     )
 }
 
@@ -3282,8 +3812,8 @@ mod tests {
         });
         intercept_tools_list(&mut response);
         let tools = response["result"]["tools"].as_array().unwrap();
-        // 2 original + 7 synthetic
-        assert_eq!(tools.len(), 9);
+        // 2 original + synthetic ATM tools
+        assert_eq!(tools.len(), 2 + crate::tools::SYNTHETIC_TOOL_COUNT);
     }
 
     #[test]
@@ -3313,9 +3843,374 @@ mod tests {
         assert!(is_synthetic_tool("atm_send"));
         assert!(is_synthetic_tool("atm_read"));
         assert!(is_synthetic_tool("agent_close"));
+        assert!(is_synthetic_tool("agent_watch_attach"));
+        assert!(is_synthetic_tool("agent_watch_poll"));
+        assert!(is_synthetic_tool("agent_watch_detach"));
         assert!(!is_synthetic_tool("codex"));
         assert!(!is_synthetic_tool("codex-reply"));
         assert!(!is_synthetic_tool("unknown"));
+    }
+
+    #[tokio::test]
+    async fn test_watch_attach_poll_detach_synthetic_tools() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let agent_id = "codex:test-agent";
+
+        proxy.watch_stream_hub.lock().await.publish_frame(
+            agent_id,
+            SourceEnvelope::new("client_prompt", "arch-atm", "mcp_primary"),
+            json!({"type":"task_started"}),
+        );
+
+        let attach = proxy
+            .handle_synthetic_tool(
+                &json!(1),
+                "agent_watch_attach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            attach.get("error").is_none(),
+            "attach should succeed: {attach}"
+        );
+        let attach_text = attach
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("attach text");
+        let attach_json: Value = serde_json::from_str(attach_text).expect("valid attach payload");
+        assert_eq!(attach_json["attached"], true);
+        assert_eq!(attach_json["replay"].as_array().map(|a| a.len()), Some(1));
+        assert!(attach_json["watcher_count"].as_u64().unwrap_or(0) >= 1);
+
+        let attach_again = proxy
+            .handle_synthetic_tool(
+                &json!(11),
+                "agent_watch_attach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            attach_again.get("error").is_none(),
+            "second attach should be idempotent: {attach_again}"
+        );
+        let attach_again_text = attach_again
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("attach_again text");
+        let attach_again_json: Value =
+            serde_json::from_str(attach_again_text).expect("valid attach_again payload");
+        assert_eq!(attach_again_json["attached"], true);
+        assert!(attach_again_json["watcher_count"].as_u64().unwrap_or(0) >= 1);
+
+        proxy.watch_stream_hub.lock().await.publish_frame(
+            agent_id,
+            SourceEnvelope::new("atm_mail", "arch-atm@atm-dev", "mail_injector"),
+            json!({"type":"agent_message_delta"}),
+        );
+
+        let poll = proxy
+            .handle_synthetic_tool(
+                &json!(2),
+                "agent_watch_poll",
+                &json!({"agent_id": agent_id, "limit": 10}),
+                None,
+            )
+            .await;
+        assert!(poll.get("error").is_none(), "poll should succeed: {poll}");
+        let poll_text = poll
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("poll text");
+        let poll_json: Value = serde_json::from_str(poll_text).expect("valid poll payload");
+        assert_eq!(poll_json["events"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(poll_json["rendered"].as_array().map(|a| a.len()), Some(1));
+
+        let detach = proxy
+            .handle_synthetic_tool(
+                &json!(3),
+                "agent_watch_detach",
+                &json!({"agent_id": agent_id}),
+                None,
+            )
+            .await;
+        assert!(
+            detach.get("error").is_none(),
+            "detach should succeed: {detach}"
+        );
+        let detach_text = detach
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .expect("detach text");
+        let detach_json: Value = serde_json::from_str(detach_text).expect("valid detach payload");
+        assert_eq!(detach_json["detached"], true);
+        assert_eq!(detach_json["watcher_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_watch_poll_without_attach_returns_error_result() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let resp = proxy
+            .handle_synthetic_tool(
+                &json!(1),
+                "agent_watch_poll",
+                &json!({"agent_id": "codex:not-attached"}),
+                None,
+            )
+            .await;
+        assert_eq!(
+            resp.pointer("/result/isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "poll without attach must return isError=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watch_attach_requires_agent_id() {
+        let proxy = ProxyServer::new(crate::config::AgentMcpConfig::default());
+        let resp = proxy
+            .handle_synthetic_tool(&json!(1), "agent_watch_attach", &json!({}), None)
+            .await;
+        assert_eq!(
+            resp.pointer("/result/isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "attach without agent_id must return isError=true"
+        );
+    }
+
+    #[test]
+    fn test_should_publish_watch_event_protocol_drift_matrix() {
+        let canonical_kinds = vec![
+            "task_started",
+            "task_complete",
+            "agent_message_delta",
+            "agent_message",
+            "agent_message_completed",
+            "agent_message_chunk",
+            "reasoning_content_delta",
+            "agent_reasoning_delta",
+            "reasoning_content",
+            "exec_command_output_delta",
+            "exec_command_started",
+            "exec_command_completed",
+            "exec_command_error",
+            "item_started",
+            "item_completed",
+            "thread_status_changed",
+            "turn_started",
+            "turn_completed",
+            "idle",
+            "done",
+            "stream_error",
+        ];
+        for kind in canonical_kinds {
+            let event = json!({"params":{"type":kind}});
+            assert!(should_publish_watch_event(&event), "kind={kind}");
+        }
+        assert!(!should_publish_watch_event(
+            &json!({"params":{"type":"unknown_new_event_kind"}})
+        ));
+    }
+
+    #[test]
+    fn test_should_publish_watch_event_missing_params_graceful() {
+        assert!(!should_publish_watch_event(&json!({})));
+        assert!(!should_publish_watch_event(&json!({"params":{}})));
+    }
+
+    #[test]
+    fn test_extract_stream_error_event_maps_summary_and_session() {
+        let event = json!({
+            "params": {
+                "type": "stream_error",
+                "threadId": "th-err-1",
+                "message": "socket closed"
+            }
+        });
+        let mapped = extract_stream_error_event(&event, "codex:agent-1");
+        let Some(agent_team_mail_core::daemon_stream::DaemonStreamEvent::StreamError {
+            agent_id,
+            session_id,
+            error_summary,
+        }) = mapped
+        else {
+            panic!("expected StreamError mapping");
+        };
+        assert_eq!(agent_id, "codex:agent-1");
+        assert_eq!(session_id, "th-err-1");
+        assert_eq!(error_summary, "socket closed");
+    }
+
+    #[tokio::test]
+    async fn test_emit_stream_error_summary_to_daemon_noop_without_daemon() {
+        // Best-effort emit should never panic/fail when daemon socket is absent.
+        let event = json!({
+            "params": { "type": "stream_error", "message": "test error" }
+        });
+        emit_stream_error_summary_to_daemon(&event, "codex:agent-1").await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_flush_dropped_counters_reports_and_resets() {
+        WATCH_UNKNOWN_EVENT_COUNT.store(7, Ordering::Relaxed);
+        let dropped = Arc::new(AtomicU64::new(5));
+        flush_dropped_counters_to_daemon(&dropped, "proxy:all").await;
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(WATCH_UNKNOWN_EVENT_COUNT.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_format_watch_frame_graceful_on_partial_payloads() {
+        let frame = json!({
+            "source": {"kind":"atm_mail"},
+            "event": {"params":{"type":"agent_message_delta","delta":"hello world"}}
+        });
+        let rendered = format_watch_frame(&frame);
+        assert!(rendered.contains("[atm_mail]"));
+        assert!(rendered.contains("assistant"));
+
+        // Drift case: missing source and missing params text fields.
+        let drift = json!({"event":{"params":{"type":"exec_command_completed"}}});
+        let rendered2 = format_watch_frame(&drift);
+        assert!(rendered2.contains("client_prompt"));
+        assert!(rendered2.contains("cmd:"));
+    }
+
+    #[test]
+    fn test_format_watch_frame_code_fence_and_context_usage() {
+        let frame = json!({
+            "source": {"kind":"client_prompt"},
+            "event": {
+                "params": {
+                    "type":"agent_message_delta",
+                    "delta":"```rust\\nfn main(){}\\n```",
+                    "usage": {"contextWindowPct": 72.4}
+                }
+            }
+        });
+        let rendered = format_watch_frame(&frame);
+        assert!(rendered.contains("assistant(code):"));
+        assert!(rendered.contains("```rust"));
+        assert!(rendered.contains("ctx 72%"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_append_watch_frame_for_tui_with_cap_rotates_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let watch_path = dir.path().join(".config/atm/watch-stream/events.jsonl");
+        std::fs::create_dir_all(
+            watch_path
+                .parent()
+                .expect("watch feed path should have parent directory"),
+        )
+        .unwrap();
+        std::fs::write(&watch_path, "x".repeat(256)).unwrap();
+
+        let frame = json!({
+            "source": {"kind": "client_prompt"},
+            "event": {"params": {"type": "agent_message_delta", "delta": "hello"}}
+        });
+        append_watch_frame_for_tui_at_path(&frame, 64, &watch_path);
+
+        let rotated_path = watch_path.with_extension("jsonl.1");
+        assert!(rotated_path.exists(), "rotation should create .jsonl.1");
+        let content = std::fs::read_to_string(&watch_path).expect("new feed file should exist");
+        assert!(
+            content.contains("\"rendered\""),
+            "new feed file should contain appended rendered record"
+        );
+        assert!(
+            content.contains("assistant"),
+            "rendered line should include formatted message class"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_forward_event_unknown_watch_kind_records_telemetry() {
+        let before = WATCH_UNKNOWN_EVENT_COUNT.load(Ordering::Relaxed);
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert(
+            "thread-unknown".to_string(),
+            "codex:unknown-agent".to_string(),
+        );
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+        let mut event = json!({
+            "jsonrpc": "2.0",
+            "method": "codex/event",
+            "params": {"type": "brand_new_kind", "threadId": "thread-unknown"}
+        });
+
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should still forward upstream");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        let after = WATCH_UNKNOWN_EVENT_COUNT.load(Ordering::Relaxed);
+        assert_eq!(
+            after,
+            before + 1,
+            "unknown kind should bump telemetry counter"
+        );
+
+        let sub = watch_stream_hub
+            .lock()
+            .await
+            .subscribe("codex:unknown-agent");
+        assert!(
+            sub.replay.is_empty(),
+            "unknown watch events should not be published to replay"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_forward_event_stream_error_triggers_daemon_emit_attempt() {
+        let before = STREAM_ERROR_EMIT_ATTEMPTS.load(Ordering::Relaxed);
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert("th-err".to_string(), "codex:err-agent".to_string());
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+        let mut event = json!({
+            "jsonrpc":"2.0",
+            "method":"codex/event",
+            "params":{"type":"stream_error","threadId":"th-err","message":"socket closed"}
+        });
+
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should forward upstream");
+        let after = STREAM_ERROR_EMIT_ATTEMPTS.load(Ordering::Relaxed);
+        assert_eq!(
+            after,
+            before + 1,
+            "stream_error should trigger daemon emission"
+        );
     }
 
     #[test]
@@ -3352,13 +4247,22 @@ mod tests {
         let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
         let mut event = json!({
             "jsonrpc": "2.0",
             "method": "codex/event",
             "params": {"type": "task_started"}
         });
         // No threadId in the event → falls back to "proxy:unknown"
-        forward_event(&mut event, &pending, &thread_to_agent, &tx, &dropped).await;
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
         let received = rx.try_recv().expect("event should be forwarded");
         assert_eq!(received["params"]["agent_id"], "proxy:unknown");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
@@ -3373,15 +4277,123 @@ mod tests {
         map.insert("thread-123".to_string(), "codex:abc-agent".to_string());
         let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
             Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
         let mut event = json!({
             "jsonrpc": "2.0",
             "method": "codex/event",
             "params": {"type": "task_started", "threadId": "thread-123"}
         });
-        forward_event(&mut event, &pending, &thread_to_agent, &tx, &dropped).await;
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
         let received = rx.try_recv().expect("event should be forwarded");
         assert_eq!(received["params"]["agent_id"], "codex:abc-agent");
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        let sub = watch_stream_hub.lock().await.subscribe("codex:abc-agent");
+        assert_eq!(sub.replay.len(), 1, "watch hub should retain replay event");
+    }
+
+    #[tokio::test]
+    async fn test_forward_event_source_from_request_id_correlation() {
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert("thread-123".to_string(), "codex:abc-agent".to_string());
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+
+        {
+            let mut p = pending.lock().await;
+            p.mark_request_source(
+                json!(99),
+                SourceEnvelope::new("atm_mail", "arch-atm@atm-dev", "mail_injector"),
+            );
+        }
+
+        let mut event = json!({
+            "jsonrpc": "2.0",
+            "method": "codex/event",
+            "params": {"type": "task_started", "threadId": "thread-123", "_meta": {"requestId": 99}}
+        });
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should be forwarded");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        let sub = watch_stream_hub.lock().await.subscribe("codex:abc-agent");
+        let replay0 = sub.replay.first().expect("replay event");
+        assert_eq!(
+            replay0.pointer("/source/kind").and_then(|v| v.as_str()),
+            Some("atm_mail")
+        );
+        assert_eq!(
+            replay0.pointer("/source/channel").and_then(|v| v.as_str()),
+            Some("mail_injector")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forward_event_source_falls_back_to_last_agent_source() {
+        let (tx, mut rx) = mpsc::channel::<Value>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
+        let mut map = HashMap::new();
+        map.insert("thread-123".to_string(), "codex:abc-agent".to_string());
+        let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(tokio::sync::Mutex::new(map));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
+
+        {
+            let mut p = pending.lock().await;
+            p.set_last_agent_source(
+                "codex:abc-agent".to_string(),
+                SourceEnvelope::new("user_steer", "randlee", "tui_user"),
+            );
+        }
+
+        let mut event = json!({
+            "jsonrpc": "2.0",
+            "method": "codex/event",
+            "params": {"type": "task_started", "threadId": "thread-123"}
+        });
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
+        let _ = rx.try_recv().expect("event should be forwarded");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        let sub = watch_stream_hub.lock().await.subscribe("codex:abc-agent");
+        let replay0 = sub.replay.first().expect("replay event");
+        assert_eq!(
+            replay0.pointer("/source/kind").and_then(|v| v.as_str()),
+            Some("user_steer")
+        );
+        assert_eq!(
+            replay0.pointer("/source/actor").and_then(|v| v.as_str()),
+            Some("randlee")
+        );
     }
 
     #[tokio::test]
@@ -3391,6 +4403,7 @@ mod tests {
         let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let thread_to_agent: Arc<tokio::sync::Mutex<HashMap<String, String>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let watch_stream_hub = Arc::new(tokio::sync::Mutex::new(WatchStreamHub::default()));
 
         // Fill the channel
         let _ = tx.try_send(json!({"fill": true}));
@@ -3401,7 +4414,15 @@ mod tests {
             "method": "codex/event",
             "params": {"type": "task_started"}
         });
-        forward_event(&mut event, &pending, &thread_to_agent, &tx, &dropped).await;
+        forward_event(
+            &mut event,
+            &pending,
+            &thread_to_agent,
+            &watch_stream_hub,
+            &tx,
+            &dropped,
+        )
+        .await;
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 
@@ -3903,8 +4924,8 @@ mod tests {
         intercept_tools_list(&mut response);
         let tools = response["result"]["tools"].as_array().unwrap();
 
-        // 2 original (codex replaced + codex-reply) + 7 synthetic
-        assert_eq!(tools.len(), 9);
+        // 2 original (codex replaced + codex-reply) + synthetic ATM tools
+        assert_eq!(tools.len(), 2 + crate::tools::SYNTHETIC_TOOL_COUNT);
 
         // The codex entry should now have the extended schema with identity property
         let codex_tool = tools
@@ -4101,11 +5122,7 @@ mod tests {
         // Seed inbox with one unread message.
         let team = "test-team";
         let identity = "test-agent";
-        let inbox_dir = dir
-            .path()
-            .join(".claude/teams")
-            .join(team)
-            .join("inboxes");
+        let inbox_dir = dir.path().join(".claude/teams").join(team).join("inboxes");
         std::fs::create_dir_all(&inbox_dir).unwrap();
         let inbox_path = inbox_dir.join(format!("{identity}.json"));
         let msg = agent_team_mail_core::InboxMessage {
@@ -4128,8 +5145,9 @@ mod tests {
         // Drop the read half immediately — writes will fail with broken pipe.
         drop(_read_half_dropped);
 
-        let broken_stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> =
-            Arc::new(Mutex::new(Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>));
+        let broken_stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>> = Arc::new(Mutex::new(
+            Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+        ));
 
         // Wrap in the SharedChildStdin type.
         let shared_stdin: SharedChildStdin = Arc::new(Mutex::new(Some(broken_stdin)));
@@ -4153,6 +5171,7 @@ mod tests {
         };
 
         let request_counter = Arc::new(AtomicU64::new(1));
+        let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let inflight = Arc::new(Mutex::new(InflightMailSet::new()));
 
         // Reserve the thread (Idle -> Busy) as dispatch_auto_mail_app_server expects.
@@ -4169,6 +5188,7 @@ mod tests {
             &registry,
             &shared_stdin,
             &request_counter,
+            &pending,
             None, // Idle: use turn/start
             &inflight,
         )

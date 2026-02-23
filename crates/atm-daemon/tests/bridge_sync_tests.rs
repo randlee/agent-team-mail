@@ -2,7 +2,9 @@
 
 use agent_team_mail_core::config::{BridgeConfig, BridgeRole, HostnameRegistry, RemoteConfig};
 use agent_team_mail_core::schema::InboxMessage;
-use agent_team_mail_daemon::plugins::bridge::{BridgePluginConfig, MockTransport, SyncEngine, SyncState, Transport, SelfWriteFilter};
+use agent_team_mail_daemon::plugins::bridge::{
+    BridgePluginConfig, MockTransport, SelfWriteFilter, SyncEngine, SyncState, Transport,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -100,7 +102,8 @@ async fn test_sync_push_with_mock_transport() {
     // Connect transport (required before operations)
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut))
+        as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -117,7 +120,9 @@ async fn test_sync_push_with_mock_transport() {
 
     // Verify cursor advanced (per-remote cursor key)
     assert_eq!(
-        engine.state().get_cursor(&PathBuf::from("inboxes/agent-1.json:desktop")),
+        engine
+            .state()
+            .get_cursor(&PathBuf::from("inboxes/agent-1.json:desktop")),
         2
     );
 
@@ -137,9 +142,11 @@ async fn test_sync_push_dedup() {
 
     // Create local inbox
     let inbox_path = inboxes_dir.join("agent-1.json");
-    let messages = vec![
-        create_test_message("user-a", "Message 1", Some("msg-001".to_string())),
-    ];
+    let messages = vec![create_test_message(
+        "user-a",
+        "Message 1",
+        Some("msg-001".to_string()),
+    )];
     let json = serde_json::to_string_pretty(&messages).unwrap();
     fs::write(&inbox_path, json).await.unwrap();
 
@@ -147,7 +154,8 @@ async fn test_sync_push_dedup() {
     let config = create_test_config("laptop", "desktop");
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut))
+        as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -186,7 +194,8 @@ async fn test_sync_push_assigns_message_ids() {
     let config = create_test_config("laptop", "desktop");
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut))
+        as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -212,7 +221,8 @@ async fn test_sync_engine_empty_inbox() {
 
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut))
+        as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -237,9 +247,11 @@ async fn test_sync_cycle() {
 
     // Create local inbox
     let inbox_path = inboxes_dir.join("agent-1.json");
-    let messages = vec![
-        create_test_message("user-a", "Message 1", Some("msg-001".to_string())),
-    ];
+    let messages = vec![create_test_message(
+        "user-a",
+        "Message 1",
+        Some("msg-001".to_string()),
+    )];
     let json = serde_json::to_string_pretty(&messages).unwrap();
     fs::write(&inbox_path, json).await.unwrap();
 
@@ -247,7 +259,8 @@ async fn test_sync_cycle() {
     let config = create_test_config("laptop", "desktop");
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut))
+        as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -288,7 +301,8 @@ async fn test_sync_cursor_advancement() {
     let config = create_test_config("laptop", "desktop");
     let mut transport_mut = MockTransport::new();
     transport_mut.connect().await.unwrap();
-    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut)) as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
+    let transport = Arc::new(tokio::sync::Mutex::new(transport_mut))
+        as Arc<tokio::sync::Mutex<dyn agent_team_mail_daemon::plugins::bridge::Transport>>;
 
     let mut transports = HashMap::new();
     transports.insert("desktop".to_string(), transport);
@@ -302,7 +316,11 @@ async fn test_sync_cursor_advancement() {
 
     // Append a third message to local inbox
     let mut all_messages = messages;
-    all_messages.push(create_test_message("user-c", "Message 3", Some("msg-003".to_string())));
+    all_messages.push(create_test_message(
+        "user-c",
+        "Message 3",
+        Some("msg-003".to_string()),
+    ));
     let json = serde_json::to_string_pretty(&all_messages).unwrap();
     fs::write(&inbox_path, json).await.unwrap();
 
@@ -312,7 +330,9 @@ async fn test_sync_cursor_advancement() {
 
     // Verify cursor advanced to 3 (per-remote cursor key)
     assert_eq!(
-        engine.state().get_cursor(&PathBuf::from("inboxes/agent-1.json:desktop")),
+        engine
+            .state()
+            .get_cursor(&PathBuf::from("inboxes/agent-1.json:desktop")),
         3
     );
 }

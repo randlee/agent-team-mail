@@ -7,7 +7,12 @@ use tempfile::TempDir;
 /// Helper to build the Azure provider stub cdylib
 fn build_azure_provider() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")?;
-    let workspace_root = PathBuf::from(manifest_dir).parent().unwrap().parent().unwrap().to_path_buf();
+    let workspace_root = PathBuf::from(manifest_dir)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let example_dir = workspace_root.join("examples").join("ci-provider-azdo");
 
     // Build the provider
@@ -35,10 +40,7 @@ fn build_azure_provider() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let lib_name = "atm_ci_provider_azdo.dll";
 
     // Since the example has its own [workspace], it builds to its own target directory
-    let lib_path = example_dir
-        .join("target")
-        .join("release")
-        .join(lib_name);
+    let lib_path = example_dir.join("target").join("release").join(lib_name);
 
     if !lib_path.exists() {
         return Err(format!("Built library not found at {}", lib_path.display()).into());
@@ -152,7 +154,10 @@ async fn test_azure_provider_list_runs() {
         assert!(runs.is_ok(), "list_runs should succeed: {:?}", runs.err());
 
         let runs = runs.unwrap();
-        assert!(!runs.is_empty(), "Stub provider should return at least one run");
+        assert!(
+            !runs.is_empty(),
+            "Stub provider should return at least one run"
+        );
 
         // Verify stub data
         let run = &runs[0];
@@ -246,13 +251,23 @@ fn test_azure_provider_with_config() {
         // Create config table
         let mut config = toml::Table::new();
         let mut azure_config = toml::Table::new();
-        azure_config.insert("organization".to_string(), toml::Value::String("test-org".to_string()));
-        azure_config.insert("project".to_string(), toml::Value::String("test-project".to_string()));
-        azure_config.insert("repo".to_string(), toml::Value::String("test-repo".to_string()));
+        azure_config.insert(
+            "organization".to_string(),
+            toml::Value::String("test-org".to_string()),
+        );
+        azure_config.insert(
+            "project".to_string(),
+            toml::Value::String("test-project".to_string()),
+        );
+        azure_config.insert(
+            "repo".to_string(),
+            toml::Value::String("test-repo".to_string()),
+        );
         config.insert("azure".to_string(), toml::Value::Table(azure_config));
 
         // Create provider with config
-        let provider = (factory.create)(Some(&config)).expect("Failed to create provider with config");
+        let provider =
+            (factory.create)(Some(&config)).expect("Failed to create provider with config");
 
         assert_eq!(provider.provider_name(), "Azure Pipelines (stub)");
     }

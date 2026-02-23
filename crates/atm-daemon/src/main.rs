@@ -1,12 +1,16 @@
 //! ATM Daemon - Background service for agent team mail plugins
 
-use anyhow::{Context, Result};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging;
 use agent_team_mail_daemon::daemon;
-use agent_team_mail_daemon::daemon::{new_dedup_store, new_launch_sender, new_pubsub_store, new_session_registry, new_state_store, new_stream_event_sender, new_stream_state_store, StatusWriter};
+use agent_team_mail_daemon::daemon::{
+    LogWriterConfig, StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue,
+    new_pubsub_store, new_session_registry, new_state_store, new_stream_event_sender,
+    new_stream_state_store, run_log_writer_task,
+};
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
 use agent_team_mail_daemon::roster::RosterService;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,7 +49,22 @@ async fn main() -> Result<()> {
         // SAFETY: process-local env mutation during startup before worker tasks spawn.
         unsafe { std::env::set_var("ATM_LOG", "debug") };
     }
-    logging::init();
+
+    // Determine home dir early so we can set up DaemonWriter logging.
+    // We do a quick best-effort resolution here; the full home_dir call below
+    // will produce the canonical error if it fails.
+    let log_file = agent_team_mail_core::home::get_home_dir()
+        .map(|h| h.join(".config/atm/atm-daemon.jsonl"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("atm-daemon.jsonl"));
+
+    let _log_guards = logging::init_unified(
+        "atm-daemon",
+        logging::UnifiedLogMode::DaemonWriter {
+            file_path: log_file.clone(),
+            rotation: logging::RotationConfig::default(),
+        },
+    )
+    .unwrap_or_else(|_| logging::init_stderr_only());
 
     info!("ATM Daemon starting...");
 
@@ -54,11 +73,28 @@ async fn main() -> Result<()> {
     }
 
     // Determine home and current directories for config resolution
-    let home_dir = agent_team_mail_core::home::get_home_dir()
-        .context("Failed to determine home directory")?;
+    let home_dir =
+        agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
 
-    let current_dir = std::env::current_dir()
-        .context("Failed to get current directory")?;
+    // Merge any spool files written by producers while the daemon was offline.
+    // This runs before the socket server starts so no new spool files can arrive
+    // from this daemon instance during the merge window.
+    {
+        let spool_dir = agent_team_mail_core::logging_event::spool_dir(&home_dir);
+        match agent_team_mail_daemon::daemon::spool_merge::merge_spool_on_startup(
+            &spool_dir, &log_file,
+        ) {
+            Ok(count) if count > 0 => {
+                info!(count, "Merged spool events into canonical log");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Spool merge failed (non-fatal): {e}");
+            }
+        }
+    }
+
+    let current_dir = std::env::current_dir().context("Failed to get current directory")?;
 
     // Load configuration
     let config_overrides = agent_team_mail_core::config::ConfigOverrides {
@@ -67,8 +103,9 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let config = agent_team_mail_core::config::resolve_config(&config_overrides, &current_dir, &home_dir)
-        .context("Failed to resolve configuration")?;
+    let config =
+        agent_team_mail_core::config::resolve_config(&config_overrides, &current_dir, &home_dir)
+            .context("Failed to resolve configuration")?;
     emit_event_best_effort(EventFields {
         level: "info",
         source: "atm-daemon",
@@ -202,7 +239,9 @@ async fn main() -> Result<()> {
     let dedup_store = match new_dedup_store(&home_dir) {
         Ok(store) => store,
         Err(e) => {
-            tracing::warn!("Failed to initialise durable dedupe store, falling back to fresh empty store: {e}");
+            tracing::warn!(
+                "Failed to initialise durable dedupe store, falling back to fresh empty store: {e}"
+            );
             // Construct a fallback store pointing at the same default path.
             // If the error was a corrupted file, the subsequent write will
             // overwrite it; if the directory is inaccessible, we'll log on
@@ -232,7 +271,10 @@ async fn main() -> Result<()> {
         home_dir.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
     ));
-    info!("Status writer initialized: {}", status_writer.status_path().display());
+    info!(
+        "Status writer initialized: {}",
+        status_writer.status_path().display()
+    );
 
     // Create cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();
@@ -244,8 +286,9 @@ async fn main() -> Result<()> {
 
         #[cfg(unix)]
         {
-            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to create SIGTERM handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to create SIGTERM handler");
 
             tokio::select! {
                 _ = ctrl_c => {
@@ -272,6 +315,16 @@ async fn main() -> Result<()> {
     // Create the broadcast sender for push-based stream event fanout.
     let stream_event_sender = new_stream_event_sender();
 
+    // Create the bounded log event queue and async writer task.
+    let log_event_queue = new_log_event_queue();
+    let log_writer_config = LogWriterConfig::from_env(&home_dir);
+    let log_cancel = cancel_token.clone();
+    tokio::spawn(run_log_writer_task(
+        log_event_queue.clone(),
+        log_writer_config,
+        log_cancel,
+    ));
+
     // Run the daemon event loop
     let run_result = daemon::run(
         &mut registry,
@@ -285,6 +338,7 @@ async fn main() -> Result<()> {
         dedup_store,
         stream_state_store,
         stream_event_sender,
+        log_event_queue,
     )
     .await;
     match &run_result {

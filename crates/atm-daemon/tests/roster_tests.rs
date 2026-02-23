@@ -112,7 +112,9 @@ fn test_add_member_success() {
     let service = RosterService::new(temp_dir.path().to_path_buf());
     let member = create_synthetic_member("issues", "bot", "test-team");
 
-    service.add_member("test-team", member.clone(), "issues").unwrap();
+    service
+        .add_member("test-team", member.clone(), "issues")
+        .unwrap();
 
     // Read config and verify member was added
     let config_path = temp_dir.path().join("test-team").join("config.json");
@@ -132,7 +134,9 @@ fn test_add_member_duplicate_rejected() {
     let member = create_synthetic_member("issues", "bot", "test-team");
 
     // First add should succeed
-    service.add_member("test-team", member.clone(), "issues").unwrap();
+    service
+        .add_member("test-team", member.clone(), "issues")
+        .unwrap();
 
     // Second add should fail with DuplicateMember error
     let result = service.add_member("test-team", member, "issues");
@@ -152,7 +156,9 @@ fn test_remove_member_success() {
     let member = create_synthetic_member("issues", "bot", "test-team");
 
     service.add_member("test-team", member, "issues").unwrap();
-    service.remove_member("test-team", "issues-bot", "issues").unwrap();
+    service
+        .remove_member("test-team", "issues-bot", "issues")
+        .unwrap();
 
     // Verify member was removed
     let config_path = temp_dir.path().join("test-team").join("config.json");
@@ -214,7 +220,11 @@ fn test_list_members_filtered_by_plugin() {
     // Filter by "issues" plugin
     let issues_members = service.list_members("test-team", Some("issues")).unwrap();
     assert_eq!(issues_members.len(), 2);
-    assert!(issues_members.iter().all(|m| m.agent_type == "plugin:issues"));
+    assert!(
+        issues_members
+            .iter()
+            .all(|m| m.agent_type == "plugin:issues")
+    );
 
     // Filter by "ci" plugin
     let ci_members = service.list_members("test-team", Some("ci")).unwrap();
@@ -409,10 +419,7 @@ fn test_team_not_found() {
 
     let result = service.add_member("nonexistent-team", member, "issues");
     assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        RosterError::TeamNotFound(_)
-    ));
+    assert!(matches!(result.unwrap_err(), RosterError::TeamNotFound(_)));
 }
 
 #[test]
@@ -422,7 +429,8 @@ fn test_preserves_unknown_fields() {
 
     // Add unknown fields to the config
     let config_path = team_dir.join("config.json");
-    let mut content: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    let mut content: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
     content["unknownField"] = serde_json::json!("test-value");
     content["futureFeature"] = serde_json::json!({"nested": "data"});
     std::fs::write(&config_path, serde_json::to_vec_pretty(&content).unwrap()).unwrap();
@@ -433,7 +441,8 @@ fn test_preserves_unknown_fields() {
     service.add_member("test-team", member, "issues").unwrap();
 
     // Verify unknown fields are preserved
-    let content: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    let content: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
     assert_eq!(content["unknownField"], "test-value");
     assert_eq!(content["futureFeature"]["nested"], "data");
 }

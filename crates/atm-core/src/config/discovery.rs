@@ -286,8 +286,8 @@ fn try_load_settings(path: &Path) -> Option<SettingsJson> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::TimestampFormat;
+    use super::*;
     use serial_test::serial;
     use std::env;
 
@@ -452,7 +452,10 @@ timestamps = "iso8601"
         // Should find settings.json at repo root
         assert!(settings.is_some());
         let settings = settings.unwrap();
-        assert_eq!(settings.env.get("TEST_VAR").map(String::as_str), Some("from_root"));
+        assert_eq!(
+            settings.env.get("TEST_VAR").map(String::as_str),
+            Some("from_root")
+        );
     }
 
     #[test]
@@ -484,7 +487,10 @@ timestamps = "iso8601"
         // Should use settings.local.json (higher precedence)
         assert!(settings.is_some());
         let settings = settings.unwrap();
-        assert_eq!(settings.env.get("SOURCE").map(String::as_str), Some("settings_local"));
+        assert_eq!(
+            settings.env.get("SOURCE").map(String::as_str),
+            Some("settings_local")
+        );
     }
 
     #[test]
@@ -520,7 +526,10 @@ enabled = false
 
         let issues = config.plugin_config("issues").unwrap();
         assert_eq!(issues.get("enabled").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(issues.get("poll_interval").and_then(|v| v.as_integer()), Some(60));
+        assert_eq!(
+            issues.get("poll_interval").and_then(|v| v.as_integer()),
+            Some(60)
+        );
     }
 
     #[test]
@@ -588,6 +597,9 @@ enabled = false
             config.roles.get("team-lead").map(String::as_str),
             Some("lead-override")
         );
-        assert_eq!(config.roles.get("reviewer").map(String::as_str), Some("qa-bot"));
+        assert_eq!(
+            config.roles.get("reviewer").map(String::as_str),
+            Some("qa-bot")
+        );
     }
 }

@@ -7,15 +7,24 @@
 //! - `sessions` — List and manage agent sessions (Sprint A.3+)
 //! - `summary`  — Display saved session summary (Sprint A.3+)
 
-use clap::Parser;
 use agent_team_mail_core::logging;
+use clap::Parser;
 
 use atm_agent_mcp::cli::{Cli, Commands};
 use atm_agent_mcp::commands;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    logging::init();
+    let _guards = logging::init_unified(
+        "atm-agent-mcp",
+        logging::UnifiedLogMode::ProducerFanIn {
+            daemon_socket: agent_team_mail_core::daemon_client::daemon_socket_path()
+                .unwrap_or_else(|_| std::env::temp_dir().join("atm-daemon.sock")),
+            fallback_spool_dir: agent_team_mail_core::logging_event::default_spool_dir()
+                .unwrap_or_else(|_| std::env::temp_dir().join("atm-spool")),
+        },
+    )
+    .unwrap_or_else(|_| logging::init_stderr_only());
     let cli = Cli::parse();
 
     match cli.command {

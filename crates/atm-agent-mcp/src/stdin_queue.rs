@@ -387,7 +387,10 @@ mod tests {
         while let Ok(Some(_)) = entries.next_entry().await {
             remaining += 1;
         }
-        assert_eq!(remaining, 0, "all queue files should be removed after drain");
+        assert_eq!(
+            remaining, 0,
+            "all queue files should be removed after drain"
+        );
     }
 
     #[tokio::test]
@@ -442,7 +445,10 @@ mod tests {
         );
 
         let total = count_a.unwrap() + count_b.unwrap();
-        assert_eq!(total, 5, "total drained should be exactly 5 (no double delivery)");
+        assert_eq!(
+            total, 5,
+            "total drained should be exactly 5 (no double delivery)"
+        );
 
         // Verify the captured content has exactly 5 messages across both writers
         let out1 = cap1.lock().unwrap().clone();
@@ -567,6 +573,9 @@ mod tests {
         std::fs::write(&lock_path, b"").unwrap();
 
         let removed = cleanup_ttl(&dir, Duration::from_secs(0)).await.unwrap();
-        assert_eq!(removed, 1, "stale lock file should be removed with 0-second TTL");
+        assert_eq!(
+            removed, 1,
+            "stale lock file should be removed with 0-second TTL"
+        );
     }
 }

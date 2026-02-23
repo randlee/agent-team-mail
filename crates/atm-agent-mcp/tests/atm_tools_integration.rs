@@ -170,11 +170,21 @@ async fn integration_atm_send_with_config_identity() {
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    assert!(resp.get("error").is_none(), "should not be a protocol error; got: {resp}");
-    assert_ne!(resp["result"]["isError"], json!(true), "should not be isError; got: {resp}");
+    assert!(
+        resp.get("error").is_none(),
+        "should not be a protocol error; got: {resp}"
+    );
+    assert_ne!(
+        resp["result"]["isError"],
+        json!(true),
+        "should not be isError; got: {resp}"
+    );
 
     let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
-    assert!(text.contains("arch-ctm"), "response should mention recipient; got: {text}");
+    assert!(
+        text.contains("arch-ctm"),
+        "response should mention recipient; got: {text}"
+    );
 
     // Verify inbox file was written
     let inbox_path = dir
@@ -219,7 +229,11 @@ async fn integration_atm_send_explicit_identity_override() {
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    assert_ne!(resp["result"]["isError"], json!(true), "should succeed; got: {resp}");
+    assert_ne!(
+        resp["result"]["isError"],
+        json!(true),
+        "should succeed; got: {resp}"
+    );
 
     let inbox_path = dir
         .path()
@@ -230,7 +244,10 @@ async fn integration_atm_send_explicit_identity_override() {
         .join("recip.json");
     let content = std::fs::read_to_string(&inbox_path).unwrap();
     let messages: Vec<Value> = serde_json::from_str(&content).unwrap();
-    assert_eq!(messages[0]["from"], "override-agent", "should use explicit identity");
+    assert_eq!(
+        messages[0]["from"], "override-agent",
+        "should use explicit identity"
+    );
 }
 
 /// `atm_send` without any identity returns ERR_IDENTITY_REQUIRED (-32009).
@@ -288,10 +305,19 @@ async fn integration_atm_read_empty_inbox() {
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    assert!(resp.get("error").is_none(), "should not be protocol error; got: {resp}");
-    assert_ne!(resp["result"]["isError"], json!(true), "should not be isError; got: {resp}");
+    assert!(
+        resp.get("error").is_none(),
+        "should not be protocol error; got: {resp}"
+    );
+    assert_ne!(
+        resp["result"]["isError"],
+        json!(true),
+        "should not be isError; got: {resp}"
+    );
 
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("null");
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("null");
     let messages: Vec<Value> = serde_json::from_str(text).unwrap();
     assert!(messages.is_empty(), "empty inbox should return empty array");
 }
@@ -318,10 +344,19 @@ async fn integration_atm_pending_count_no_inbox() {
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    assert!(resp.get("error").is_none(), "should not be protocol error; got: {resp}");
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("{}");
+    assert!(
+        resp.get("error").is_none(),
+        "should not be protocol error; got: {resp}"
+    );
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("{}");
     let v: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(v["unread"], json!(0), "nonexistent inbox should have 0 unread");
+    assert_eq!(
+        v["unread"],
+        json!(0),
+        "nonexistent inbox should have 0 unread"
+    );
 }
 
 /// `agent_sessions` returns a valid list of sessions (Sprint A.5 fully implemented).
@@ -350,15 +385,19 @@ async fn integration_agent_sessions_returns_list() {
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    assert!(resp.get("error").is_none(), "should not be a protocol error; got: {resp}");
+    assert!(
+        resp.get("error").is_none(),
+        "should not be a protocol error; got: {resp}"
+    );
     assert_ne!(
         resp["result"]["isError"],
         json!(true),
         "agent_sessions should not set isError; got: {resp}"
     );
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("MISSING");
-    let parsed: Value =
-        serde_json::from_str(text).expect("agent_sessions text must be valid JSON");
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("MISSING");
+    let parsed: Value = serde_json::from_str(text).expect("agent_sessions text must be valid JSON");
     assert!(
         parsed.is_array(),
         "agent_sessions result must be a JSON array; got: {text}"
@@ -391,21 +430,40 @@ async fn integration_agent_status_returns_object() {
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    assert!(resp.get("error").is_none(), "should not be a protocol error; got: {resp}");
+    assert!(
+        resp.get("error").is_none(),
+        "should not be a protocol error; got: {resp}"
+    );
     assert_ne!(
         resp["result"]["isError"],
         json!(true),
         "agent_status should not set isError; got: {resp}"
     );
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("MISSING");
-    let parsed: Value =
-        serde_json::from_str(text).expect("agent_status text must be valid JSON");
-    assert!(parsed.is_object(), "agent_status result must be a JSON object; got: {text}");
-    assert!(parsed.get("child_alive").is_some(), "status must include 'child_alive'");
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("MISSING");
+    let parsed: Value = serde_json::from_str(text).expect("agent_status text must be valid JSON");
+    assert!(
+        parsed.is_object(),
+        "agent_status result must be a JSON object; got: {text}"
+    );
+    assert!(
+        parsed.get("child_alive").is_some(),
+        "status must include 'child_alive'"
+    );
     assert!(parsed.get("team").is_some(), "status must include 'team'");
-    assert!(parsed.get("uptime_secs").is_some(), "status must include 'uptime_secs'");
-    assert!(parsed.get("active_thread_count").is_some(), "status must include 'active_thread_count'");
-    assert!(parsed.get("identity_map").is_some(), "status must include 'identity_map'");
+    assert!(
+        parsed.get("uptime_secs").is_some(),
+        "status must include 'uptime_secs'"
+    );
+    assert!(
+        parsed.get("active_thread_count").is_some(),
+        "status must include 'active_thread_count'"
+    );
+    assert!(
+        parsed.get("identity_map").is_some(),
+        "status must include 'identity_map'"
+    );
 }
 
 /// `atm_read` without identity returns ERR_IDENTITY_REQUIRED.
@@ -496,8 +554,15 @@ async fn integration_atm_broadcast_delivers_to_members() {
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
     unsafe { std::env::remove_var("ATM_HOME") };
 
-    assert!(resp.get("error").is_none(), "should not be protocol error; got: {resp}");
-    assert_ne!(resp["result"]["isError"], json!(true), "should not be isError; got: {resp}");
+    assert!(
+        resp.get("error").is_none(),
+        "should not be protocol error; got: {resp}"
+    );
+    assert_ne!(
+        resp["result"]["isError"],
+        json!(true),
+        "should not be isError; got: {resp}"
+    );
 
     let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
     assert!(

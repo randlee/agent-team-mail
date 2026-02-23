@@ -1,7 +1,11 @@
 //! Main daemon event loop
 
-use crate::daemon::{graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes, InboxEvent, InboxEventKind, SharedDedupeStore, SharedPubSubStore, SharedSessionRegistry, SharedStateStore, SharedStreamEventSender};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
+use crate::daemon::{
+    InboxEvent, InboxEventKind, LogEventQueue, SharedDedupeStore, SharedPubSubStore,
+    SharedSessionRegistry, SharedStateStore, SharedStreamEventSender, graceful_shutdown,
+    spool_drain_loop, start_socket_server, watch_inboxes,
+};
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use anyhow::{Context, Result};
@@ -55,6 +59,8 @@ use tracing::{debug, error, info, warn};
 /// * `stream_state_store` - Per-agent stream turn state store.
 /// * `stream_event_sender` - Broadcast sender for push-based stream event fanout.
 ///   Create with `crate::daemon::new_stream_event_sender()`.
+/// * `log_event_queue` - Bounded queue for `"log-event"` socket commands.
+///   Create with `crate::daemon::new_log_event_queue()`.
 #[expect(
     clippy::too_many_arguments,
     reason = "event loop wiring needs shared runtime handles and plugin coordination state"
@@ -71,6 +77,7 @@ pub async fn run(
     dedup_store: SharedDedupeStore,
     stream_state_store: crate::daemon::SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
+    log_event_queue: LogEventQueue,
 ) -> Result<()> {
     info!("Initializing daemon event loop");
 
@@ -121,14 +128,30 @@ pub async fn run(
     // construction time, so the socket server reads live agent state. When the
     // worker adapter is not enabled the caller passes a fresh empty store; the
     // socket server still accepts connections but returns AGENT_NOT_FOUND.
-    let socket_home_dir = ctx.system.claude_root
+    let socket_home_dir = ctx
+        .system
+        .claude_root
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| {
-            agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| ctx.system.claude_root.clone())
+            agent_team_mail_core::home::get_home_dir()
+                .unwrap_or_else(|_| ctx.system.claude_root.clone())
         });
     let socket_cancel = cancel.clone();
-    let _socket_server_handle = match start_socket_server(socket_home_dir, state_store, pubsub_store, launch_tx, session_registry, dedup_store, stream_state_store, stream_event_sender, socket_cancel).await {
+    let _socket_server_handle = match start_socket_server(
+        socket_home_dir,
+        state_store,
+        pubsub_store,
+        launch_tx,
+        session_registry,
+        dedup_store,
+        stream_state_store,
+        stream_event_sender,
+        log_event_queue,
+        socket_cancel,
+    )
+    .await
+    {
         Ok(handle) => {
             if handle.is_some() {
                 info!("Unix socket server started successfully");
@@ -166,7 +189,9 @@ pub async fn run(
     let watcher_root = ctx.mail.teams_root().clone();
     let watcher_cancel = cancel.clone();
     let watcher_task = tokio::spawn(async move {
-        if let Err(e) = watch_inboxes(watcher_root, event_tx, hostname_registry, watcher_cancel).await {
+        if let Err(e) =
+            watch_inboxes(watcher_root, event_tx, hostname_registry, watcher_cancel).await
+        {
             error!("Inbox watcher failed: {}", e);
         }
     });
@@ -287,7 +312,10 @@ pub async fn run(
 
     // Start retention task if enabled
     let retention_task = if ctx.config.retention.enabled {
-        info!("Starting retention task (interval: {}s)", ctx.config.retention.interval_secs);
+        info!(
+            "Starting retention task (interval: {}s)",
+            ctx.config.retention.interval_secs
+        );
         let retention_cancel = cancel.clone();
         let retention_ctx = ctx.clone();
         Some(tokio::spawn(async move {
@@ -304,7 +332,13 @@ pub async fn run(
     let status_plugins = plugins.clone();
     let status_ctx = ctx.clone();
     let status_task = tokio::spawn(async move {
-        status_writer_loop(status_writer_clone, status_plugins, status_ctx, status_cancel).await;
+        status_writer_loop(
+            status_writer_clone,
+            status_plugins,
+            status_ctx,
+            status_cancel,
+        )
+        .await;
     });
 
     info!("Daemon event loop running. Waiting for cancellation signal...");
@@ -363,7 +397,8 @@ async fn read_new_inbox_messages(
     cursor: &mut InboxCursor,
 ) -> Result<Vec<agent_team_mail_core::schema::InboxMessage>> {
     let content = tokio::fs::read_to_string(path).await?;
-    let inbox_msgs: Vec<agent_team_mail_core::schema::InboxMessage> = serde_json::from_str(&content)?;
+    let inbox_msgs: Vec<agent_team_mail_core::schema::InboxMessage> =
+        serde_json::from_str(&content)?;
     if inbox_msgs.is_empty() {
         cursor.last_message_id = None;
         cursor.last_index = 0;
@@ -397,7 +432,9 @@ async fn read_new_inbox_messages(
 /// Extract hostname registry from bridge plugin config
 ///
 /// Returns None if bridge plugin is not configured or not enabled.
-fn extract_hostname_registry(config: &agent_team_mail_core::config::Config) -> Option<std::sync::Arc<agent_team_mail_core::config::HostnameRegistry>> {
+fn extract_hostname_registry(
+    config: &agent_team_mail_core::config::Config,
+) -> Option<std::sync::Arc<agent_team_mail_core::config::HostnameRegistry>> {
     use agent_team_mail_core::config::BridgeConfig;
 
     // Check if bridge plugin config exists
@@ -499,14 +536,25 @@ fn retention_work(
     retention_policy: &agent_team_mail_core::config::RetentionConfig,
     report_dir: Option<&PathBuf>,
 ) {
-    use agent_team_mail_core::retention::{apply_retention, clean_report_files};
     use agent_team_mail_core::retention::parse_duration;
+    use agent_team_mail_core::retention::{apply_retention, clean_report_files};
 
     // Enumerate team directories
     let team_dirs = match std::fs::read_dir(teams_root) {
         Ok(entries) => entries,
         Err(e) => {
-            tracing::error!("Failed to read teams directory {}: {}", teams_root.display(), e);
+            tracing::error!(
+                "Failed to read teams directory {}: {}",
+                teams_root.display(),
+                e
+            );
+            emit_event_best_effort(EventFields {
+                level: "error",
+                source: "atm-daemon",
+                action: "retention_dir_read_error",
+                error: Some(format!("Failed to read teams directory: {e}")),
+                ..Default::default()
+            });
             return;
         }
     };
@@ -540,7 +588,19 @@ fn retention_work(
         let agents = match std::fs::read_dir(&inboxes_path) {
             Ok(entries) => entries,
             Err(e) => {
-                tracing::warn!("Failed to read inboxes directory {}: {}", inboxes_path.display(), e);
+                tracing::warn!(
+                    "Failed to read inboxes directory {}: {}",
+                    inboxes_path.display(),
+                    e
+                );
+                emit_event_best_effort(EventFields {
+                    level: "error",
+                    source: "atm-daemon",
+                    action: "retention_inbox_read_error",
+                    team: Some(team_name.clone()),
+                    error: Some(format!("Failed to read inboxes directory: {e}")),
+                    ..Default::default()
+                });
                 continue;
             }
         };
@@ -593,7 +653,12 @@ fn retention_work(
             };
 
             // Apply retention to this inbox
-            tracing::debug!("Applying retention to {}/{}/{}", team_name, agent_name, file_name);
+            tracing::debug!(
+                "Applying retention to {}/{}/{}",
+                team_name,
+                agent_name,
+                file_name
+            );
             match apply_retention(
                 &agent_path,
                 &team_name,
@@ -605,16 +670,42 @@ fn retention_work(
                     if result.removed > 0 {
                         tracing::info!(
                             "Retention: {}/{}/{}: kept={}, removed={}, archived={}",
-                            team_name, agent_name, file_name,
-                            result.kept, result.removed, result.archived
+                            team_name,
+                            agent_name,
+                            file_name,
+                            result.kept,
+                            result.removed,
+                            result.archived
                         );
+                        emit_event_best_effort(EventFields {
+                            level: "info",
+                            source: "atm-daemon",
+                            action: "retention_applied",
+                            team: Some(team_name.clone()),
+                            agent_id: Some(agent_name.clone()),
+                            count: Some(result.removed as u64),
+                            result: Some("ok".to_string()),
+                            ..Default::default()
+                        });
                     }
                 }
                 Err(e) => {
                     tracing::error!(
                         "Retention failed for {}/{}/{}: {}",
-                        team_name, agent_name, file_name, e
+                        team_name,
+                        agent_name,
+                        file_name,
+                        e
                     );
+                    emit_event_best_effort(EventFields {
+                        level: "error",
+                        source: "atm-daemon",
+                        action: "retention_error",
+                        team: Some(team_name.clone()),
+                        agent_id: Some(agent_name.clone()),
+                        error: Some(format!("Retention failed: {e}")),
+                        ..Default::default()
+                    });
                 }
             }
         }
@@ -639,12 +730,28 @@ fn retention_work(
                 if result.deleted_count > 0 {
                     tracing::info!(
                         "Report cleanup: deleted={}, skipped={}",
-                        result.deleted_count, result.skipped_count
+                        result.deleted_count,
+                        result.skipped_count
                     );
+                    emit_event_best_effort(EventFields {
+                        level: "info",
+                        source: "atm-daemon",
+                        action: "report_cleanup",
+                        count: Some(result.deleted_count as u64),
+                        result: Some("ok".to_string()),
+                        ..Default::default()
+                    });
                 }
             }
             Err(e) => {
                 tracing::error!("Report cleanup failed: {}", e);
+                emit_event_best_effort(EventFields {
+                    level: "error",
+                    source: "atm-daemon",
+                    action: "report_cleanup_error",
+                    error: Some(format!("Report cleanup failed: {e}")),
+                    ..Default::default()
+                });
             }
         }
     }
@@ -751,14 +858,13 @@ fn format_timestamp(time: SystemTime) -> String {
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
 
-    let dt = DateTime::<Utc>::from_timestamp(secs as i64, nanos)
-        .unwrap_or_else(Utc::now);
+    let dt = DateTime::<Utc>::from_timestamp(secs as i64, nanos).unwrap_or_else(Utc::now);
     dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{read_new_inbox_messages, InboxCursor};
+    use super::{InboxCursor, read_new_inbox_messages};
     use agent_team_mail_core::schema::InboxMessage;
     use std::collections::HashMap;
     use tempfile::TempDir;

@@ -343,9 +343,6 @@ mod tests {
         let teams_root = std::env::temp_dir().join("test-atm-teams");
         let service = RosterService::new(teams_root.clone());
         let path = service.config_path("test-team");
-        assert_eq!(
-            path,
-            teams_root.join("test-team").join("config.json")
-        );
+        assert_eq!(path, teams_root.join("test-team").join("config.json"));
     }
 }

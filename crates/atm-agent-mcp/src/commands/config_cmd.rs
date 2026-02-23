@@ -4,7 +4,7 @@
 //! (`--json`) or as a human-readable key=value table.
 
 use crate::cli::ConfigArgs;
-use crate::config::{resolve_config, AgentMcpConfig, ResolvedConfig, RolePreset};
+use crate::config::{AgentMcpConfig, ResolvedConfig, RolePreset, resolve_config};
 use std::path::PathBuf;
 
 /// Run the `config` subcommand.

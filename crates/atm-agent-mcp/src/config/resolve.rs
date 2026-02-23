@@ -10,7 +10,7 @@
 //! 5. Compiled-in defaults (via [`AgentMcpConfig::default`])
 
 use super::types::AgentMcpConfig;
-use agent_team_mail_core::config::{resolve_config as core_resolve, ConfigOverrides, CoreConfig};
+use agent_team_mail_core::config::{ConfigOverrides, CoreConfig, resolve_config as core_resolve};
 use agent_team_mail_core::home::get_home_dir;
 use std::path::Path;
 
@@ -343,9 +343,15 @@ sandbox = "network-disabled"
         assert_eq!(original.model, restored.model);
         assert_eq!(original.sandbox, restored.sandbox);
         assert_eq!(original.approval_policy, restored.approval_policy);
-        assert_eq!(original.mail_poll_interval_ms, restored.mail_poll_interval_ms);
+        assert_eq!(
+            original.mail_poll_interval_ms,
+            restored.mail_poll_interval_ms
+        );
         assert_eq!(original.request_timeout_secs, restored.request_timeout_secs);
-        assert_eq!(original.max_concurrent_threads, restored.max_concurrent_threads);
+        assert_eq!(
+            original.max_concurrent_threads,
+            restored.max_concurrent_threads
+        );
         assert_eq!(original.persist_threads, restored.persist_threads);
         assert_eq!(original.auto_mail, restored.auto_mail);
     }

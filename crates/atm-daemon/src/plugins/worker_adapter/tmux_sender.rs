@@ -157,7 +157,12 @@ impl DefaultTmuxSender {
     }
 
     #[cfg(unix)]
-    fn send_payload(&self, pane_id: &str, payload: &str, method: DeliveryMethod) -> Result<(), PluginError> {
+    fn send_payload(
+        &self,
+        pane_id: &str,
+        payload: &str,
+        method: DeliveryMethod,
+    ) -> Result<(), PluginError> {
         match method {
             DeliveryMethod::SendKeys => {
                 let output = Command::new("tmux")
@@ -224,7 +229,12 @@ impl DefaultTmuxSender {
     }
 
     #[cfg(not(unix))]
-    fn send_payload(&self, _pane_id: &str, _payload: &str, _method: DeliveryMethod) -> Result<(), PluginError> {
+    fn send_payload(
+        &self,
+        _pane_id: &str,
+        _payload: &str,
+        _method: DeliveryMethod,
+    ) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -336,7 +346,11 @@ impl TmuxSender for DefaultTmuxSender {
                 let delay = Self::backoff_with_jitter(attempt);
                 debug!(
                     "tmux delivery retry for pane {} [{}], attempt {}/{} after {:?}",
-                    pane_id, context, attempt + 1, MAX_ATTEMPTS, delay
+                    pane_id,
+                    context,
+                    attempt + 1,
+                    MAX_ATTEMPTS,
+                    delay
                 );
                 tokio::time::sleep(delay).await;
             }
@@ -393,7 +407,10 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_TMUX_DELIVERY_METHOD", "paste-buffer");
         }
-        assert_eq!(DeliveryMethod::from_env(), Some(DeliveryMethod::PasteBuffer));
+        assert_eq!(
+            DeliveryMethod::from_env(),
+            Some(DeliveryMethod::PasteBuffer)
+        );
         unsafe {
             std::env::remove_var("ATM_TMUX_DELIVERY_METHOD");
         }

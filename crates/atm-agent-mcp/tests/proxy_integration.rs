@@ -172,12 +172,13 @@ async fn test_initialize_passes_through() {
     });
     send_content_length(&mut writer, &init_req).await;
 
-    let resp = read_response(&mut reader).await.expect("initialize response");
+    let resp = read_response(&mut reader)
+        .await
+        .expect("initialize response");
     assert_eq!(resp["id"], 2);
     assert!(resp.get("result").is_some(), "initialize should succeed");
     assert_eq!(
-        resp["result"]["serverInfo"]["name"],
-        "atm-agent-mcp",
+        resp["result"]["serverInfo"]["name"], "atm-agent-mcp",
         "proxy must respond with its own serverInfo, not the child's"
     );
 
@@ -229,7 +230,9 @@ async fn test_tools_list_adds_synthetic_tools() {
     });
     send_newline(&mut writer, &list_req).await;
 
-    let resp = read_response(&mut reader).await.expect("tools/list response");
+    let resp = read_response(&mut reader)
+        .await
+        .expect("tools/list response");
     assert_eq!(resp["id"], 10);
     let tools = resp["result"]["tools"].as_array().expect("tools array");
 
@@ -246,10 +249,7 @@ async fn test_tools_list_adds_synthetic_tools() {
         names.contains(&"atm_pending_count"),
         "missing atm_pending_count"
     );
-    assert!(
-        names.contains(&"agent_sessions"),
-        "missing agent_sessions"
-    );
+    assert!(names.contains(&"agent_sessions"), "missing agent_sessions");
     assert!(names.contains(&"agent_status"), "missing agent_status");
     assert!(names.contains(&"agent_close"), "missing agent_close");
 
@@ -278,7 +278,9 @@ async fn test_tools_list_preserves_codex_tools() {
     });
     send_newline(&mut writer, &list_req).await;
 
-    let resp = read_response(&mut reader).await.expect("tools/list response");
+    let resp = read_response(&mut reader)
+        .await
+        .expect("tools/list response");
     let tools = resp["result"]["tools"].as_array().expect("tools array");
     let names: Vec<&str> = tools
         .iter()
@@ -316,11 +318,17 @@ async fn test_multiple_synthetic_tools_count() {
     });
     send_newline(&mut writer, &list_req).await;
 
-    let resp = read_response(&mut reader).await.expect("tools/list response");
+    let resp = read_response(&mut reader)
+        .await
+        .expect("tools/list response");
     let tools = resp["result"]["tools"].as_array().expect("tools array");
 
-    // 2 from echo server + 7 synthetic = 9
-    assert_eq!(tools.len(), 9, "expected 2 native + 7 synthetic tools");
+    // 2 from echo server + synthetic tools
+    assert_eq!(
+        tools.len(),
+        2 + atm_agent_mcp::tools::SYNTHETIC_TOOL_COUNT,
+        "expected 2 native + synthetic tools"
+    );
 
     drop(writer);
     let _ = handle.await;
@@ -351,7 +359,9 @@ async fn test_unknown_method_passes_through() {
     });
     send_newline(&mut writer, &req).await;
 
-    let resp = read_response(&mut reader).await.expect("should get error response");
+    let resp = read_response(&mut reader)
+        .await
+        .expect("should get error response");
     assert_eq!(resp["id"], 40);
     // The echo server returns -32601 for unknown methods
     assert_eq!(resp["error"]["code"], -32601);
@@ -375,7 +385,9 @@ async fn test_lazy_spawn_on_first_codex_call() {
     });
     send_newline(&mut writer, &list_req).await;
 
-    let resp = read_response(&mut reader).await.expect("tools/list response");
+    let resp = read_response(&mut reader)
+        .await
+        .expect("tools/list response");
     assert_eq!(resp["id"], 1);
     // Should return synthetic tools, not an error
     assert!(
@@ -514,9 +526,7 @@ async fn test_child_crash_includes_exit_code() {
         let got = read_all_responses(&mut reader, Duration::from_millis(200)).await;
         let found = got.iter().find(|r| {
             r.get("id") == Some(&json!(probe_id))
-                && r.pointer("/error/data/exit_code")
-                    .and_then(|v| v.as_i64())
-                    == Some(42)
+                && r.pointer("/error/data/exit_code").and_then(|v| v.as_i64()) == Some(42)
         });
         if found.is_some() {
             break;
@@ -538,7 +548,9 @@ async fn test_child_crash_includes_exit_code() {
     assert!(error_resp.is_some(), "expected error response");
 
     let err = error_resp.unwrap();
-    let exit_code = err.pointer("/error/data/exit_code").and_then(|v| v.as_i64());
+    let exit_code = err
+        .pointer("/error/data/exit_code")
+        .and_then(|v| v.as_i64());
     assert_eq!(exit_code, Some(42), "expected exit code 42");
 
     drop(writer);
@@ -588,9 +600,9 @@ async fn test_timeout_includes_proxy_source() {
     send_newline(&mut writer, &req).await;
 
     let responses = read_all_responses(&mut reader, Duration::from_secs(10)).await;
-    let timeout_resp = responses.iter().find(|r| {
-        r.pointer("/error/code").and_then(|v| v.as_i64()) == Some(-32006)
-    });
+    let timeout_resp = responses
+        .iter()
+        .find(|r| r.pointer("/error/code").and_then(|v| v.as_i64()) == Some(-32006));
     assert!(timeout_resp.is_some(), "expected timeout error");
     assert_eq!(
         timeout_resp.unwrap().pointer("/error/data/error_source"),
@@ -651,14 +663,9 @@ async fn test_codex_event_has_agent_id() {
         .collect();
 
     for event in &events {
-        let agent_id = event
-            .pointer("/params/agent_id")
-            .and_then(|v| v.as_str());
+        let agent_id = event.pointer("/params/agent_id").and_then(|v| v.as_str());
         // Events without a known threadId mapping fall back to "proxy:unknown"
-        assert!(
-            agent_id.is_some(),
-            "event should have an agent_id field"
-        );
+        assert!(agent_id.is_some(), "event should have an agent_id field");
     }
 
     drop(writer);
@@ -689,10 +696,7 @@ async fn test_event_content_unchanged() {
     let msg_type = first_event
         .pointer("/params/msg/type")
         .and_then(|v| v.as_str());
-    assert!(
-        msg_type.is_some(),
-        "event msg.type should be present"
-    );
+    assert!(msg_type.is_some(), "event msg.type should be present");
     // The echo server sends "session_configured" as the first event type
     assert_eq!(msg_type, Some("session_configured"));
 
@@ -801,7 +805,9 @@ async fn test_synthetic_tool_returns_not_implemented() {
     });
     send_newline(&mut writer, &req).await;
 
-    let resp = read_response(&mut reader).await.expect("synthetic tool response");
+    let resp = read_response(&mut reader)
+        .await
+        .expect("synthetic tool response");
     assert_eq!(resp["id"], 1);
     // Must be a JSON-RPC error (not a result)
     let code = resp
@@ -836,10 +842,15 @@ async fn test_content_length_upstream_framing() {
     });
     send_content_length(&mut writer, &req).await;
 
-    let resp = read_response(&mut reader).await.expect("response to CL-framed request");
+    let resp = read_response(&mut reader)
+        .await
+        .expect("response to CL-framed request");
     assert_eq!(resp["id"], 1);
     // agent_status is fully implemented in Sprint A.5; it returns a successful result.
-    assert!(resp.get("error").is_none(), "should not be a protocol error; got: {resp}");
+    assert!(
+        resp.get("error").is_none(),
+        "should not be a protocol error; got: {resp}"
+    );
     assert_ne!(
         resp["result"]["isError"],
         json!(true),
@@ -922,14 +933,12 @@ async fn test_tools_list_before_child_spawn_returns_synthetic_tools() {
         .expect("tools should be array");
     assert_eq!(
         tools.len(),
-        7,
-        "expected 7 synthetic tools, got {}",
+        atm_agent_mcp::tools::SYNTHETIC_TOOL_COUNT,
+        "expected synthetic tool count {}, got {}",
+        atm_agent_mcp::tools::SYNTHETIC_TOOL_COUNT,
         tools.len()
     );
-    let names: Vec<&str> = tools
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     for expected in &[
         "atm_send",
         "atm_read",
@@ -938,6 +947,9 @@ async fn test_tools_list_before_child_spawn_returns_synthetic_tools() {
         "agent_sessions",
         "agent_status",
         "agent_close",
+        "agent_watch_attach",
+        "agent_watch_poll",
+        "agent_watch_detach",
     ] {
         assert!(
             names.contains(expected),
@@ -962,11 +974,7 @@ async fn test_notifications_initialized_does_not_produce_response() {
     )
     .await;
 
-    let result = tokio::time::timeout(
-        Duration::from_millis(200),
-        read_response(&mut reader),
-    )
-    .await;
+    let result = tokio::time::timeout(Duration::from_millis(200), read_response(&mut reader)).await;
     assert!(result.is_err(), "notification must not produce a response");
 
     drop(writer);

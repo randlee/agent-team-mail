@@ -3,9 +3,9 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
 use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_daemon::plugin::MailService;
 use agent_team_mail_daemon::plugin::{Plugin, PluginContext};
 use agent_team_mail_daemon::plugins::issues::IssuesPlugin;
-use agent_team_mail_daemon::plugin::MailService;
 use agent_team_mail_daemon::roster::RosterService;
 use std::collections::HashMap;
 use std::path::Path;
@@ -102,7 +102,10 @@ async fn test_api_failure_continues_polling() {
 
     // Plugin should not crash even if GitHub API fails
     let result = plugin.run(cancel).await;
-    assert!(result.is_ok(), "Plugin should handle API failures gracefully");
+    assert!(
+        result.is_ok(),
+        "Plugin should handle API failures gracefully"
+    );
 
     // Verify no inbox messages written (error was handled gracefully)
     let inbox_messages = ctx.mail.read_inbox("test-team", "issues-bot");
@@ -187,19 +190,30 @@ async fn test_invalid_config_values_use_defaults() {
 
     // Create config with invalid types
     let mut plugin_config = toml::Table::new();
-    plugin_config.insert("poll_interval".to_string(), toml::Value::String("not-a-number".to_string()));
+    plugin_config.insert(
+        "poll_interval".to_string(),
+        toml::Value::String("not-a-number".to_string()),
+    );
     plugin_config.insert("labels".to_string(), toml::Value::Integer(123)); // Should be array
 
     let mut config = (*ctx.config).clone();
     config.plugins.insert("issues".to_string(), plugin_config);
-    ctx = PluginContext::new(ctx.system.clone(), ctx.mail.clone(), Arc::new(config), ctx.roster.clone());
+    ctx = PluginContext::new(
+        ctx.system.clone(),
+        ctx.mail.clone(),
+        Arc::new(config),
+        ctx.roster.clone(),
+    );
 
     // Create and init plugin - should fall back to defaults gracefully
     let mut plugin = IssuesPlugin::new();
     let result = plugin.init(&ctx).await;
 
     // Should succeed with defaults
-    assert!(result.is_ok(), "Plugin should handle invalid config types gracefully");
+    assert!(
+        result.is_ok(),
+        "Plugin should handle invalid config types gracefully"
+    );
 }
 
 #[tokio::test]
@@ -232,7 +246,10 @@ async fn test_handle_message_with_invalid_format() {
 
     // Should handle gracefully (ignore non-issue messages)
     let result = plugin.handle_message(&msg).await;
-    assert!(result.is_ok(), "Plugin should ignore non-issue messages gracefully");
+    assert!(
+        result.is_ok(),
+        "Plugin should ignore non-issue messages gracefully"
+    );
 
     // Test with invalid issue number
     let msg2 = InboxMessage {
@@ -246,7 +263,10 @@ async fn test_handle_message_with_invalid_format() {
     };
 
     let result2 = plugin.handle_message(&msg2).await;
-    assert!(result2.is_ok(), "Plugin should handle invalid issue numbers gracefully");
+    assert!(
+        result2.is_ok(),
+        "Plugin should handle invalid issue numbers gracefully"
+    );
 }
 
 #[tokio::test]
@@ -279,5 +299,8 @@ async fn test_handle_message_with_empty_body() {
 
     // Should handle gracefully (skip posting empty comment)
     let result = plugin.handle_message(&msg).await;
-    assert!(result.is_ok(), "Plugin should handle empty reply bodies gracefully");
+    assert!(
+        result.is_ok(),
+        "Plugin should handle empty reply bodies gracefully"
+    );
 }

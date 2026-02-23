@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -129,7 +129,8 @@ impl IssuesPlugin {
                     return Ok(Box::new(GitHubProvider::new(owner.clone(), repo.clone())));
                 }
                 return Err(PluginError::Provider {
-                    message: "Configured provider 'github' but git remote is not GitHub".to_string(),
+                    message: "Configured provider 'github' but git remote is not GitHub"
+                        .to_string(),
                     source: None,
                 });
             }
@@ -324,7 +325,8 @@ impl Plugin for IssuesPlugin {
             })?;
 
             // Create the issue provider from the registry
-            self.provider = Some(self.create_provider_from_registry(&registry, git_provider, config_table)?);
+            self.provider =
+                Some(self.create_provider_from_registry(&registry, git_provider, config_table)?);
         }
 
         // Store registry for potential runtime use
@@ -353,10 +355,7 @@ impl Plugin for IssuesPlugin {
             plan_mode_required: None,
             joined_at: now_ms,
             tmux_pane_id: None,
-            cwd: repo
-                .path
-                .to_string_lossy()
-                .to_string(),
+            cwd: repo.path.to_string_lossy().to_string(),
             subscriptions: Vec::new(),
             backend_type: None,
             is_active: Some(true),
@@ -443,7 +442,11 @@ impl Plugin for IssuesPlugin {
             // Clean up synthetic member (soft cleanup - mark inactive)
             if !self.config.team.is_empty() {
                 ctx.roster
-                    .cleanup_plugin(&self.config.team, "issues", crate::roster::CleanupMode::Soft)
+                    .cleanup_plugin(
+                        &self.config.team,
+                        "issues",
+                        crate::roster::CleanupMode::Soft,
+                    )
                     .map_err(|e| PluginError::Shutdown {
                         message: format!("Failed to cleanup roster: {e}"),
                         source: None,
@@ -504,29 +507,45 @@ mod tests {
 
         assert_eq!(metadata.name, "issues");
         assert_eq!(metadata.version, "0.1.0");
-        assert!(metadata
-            .description
-            .contains("git provider issues and agent team messaging"));
+        assert!(
+            metadata
+                .description
+                .contains("git provider issues and agent team messaging")
+        );
 
         assert!(metadata.capabilities.contains(&Capability::IssueTracking));
-        assert!(metadata
-            .capabilities
-            .contains(&Capability::AdvertiseMembers));
+        assert!(
+            metadata
+                .capabilities
+                .contains(&Capability::AdvertiseMembers)
+        );
         assert!(metadata.capabilities.contains(&Capability::EventListener));
         assert!(metadata.capabilities.contains(&Capability::InjectMessages));
     }
 
     #[test]
     fn test_parse_issue_reference() {
-        assert_eq!(IssuesPlugin::parse_issue_reference("[issue:123] Fix bug"), Some(123));
+        assert_eq!(
+            IssuesPlugin::parse_issue_reference("[issue:123] Fix bug"),
+            Some(123)
+        );
         assert_eq!(
             IssuesPlugin::parse_issue_reference("[issue:456] Another issue\nWith body"),
             Some(456)
         );
         assert_eq!(IssuesPlugin::parse_issue_reference("No issue here"), None);
-        assert_eq!(IssuesPlugin::parse_issue_reference("[task:123] Not an issue"), None);
-        assert_eq!(IssuesPlugin::parse_issue_reference("[issue:abc] Invalid number"), None);
-        assert_eq!(IssuesPlugin::parse_issue_reference("  [issue:789]  "), Some(789));
+        assert_eq!(
+            IssuesPlugin::parse_issue_reference("[task:123] Not an issue"),
+            None
+        );
+        assert_eq!(
+            IssuesPlugin::parse_issue_reference("[issue:abc] Invalid number"),
+            None
+        );
+        assert_eq!(
+            IssuesPlugin::parse_issue_reference("  [issue:789]  "),
+            Some(789)
+        );
     }
 
     #[test]
@@ -567,11 +586,12 @@ mod tests {
         assert!(msg.text.contains("https://github.com/owner/repo/issues/42"));
         assert!(!msg.read);
         assert_eq!(msg.summary, Some("Issue #42: Test issue".to_string()));
-        assert!(msg
-            .message_id
-            .as_deref()
-            .unwrap_or("")
-            .starts_with("issue-42-"));
+        assert!(
+            msg.message_id
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("issue-42-")
+        );
     }
 
     #[test]
@@ -710,8 +730,10 @@ mod tests {
 
         // No AddComment should be called
         let calls = provider_clone.get_calls();
-        assert!(calls
-            .iter()
-            .all(|c| !matches!(c, MockCall::AddComment { .. })));
+        assert!(
+            calls
+                .iter()
+                .all(|c| !matches!(c, MockCall::AddComment { .. }))
+        );
     }
 }

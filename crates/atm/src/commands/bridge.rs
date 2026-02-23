@@ -68,7 +68,7 @@ pub fn execute(args: BridgeArgs) -> Result<()> {
 }
 
 fn execute_status(args: BridgeStatusArgs) -> Result<()> {
-    use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+    use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -86,8 +86,8 @@ fn execute_status(args: BridgeStatusArgs) -> Result<()> {
     let metrics_path = team_dir.join(".bridge-metrics.json");
 
     let metrics = if metrics_path.exists() {
-        let content = std::fs::read_to_string(&metrics_path)
-            .context("Failed to read bridge metrics")?;
+        let content =
+            std::fs::read_to_string(&metrics_path).context("Failed to read bridge metrics")?;
         serde_json::from_str(&content).context("Failed to parse bridge metrics")?
     } else {
         // No metrics file yet - bridge not initialized or never synced
@@ -143,7 +143,7 @@ fn execute_status(args: BridgeStatusArgs) -> Result<()> {
 }
 
 fn execute_sync(args: BridgeSyncArgs) -> Result<()> {
-    use agent_team_mail_core::config::{resolve_config, ConfigOverrides};
+    use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -192,7 +192,10 @@ fn format_elapsed_ms(timestamp_ms: u64) -> String {
         format!("{elapsed_secs} seconds ago")
     } else if elapsed_secs < 3600 {
         let minutes = elapsed_secs / 60;
-        format!("{minutes} minute{} ago", if minutes == 1 { "" } else { "s" })
+        format!(
+            "{minutes} minute{} ago",
+            if minutes == 1 { "" } else { "s" }
+        )
     } else if elapsed_secs < 86400 {
         let hours = elapsed_secs / 3600;
         format!("{hours} hour{} ago", if hours == 1 { "" } else { "s" })

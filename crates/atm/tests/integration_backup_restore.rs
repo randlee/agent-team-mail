@@ -22,8 +22,16 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
 fn setup_tasks(temp_dir: &TempDir, team_name: &str) {
     let tasks_dir = temp_dir.path().join(".claude/tasks").join(team_name);
     fs::create_dir_all(&tasks_dir).unwrap();
-    fs::write(tasks_dir.join("task-a.json"), r#"{"id":"task-a","status":"open"}"#).unwrap();
-    fs::write(tasks_dir.join("task-b.json"), r#"{"id":"task-b","status":"done"}"#).unwrap();
+    fs::write(
+        tasks_dir.join("task-a.json"),
+        r#"{"id":"task-a","status":"open"}"#,
+    )
+    .unwrap();
+    fs::write(
+        tasks_dir.join("task-b.json"),
+        r#"{"id":"task-b","status":"done"}"#,
+    )
+    .unwrap();
 }
 
 /// Create a test team with two members: team-lead and test-member.
@@ -81,7 +89,11 @@ fn test_backup_creates_backup() {
 
     // Create an inbox for test-member
     let inbox = team_dir.join("inboxes/test-member.json");
-    fs::write(&inbox, r#"[{"from":"team-lead","text":"hi","timestamp":"2026-01-01T00:00:00Z","read":false}]"#).unwrap();
+    fs::write(
+        &inbox,
+        r#"[{"from":"team-lead","text":"hi","timestamp":"2026-01-01T00:00:00Z","read":false}]"#,
+    )
+    .unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
@@ -97,10 +109,17 @@ fn test_backup_creates_backup() {
         .unwrap()
         .filter_map(|e| e.ok())
         .collect();
-    assert_eq!(entries.len(), 1, "should have exactly one timestamped backup dir");
+    assert_eq!(
+        entries.len(),
+        1,
+        "should have exactly one timestamped backup dir"
+    );
 
     let backup_dir = entries[0].path();
-    assert!(backup_dir.join("config.json").exists(), "config.json should be in backup");
+    assert!(
+        backup_dir.join("config.json").exists(),
+        "config.json should be in backup"
+    );
     assert!(
         backup_dir.join("inboxes/test-member.json").exists(),
         "inbox should be in backup"
@@ -129,7 +148,11 @@ fn test_restore_round_trip() {
 
     // Create inbox for test-member
     let inbox = team_dir.join("inboxes/test-member.json");
-    fs::write(&inbox, r#"[{"from":"team-lead","text":"hello","timestamp":"2026-01-01T00:00:00Z","read":false}]"#).unwrap();
+    fs::write(
+        &inbox,
+        r#"[{"from":"team-lead","text":"hello","timestamp":"2026-01-01T00:00:00Z","read":false}]"#,
+    )
+    .unwrap();
 
     // Step 1: backup
     {
@@ -277,7 +300,10 @@ fn test_restore_with_skip_tasks() {
     // Step 2: remove tasks directory
     let tasks_dir = temp_dir.path().join(".claude/tasks/test-team");
     fs::remove_dir_all(&tasks_dir).unwrap();
-    assert!(!tasks_dir.exists(), "tasks dir should be removed before restore");
+    assert!(
+        !tasks_dir.exists(),
+        "tasks dir should be removed before restore"
+    );
 
     // Step 3: restore with --skip-tasks
     {
@@ -305,7 +331,13 @@ fn test_restore_from_nonexistent_path_fails() {
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
-    cmd.args(["teams", "restore", "test-team", "--from", "/nonexistent/path/that/does/not/exist"]);
+    cmd.args([
+        "teams",
+        "restore",
+        "test-team",
+        "--from",
+        "/nonexistent/path/that/does/not/exist",
+    ]);
 
     cmd.assert()
         .failure()
@@ -319,17 +351,21 @@ fn test_restore_from_backup_missing_tasks_dir_succeeds() {
     let team_dir = setup_test_team(&temp_dir, "test-team");
 
     // Create a backup manually WITHOUT a tasks/ dir
-    let backup_dir = temp_dir.path()
+    let backup_dir = temp_dir
+        .path()
         .join(".claude/teams/.backups/test-team/20240101T000000Z");
     std::fs::create_dir_all(backup_dir.join("inboxes")).unwrap();
-    std::fs::copy(
-        team_dir.join("config.json"),
-        backup_dir.join("config.json"),
-    ).unwrap();
+    std::fs::copy(team_dir.join("config.json"), backup_dir.join("config.json")).unwrap();
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
-    cmd.args(["teams", "restore", "test-team", "--from", backup_dir.to_str().unwrap()]);
+    cmd.args([
+        "teams",
+        "restore",
+        "test-team",
+        "--from",
+        backup_dir.to_str().unwrap(),
+    ]);
 
     cmd.assert().success();
 }

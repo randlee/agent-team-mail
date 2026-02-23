@@ -70,12 +70,13 @@ impl CiProviderRegistry {
         name: &str,
         config: Option<&toml::Table>,
     ) -> Result<Box<dyn ErasedCiProvider>, PluginError> {
-        let factory = self.factories.get(name).ok_or_else(|| {
-            PluginError::Provider {
+        let factory = self
+            .factories
+            .get(name)
+            .ok_or_else(|| PluginError::Provider {
                 message: format!("CI provider '{name}' not registered"),
                 source: None,
-            }
-        })?;
+            })?;
 
         (factory.create)(config)
     }
@@ -163,10 +164,7 @@ mod tests {
         let registry = CiProviderRegistry::new();
         let result = registry.create_provider("missing-provider", None);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not registered"));
+        assert!(result.unwrap_err().to_string().contains("not registered"));
     }
 
     #[test]

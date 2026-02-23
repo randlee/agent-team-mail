@@ -24,22 +24,20 @@ impl GitHubProvider {
         // Run gh command in a blocking task
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         tokio::task::spawn_blocking(move || {
-            let output = Command::new("gh")
-                .args(&args_owned)
-                .output()
-                .map_err(|e| {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        PluginError::Provider {
-                            message: "gh CLI not found. Install from https://cli.github.com/".to_string(),
-                            source: Some(Box::new(e)),
-                        }
-                    } else {
-                        PluginError::Provider {
-                            message: format!("Failed to execute gh: {e}"),
-                            source: Some(Box::new(e)),
-                        }
+            let output = Command::new("gh").args(&args_owned).output().map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    PluginError::Provider {
+                        message: "gh CLI not found. Install from https://cli.github.com/"
+                            .to_string(),
+                        source: Some(Box::new(e)),
                     }
-                })?;
+                } else {
+                    PluginError::Provider {
+                        message: format!("Failed to execute gh: {e}"),
+                        source: Some(Box::new(e)),
+                    }
+                }
+            })?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -83,11 +81,7 @@ impl GitHubProvider {
                     color: l.color.clone(),
                 })
                 .collect(),
-            assignees: gh_json
-                .assignees
-                .iter()
-                .map(|a| a.login.clone())
-                .collect(),
+            assignees: gh_json.assignees.iter().map(|a| a.login.clone()).collect(),
             author: gh_json.author.login.clone(),
             created_at: gh_json.created_at.clone(),
             updated_at: gh_json.updated_at.clone(),
@@ -178,7 +172,11 @@ impl IssueProvider for GitHubProvider {
         Ok(self.parse_issue(&gh_issue))
     }
 
-    async fn add_comment(&self, issue_number: u64, body: &str) -> Result<IssueComment, PluginError> {
+    async fn add_comment(
+        &self,
+        issue_number: u64,
+        body: &str,
+    ) -> Result<IssueComment, PluginError> {
         let number_arg = issue_number.to_string();
         let repo_arg = format!("{}/{}", self.owner, self.repo);
         let args = [

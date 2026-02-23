@@ -292,7 +292,12 @@ impl TurnTracker {
     ///
     /// Prefer [`TurnControl::on_turn_completed`] for transports that delegate
     /// all stream emission to the tracker.
-    pub async fn on_turn_completed_no_emit(&self, thread_id: &str, turn_id: &str, status: TurnStatus) {
+    pub async fn on_turn_completed_no_emit(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        status: TurnStatus,
+    ) {
         {
             let mut guard = self.active_turns.lock().await;
             guard.insert(thread_id.to_string(), None);

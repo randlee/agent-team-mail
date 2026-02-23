@@ -133,7 +133,10 @@ impl GitProvider {
     fn parse_https_url(url: &str) -> Option<Self> {
         let parsed = url::Url::parse(url).ok()?;
         let host = parsed.host_str()?;
-        let path = parsed.path().trim_start_matches('/').trim_end_matches(".git");
+        let path = parsed
+            .path()
+            .trim_start_matches('/')
+            .trim_end_matches(".git");
 
         match host {
             "github.com" => Self::parse_github_path(path),
@@ -437,10 +440,7 @@ mod tests {
     // RepoContext tests
     #[test]
     fn test_repo_context_new() {
-        let ctx = RepoContext::new(
-            "test-repo".to_string(),
-            PathBuf::from("/path/to/repo"),
-        );
+        let ctx = RepoContext::new("test-repo".to_string(), PathBuf::from("/path/to/repo"));
         assert_eq!(ctx.name, "test-repo");
         assert_eq!(ctx.path, PathBuf::from("/path/to/repo"));
         assert!(ctx.remote_url.is_none());
@@ -449,13 +449,13 @@ mod tests {
 
     #[test]
     fn test_repo_context_with_remote() {
-        let ctx = RepoContext::new(
-            "test-repo".to_string(),
-            PathBuf::from("/path/to/repo"),
-        )
-        .with_remote("git@github.com:owner/repo.git".to_string());
+        let ctx = RepoContext::new("test-repo".to_string(), PathBuf::from("/path/to/repo"))
+            .with_remote("git@github.com:owner/repo.git".to_string());
 
-        assert_eq!(ctx.remote_url, Some("git@github.com:owner/repo.git".to_string()));
+        assert_eq!(
+            ctx.remote_url,
+            Some("git@github.com:owner/repo.git".to_string())
+        );
         assert!(ctx.provider.is_some());
 
         if let Some(GitProvider::GitHub { owner, repo }) = ctx.provider {

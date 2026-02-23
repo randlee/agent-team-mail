@@ -1,7 +1,7 @@
 //! Bridge plugin configuration parsing and validation
 
-use agent_team_mail_core::config::{BridgeConfig, HostnameRegistry};
 use crate::plugin::PluginError;
+use agent_team_mail_core::config::{BridgeConfig, HostnameRegistry};
 
 /// Bridge plugin configuration (daemon-specific)
 #[derive(Debug, Clone)]
@@ -27,12 +27,9 @@ impl BridgePluginConfig {
     /// - Bridge is enabled but has no remotes configured
     pub fn from_toml(table: &toml::Table, system_hostname: &str) -> Result<Self, PluginError> {
         // Parse core bridge config
-        let core: BridgeConfig = table
-            .clone()
-            .try_into()
-            .map_err(|e| PluginError::Config {
-                message: format!("Failed to parse bridge config: {e}"),
-            })?;
+        let core: BridgeConfig = table.clone().try_into().map_err(|e| PluginError::Config {
+            message: format!("Failed to parse bridge config: {e}"),
+        })?;
 
         // Resolve local hostname (use config value or system hostname)
         let local_hostname = core
@@ -44,11 +41,11 @@ impl BridgePluginConfig {
         let mut registry = HostnameRegistry::new();
 
         for remote in &core.remotes {
-            registry.register(remote.clone()).map_err(|e| {
-                PluginError::Config {
+            registry
+                .register(remote.clone())
+                .map_err(|e| PluginError::Config {
                     message: format!("Hostname registry error: {e}"),
-                }
-            })?;
+                })?;
         }
 
         // Validate: if bridge is enabled, must have at least one remote
@@ -228,7 +225,10 @@ address = "user@spoke1.local"
         let table: toml::Table = toml::from_str(hub_toml).unwrap();
         let config = BridgePluginConfig::from_toml(&table, "hub-host").unwrap();
 
-        assert_eq!(config.core.role, agent_team_mail_core::config::BridgeRole::Hub);
+        assert_eq!(
+            config.core.role,
+            agent_team_mail_core::config::BridgeRole::Hub
+        );
 
         let spoke_toml = r#"
 enabled = true
@@ -242,7 +242,10 @@ address = "user@hub.local"
         let table: toml::Table = toml::from_str(spoke_toml).unwrap();
         let config = BridgePluginConfig::from_toml(&table, "spoke-host").unwrap();
 
-        assert_eq!(config.core.role, agent_team_mail_core::config::BridgeRole::Spoke);
+        assert_eq!(
+            config.core.role,
+            agent_team_mail_core::config::BridgeRole::Spoke
+        );
     }
 
     #[test]

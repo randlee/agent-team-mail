@@ -59,7 +59,11 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!(" Team: {}", app.team)),
+        Span::raw(format!(
+            " v{}  Team: {}",
+            env!("CARGO_PKG_VERSION"),
+            app.team
+        )),
     ]);
     frame.render_widget(Paragraph::new(text), area);
 }
@@ -73,7 +77,11 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     draw_dashboard(frame, columns[0], app);
-    draw_agent_terminal(frame, columns[1], app);
+    if app.log_viewer_visible {
+        draw_log_viewer(frame, columns[1], app);
+    } else {
+        draw_agent_terminal(frame, columns[1], app);
+    }
 }
 
 // ── Dashboard panel ───────────────────────────────────────────────────────────
@@ -92,13 +100,16 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(border_style);
 
+    let left_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(area);
+
     // Column header row
-    let header = ListItem::new(Line::from(vec![
-        Span::styled(
-            format!("{:<20} {:<8} {}", "AGENT", "STATE", "INBOX"),
-            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-    ]));
+    let header = ListItem::new(Line::from(vec![Span::styled(
+        format!("{:<20} {:<8} {}", "AGENT", "STATE", "INBOX"),
+        Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    )]));
 
     let mut items: Vec<ListItem> = vec![header];
 
@@ -121,18 +132,12 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
         };
 
         let row = Line::from(vec![
-            Span::styled(
-                format!("{:<20}", truncate_str(&member.agent, 20)),
-                style,
-            ),
+            Span::styled(format!("{:<20}", truncate_str(&member.agent, 20)), style),
             Span::styled(
                 format!(" {:<8}", truncate_str(&member.state, 8)),
                 Style::default().fg(if selected { Color::Black } else { state_color }),
             ),
-            Span::styled(
-                format!(" {}", member.inbox_count),
-                style,
-            ),
+            Span::styled(format!(" {}", member.inbox_count), style),
         ]);
 
         items.push(ListItem::new(row));
@@ -149,11 +154,38 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
     // +1 because the header occupies index 0 in the item list
     list_state.select(Some(app.selected_index + 1));
 
-    frame.render_stateful_widget(
-        List::new(items).block(block),
-        area,
-        &mut list_state,
-    );
+    frame.render_stateful_widget(List::new(items).block(block), left_rows[0], &mut list_state);
+
+    let inbox_title = app
+        .selected_agent()
+        .map(|a| format!(" Inbox Preview ({a}) "))
+        .unwrap_or_else(|| " Inbox Preview ".to_string());
+    let inbox_block = Block::default()
+        .title(inbox_title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style);
+
+    if app.inbox_preview.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No messages")
+                .block(inbox_block)
+                .style(Style::default().fg(Color::DarkGray)),
+            left_rows[1],
+        );
+    } else {
+        let lines: Vec<Line> = app
+            .inbox_preview
+            .iter()
+            .map(|s| Line::from(Span::raw(s.clone())))
+            .collect();
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(inbox_block)
+                .wrap(Wrap { trim: false }),
+            left_rows[1],
+        );
+    }
 }
 
 // ── Agent Terminal panel ──────────────────────────────────────────────────────
@@ -176,31 +208,30 @@ fn draw_agent_terminal(frame: &mut Frame, area: Rect, app: &App) {
     draw_control_input(frame, rows[1], app, border_style);
 }
 
-fn draw_stream_pane(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    border_style: Style,
-    focused: bool,
-) {
-    let agent_label = app
-        .streaming_agent
-        .as_deref()
-        .unwrap_or("(none selected)");
+fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Style, focused: bool) {
+    let agent_label = app.streaming_agent.as_deref().unwrap_or("(none selected)");
 
-    // Choose stream badge based on error/live/waiting state.
+    // Choose stream badge from daemon-derived stream state rather than
+    // filesystem inference.
     let source_badge = if app.stream_source_error.is_some() {
         Span::styled(
             "[FROZEN] ",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )
-    } else if app.session_log_path.as_ref().is_some_and(|p| p.exists()) {
+    } else if app.daemon_turn_state.as_ref().is_some_and(|s| {
+        s.turn_status != agent_team_mail_core::daemon_stream::StreamTurnStatus::Terminal
+    }) {
         Span::styled(
             "[LIVE] ",
             Style::default()
                 .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if !app.stream_lines.is_empty() {
+        Span::styled(
+            "[REPLAY] ",
+            Style::default()
+                .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -229,7 +260,11 @@ fn draw_stream_pane(
     let block = Block::default()
         .title(title_line)
         .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-        .border_type(if focused { BorderType::Rounded } else { BorderType::Plain })
+        .border_type(if focused {
+            BorderType::Rounded
+        } else {
+            BorderType::Plain
+        })
         .border_style(border_style);
 
     // Compute visible log lines based on scroll offset and viewport height.
@@ -315,7 +350,9 @@ fn draw_control_input(frame: &mut Frame, area: Rect, app: &App, border_style: St
         let content = Line::from(vec![
             Span::styled(
                 "[disabled] ",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ),
             Span::styled(
                 format!("control input not available: {reason}"),
@@ -326,6 +363,124 @@ fn draw_control_input(frame: &mut Frame, area: Rect, app: &App, border_style: St
     }
 }
 
+// ── Log Viewer panel ──────────────────────────────────────────────────────────
+
+/// Format a single [`LogEventV1`] into a display line and the color to render it with.
+///
+/// Format: `{ts}  {LEVEL:<5}  [{source_binary}{/agent}] {action}{suffix}`
+/// where suffix is `: {error}` or ` ({outcome})` when those fields are present.
+fn format_log_event_line(
+    event: &agent_team_mail_core::logging_event::LogEventV1,
+) -> (String, ratatui::style::Color) {
+    // Choose a color based on the log level.
+    let color = match event.level.to_lowercase().as_str() {
+        "error" => Color::Red,
+        "warn" => Color::Yellow,
+        "info" => Color::Green,
+        "debug" | "trace" => Color::DarkGray,
+        _ => Color::White,
+    };
+
+    // Build the source label: `source_binary` or `source_binary/agent`.
+    let source_label = match event.agent.as_deref() {
+        Some(agent) => format!("{}/{}", event.source_binary, agent),
+        None => event.source_binary.clone(),
+    };
+
+    // Build optional suffix.
+    let suffix = if let Some(ref err) = event.error {
+        format!(": {err}")
+    } else if let Some(ref outcome) = event.outcome {
+        format!(" ({outcome})")
+    } else {
+        String::new()
+    };
+
+    let line = format!(
+        "{}  {:<5}  [{}] {}{}",
+        event.ts,
+        event.level.to_uppercase(),
+        source_label,
+        event.action,
+        suffix,
+    );
+
+    (line, color)
+}
+
+/// Render the Log Viewer panel.
+fn draw_log_viewer(frame: &mut Frame, area: Rect, app: &App) {
+    let focused = app.focus == FocusPanel::LogViewer;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    // Build the title with optional level filter and follow badge.
+    let level_label = match app.log_level_filter.as_deref() {
+        Some(l) => format!(" Log Viewer [level: {l}]"),
+        None => " Log Viewer [level: all]".to_string(),
+    };
+    let title_text = if app.log_follow_mode {
+        format!("{level_label} [FOLLOW] ")
+    } else {
+        format!("{level_label} ")
+    };
+
+    let block = Block::default()
+        .title(title_text)
+        .borders(Borders::ALL)
+        .border_type(if focused {
+            BorderType::Rounded
+        } else {
+            BorderType::Plain
+        })
+        .border_style(border_style);
+
+    // Account for top/bottom borders.
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    if app.log_events.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No log events — start atm-daemon to see logs")
+                .block(block)
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    // Filter events by active level filter before windowing.
+    let filtered: Vec<&agent_team_mail_core::logging_event::LogEventV1> = app
+        .log_events
+        .iter()
+        .filter(|e| {
+            app.log_level_filter
+                .as_deref()
+                .is_none_or(|f| e.level.eq_ignore_ascii_case(f))
+        })
+        .collect();
+
+    let bottom = app.log_scroll_offset.min(filtered.len());
+    let start = bottom.saturating_sub(inner_height.max(1));
+    let visible: Vec<Line> = filtered[start..bottom]
+        .iter()
+        .map(|event| {
+            let (text, color) = format_log_event_line(event);
+            Line::from(Span::styled(text, Style::default().fg(color)))
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(visible)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
@@ -334,11 +489,21 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled(
                 " Send interrupt? ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("[y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[y",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("/"),
-            Span::styled("N]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "N]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
         ])
     } else if let Some(ref msg) = app.status_message {
         Line::from(vec![
@@ -354,21 +519,61 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(err.as_str(), Style::default().fg(Color::Yellow)),
         ])
     } else {
-        let follow_label = if app.follow_mode { "follow:ON" } else { "follow:OFF" };
+        let follow_label = if app.follow_mode {
+            "follow:ON"
+        } else {
+            "follow:OFF"
+        };
         Line::from(vec![
-            Span::styled(" q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " q",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(": quit  "),
-            Span::styled("↑↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "↑↓",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(": select  "),
-            Span::styled("Tab", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Tab",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(": panel  "),
             Span::styled(
                 "Ctrl-I",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(": interrupt  "),
-            Span::styled("F", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(format!(": {follow_label}")),
+            Span::styled(
+                "F",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(": {follow_label}  ")),
+            Span::styled(
+                "L",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(": log  "),
+            Span::styled(
+                "G",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(": filter"),
         ])
     };
     frame.render_widget(

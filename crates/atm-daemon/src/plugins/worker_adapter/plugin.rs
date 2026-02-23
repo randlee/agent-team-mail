@@ -12,7 +12,7 @@ use super::pubsub::PubSub;
 use super::router::{ConcurrencyPolicy, MessageRouter};
 use super::trait_def::{WorkerAdapter, WorkerHandle};
 use crate::daemon::session_registry::SharedSessionRegistry;
-use crate::daemon::socket::{LaunchRequest};
+use crate::daemon::socket::LaunchRequest;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use agent_team_mail_core::io::inbox::inbox_append;
@@ -21,7 +21,7 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -135,9 +135,7 @@ impl WorkerAdapterPlugin {
     /// The returned `Arc` points to the same tracker that the `HookWatcher`
     /// populates, so the socket server can read live state without a fresh
     /// empty store.
-    pub fn state_store(
-        &self,
-    ) -> std::sync::Arc<std::sync::Mutex<AgentStateTracker>> {
+    pub fn state_store(&self) -> std::sync::Arc<std::sync::Mutex<AgentStateTracker>> {
         Arc::clone(&self.agent_state)
     }
 
@@ -239,7 +237,9 @@ impl WorkerAdapterPlugin {
         };
 
         let team_root = ctx.system.claude_root.join("teams").join(team_name);
-        let sender_inbox = team_root.join("inboxes").join(format!("{sender_name}.json"));
+        let sender_inbox = team_root
+            .join("inboxes")
+            .join(format!("{sender_name}.json"));
         if let Err(e) = inbox_append(&sender_inbox, &warn_msg, team_name, sender_name) {
             error!("Failed to warn sender {sender_name}: {e}");
         }
@@ -275,12 +275,7 @@ impl WorkerAdapterPlugin {
         }
 
         // Verify the agent is actually Idle right now
-        let current_state = {
-            self.agent_state
-                .lock()
-                .unwrap()
-                .get_state(member_name)
-        };
+        let current_state = { self.agent_state.lock().unwrap().get_state(member_name) };
 
         let Some(AgentState::Idle) = current_state else {
             return;
@@ -349,12 +344,14 @@ impl WorkerAdapterPlugin {
         message: InboxMessage,
     ) -> Result<(), PluginError> {
         // Check if agent is configured and enabled
-        let agent_config = self.config.agents.get(config_key).ok_or_else(|| {
-            PluginError::Runtime {
-                message: format!("Agent config not found for {config_key}"),
-                source: None,
-            }
-        })?;
+        let agent_config =
+            self.config
+                .agents
+                .get(config_key)
+                .ok_or_else(|| PluginError::Runtime {
+                    message: format!("Agent config not found for {config_key}"),
+                    source: None,
+                })?;
 
         if !agent_config.enabled {
             debug!("Agent {config_key} is not enabled for worker adapter");
@@ -443,7 +440,10 @@ impl WorkerAdapterPlugin {
             }
         };
 
-        debug!("Captured response from {member_name}: {} bytes", captured.response_text.len());
+        debug!(
+            "Captured response from {member_name}: {} bytes",
+            captured.response_text.len()
+        );
 
         // Record activity after successful response capture
         self.record_activity(ctx, team_name, &member_name);
@@ -513,12 +513,14 @@ impl WorkerAdapterPlugin {
             source: None,
         })?;
 
-        let agent_config = self.config.agents.get(config_key).ok_or_else(|| {
-            PluginError::Runtime {
-                message: format!("Agent config not found for {config_key}"),
-                source: None,
-            }
-        })?;
+        let agent_config =
+            self.config
+                .agents
+                .get(config_key)
+                .ok_or_else(|| PluginError::Runtime {
+                    message: format!("Agent config not found for {config_key}"),
+                    source: None,
+                })?;
 
         let member_name = &agent_config.member_name;
         let command = self.config.resolve_command(config_key);
@@ -666,13 +668,9 @@ impl WorkerAdapterPlugin {
             };
             let inbox_path = self.agent_inbox_path(ctx, team_name, subscriber);
             if let Err(e) = inbox_append(&inbox_path, &msg, team_name, subscriber) {
-                warn!(
-                    "Failed to deliver pubsub notification to {subscriber}: {e}"
-                );
+                warn!("Failed to deliver pubsub notification to {subscriber}: {e}");
             } else {
-                debug!(
-                    "Delivered pubsub notification to {subscriber}: {agent} → {new_state}"
-                );
+                debug!("Delivered pubsub notification to {subscriber}: {agent} → {new_state}");
             }
         }
     }
@@ -708,10 +706,7 @@ impl WorkerAdapterPlugin {
     /// A timeout is treated as a warning rather than an error: the result still
     /// contains the pane ID and a warning message, but the initial prompt is
     /// still sent.
-    async fn handle_launch(
-        &mut self,
-        config: LaunchConfig,
-    ) -> Result<LaunchResult, String> {
+    async fn handle_launch(&mut self, config: LaunchConfig) -> Result<LaunchResult, String> {
         // Validate
         if config.agent.trim().is_empty() {
             return Err("Launch config missing required field: 'agent'".to_string());
@@ -838,14 +833,10 @@ impl WorkerAdapterPlugin {
         // Use workers.team_name for team lookups, falling back to default_team
         let team_name = self.resolve_team_name(ctx, None);
         let home_dir = &ctx.system.claude_root;
-        let team_config_path = home_dir
-            .join("teams")
-            .join(team_name)
-            .join("config.json");
+        let team_config_path = home_dir.join("teams").join(team_name).join("config.json");
 
         if team_config_path.exists() {
-            self.activity_tracker
-                .check_inactivity(&team_config_path)?;
+            self.activity_tracker.check_inactivity(&team_config_path)?;
         }
 
         Ok(())
@@ -929,7 +920,10 @@ impl Plugin for WorkerAdapterPlugin {
         // Store context for runtime use
         self.ctx = Some(ctx.clone());
 
-        debug!("Worker Adapter plugin initialized with {} backend", self.config.backend);
+        debug!(
+            "Worker Adapter plugin initialized with {} backend",
+            self.config.backend
+        );
         debug!("Configured {} agents", self.config.agents.len());
 
         // Auto-start configured workers
@@ -970,7 +964,10 @@ impl Plugin for WorkerAdapterPlugin {
             // Ensure parent directory exists
             if let Some(parent) = events_path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    warn!("Could not create hook events directory {}: {e}", parent.display());
+                    warn!(
+                        "Could not create hook events directory {}: {e}",
+                        parent.display()
+                    );
                 }
             }
             let claude_root = ctx.system.claude_root.clone();
@@ -1077,16 +1074,23 @@ impl Plugin for WorkerAdapterPlugin {
 
                 // Use graceful shutdown with timeout
                 let timeout_secs = self.config.shutdown_timeout_secs;
-                if let Err(e) =
-                    lifecycle::graceful_shutdown(&member_name, backend.as_mut(), &handle, timeout_secs)
-                        .await
+                if let Err(e) = lifecycle::graceful_shutdown(
+                    &member_name,
+                    backend.as_mut(),
+                    &handle,
+                    timeout_secs,
+                )
+                .await
                 {
                     error!("Failed to shut down worker for {member_name}: {e}");
                 }
 
                 // Unregister from lifecycle manager and state tracker
                 self.lifecycle.unregister_worker(&member_name);
-                self.agent_state.lock().unwrap().unregister_agent(&member_name);
+                self.agent_state
+                    .lock()
+                    .unwrap()
+                    .unregister_agent(&member_name);
             }
 
             info!("All workers shut down");
@@ -1146,8 +1150,7 @@ impl Plugin for WorkerAdapterPlugin {
 
         debug!(
             "Routing message from {} to agent {} (config key: {config_key})",
-            msg.from,
-            self.config.agents[&config_key].member_name
+            msg.from, self.config.agents[&config_key].member_name
         );
 
         self.process_message(&config_key, msg.clone()).await
@@ -1177,7 +1180,10 @@ mod tests {
         let result = plugin.handle_launch(config).await;
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("backend"), "Expected error about backend: {msg}");
+        assert!(
+            msg.contains("backend"),
+            "Expected error about backend: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1233,9 +1239,11 @@ mod tests {
         assert!(metadata.description.contains("async agent teammates"));
 
         assert!(metadata.capabilities.contains(&Capability::EventListener));
-        assert!(metadata
-            .capabilities
-            .contains(&Capability::AdvertiseMembers));
+        assert!(
+            metadata
+                .capabilities
+                .contains(&Capability::AdvertiseMembers)
+        );
         assert!(metadata.capabilities.contains(&Capability::InjectMessages));
     }
 

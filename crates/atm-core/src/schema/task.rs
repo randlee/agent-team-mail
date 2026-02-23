@@ -162,7 +162,10 @@ mod tests {
         let task: TaskItem = serde_json::from_str(json).unwrap();
         assert_eq!(task.task_id, "1");
         assert_eq!(task.subject, "Fix authentication timeout");
-        assert_eq!(task.active_form, Some("Fixing authentication timeout".to_string()));
+        assert_eq!(
+            task.active_form,
+            Some("Fixing authentication timeout".to_string())
+        );
         assert_eq!(task.status, TaskStatus::InProgress);
         assert_eq!(task.owner, Some("ci-fix-agent".to_string()));
         assert_eq!(task.blocks, vec!["2", "3"]);

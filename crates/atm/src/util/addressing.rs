@@ -84,13 +84,23 @@ mod tests {
     fn test_parse_address_empty_agent() {
         let result = parse_address("@backend", &None, "default-team");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("agent name cannot be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("agent name cannot be empty")
+        );
     }
 
     #[test]
     fn test_parse_address_empty_team() {
         let result = parse_address("ci-agent@", &None, "default-team");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("team name cannot be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("team name cannot be empty")
+        );
     }
 }

@@ -305,7 +305,10 @@ mod tests {
         let member: AgentMember = serde_json::from_str(json).unwrap();
         assert_eq!(member.agent_id, "haiku-poet-1@test-team");
         assert_eq!(member.name, "haiku-poet-1");
-        assert_eq!(member.prompt, Some("You are a creative haiku poet.".to_string()));
+        assert_eq!(
+            member.prompt,
+            Some("You are a creative haiku poet.".to_string())
+        );
         assert_eq!(member.color, Some("blue".to_string()));
         assert_eq!(member.plan_mode_required, Some(false));
         assert_eq!(member.tmux_pane_id, Some("%14".to_string()));

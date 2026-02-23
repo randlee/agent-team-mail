@@ -23,7 +23,10 @@ pub async fn spool_drain_loop(
     interval_duration: Duration,
     cancel: CancellationToken,
 ) -> Result<()> {
-    info!("Starting spool drain loop (interval: {:?})", interval_duration);
+    info!(
+        "Starting spool drain loop (interval: {:?})",
+        interval_duration
+    );
     let mut ticker = interval(interval_duration);
 
     loop {

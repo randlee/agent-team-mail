@@ -11,8 +11,7 @@ pub const DEFAULT_COMMAND: &str = "codex --yolo";
 /// Default nudge message template.
 ///
 /// `{count}` is replaced with the number of unread messages.
-pub const DEFAULT_NUDGE_TEXT: &str =
-    "You have {count} unread ATM messages. Run: atm read";
+pub const DEFAULT_NUDGE_TEXT: &str = "You have {count} unread ATM messages. Run: atm read";
 
 /// Default nudge cooldown in seconds (30 seconds between nudges per agent).
 pub const DEFAULT_NUDGE_COOLDOWN_SECS: u64 = 30;
@@ -52,10 +51,7 @@ impl NudgeConfig {
             return Self::default();
         };
 
-        let enabled = t
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let enabled = t.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
 
         let cooldown_secs = t
             .get("cooldown_secs")

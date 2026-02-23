@@ -50,7 +50,9 @@ impl ActivityTracker {
             if let Some(member) = config.members.iter_mut().find(|m| m.name == agent_name) {
                 member.is_active = Some(true);
                 member.last_active = Some(now_ms);
-                debug!("Updated activity for agent {agent_name}: isActive=true, lastActive={now_ms}");
+                debug!(
+                    "Updated activity for agent {agent_name}: isActive=true, lastActive={now_ms}"
+                );
                 true
             } else {
                 warn!("Agent {agent_name} not found in team config");
@@ -212,37 +214,31 @@ mod tests {
             created_at: 1234567890,
             lead_agent_id: "team-lead@test-team".to_string(),
             lead_session_id: "session-123".to_string(),
-            members: vec![
-                AgentMember {
-                    agent_id: "agent1@test-team".to_string(),
-                    name: "agent1".to_string(),
-                    agent_type: "general-purpose".to_string(),
-                    model: "claude-opus-4-6".to_string(),
-                    prompt: None,
-                    color: None,
-                    plan_mode_required: None,
-                    joined_at: 1234567890,
-                    tmux_pane_id: None,
-                    cwd: "/test".to_string(),
-                    subscriptions: vec![],
-                    backend_type: None,
-                    is_active: None,
-                    last_active: None,
-                    session_id: None,
-                    external_backend_type: None,
-                    external_model: None,
-                    unknown_fields: HashMap::new(),
-                },
-            ],
+            members: vec![AgentMember {
+                agent_id: "agent1@test-team".to_string(),
+                name: "agent1".to_string(),
+                agent_type: "general-purpose".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                prompt: None,
+                color: None,
+                plan_mode_required: None,
+                joined_at: 1234567890,
+                tmux_pane_id: None,
+                cwd: "/test".to_string(),
+                subscriptions: vec![],
+                backend_type: None,
+                is_active: None,
+                last_active: None,
+                session_id: None,
+                external_backend_type: None,
+                external_model: None,
+                unknown_fields: HashMap::new(),
+            }],
             unknown_fields: HashMap::new(),
         };
 
         let config_path = temp_dir.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
         (config, config_path)
     }
