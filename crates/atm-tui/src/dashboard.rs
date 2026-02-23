@@ -6,6 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::io::lock::acquire_lock;
+use agent_team_mail_core::schema::InboxMessage;
 use serde_json::Value;
 
 /// Read the number of messages in an agent's inbox file.
@@ -76,12 +78,16 @@ pub fn read_inbox_preview(home: &Path, team: &str, agent: &str, max_items: usize
         .join(team)
         .join("inboxes")
         .join(format!("{agent}.json"));
-
-    let content = match std::fs::read_to_string(inbox_path) {
+    let lock_path = inbox_path.with_extension("lock");
+    let _lock = match acquire_lock(&lock_path, 5) {
+        Ok(lock) => lock,
+        Err(_) => return Vec::new(),
+    };
+    let content = match std::fs::read(&inbox_path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let messages: Vec<Value> = match serde_json::from_str(&content) {
+    let messages: Vec<InboxMessage> = match serde_json::from_slice(&content) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
@@ -91,15 +97,8 @@ pub fn read_inbox_preview(home: &Path, team: &str, agent: &str, max_items: usize
         .rev()
         .take(max_items)
         .map(|m| {
-            let from = m
-                .get("from")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let summary = m
-                .get("summary")
-                .and_then(|v| v.as_str())
-                .or_else(|| m.get("message").and_then(|v| v.as_str()))
-                .unwrap_or("(no content)");
+            let from = m.from.as_str();
+            let summary = m.summary.as_deref().unwrap_or(m.text.as_str());
             let mut line = format!("{from}: {summary}");
             if line.len() > 100 {
                 line.truncate(97);
@@ -242,7 +241,7 @@ mod tests {
             fs::create_dir_all(&inbox_dir).unwrap();
             fs::write(
                 inbox_dir.join("arch-ctm.json"),
-                r#"[{"from":"a","summary":"one"},{"from":"b","summary":"two"},{"from":"c","summary":"three"}]"#,
+                r#"[{"from":"a","text":"one","timestamp":"2026-01-01T00:00:00Z","read":false,"summary":"one"},{"from":"b","text":"two","timestamp":"2026-01-01T00:00:01Z","read":false,"summary":"two"},{"from":"c","text":"three","timestamp":"2026-01-01T00:00:02Z","read":false,"summary":"three"}]"#,
             )
             .unwrap();
 
