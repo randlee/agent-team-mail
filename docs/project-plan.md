@@ -564,6 +564,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - `docs/atm-agent-mcp/requirements.md` (FR-13.9, FR-23, Phase O sprint contract)
 - `docs/atm-agent-mcp/live-stream-and-log-viewing.md` (watch and attached parity planning alignment)
 - `docs/atm-agent-mcp/phase-o-event-applicability-matrix.md` (explicit event class scope for O.1/O.2/O.3)
+- `docs/atm-agent-mcp/phase-o-pre-sprint-design-notes.md` (input routing contract, sizing guardrails, attach test strategy)
 
 ---
 
