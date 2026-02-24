@@ -779,10 +779,10 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let old_home = std::env::var("HOME").ok();
+        let old_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation under serial test execution.
         unsafe {
-            std::env::set_var("HOME", temp_dir.path());
+            std::env::set_var("ATM_HOME", temp_dir.path());
         }
 
         let daemon_dir = temp_dir.path().join(".claude/daemon");
@@ -831,7 +831,7 @@ mod tests {
         if let Some(home) = old_home {
             // SAFETY: test-scoped env mutation under serial test execution.
             unsafe {
-                std::env::set_var("HOME", home);
+                std::env::set_var("ATM_HOME", home);
             }
         }
     }
