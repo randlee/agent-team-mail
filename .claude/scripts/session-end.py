@@ -17,59 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
-# ── TOML parsing ──────────────────────────────────────────────────────────────
-
-def read_atm_toml() -> dict[str, Any] | None:
-    """Read .atm.toml from current working directory.
-
-    Returns the parsed config dict, or None if not present / unreadable.
-    Supports Python 3.11+ (tomllib) and older versions via tomli fallback.
-    """
-    try:
-        try:
-            import tomllib
-        except ImportError:
-            try:
-                import tomli as tomllib  # type: ignore[no-redef]
-            except ImportError:
-                return None  # Cannot parse TOML; treat as absent
-
-        toml_path = Path(".atm.toml")
-        if not toml_path.exists():
-            return None
-        with toml_path.open("rb") as f:
-            return tomllib.load(f)
-    except Exception:
-        return None
-
-
-# ── Socket helper ─────────────────────────────────────────────────────────────
-
-def send_hook_event(payload: dict[str, Any]) -> None:
-    """Send hook_event to daemon socket. Fail-open: any error is logged to stderr."""
-    import socket as _socket
-    import uuid
-    atm_home = Path(os.environ.get("ATM_HOME", str(Path.home())))
-    sock_path = atm_home / ".claude" / "daemon" / "atm-daemon.sock"
-    if not sock_path.exists():
-        return
-    request = {
-        "version": 1,
-        "request_id": str(uuid.uuid4()),
-        "command": "hook-event",
-        "payload": payload,
-    }
-    msg = (json.dumps(request, separators=(",", ":")) + "\n").encode()
-    try:
-        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
-            s.settimeout(1.0)
-            s.connect(str(sock_path))
-            s.sendall(msg)
-            # Drain response (ignore content)
-            s.recv(4096)
-    except Exception as exc:  # noqa: BLE001
-        sys.stderr.write(f"[atm-hook] socket send failed: {exc}\n")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from atm_hook_lib import send_hook_event, read_atm_toml  # noqa: E402
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

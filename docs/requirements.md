@@ -483,8 +483,15 @@ atm read --all                   # read all messages (not just unread)
 | `--since <timestamp>` | Show messages after timestamp |
 | `--json` | Output as JSON |
 | `--from <name>` | Filter by sender |
+| `--as <name>` | Reader identity override for own-inbox reads |
 
-**Identity resolution**: When an explicit `<agent>` argument is provided, it is resolved through the same roles → aliases → literal pipeline as `atm send`. When reading your own inbox (no agent argument), the caller's identity from config is used directly without alias/role resolution.
+**Identity resolution**:
+- When an explicit `<agent>` argument is provided, it is resolved through the same roles → aliases → literal pipeline as `atm send`.
+- When reading your own inbox (no agent argument), identity resolution order is:
+  1. `--as <name>` (explicit reader identity)
+  2. `ATM_IDENTITY`
+  3. `.atm.toml [core].identity` when it resolves to a concrete team member
+- If identity remains unresolved, `atm read` must fail with an actionable error and must not silently default to `human`.
 
 #### `atm inbox`
 
@@ -556,7 +563,7 @@ atm status <team>                # specific team
 ```toml
 [core]
 default_team = "backend-ci-team"    # default team for commands
-identity = "human"                  # from field on sent messages
+identity = "team-lead"              # from field on sent messages
 
 [messaging]
 offline_action = "PENDING ACTION - execute when online"  # call-to-action prepended for offline recipients
@@ -1239,7 +1246,7 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 ## 11. Open Questions
 
-1. **CLI inbox identity**: When reading "own" messages via `atm read` (no agent specified), which inbox does it read? The configured `identity` name? `team-lead`? Or show a picker?
+1. **Concurrent team-lead session policy**: For `atm register <team>`, should conflicts always block by default with `--force` takeover, and should optional `--kill` require explicit user confirmation every time?
 
 2. **Inbox file creation**: If an agent doesn't have an inbox file yet, should `atm send` create it? Or error?
 
