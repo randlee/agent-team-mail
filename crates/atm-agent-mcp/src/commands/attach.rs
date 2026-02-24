@@ -48,7 +48,6 @@ struct AttachedRenderEnvelope {
     mode: &'static str,
     agent_id: String,
     class: String,
-    applicability: String,
     source_kind: String,
     source_actor: String,
     source_channel: String,
@@ -57,23 +56,6 @@ struct AttachedRenderEnvelope {
     is_turn_boundary: bool,
     unsupported_count: Option<u64>,
     raw: Value,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EventApplicability {
-    Required,
-    Degraded,
-    OutOfScope,
-}
-
-impl EventApplicability {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Required => "required",
-            Self::Degraded => "degraded",
-            Self::OutOfScope => "out_of_scope",
-        }
-    }
 }
 
 static UNSUPPORTED_EVENT_COUNTS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
@@ -151,10 +133,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                                     }
                                 }
                             }
-                            ControlVerb::Detach => {
-                                emit_unsupported_summary(args.json)?;
-                                break;
-                            }
+                            ControlVerb::Detach => break,
                             ControlVerb::Approve => {
                                 let payload = arg.unwrap_or_else(|| "approve".to_string());
                                 match send_stdin_control(&team, &args.agent_id, &payload) {
@@ -180,7 +159,6 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
         }
     }
 
-    emit_unsupported_summary(args.json)?;
     println!("detached from {}", args.agent_id);
     Ok(())
 }
@@ -430,18 +408,19 @@ fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()
     }
 
     if env.class == "input.atm_mail" {
-        println!(
-            "{} <{}>",
-            format_mail_actor(&env.source_actor),
-            clamp_three_lines(&env.text)
-        );
+        println!("{} <{}>", env.source_actor, clamp_three_lines(&env.text));
         return Ok(());
     }
 
-    let rendered = render_attached_text(&env);
     println!(
-        "[{}][{}|{}] {rendered}",
-        env.class, env.source_kind, env.applicability
+        "[{}][{}] {}",
+        env.class,
+        env.source_kind,
+        if env.text.is_empty() {
+            env.event_type
+        } else {
+            env.text
+        }
     );
     Ok(())
 }
@@ -469,8 +448,16 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
-    let text = extract_event_text(event).to_string();
-    let (class, applicability, unsupported_count) = classify_event_class(&event_type, &source_kind);
+    let text = event
+        .pointer("/params/delta")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/text").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/output").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/message").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+
+    let (class, unsupported_count) = classify_event_class(&event_type, &source_kind);
     let is_turn_boundary = matches!(
         event_type.as_str(),
         "turn_started"
@@ -499,8 +486,7 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         v: 1,
         mode: "attached",
         agent_id: agent_id.to_string(),
-        class: class.to_string(),
-        applicability: applicability.as_str().to_string(),
+        class,
         source_kind,
         source_actor,
         source_channel,
@@ -512,30 +498,21 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
     }
 }
 
-fn classify_event_class(
-    event_type: &str,
-    source_kind: &str,
-) -> (String, EventApplicability, Option<u64>) {
+fn classify_event_class(event_type: &str, source_kind: &str) -> (String, Option<u64>) {
     if source_kind == "atm_mail" || source_kind == "atm_mcp" {
-        return ("input.atm_mail".to_string(), EventApplicability::Required, None);
+        return ("input.atm_mail".to_string(), None);
     }
     if source_kind == "user_steer" || source_kind == "tui_user" {
-        return (
-            "input.user_steer".to_string(),
-            EventApplicability::Required,
-            None,
-        );
+        return ("input.user_steer".to_string(), None);
     }
 
-    let lower = event_type.to_ascii_lowercase();
-    let event_type = lower.as_str();
-    let (class, applicability) = match event_type {
-        "user_message" => ("input.client", EventApplicability::Required),
+    let class = match event_type {
+        "user_message" => "input.client",
         "agent_message" | "agent_message_delta" | "agent_message_chunk" | "item_delta" => {
-            ("assistant.output", EventApplicability::Required)
+            "assistant.output"
         }
         "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
-            ("assistant.reasoning", EventApplicability::Required)
+            "assistant.reasoning"
         }
         "approval_prompt"
         | "approval_request"
@@ -543,66 +520,24 @@ fn classify_event_class(
         | "approval_approved"
         | "entered_review_mode"
         | "exited_review_mode"
-        | "item/enteredreviewmode"
-        | "item/exitedreviewmode" => ("approval", EventApplicability::Required),
+        | "item/enteredReviewMode"
+        | "item/exitedReviewMode" => "approval",
         "exec_command_started"
         | "exec_command_output_delta"
         | "exec_command_completed"
-        | "exec_command_error"
-        | "terminal_interaction" => ("tool.exec", EventApplicability::Required),
-        "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => {
-            ("file.edit", EventApplicability::Required)
-        }
-        "request_user_input" | "elicitation_request" => {
-            ("elicitation.request", EventApplicability::Required)
-        }
+        | "exec_command_error" => "tool.exec",
+        "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => "file.edit",
+        "request_user_input" | "elicitation_request" => "elicitation.request",
         "turn_started" | "turn_completed" | "task_started" | "task_complete" | "turn_idle"
-        | "idle" | "done" | "item_started" | "item_completed" | "turn_aborted" | "turn_interrupted"
-        | "turn_cancelled" | "cancelled" | "interrupt" | "stream_error" | "error" => {
-            ("turn.lifecycle", EventApplicability::Required)
-        }
-        "mcp_tool_call_begin"
-        | "mcp_tool_call_end"
-        | "web_search_begin"
-        | "web_search_end"
-        | "dynamic_tool_call_request"
-        | "view_image_tool_call"
-        | "tool_call"
-        | "tool_result" => ("tool.lifecycle", EventApplicability::Degraded),
-        "session_configured"
-        | "thread_name_updated"
-        | "token_count"
-        | "model_reroute"
-        | "context_compacted"
-        | "thread_rolled_back"
-        | "undo_started"
-        | "undo_completed"
-        | "background_event"
-        | "warning"
-        | "deprecation_notice"
-        | "plan_update"
-        | "plan_delta" => ("session.meta", EventApplicability::Degraded),
-        "mcp_list_tools_response" | "remote_skill_downloaded" | "skills_update_available" => {
-            ("unsupported.skills", EventApplicability::OutOfScope)
-        }
-        other if other.starts_with("list_") => ("unsupported.list", EventApplicability::OutOfScope),
-        other if other.starts_with("realtime_conversation_") => {
-            ("unsupported.realtime", EventApplicability::OutOfScope)
-        }
-        other if other.starts_with("collab_") => {
-            ("unsupported.collab", EventApplicability::OutOfScope)
-        }
+        | "idle" | "done" | "item_started" | "item_completed" => "turn.lifecycle",
+        "stream_error" | "error" => "stream.error",
         _ => {
-            let event = sanitize_event_type(event_type);
-            let count = record_unsupported_event(&event);
-            return (
-                format!("unsupported.{event}"),
-                EventApplicability::OutOfScope,
-                Some(count),
-            );
+            let ty = sanitize_event_type(event_type);
+            let count = record_unsupported_event(&ty);
+            return (format!("unsupported.{ty}"), Some(count));
         }
     };
-    (class.to_string(), applicability, None)
+    (class.to_string(), None)
 }
 
 fn sanitize_event_type(event_type: &str) -> String {
@@ -630,26 +565,11 @@ fn record_unsupported_event(event_type: &str) -> u64 {
     *entry
 }
 
-fn emit_unsupported_summary(as_json: bool) -> anyhow::Result<()> {
+#[cfg(test)]
+fn unsupported_event_count(event_type: &str) -> u64 {
     let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
     let guard = map.lock().expect("unsupported event counter mutex");
-    if guard.is_empty() {
-        return Ok(());
-    }
-    let mut counts: Vec<(String, u64)> = guard.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    counts.sort_by(|a, b| a.0.cmp(&b.0));
-    if as_json {
-        let payload = serde_json::json!({
-            "v": 1,
-            "mode": "attached",
-            "class": "telemetry.unsupported_summary",
-            "counts": counts
-        });
-        println!("{}", serde_json::to_string(&payload)?);
-        return Ok(());
-    }
-    println!("[telemetry.unsupported_summary] {:?}", counts);
-    Ok(())
+    guard.get(event_type).copied().unwrap_or(0)
 }
 
 fn print_stream_error(context: &str, err: &anyhow::Error, as_json: bool) -> anyhow::Result<()> {
@@ -683,159 +603,6 @@ fn classify_control_send_error(err: &anyhow::Error) -> &'static str {
         Some(_) => "control.io_error",
         None => "control.error",
     }
-}
-
-fn extract_event_text(event: &Value) -> &str {
-    event
-        .pointer("/params/delta")
-        .and_then(|v| v.as_str())
-        .or_else(|| event.pointer("/params/text").and_then(|v| v.as_str()))
-        .or_else(|| event.pointer("/params/output").and_then(|v| v.as_str()))
-        .or_else(|| event.pointer("/params/message").and_then(|v| v.as_str()))
-        .or_else(|| event.pointer("/params/prompt").and_then(|v| v.as_str()))
-        .or_else(|| event.pointer("/params/diff").and_then(|v| v.as_str()))
-        .unwrap_or("")
-}
-
-fn render_attached_text(env: &AttachedRenderEnvelope) -> String {
-    match env.class.as_str() {
-        "elicitation.request" => {
-            let corr = env
-                .raw
-                .pointer("/event/params/request_id")
-                .and_then(|v| v.as_str())
-                .or_else(|| env.raw.pointer("/event/params/id").and_then(|v| v.as_str()))
-                .unwrap_or("unknown");
-            let choices = env
-                .raw
-                .pointer("/event/params/choices")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|x| x.as_str())
-                        .collect::<Vec<&str>>()
-                        .join("|")
-                })
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "n/a".to_string());
-            format!(
-                "? req={} choices={} {}",
-                corr,
-                choices,
-                if env.text.is_empty() {
-                    "input requested".to_string()
-                } else {
-                    env.text.clone()
-                }
-            )
-        }
-        "tool.exec" => {
-            if env.event_type == "exec_command_output_delta" {
-                if env.text.is_empty() {
-                    return "    ".to_string();
-                }
-                return format!("    {}", env.text);
-            }
-            let marker = match env.event_type.as_str() {
-                "exec_command_started" => ">>",
-                "exec_command_completed" => "<<",
-                "exec_command_error" => "!!",
-                _ => "·",
-            };
-            if env.text.is_empty() {
-                format!("{marker} {}", env.event_type)
-            } else {
-                format!("{marker} {}", env.text)
-            }
-        }
-        "assistant.reasoning" => {
-            if env.text.is_empty() {
-                "[reasoning]".to_string()
-            } else {
-                format!("[reasoning] {}", env.text)
-            }
-        }
-        "input.client" => {
-            if env.text.is_empty() {
-                "[INPUT]".to_string()
-            } else {
-                format!("[INPUT] {}", env.text)
-            }
-        }
-        "input.user_steer" => {
-            if env.text.is_empty() {
-                "[STEER]".to_string()
-            } else {
-                format!("[STEER] {}", env.text)
-            }
-        }
-        "tool.lifecycle" => {
-            let label = extract_tool_name(&env.raw).unwrap_or("tool");
-            if env.text.is_empty() {
-                format!("{label} {}", env.event_type)
-            } else {
-                format!("{label} {}: {}", env.event_type, env.text)
-            }
-        }
-        "file.edit" => render_diff_text(&env.text, &env.event_type),
-        _ => {
-            if env.class.starts_with("unsupported.") {
-                env.class.clone()
-            } else if env.class == "turn.lifecycle" && env.event_type == "turn_aborted" {
-                "[ERROR] turn_aborted".to_string()
-            } else if env.class == "stream.error" {
-                format!(
-                    "[ERROR] {}",
-                    if env.text.is_empty() {
-                        env.event_type.clone()
-                    } else {
-                        env.text.clone()
-                    }
-                )
-            } else if env.class == "unknown" {
-                format!("unknown.{}", env.event_type)
-            } else if env.text.is_empty() {
-                env.event_type.clone()
-            } else {
-                env.text.clone()
-            }
-        }
-    }
-}
-
-fn extract_tool_name(frame: &Value) -> Option<&str> {
-    let event = frame.get("event").unwrap_or(frame);
-    event
-        .pointer("/params/tool_name")
-        .and_then(|v| v.as_str())
-        .or_else(|| event.pointer("/params/toolName").and_then(|v| v.as_str()))
-        .or_else(|| event.pointer("/params/name").and_then(|v| v.as_str()))
-}
-
-fn render_diff_text(text: &str, fallback: &str) -> String {
-    if text.trim().is_empty() {
-        return fallback.to_string();
-    }
-    text.lines()
-        .map(|line| {
-            if line.starts_with('+') {
-                format!("\u{1b}[32m{line}\u{1b}[0m")
-            } else if line.starts_with('-') {
-                format!("\u{1b}[31m{line}\u{1b}[0m")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<String>>()
-        .join("\n")
-}
-
-fn format_mail_actor(actor: &str) -> String {
-    if actor.contains('@') {
-        return actor.to_string();
-    }
-    let team = std::env::var("ATM_TEAM").unwrap_or_else(|_| "atm-dev".to_string());
-    format!("{actor}@{}", team.trim())
 }
 
 fn clamp_three_lines(text: &str) -> String {
@@ -872,8 +639,8 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    fn attach_parity_fixture_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parity/attach")
+    fn attach_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/attach")
     }
 
     #[test]
@@ -926,7 +693,14 @@ mod tests {
             }
         );
         assert_eq!(parse_attach_input(":"), AttachInput::Ignore);
-        assert_eq!(parse_attach_input("  "), AttachInput::Ignore);
+        assert_eq!(parse_attach_input("   "), AttachInput::Ignore);
+        assert_eq!(
+            parse_attach_input(":unknown"),
+            AttachInput::Control {
+                verb: ControlVerb::Help,
+                arg: None
+            }
+        );
     }
 
     #[test]
@@ -953,24 +727,19 @@ mod tests {
         let env = to_attached_envelope("codex:abc", &frame);
         assert_eq!(env.mode, "attached");
         assert_eq!(env.class, "assistant.output");
-        assert_eq!(env.applicability, "required");
         assert_eq!(env.text, "hello");
         assert_eq!(env.source_actor, "arch-atm");
+        assert_eq!(env.unsupported_count, None);
     }
 
     #[test]
-    fn classify_tool_lifecycle_degraded() {
-        let (class, applicability, _) = classify_event_class("mcp_tool_call_begin", "client_prompt");
-        assert_eq!(class, "tool.lifecycle");
-        assert_eq!(applicability.as_str(), "degraded");
-    }
-
-    #[test]
-    fn classify_unknown_becomes_unsupported_out_of_scope() {
-        let (class, applicability, count) = classify_event_class("future/event", "client_prompt");
+    fn classify_unknown_event_emits_supported_prefix_and_counter() {
+        let (class, count1) = classify_event_class("future/event", "client_prompt");
+        let (_, count2) = classify_event_class("future/event", "client_prompt");
         assert_eq!(class, "unsupported.future_event");
-        assert_eq!(applicability.as_str(), "out_of_scope");
-        assert_eq!(count, Some(1));
+        assert_eq!(count1, Some(1));
+        assert_eq!(count2, Some(2));
+        assert_eq!(unsupported_event_count("future_event"), 2);
     }
 
     #[test]
@@ -979,64 +748,91 @@ mod tests {
         assert_eq!(classify_control_send_error(&err), "control.connection_refused");
     }
 
-    #[test]
-    fn render_diff_text_applies_ansi_colors() {
-        let rendered = render_diff_text("-old\n+new\n context", "turn_diff");
-        assert!(rendered.contains("\u{1b}[31m-old\u{1b}[0m"));
-        assert!(rendered.contains("\u{1b}[32m+new\u{1b}[0m"));
-        assert!(rendered.contains(" context"));
+    #[tokio::test]
+    async fn replay_tail_reads_fixture_jsonl() {
+        let fixture = attach_fixture_dir().join("replay.sample.jsonl");
+        let raw = fs::read_to_string(&fixture).expect("fixture exists");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let feed_path = temp_dir.path().join("feed.jsonl");
+        fs::write(&feed_path, raw).expect("write feed");
+
+        let (frames, pos) = tail_watch_stream_file(&feed_path, 0, "codex:test")
+            .await
+            .expect("tail succeeds");
+        assert_eq!(frames.len(), 2);
+        assert!(pos > 0);
+        assert_eq!(
+            frames[0].pointer("/event/params/type").and_then(|v| v.as_str()),
+            Some("turn_started")
+        );
+        assert_eq!(
+            frames[1].pointer("/event/params/type").and_then(|v| v.as_str()),
+            Some("item_delta")
+        );
     }
 
-    #[test]
-    fn tool_exec_output_delta_is_indented() {
-        let env = AttachedRenderEnvelope {
-            v: 1,
-            mode: "attached",
-            agent_id: "codex:test".to_string(),
-            class: "tool.exec".to_string(),
-            applicability: "required".to_string(),
-            source_kind: "client_prompt".to_string(),
-            source_actor: "arch-atm".to_string(),
-            source_channel: "mcp_primary".to_string(),
-            event_type: "exec_command_output_delta".to_string(),
-            text: "line".to_string(),
-            is_turn_boundary: false,
-            unsupported_count: None,
-            raw: serde_json::json!({}),
-        };
-        assert_eq!(render_attached_text(&env), "    line");
-    }
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn send_stdin_control_with_mock_daemon_ack() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
 
-    #[test]
-    fn format_mail_actor_adds_team_suffix() {
-        let actor = format_mail_actor("arch-atm");
-        assert!(actor.contains("arch-atm@"));
-    }
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let old_home = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            std::env::set_var("ATM_HOME", temp_dir.path());
+        }
 
-    #[test]
-    fn parity_attach_fixture_classes() {
-        let input_path = attach_parity_fixture_dir().join("class-map.input.jsonl");
-        let expected_path = attach_parity_fixture_dir().join("class-map.expected.jsonl");
-        let input = fs::read_to_string(input_path).expect("input fixture");
-        let expected = fs::read_to_string(expected_path).expect("expected fixture");
-        let expected: Vec<serde_json::Value> = expected
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l).expect("expected json"))
-            .collect();
-        let actual: Vec<serde_json::Value> = input
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("frame json"))
-            .map(|frame| {
-                let env = to_attached_envelope("codex:test", &frame);
-                serde_json::json!({
-                    "event_type": env.event_type,
-                    "class": env.class,
-                    "applicability": env.applicability
-                })
-            })
-            .collect();
-        assert_eq!(actual, expected);
+        let daemon_dir = temp_dir.path().join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).expect("daemon dir");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut req_line = String::new();
+            {
+                let mut reader = BufReader::new(&stream);
+                reader.read_line(&mut req_line).expect("read request");
+            }
+            let req: serde_json::Value = serde_json::from_str(req_line.trim()).expect("json req");
+            assert_eq!(req.get("command").and_then(|v| v.as_str()), Some("control"));
+            let socket_request_id = req
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sock-test");
+            let response = serde_json::json!({
+                "version": 1,
+                "request_id": socket_request_id,
+                "status": "ok",
+                "payload": {
+                    "request_id": "req-attach-test",
+                    "result": "ok",
+                    "duplicate": false,
+                    "detail": "mock-daemon-ack",
+                    "acked_at": "2026-02-24T00:00:00Z"
+                }
+            });
+            let mut writer = std::io::BufWriter::new(&stream);
+            writer
+                .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                .expect("write response");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+        });
+
+        let ack = send_stdin_control("atm-dev", "codex:test", "hello").expect("control ack");
+        assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
+        assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
+
+        server.join().expect("server join");
+        if let Some(home) = old_home {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::set_var("ATM_HOME", home);
+            }
+        }
     }
 }
