@@ -142,6 +142,58 @@ pub fn render_stream_line(raw_line: &str) -> Line<'static> {
         ]);
     }
 
+    if let Some(rest) = trimmed.strip_prefix("input.client ") {
+        return Line::from(vec![
+            Span::styled(
+                "→ ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Client input ", Style::default().fg(Color::Cyan)),
+            Span::raw(rest.to_string()),
+        ]);
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("input.user_steer ") {
+        return Line::from(vec![
+            Span::styled(
+                "↪ ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Steer input ", Style::default().fg(Color::Yellow)),
+            Span::raw(rest.to_string()),
+        ]);
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("input.atm_mail ") {
+        return Line::from(vec![
+            Span::styled(
+                "✉ ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("ATM mail ", Style::default().fg(Color::Magenta)),
+            Span::raw(rest.to_string()),
+        ]);
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("elicitation.request ") {
+        return Line::from(vec![
+            Span::styled(
+                "? ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Input requested ", Style::default().fg(Color::Magenta)),
+            Span::raw(rest.to_string()),
+        ]);
+    }
+
     if let Some(rest) = trimmed.strip_prefix("stream.counters ") {
         return Line::from(vec![
             Span::styled(
@@ -219,34 +271,54 @@ mod tests {
     }
 
     #[test]
-    fn parity_render_fixture_combined_flow() {
-        let scenario = renderer_fixture_dir().join("combined-flow");
-        let raw_events =
-            fs::read_to_string(scenario.join("normalized.events.jsonl")).expect("events fixture");
-        let actual_lines: Vec<String> = raw_events
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("valid JSON line"))
-            .map(|v| {
-                let raw = v
-                    .get("line")
-                    .and_then(|v| v.as_str())
-                    .expect("line field in fixture");
-                rendered_text(render_stream_line(raw))
-            })
-            .collect();
-        let actual = format!("{}\n", actual_lines.join("\n"));
+    fn parity_render_fixture_scenarios() {
+        let scenarios = [
+            "combined-flow",
+            "multi-item",
+            "fatal-error",
+            "unknown-event",
+            "atm-mail",
+            "user-steer",
+            "session-attach",
+            "detach-reattach",
+            "cross-transport",
+        ];
 
-        let expected_120 = fs::read_to_string(scenario.join("viewport-120x36.snap"))
-            .expect("120x36 snapshot")
-            .replace("\r\n", "\n");
-        let expected_80 = fs::read_to_string(scenario.join("viewport-80x24.snap"))
-            .expect("80x24 snapshot")
-            .replace("\r\n", "\n");
+        for scenario_name in scenarios {
+            let scenario = renderer_fixture_dir().join(scenario_name);
+            let raw_events = fs::read_to_string(scenario.join("normalized.events.jsonl"))
+                .expect("events fixture");
+            let actual_lines: Vec<String> = raw_events
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("valid JSON line"))
+                .map(|v| {
+                    let raw = v
+                        .get("line")
+                        .and_then(|v| v.as_str())
+                        .expect("line field in fixture");
+                    rendered_text(render_stream_line(raw))
+                })
+                .collect();
+            let actual = format!("{}\n", actual_lines.join("\n"));
 
-        // Current parity baseline uses viewport-independent line snapshots.
-        // Keep both fixtures explicit until full frame-buffer snapshots land.
-        assert_eq!(actual, expected_120, "renderer mismatch for 120x36 snapshot");
-        assert_eq!(actual, expected_80, "renderer mismatch for 80x24 snapshot");
+            let expected_120 = fs::read_to_string(scenario.join("viewport-120x36.snap"))
+                .expect("120x36 snapshot")
+                .replace("\r\n", "\n");
+            let expected_80 = fs::read_to_string(scenario.join("viewport-80x24.snap"))
+                .expect("80x24 snapshot")
+                .replace("\r\n", "\n");
+
+            // Current parity baseline uses viewport-independent line snapshots.
+            // Keep both fixtures explicit until full frame-buffer snapshots land.
+            assert_eq!(
+                actual, expected_120,
+                "renderer mismatch for 120x36 snapshot in scenario {scenario_name}"
+            );
+            assert_eq!(
+                actual, expected_80,
+                "renderer mismatch for 80x24 snapshot in scenario {scenario_name}"
+            );
+        }
     }
 }

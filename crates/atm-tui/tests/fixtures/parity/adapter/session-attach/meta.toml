@@ -1,0 +1,5 @@
+name = "session-attach"
+transport = "mcp"
+codex_version = "0.15.0"
+schema_version = "v1"
+notes = "attach replay continuity sample"

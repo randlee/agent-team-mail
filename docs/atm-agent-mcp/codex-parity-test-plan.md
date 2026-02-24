@@ -185,5 +185,5 @@ Only after these are green should subjective user validation begin.
 - Current approved deviation: renderer parity snapshots are line-level textual snapshots derived from `codex_watch::render_stream_line`, not full terminal-buffer frame dumps.
 - Rationale: provides deterministic, cross-platform parity checks in CI while preserving a clear upgrade path to full-frame snapshotting in follow-up parity expansion work.
 - Delivered fixture scenarios for M.7 baseline: `prompt-basic`, `tool-stream`, `approval-flow`, `error-flow`, `cancel-flow`.
-- Deferred scenario deviations (approved for future parity expansion): `multi-item`, `fatal-error`, `unknown-event`, `atm-mail`, `user-steer`, `session-attach`, `detach-reattach`, `cross-transport`.
+- O.3 parity expansion delivered the previously deferred scenarios: `multi-item`, `fatal-error`, `unknown-event`, `atm-mail`, `user-steer`, `session-attach`, `detach-reattach`, `cross-transport`.
 - Viewport reflow deviation: current renderer parity checks are viewport-width-independent line snapshots. `viewport-120x36` and `viewport-80x24` remain intentionally identical baseline fixtures until full frame-buffer snapshot testing is added.
