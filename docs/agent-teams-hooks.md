@@ -506,7 +506,7 @@ Agent PID (stable per session, e.g., 11449)
 
 The PreToolUse hook fires before every tool call as a child process of the agent.
 
-- **Only writes for `atm` commands** — checks `tool_input.command` for `atm` or `cargo run atm` substring; skips all other tool calls (no orphan files). This is a Python script and can be hand-edited if custom aliases or wrappers are used.
+- **Only writes for `atm` commands** — parses command tokens and matches `atm` invocation patterns (including `cargo run ... atm` forms); skips all other tool calls (no orphan files). This is a Python script and can be hand-edited if custom aliases or wrappers are used.
 - **File**: `<temp_dir>/atm-hook-<hook_pid>.json` where `hook_pid` = `os.getpid()` (changes every call)
 - **Permissions**: `0600` (owner-only read/write) on Unix — prevents spoofing/tampering in shared temp directories. On Windows, ACL-based ownership validation is not portable; implementation should log a warning and skip ownership check rather than fail (fail-open).
 - **Contents**: `{ pid: <agent_pid>, session_id, agent_name, created_at }`
@@ -529,7 +529,10 @@ When `atm send`, `atm read`, etc. runs inside a Bash tool call:
    - `session_id` matches expected session if known (guard against PID reuse misattribution)
 4. Reads `session_id` + `agent_name` from the file
 5. **Does not delete** — file is cleaned up by PostToolUse hook (supports multiple `atm` calls in one Bash invocation)
-6. **Missing or unreadable file**: `atm` **rejects the call** and requires `--from <name>` to proceed. No silent fallback — a missing hook file indicates a broken hook setup and should not be masked. Same behavior for locked, permission-denied, or corrupt files.
+6. **Missing or unreadable file**: `atm` **rejects the call** and requires an explicit identity override by command contract:
+   - `atm send` / `atm broadcast`: require `--from <name>`
+   - `atm read` (own inbox mode): require `--as <name>`
+   No silent fallback — a missing hook file indicates a broken hook setup and should not be masked. Same behavior for locked, permission-denied, or corrupt files.
 
 This works because the PreToolUse hook and the Bash shell share the same PID — Claude Code runs both as the same child process of the agent. The hook runs first (and can block with exit code 2), then the shell executes in the same process. So `atm`'s parent PID is always the hook file's name.
 
@@ -537,7 +540,12 @@ This works because the PreToolUse hook and the Bash shell share the same PID —
 
 ### `atm register` — Unified Session Registration (replaces `atm teams resume`)
 
-One command handles both team-lead and teammate registration. Called once per session at startup (instructed via CLAUDE.md). Reads the hook file for `session_id` automatically — no more manual `--session-id` flag.
+One command handles both team-lead and teammate registration. Called once per session at startup (instructed via CLAUDE.md). Reads the hook file for `session_id` automatically.
+
+Session ID source policy for `register`:
+- Primary: hook file (`<temp_dir>/atm-hook-<pid>.json`)
+- Bootstrap fallback (register only): `CLAUDE_SESSION_ID` with a warning if hook file is unavailable
+- If neither source is available: reject and require explicit remediation (fix hooks or pass an explicit session identifier if supported)
 
 #### Team-lead: `atm register <team>`
 
@@ -547,6 +555,10 @@ Team-lead calls first (identity resolved from `.atm.toml`). This subsumes the cu
 - Claims team lead: updates `leadSessionId` in team config
 - Auto-backup before state change
 - Liveness check on old session (daemon query, `--force` to override)
+- If another team-lead session appears active, do not auto-assume role:
+  - warn and block by default
+  - allow explicit takeover with `--force`
+  - optional `--force --kill` may terminate prior lead PID only when PID is known and user explicitly requested it
 - Marks non-lead members inactive
 - Notifies all members via inbox
 - Registers `{ agent_name: "team-lead", session_id, agent_pid }` with daemon
@@ -576,18 +588,20 @@ atm register <team> <name>    # teammates (name passed explicitly)
 
 For Claude Code agents (hook file expected):
 ```
-1. Hook file (<temp_dir>/atm-hook-<pid>.json)  → required for Claude Code teammates
-2. If hook file missing/unreadable              → REJECT, require --from <name>
+1. Hook file (<temp_dir>/atm-hook-<pid>.json)        → required when identity is not explicitly provided
+2. Explicit override (`--from` for send, `--as` read) → always allowed
+3. If neither available                               → REJECT and ask user to identify agent explicitly
 ```
 
 For non-Claude agents (Codex, Gemini, external — no hooks):
 ```
-1. --from <name> CLI flag                 → explicit override (always works)
-2. ATM_IDENTITY env var                   → Codex/Gemini/external agents
-3. .atm.toml [core].identity              → fallback (team-lead default)
+1. Explicit CLI identity override (`--from` / `--as`)   → always works
+2. ATM_IDENTITY env var                                  → Codex/Gemini/external agents
+3. .atm.toml [core].identity                             → fallback only when set to a concrete team member
+4. No identity resolved                                  → REJECT; do not silently assign `human`
 ```
 
-The `--from` flag works regardless of hook state — it is the universal escape hatch.
+Explicit identity flags (`--from`, `--as`) work regardless of hook state.
 
 ### Register Ordering
 
