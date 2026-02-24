@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
-**Version**: 0.3
-**Date**: 2026-02-22
-**Status**: Phase L active (v0.17.0 target). Phase G complete (v0.16.0).
+**Version**: 0.4
+**Date**: 2026-02-23
+**Status**: Phase M complete (v0.17.0). Phase G released (v0.16.0).
 
 ---
 
@@ -485,20 +485,20 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.1 Phase M: Log & Stream Cleanup — PLANNED
+## 17.1 Phase M: Log & Stream Cleanup — COMPLETE
 
 **Goal**: Close post-Phase-L logging/streaming gaps, then deliver Codex CLI look-and-feel parity in ATM watch mode.
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| M.1 | Watch-stream file naming/scoping cleanup | L.5 | PLANNED |
-| M.1b | Legacy bridge removal (`emit_event_best_effort` sunset) | M.1 | IN PROGRESS |
-| M.2 | Codex watch-pane UI import baseline (copy-first) | L.5 | PLANNED |
-| M.3 | Event adapter parity (`CodexAdapter`) | M.2 | PLANNED |
-| M.4 | Input/approval/interrupt parity | M.3 | PLANNED |
-| M.5 | Session/status surface parity | M.4 | PLANNED |
-| M.6 | Replay/reconnect hardening | M.5 | PLANNED |
-| M.7 | Golden parity test harness + rollout gate | M.6 | PLANNED |
+| M.1 | Watch-stream file naming/scoping cleanup | L.5 | COMPLETE |
+| M.1b | Legacy bridge removal (`emit_event_best_effort` sunset) | M.1 | COMPLETE |
+| M.2 | Codex watch-pane UI import baseline (copy-first) | L.5 | COMPLETE |
+| M.3 | Event adapter parity (`CodexAdapter`) | M.2 | COMPLETE |
+| M.4 | Input/approval/interrupt parity | M.3 | COMPLETE |
+| M.5 | Session/status surface parity | M.4 | COMPLETE |
+| M.6 | Replay/reconnect hardening | M.5 | COMPLETE |
+| M.7 | Golden parity test harness + rollout gate | M.6 | COMPLETE |
 
 **Parallel tracks**: M.1 and M.2 can execute concurrently (both depend only on L.5). M.1b depends on M.1 but is independent of M.2-M.7 and can run in parallel with the Codex parity track. M.3+ is sequential after M.2.
 
@@ -632,8 +632,16 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **L** | L.3 | `atm logs` CLI command | COMPLETE | integrate/phase-L |
 | **L** | L.4 | TUI log viewer + legacy sunset | COMPLETE | integrate/phase-L |
 | **L** | L.5 | Direct watch stream + daemon boundary hardening | COMPLETE | [#201](https://github.com/randlee/agent-team-mail/pull/201) |
+| **M** | M.1 | Watch-stream file naming/scoping cleanup | COMPLETE | [#206](https://github.com/randlee/agent-team-mail/pull/206) |
+| **M** | M.1b | Legacy bridge removal (`emit_event_best_effort` sunset) | COMPLETE | [#213](https://github.com/randlee/agent-team-mail/pull/213) |
+| **M** | M.2 | Codex watch-pane UI import baseline (copy-first) | COMPLETE | [#207](https://github.com/randlee/agent-team-mail/pull/207) |
+| **M** | M.3 | Event adapter parity (`CodexAdapter`) | COMPLETE | [#208](https://github.com/randlee/agent-team-mail/pull/208) |
+| **M** | M.4 | Input/approval/interrupt parity | COMPLETE | [#209](https://github.com/randlee/agent-team-mail/pull/209) |
+| **M** | M.5 | Session/status surface parity | COMPLETE | [#210](https://github.com/randlee/agent-team-mail/pull/210) |
+| **M** | M.6 | Replay/reconnect hardening | COMPLETE | [#211](https://github.com/randlee/agent-team-mail/pull/211) |
+| **M** | M.7 | Golden parity test harness + CI gates | COMPLETE | [#212](https://github.com/randlee/agent-team-mail/pull/212) |
 
-**Completed**: 80+ sprints across 18 phases (CI green)
+**Completed**: 88+ sprints across 19 phases (CI green)
 **Current version**: v0.17.0
 **Next**: Phase F (Team Installer) planned
 
@@ -654,7 +662,10 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Phase B | [#121](https://github.com/randlee/agent-team-mail/pull/121) | Merged |
 | Phase C | [#126](https://github.com/randlee/agent-team-mail/pull/126) | Merged |
 | Phase D | [#140](https://github.com/randlee/agent-team-mail/pull/140) | Merged |
-| Phase E | TBD | Pending |
+| Phase E | [#166](https://github.com/randlee/agent-team-mail/pull/166) | Merged |
+| Phase G | [#178](https://github.com/randlee/agent-team-mail/pull/178) | Merged |
+| Phase L | [#199](https://github.com/randlee/agent-team-mail/pull/199) | Merged |
+| Phase M | [#214](https://github.com/randlee/agent-team-mail/pull/214) | Pending |
 
 ---
 
