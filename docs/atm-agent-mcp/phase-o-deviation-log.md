@@ -11,6 +11,8 @@ Owner: `arch-ctm`
 - Rationale: keep attached stream dense and scan-friendly while preserving exact line-boundary truncation semantics.
 - Mitigation: source text is clamped from true line boundaries, and overflow indicator (`...`) is preserved.
 - Follow-up: revisit multiline expansion in O.3b if operator feedback shows readability regression.
+- approved_by: team-lead
+- approved_date: 2026-02-24
 
 ### DEV-O2-002: O.2 split trigger assessment
 - Assessment: split trigger did **not** fire.
