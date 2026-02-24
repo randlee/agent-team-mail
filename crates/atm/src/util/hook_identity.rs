@@ -137,19 +137,6 @@ pub fn read_hook_file_identity() -> Result<Option<String>> {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    /// Write a hook file with a given JSON payload, then swap it into the expected
-    /// path for `read_hook_file()` to find.  Returns the temp dir guard so it lives
-    /// for the duration of the test.
-    fn write_hook_file_for_ppid(data: &serde_json::Value) -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let ppid = get_parent_pid();
-        let path = dir.path().join(format!("atm-hook-{ppid}.json"));
-        std::fs::write(&path, serde_json::to_string(data).unwrap()).unwrap();
-        (dir, path)
-    }
 
     #[test]
     #[serial]

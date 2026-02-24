@@ -84,10 +84,14 @@ fn resolve_session_id() -> Result<String> {
         }
     }
 
-    // 2. Fall back to CLAUDE_SESSION_ID environment variable.
+    // 2. Bootstrap fallback: CLAUDE_SESSION_ID (register only — with mandatory warning).
     if let Ok(id) = std::env::var("CLAUDE_SESSION_ID") {
         let trimmed = id.trim().to_string();
         if !trimmed.is_empty() {
+            eprintln!(
+                "WARNING: hook file not found, falling back to CLAUDE_SESSION_ID. \
+                 Ensure atm-identity-write.py hook is configured in .claude/settings.json."
+            );
             return Ok(trimmed);
         }
     }

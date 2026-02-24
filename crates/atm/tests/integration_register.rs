@@ -113,7 +113,8 @@ fn test_register_team_lead_with_session_id_env() {
         .success()
         .stdout(predicate::str::contains("Registered as team-lead"))
         .stdout(predicate::str::contains("my-team"))
-        .stdout(predicate::str::contains("test-session-lead-001"));
+        .stdout(predicate::str::contains("test-session-lead-001"))
+        .stderr(predicate::str::contains("WARNING: hook file not found"));
 
     // Verify leadSessionId was updated in config.json.
     let config_path = temp_dir
@@ -156,7 +157,8 @@ fn test_register_teammate_with_session_id_env() {
         .success()
         .stdout(predicate::str::contains("Registered as 'alice'"))
         .stdout(predicate::str::contains("my-team"))
-        .stdout(predicate::str::contains("test-session-alice-001"));
+        .stdout(predicate::str::contains("test-session-alice-001"))
+        .stderr(predicate::str::contains("WARNING: hook file not found"));
 
     // Verify sessionId was written on the alice member.
     let config: serde_json::Value =
@@ -187,6 +189,7 @@ fn test_register_unknown_name_fails() {
 
     cmd.assert()
         .failure()
+        .stderr(predicate::str::contains("WARNING: hook file not found"))
         .stderr(predicate::str::contains("not found in team"));
 }
 
@@ -208,7 +211,8 @@ fn test_register_warns_when_lead_not_registered() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("WARNING"));
+        .stdout(predicate::str::contains("WARNING"))
+        .stderr(predicate::str::contains("WARNING: hook file not found"));
 }
 
 #[test]
@@ -232,6 +236,7 @@ fn test_register_team_lead_wrong_identity_fails() {
 
     cmd.assert()
         .failure()
+        .stderr(predicate::str::contains("WARNING: hook file not found"))
         .stderr(predicate::str::contains("Only team-lead may call"));
 }
 
