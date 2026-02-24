@@ -18,3 +18,19 @@ Owner: `arch-ctm`
 - Assessment: split trigger did **not** fire.
 - Reason: required class coverage + fixture expansion landed in O.2 scope without additional architecture churn.
 - Residual deferred work: none for O.2 gate; O.3 continues control-path parity hardening.
+
+## O.3
+
+### DEV-O3-001: stream error_source granularity
+- Requirement context: control-path/fault surfacing parity in Phase O.
+- Current behavior: `error_source` is always emitted as `proxy` (no `child` vs `upstream_mcp` distinction).
+- approved_by: team-lead
+- approved_date: 2026-02-24
+- rationale: full fault source classification deferred to production hardening phase.
+
+### DEV-O3-002: Ctrl-C maps to process exit, not interrupt control
+- Requirement context: attached mode control UX.
+- Current behavior: terminal `Ctrl-C` follows default process signal behavior and exits attached mode; it does not emit `control.interrupt.request`.
+- approved_by: team-lead
+- approved_date: 2026-02-24
+- rationale: explicit `:interrupt` command is the canonical interrupt path in Phase O; terminal-signal interception is deferred to hardening.

@@ -1,0 +1,2 @@
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"item_delta","delta":"before detach"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"item_delta","delta":"after reattach"}}}

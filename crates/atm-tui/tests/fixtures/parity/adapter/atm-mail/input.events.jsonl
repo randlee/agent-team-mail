@@ -1,0 +1,1 @@
+{"source":{"kind":"atm_mail","actor":"arch-atm","channel":"mail_injector"},"event":{"params":{"type":"user_message","text":"line1\nline2\nline3\nline4"}}}

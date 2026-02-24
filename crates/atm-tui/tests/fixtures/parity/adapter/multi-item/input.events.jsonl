@@ -1,0 +1,8 @@
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"turn_started"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"item_started"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"item_delta","delta":"step 1"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"item_completed"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"item_started"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"item_delta","delta":"step 2"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"item_completed"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"turn_completed","status":"completed"}}}
