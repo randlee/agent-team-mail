@@ -71,8 +71,8 @@ fn setup_team() -> (TempDir, PathBuf) {
 fn test_send_defaults_to_human_when_no_identity() {
     let (temp_dir, _team_dir) = setup_team();
 
-    // Send without ATM_IDENTITY or --from should default to "human"
-    // Set current_dir to temp_dir so .atm.toml in the repo root doesn't leak identity
+    // Send without ATM_IDENTITY or --from and without a hook file must be
+    // rejected with a clear error message (new design: no silent fallback).
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", temp_dir.path())
         .env("ATM_TEAM", "test-team")
@@ -82,16 +82,9 @@ fn test_send_defaults_to_human_when_no_identity() {
         .arg("alice")
         .arg("Hello from human");
 
-    cmd.assert().success();
-
-    // Verify message is from "human"
-    let inbox = fs::read_to_string(
-        temp_dir
-            .path()
-            .join(".claude/teams/test-team/inboxes/alice.json"),
-    )
-    .unwrap();
-    assert!(inbox.contains("\"from\": \"human\""));
+    cmd.assert()
+        .failure()
+        .stderr(predicates::str::contains("Cannot determine sender identity"));
 }
 
 #[test]
@@ -184,8 +177,7 @@ fn test_send_without_team_context_defaults_to_human() {
     fs::write(team_dir.join("inboxes/alice.json"), "[]").unwrap();
     fs::create_dir_all(temp_dir.path().join("workdir")).unwrap();
 
-    // Send without matching identity should default to "human"
-    // Set current_dir to workdir so .atm.toml in the repo root doesn't leak identity
+    // Send without ATM_IDENTITY or hook file must be rejected (new design: no silent fallback).
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", temp_dir.path())
         .env("ATM_TEAM", "external-team")
@@ -195,16 +187,9 @@ fn test_send_without_team_context_defaults_to_human() {
         .arg("alice")
         .arg("Message from outside");
 
-    cmd.assert().success();
-
-    // Verify message is from "human"
-    let inbox = fs::read_to_string(
-        temp_dir
-            .path()
-            .join(".claude/teams/external-team/inboxes/alice.json"),
-    )
-    .unwrap();
-    assert!(inbox.contains("\"from\": \"human\""));
+    cmd.assert()
+        .failure()
+        .stderr(predicates::str::contains("Cannot determine sender identity"));
 }
 
 #[test]
