@@ -2,7 +2,7 @@
 
 **Version**: 0.4
 **Date**: 2026-02-23
-**Status**: Phase M complete (v0.17.0). Phase G released (v0.16.0).
+**Status**: Phase M complete (v0.17.0). Phase N planning in progress.
 
 ---
 
@@ -524,6 +524,29 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
+## 17.2 Phase N: Attached CLI Parity — PLANNED
+
+**Goal**: Deliver an `atm-agent-mcp attach <agent-id>` terminal mode with Codex CLI parity for output and interaction semantics while preserving ATM source attribution and daemon boundaries.
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| N.1 | Attach command + stream/control wiring | M.7 | PLANNED |
+| N.2 | Renderer/runtime parity in attached mode | N.1 | PLANNED |
+| N.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | N.2 | PLANNED |
+| N.4 | Golden parity + deviation governance | N.3 | PLANNED |
+
+**Scope**:
+- Add `attach <agent-id>` as an interactive terminal entrypoint bound to one active session.
+- Preserve source attribution metadata (`client_prompt`, `atm_mail`, `user_steer`) with Codex-parity ordering/formatting.
+- Guarantee attach/detach/re-attach continuity with bounded replay and explicit fault surfacing.
+- Track and approve intentional parity deviations through a maintained deviation log.
+
+**References**:
+- `docs/atm-agent-mcp/requirements.md` (FR-13.9, FR-23, Phase N sprint contract)
+- `docs/atm-agent-mcp/live-stream-and-log-viewing.md` (watch and attached parity planning alignment)
+
+---
+
 ## 18. Future Plugins
 
 | Plugin | Priority | Notes |
@@ -640,10 +663,14 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **M** | M.5 | Session/status surface parity | COMPLETE | [#210](https://github.com/randlee/agent-team-mail/pull/210) |
 | **M** | M.6 | Replay/reconnect hardening | COMPLETE | [#211](https://github.com/randlee/agent-team-mail/pull/211) |
 | **M** | M.7 | Golden parity test harness + CI gates | COMPLETE | [#212](https://github.com/randlee/agent-team-mail/pull/212) |
+| **N** | N.1 | Attach command + stream/control wiring | PLANNED | — |
+| **N** | N.2 | Renderer/runtime parity in attached mode | PLANNED | — |
+| **N** | N.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | PLANNED | — |
+| **N** | N.4 | Golden parity + deviation governance | PLANNED | — |
 
 **Completed**: 88+ sprints across 19 phases (CI green)
 **Current version**: v0.17.0
-**Next**: Phase F (Team Installer) planned
+**Next**: Phase N (Attached CLI Parity) planned
 
 ---
 
@@ -666,6 +693,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Phase G | [#178](https://github.com/randlee/agent-team-mail/pull/178) | Merged |
 | Phase L | [#199](https://github.com/randlee/agent-team-mail/pull/199) | Merged |
 | Phase M | [#214](https://github.com/randlee/agent-team-mail/pull/214) | Pending |
+| Phase N | — | Planned |
 
 ---
 

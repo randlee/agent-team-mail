@@ -4,6 +4,9 @@ Status: Approved baseline for M.3/M.7 implementation
 Owner: `arch-ctm`
 Scope: `atm-agent-mcp` + `atm-tui` Codex watch parity validation
 
+Companion analysis:
+- `docs/atm-agent-mcp/codex-cli-atm-tui-render-gap-analysis.md` (type-by-type Codex vs ATM render mapping and remediation priorities)
+
 ## 1. Goal
 
 Provide objective, automatable parity checks so Codex watch mode can be validated before user testing.
@@ -123,6 +126,9 @@ Event record requirements:
 10. Primary client prompt and local user steer in same session.
 11. Session attach with 50-line replay.
 12. Detach/reattach and reconnect continuity.
+13. MCP client/user input rendering uses distinct input style class.
+14. ATM mail rendering uses `sender@team <short-message>` with 3-line clamp.
+15. File edit/patch diff renders with Codex-equivalent red/green semantics.
 
 ### Transport coverage
 13. Repeat representative scenarios on all transports:

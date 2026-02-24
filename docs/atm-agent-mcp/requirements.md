@@ -214,6 +214,7 @@ Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-view
 - **FR-13.6**: `atm-agent-mcp summary <agent-id>` — display saved summary.
 - **FR-13.7**: High-level flags SHOULD be supported for common profiles: `--fast`, `--subagents`, and `--readonly`/`--explore`.
 - **FR-13.8**: Downstream execution mode is config-driven (`transport = "mcp" | "cli-json" | "app-server"`). CLI MAY add `--transport` later.
+- **FR-13.9**: `atm-agent-mcp attach <agent-id>` MUST be supported for an interactive terminal mode that subscribes to one live session stream and forwards user controls to that same session.
 
 ### FR-14: Request Timeouts
 
@@ -321,6 +322,20 @@ Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-view
 - **FR-22.2**: Watch stream events delivered to `atm-tui` MUST preserve source metadata so UI can render origin badges/labels.
 - **FR-22.3**: Structured logs for turn/request lifecycle MUST include `source.kind` and `source.actor` fields where available.
 
+### FR-23: Attached Terminal Parity (Codex CLI Baseline)
+
+> **Design Decision**: ATM must provide an attached terminal mode that matches Codex CLI output and interaction behavior for a selected `agent_id`, while preserving ATM source attribution metadata.
+
+- **FR-23.1**: `attach <agent-id>` MUST render core flows at Codex-CLI parity: prompt lifecycle, streaming tool output, approval/reject, interrupt/cancel, errors/fatal, and turn completion.
+- **FR-23.2**: Attached mode MUST accept user input/steer actions and route them through the MCP session bound to the attached `agent_id`.
+- **FR-23.3**: Attached mode MUST preserve `source.kind` attribution (`client_prompt`, `atm_mail`, `user_steer`) without degrading Codex-equivalent formatting/ordering.
+- **FR-23.4**: Attach/detach/re-attach MUST preserve continuity via bounded replay, with no out-of-order render or duplicate replay artifacts.
+- **FR-23.5**: Transport/session failures in attached mode MUST surface explicit error states (proxy vs child vs upstream MCP), never silent stalls.
+- **FR-23.6**: Any intentional output/behavior deviation from Codex CLI MUST be captured in a maintained deviation log with rationale and approval.
+- **FR-23.7**: Attached mode MUST render MCP client/user input as a distinct input class (not merged with assistant/tool output), with stable styling semantics.
+- **FR-23.8**: Attached mode MUST render ATM mail input as `sender@team <short-message>`, where `<short-message>` is clamped to at most 3 visible lines with overflow ellipsis.
+- **FR-23.9**: Attached mode MUST render file-edit/patch diffs with Codex-equivalent red/green semantics for add/remove hunks.
+
 ---
 
 ## 4. Non-Functional Requirements
@@ -342,6 +357,7 @@ Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-view
 - MUST work with Codex CLI v0.103+ MCP server protocol.
 - MUST work on macOS, Linux, and Windows. Codex CLI supports Windows; `atm-agent-mcp` MUST compile and pass tests on all three platforms. CI MUST include Windows in the test matrix.
 - MUST integrate with existing `atm-core` config and IO primitives.
+- Attached terminal parity MUST be re-verified when Codex CLI baseline version changes.
 
 ### NFR-5: Observability
 - Structured logging via `tracing` crate.
@@ -478,6 +494,15 @@ Notes:
 |--------|-------------|--------------|
 | C.1 | **Conformance testing** — MCP protocol conformance test suite (initialize, capabilities, notifications, cancellation, streaming), proxy latency benchmarks, registry stress tests | Phase B |
 | C.2 | **Packaging + polish** — `atm-agent-mcp` added to release workflow, Homebrew formula update, documentation | C.1 |
+
+### Phase N: Attached CLI Parity (4 sprints)
+
+| Sprint | Deliverable | Dependencies |
+|--------|-------------|--------------|
+| N.1 | **Attach command + wiring** — implement `attach <agent-id>`, bind one live stream, and forward user controls to the bound session | Phase C |
+| N.2 | **Renderer/runtime parity** — align terminal rendering/event grouping with Codex CLI baseline for core flows | N.1 |
+| N.3 | **Control-path parity** — approval/reject and interrupt/cancel behavior parity in attached mode, including fault surfacing | N.2 |
+| N.4 | **Golden parity + deviation governance** — side-by-side parity fixtures/tests and enforced deviation log workflow | N.3 |
 
 ### Test Strategy
 
