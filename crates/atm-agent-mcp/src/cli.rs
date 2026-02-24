@@ -29,6 +29,8 @@ pub enum Commands {
     Sessions(SessionsArgs),
     /// Display saved session summary
     Summary(SummaryArgs),
+    /// Attach interactive terminal to a live agent session
+    Attach(AttachArgs),
 }
 
 /// Arguments for the `serve` subcommand
@@ -108,4 +110,23 @@ pub struct SessionsArgs {
 pub struct SummaryArgs {
     /// Agent ID to show summary for
     pub agent_id: String,
+}
+
+/// Arguments for the `attach` subcommand
+#[derive(Args, Debug)]
+pub struct AttachArgs {
+    /// Agent ID to attach (session binding key)
+    pub agent_id: String,
+
+    /// Team namespace for control routing (defaults to ATM_TEAM or atm-dev)
+    #[arg(long)]
+    pub team: Option<String>,
+
+    /// Poll interval in milliseconds for watch stream tailing
+    #[arg(long, default_value_t = 200)]
+    pub poll_ms: u64,
+
+    /// Render typed attached event envelopes as JSONL
+    #[arg(long)]
+    pub json: bool,
 }
