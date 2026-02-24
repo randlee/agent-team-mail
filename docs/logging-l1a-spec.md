@@ -76,6 +76,8 @@ pub struct LogEventV1 {
     pub ts: String,               // RFC3339 UTC timestamp
     pub level: String,            // trace|debug|info|warn|error
     pub source_binary: String,    // atm|atm-daemon|atm-tui|atm-agent-mcp
+    pub hostname: String,         // producer host name
+    pub pid: u32,                 // producer process id
     pub target: String,           // tracing target/module path
     pub action: String,           // stable event name
     pub team: Option<String>,
@@ -97,9 +99,26 @@ pub struct SpanRefV1 {
 
 Validation:
 
-- required: `ts`, `level`, `source_binary`, `target`, `action`
+- required: `ts`, `level`, `source_binary`, `hostname`, `pid`, `target`, `action`
 - serialized-size guard (initial target: 64 KiB per line)
 - redaction policy runs before persistence
+
+### Action Vocabulary (Canonical Baseline)
+
+`action` is a stable machine-readable event name. It is not a closed enum, but
+the following baseline values are canonical and should not be renamed without a
+versioned migration:
+
+- lifecycle/control: `daemon_start`, `daemon_stop`, `control_request`, `control_ack`
+- stream boundary signals: `stream_error_summary`, `stream_dropped_counters`
+- CLI ops: `send`, `broadcast`, `read`, `read_mark`
+- TUI ops: `tui_start`, `session_connect`, `stream_attach`, `stream_detach`
+- MCP transport/session: `transport_init`, `transport_shutdown`, `turn_started`, `turn_completed`, `turn_terminal_crash`, `idle_detected`, `codex_done`
+- MCP audit queueing: `audit_event`, `stdin_queue_enqueue`, `stdin_queue_drain`
+
+Guidance:
+- New actions are allowed when needed, but must remain snake_case and be added
+  to docs when they become operationally significant for dashboards/alerts.
 
 ## Initialization API
 
@@ -134,21 +153,11 @@ Behavior:
 - daemon mode adds JSON file writer layer and rotation,
 - any initialization failure degrades to `StderrOnly` (fail-open).
 
-## Migration Bridge (`emit_event_best_effort`)
+## Migration Bridge (`emit_event_best_effort`) — REMOVED (Phase M.1b)
 
-During L.1/L.2 migration:
-
-- bridge maps legacy `EventFields` to `LogEventV1`,
-- emits unified event path,
-- and also writes legacy `events.jsonl` until sunset.
-
-Bridge control:
-
-- `ATM_LOG_BRIDGE=dual` (default during migration),
-- `ATM_LOG_BRIDGE=unified_only`,
-- `ATM_LOG_BRIDGE=legacy_only` (rollback switch).
-
-Sunset target: remove legacy writes in L.4 after parity + soak.
+The dual-write bridge and legacy `events.jsonl` sink were removed in Phase M.1b.
+`emit_event_best_effort` now routes exclusively through the unified producer channel.
+`ATM_LOG_BRIDGE` is no longer a recognized environment variable.
 
 ## Fallback When Daemon Is Unavailable
 
@@ -190,7 +199,7 @@ Daemon-only.
 ### L.1b
 
 - Add `init_unified()` and `UnifiedLogMode` wiring in all 4 binaries.
-- Implement dual-write bridge in `emit_event_best_effort`.
+- ~~Implement dual-write bridge in `emit_event_best_effort`~~ (removed in Phase M.1b)
 - Add daemon startup spool merge path (claim + append + cleanup).
 - Add integration tests for fan-in, fallback, merge, and rotation.
 

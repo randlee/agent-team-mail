@@ -1,0 +1,5 @@
+name = "tool-stream"
+transport = "cli-json"
+codex_version = "0.15.0"
+schema_version = "v1"
+notes = "exec command output stream"

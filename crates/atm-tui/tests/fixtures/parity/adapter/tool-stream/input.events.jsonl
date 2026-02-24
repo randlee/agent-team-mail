@@ -1,0 +1,2 @@
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"exec_command_output_delta","delta":"ls -la"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"exec_command_completed","delta":"ok"}}}

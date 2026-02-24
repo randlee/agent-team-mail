@@ -1,0 +1,3 @@
+{"source":{"kind":"user_steer","actor":"randlee","channel":"tui_user"},"event":{"params":{"type":"approval_request","message":"allow?"}}}
+{"source":{"kind":"user_steer","actor":"randlee","channel":"tui_user"},"event":{"params":{"type":"approval_rejected","message":"denied"}}}
+{"source":{"kind":"user_steer","actor":"randlee","channel":"tui_user"},"event":{"params":{"type":"approval_approved","message":"granted"}}}

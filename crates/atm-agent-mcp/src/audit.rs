@@ -15,7 +15,6 @@
 
 use std::path::PathBuf;
 
-use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use serde::Serialize;
 
 /// Maximum number of characters kept from a prompt for audit logging (FR-9.2).
@@ -56,27 +55,20 @@ pub struct AuditEntry {
 #[derive(Debug)]
 pub struct AuditLog {
     path: PathBuf,
-    team: String,
 }
 
 impl AuditLog {
     /// Create an audit log for the given team.
     ///
     /// The log file path is resolved via [`crate::lock::sessions_dir()`].
-    pub fn new(team: &str) -> Self {
-        let path = crate::lock::sessions_dir().join(team).join("audit.jsonl");
-        Self {
-            path,
-            team: team.to_string(),
-        }
+    pub fn new(_team: &str) -> Self {
+        let path = crate::lock::sessions_dir().join(_team).join("audit.jsonl");
+        Self { path }
     }
 
     /// Create an audit log with an explicit path (for testing).
     pub fn new_with_path(path: PathBuf) -> Self {
-        Self {
-            path,
-            team: "unknown".to_string(),
-        }
+        Self { path }
     }
 
     /// Log an ATM tool call (FR-9.1).
@@ -129,26 +121,6 @@ impl AuditLog {
     ///
     /// Creates parent directories if needed. Swallows all errors.
     async fn append(&self, entry: &AuditEntry) {
-        emit_event_best_effort(EventFields {
-            level: "info",
-            source: "atm-agent-mcp",
-            action: "audit_event",
-            team: Some(self.team.clone()),
-            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-            agent_id: entry.identity.clone().or(entry.agent_id.clone()),
-            agent_name: entry.identity.clone(),
-            target: entry.recipient.clone(),
-            result: Some(entry.event_type.clone()),
-            message_id: None,
-            request_id: None,
-            count: None,
-            error: None,
-            message_text: entry
-                .message_summary
-                .clone()
-                .or(entry.prompt_summary.clone()),
-        });
-
         if let Err(e) = self.try_append(entry).await {
             tracing::warn!(path = %self.path.display(), error = %e, "audit log write failed");
         }

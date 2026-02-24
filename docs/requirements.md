@@ -713,6 +713,9 @@ Validation rules:
 - Reject payloads missing required fields
 - Enforce serialized-size guard (`64 KiB` max per line, initial default)
 - Apply built-in redaction before enqueue/write
+- `action` MUST be stable snake_case. Canonical baseline action vocabulary is
+  defined in `docs/logging-l1a-spec.md` and is the source of truth for
+  dashboard/alert naming.
 
 #### Sink Paths and Files
 
@@ -733,7 +736,7 @@ Spool filename convention:
 - Overflow policy: `drop-new`
 - Overflow observability: increment dropped counter + rate-limited warning
 - Redaction v1 denylist keys (case-insensitive): `password`, `secret`, `token`,
-  `api_key`, `authorization`; plus bearer-token value pattern
+  `api_key`, `auth`; plus bearer-token value pattern
 - Rotation: size-based at `50 MiB`, retain `5` rotated files
 
 #### Failure and Merge Semantics
@@ -744,17 +747,11 @@ Spool filename convention:
   only after successful merge.
 - Merge ordering: timestamp then file order, append-only.
 
-#### Migration Bridge (Legacy `events.jsonl`)
+#### Migration Bridge (Legacy `events.jsonl`) — REMOVED (Phase M.1b)
 
-During migration window:
-- `emit_event_best_effort` dual-writes by mapping legacy fields into `LogEventV1`
-  and preserving legacy sink output.
-- Control via `ATM_LOG_BRIDGE`:
-  - `dual` (default during migration)
-  - `unified_only`
-  - `legacy_only` (rollback safety)
-
-Legacy sink removal target is Phase L.4 after parity + soak.
+The `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var were removed in Phase M.1b.
+`emit_event_best_effort` now routes exclusively through the unified producer channel.
+No legacy `events.jsonl` sink code remains in any crate.
 
 #### Minimum Event Coverage
 

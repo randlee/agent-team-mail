@@ -66,7 +66,9 @@ const CHILD_DRAIN_GRACE_MS: u64 = 100;
 const WATCH_RENDER_MAX_CHARS: usize = 200;
 /// Truncated prefix length before appending ellipsis (`...`).
 const WATCH_RENDER_TRUNCATE_AT: usize = WATCH_RENDER_MAX_CHARS - 3;
-/// Hard cap for `~/.config/atm/watch-stream/events.jsonl` before rotation.
+/// Hard cap for per-agent watch-stream files before rotation.
+/// Path: `$ATM_HOME/watch-stream/<agent-id>.jsonl` (when ATM_HOME is set)
+///       or `~/.config/atm/watch-stream/<agent-id>.jsonl` otherwise.
 const WATCH_FEED_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// Counter for unknown watch event kinds skipped by the MVP publisher gate.
 static WATCH_UNKNOWN_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -2506,16 +2508,6 @@ Session ending. Write a concise summary of:\n\
                     match event_type {
                         JsonlEventType::Idle => {
                             idle_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                            agent_team_mail_core::event_log::emit_event_best_effort(
-                                agent_team_mail_core::event_log::EventFields {
-                                    level: "info",
-                                    source: "atm-agent-mcp",
-                                    action: "idle_detected",
-                                    team: Some(team_for_reader.clone()),
-                                    result: Some("cli-json".to_string()),
-                                    ..Default::default()
-                                },
-                            );
 
                             // Drain for all active agent sessions (keyed by actual agent_id).
                             let agent_ids: Vec<String> = {
@@ -2541,16 +2533,6 @@ Session ending. Write a concise summary of:\n\
                             continue;
                         }
                         JsonlEventType::Done => {
-                            agent_team_mail_core::event_log::emit_event_best_effort(
-                                agent_team_mail_core::event_log::EventFields {
-                                    level: "info",
-                                    source: "atm-agent-mcp",
-                                    action: "codex_done",
-                                    team: Some(team_for_reader.clone()),
-                                    result: Some("cli-json".to_string()),
-                                    ..Default::default()
-                                },
-                            );
                             // Don't forward the done event upstream as a JSON-RPC message
                             continue;
                         }
@@ -2806,20 +2788,11 @@ async fn forward_event(
             .lock()
             .await
             .publish(&agent_id, frame.clone());
-        append_watch_frame_for_tui(&frame);
+        append_watch_frame_for_tui(&frame, &agent_id);
     } else if let Some(kind) = event.pointer("/params/type").and_then(|v| v.as_str())
         && !kind.is_empty()
     {
         WATCH_UNKNOWN_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
-        agent_team_mail_core::event_log::emit_event_best_effort(
-            agent_team_mail_core::event_log::EventFields {
-                level: "debug",
-                source: "atm-agent-mcp",
-                action: "watch_event_ignored_unknown",
-                result: Some(kind.to_string()),
-                ..Default::default()
-            },
-        );
     }
 
     match upstream_tx.try_send(event.clone()) {
@@ -2840,6 +2813,14 @@ fn should_publish_watch_event(event: &Value) -> bool {
         kind,
         "task_started"
             | "task_complete"
+            | "approval_prompt"
+            | "approval_request"
+            | "approval_rejected"
+            | "approval_approved"
+            | "entered_review_mode"
+            | "exited_review_mode"
+            | "item/enteredReviewMode"
+            | "item/exitedReviewMode"
             | "agent_message_delta"
             | "agent_message"
             | "agent_message_completed"
@@ -2856,6 +2837,10 @@ fn should_publish_watch_event(event: &Value) -> bool {
             | "thread_status_changed"
             | "turn_started"
             | "turn_completed"
+            | "turn_interrupted"
+            | "turn_cancelled"
+            | "cancelled"
+            | "interrupt"
             | "idle"
             | "done"
             | "stream_error"
@@ -2988,17 +2973,39 @@ fn format_watch_frame(frame: &Value) -> String {
     base
 }
 
-fn watch_feed_path() -> Option<std::path::PathBuf> {
+fn watch_feed_path(agent_id: &str) -> Option<std::path::PathBuf> {
+    // Sanitize agent_id to be filesystem-safe: replace path separators with '_'.
+    let safe_id: std::borrow::Cow<str> = if agent_id.contains('/') || agent_id.contains('\\') {
+        std::borrow::Cow::Owned(agent_id.replace(['/', '\\'], "_"))
+    } else {
+        std::borrow::Cow::Borrowed(agent_id)
+    };
+    // ATM_HOME convention: when ATM_HOME is set, use it as the base directory
+    // directly (no `.config/atm/` nesting). Matches the canonical log path
+    // `$ATM_HOME/atm.log.jsonl` established in atm-core/src/event_log.rs.
+    if let Ok(atm_home) = std::env::var("ATM_HOME") {
+        let trimmed = atm_home.trim();
+        if !trimmed.is_empty() {
+            return Some(
+                std::path::PathBuf::from(trimmed)
+                    .join("watch-stream")
+                    .join(format!("{safe_id}.jsonl")),
+            );
+        }
+    }
     let home = agent_team_mail_core::home::get_home_dir().ok()?;
-    Some(home.join(".config/atm/watch-stream/events.jsonl"))
+    Some(
+        home.join(".config/atm/watch-stream")
+            .join(format!("{safe_id}.jsonl")),
+    )
 }
 
-fn append_watch_frame_for_tui(frame: &Value) {
-    append_watch_frame_for_tui_with_cap(frame, WATCH_FEED_MAX_BYTES);
+fn append_watch_frame_for_tui(frame: &Value, agent_id: &str) {
+    append_watch_frame_for_tui_with_cap(frame, WATCH_FEED_MAX_BYTES, agent_id);
 }
 
-fn append_watch_frame_for_tui_with_cap(frame: &Value, max_bytes: u64) {
-    let Some(path) = watch_feed_path() else {
+fn append_watch_frame_for_tui_with_cap(frame: &Value, max_bytes: u64, agent_id: &str) {
+    let Some(path) = watch_feed_path(agent_id) else {
         return;
     };
     append_watch_frame_for_tui_at_path(frame, max_bytes, &path);
@@ -3984,6 +3991,14 @@ mod tests {
         let canonical_kinds = vec![
             "task_started",
             "task_complete",
+            "approval_prompt",
+            "approval_request",
+            "approval_rejected",
+            "approval_approved",
+            "entered_review_mode",
+            "exited_review_mode",
+            "item/enteredReviewMode",
+            "item/exitedReviewMode",
             "agent_message_delta",
             "agent_message",
             "agent_message_completed",
@@ -4000,6 +4015,10 @@ mod tests {
             "thread_status_changed",
             "turn_started",
             "turn_completed",
+            "turn_interrupted",
+            "turn_cancelled",
+            "cancelled",
+            "interrupt",
             "idle",
             "done",
             "stream_error",
@@ -4100,7 +4119,7 @@ mod tests {
     #[serial_test::serial]
     fn test_append_watch_frame_for_tui_with_cap_rotates_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let watch_path = dir.path().join(".config/atm/watch-stream/events.jsonl");
+        let watch_path = dir.path().join(".config/atm/watch-stream/test-agent.jsonl");
         std::fs::create_dir_all(
             watch_path
                 .parent()
@@ -5223,5 +5242,25 @@ mod tests {
         );
 
         unsafe { std::env::remove_var("ATM_HOME") };
+    }
+
+    /// When ATM_HOME is set, `watch_feed_path` must produce
+    /// `$ATM_HOME/watch-stream/<agent-id>.jsonl` (no `.config/atm/` nesting).
+    #[test]
+    #[serial_test::serial]
+    fn test_watch_feed_path_uses_atm_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+
+        let result = watch_feed_path("test-agent");
+
+        unsafe { std::env::remove_var("ATM_HOME") };
+
+        let path = result.expect("watch_feed_path should return Some when ATM_HOME is set");
+        let expected = dir.path().join("watch-stream").join("test-agent.jsonl");
+        assert_eq!(
+            path, expected,
+            "ATM_HOME path must not include .config/atm/ nesting"
+        );
     }
 }
