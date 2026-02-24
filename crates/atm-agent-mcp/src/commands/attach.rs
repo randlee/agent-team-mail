@@ -12,8 +12,10 @@ use agent_team_mail_core::daemon_client::{query_agent_state, send_control};
 use serde::Serialize;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::time::interval;
@@ -52,8 +54,11 @@ struct AttachedRenderEnvelope {
     event_type: String,
     text: String,
     is_turn_boundary: bool,
+    unsupported_count: Option<u64>,
     raw: Value,
 }
+
+static UNSUPPORTED_EVENT_COUNTS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
 pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     let team = resolved_team(args.team.as_deref());
@@ -79,21 +84,27 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
 
     // Initial attach replay (bounded).
-    if let Ok((replay, new_pos)) = tail_watch_stream_file(&watch_path, 0, &args.agent_id).await {
-        stream_pos = new_pos;
-        for frame in replay {
-            print_frame(&args.agent_id, frame, args.json)?;
+    match tail_watch_stream_file(&watch_path, 0, &args.agent_id).await {
+        Ok((replay, new_pos)) => {
+            stream_pos = new_pos;
+            for frame in replay {
+                print_frame(&args.agent_id, frame, args.json)?;
+            }
         }
+        Err(err) => print_stream_error("watch.tail.initial", &err, args.json)?,
     }
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Ok((frames, new_pos)) = tail_watch_stream_file(&watch_path, stream_pos, &args.agent_id).await {
-                    stream_pos = new_pos;
-                    for frame in frames {
-                        print_frame(&args.agent_id, frame, args.json)?;
+                match tail_watch_stream_file(&watch_path, stream_pos, &args.agent_id).await {
+                    Ok((frames, new_pos)) => {
+                        stream_pos = new_pos;
+                        for frame in frames {
+                            print_frame(&args.agent_id, frame, args.json)?;
+                        }
                     }
+                    Err(err) => print_stream_error("watch.tail", &err, args.json)?,
                 }
             }
             maybe_line = stdin_lines.next_line() => {
@@ -104,26 +115,42 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                     AttachInput::Ignore => {}
                     AttachInput::AgentText(text) => {
                         // Default route is agent input; control verbs must be prefixed with ':'.
-                        let ack = send_stdin_control(&team, &args.agent_id, &text)?;
-                        println!("ack {}", format_ack(&ack));
+                        match send_stdin_control(&team, &args.agent_id, &text) {
+                            Ok(ack) => println!("ack {}", format_ack(&ack)),
+                            Err(err) => {
+                                print_stream_error(classify_control_send_error(&err), &err, args.json)?
+                            }
+                        }
                     }
                     AttachInput::Control { verb, arg } => {
                         match verb {
                             ControlVerb::Help => print_input_contract(),
                             ControlVerb::Interrupt => {
-                                let ack = send_interrupt_control(&team, &args.agent_id)?;
-                                println!("ack {}", format_ack(&ack));
+                                match send_interrupt_control(&team, &args.agent_id) {
+                                    Ok(ack) => println!("ack {}", format_ack(&ack)),
+                                    Err(err) => {
+                                        print_stream_error(classify_control_send_error(&err), &err, args.json)?
+                                    }
+                                }
                             }
                             ControlVerb::Detach => break,
                             ControlVerb::Approve => {
                                 let payload = arg.unwrap_or_else(|| "approve".to_string());
-                                let ack = send_stdin_control(&team, &args.agent_id, &payload)?;
-                                println!("ack {}", format_ack(&ack));
+                                match send_stdin_control(&team, &args.agent_id, &payload) {
+                                    Ok(ack) => println!("ack {}", format_ack(&ack)),
+                                    Err(err) => {
+                                        print_stream_error(classify_control_send_error(&err), &err, args.json)?
+                                    }
+                                }
                             }
                             ControlVerb::Reject => {
                                 let payload = arg.unwrap_or_else(|| "reject".to_string());
-                                let ack = send_stdin_control(&team, &args.agent_id, &payload)?;
-                                println!("ack {}", format_ack(&ack));
+                                match send_stdin_control(&team, &args.agent_id, &payload) {
+                                    Ok(ack) => println!("ack {}", format_ack(&ack)),
+                                    Err(err) => {
+                                        print_stream_error(classify_control_send_error(&err), &err, args.json)?
+                                    }
+                                }
                             }
                         }
                     }
@@ -430,7 +457,7 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         .unwrap_or("")
         .to_string();
 
-    let class = classify_event_class(&event_type, &source_kind).to_string();
+    let (class, unsupported_count) = classify_event_class(&event_type, &source_kind);
     let is_turn_boundary = matches!(
         event_type.as_str(),
         "turn_started"
@@ -466,19 +493,20 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         event_type,
         text,
         is_turn_boundary,
+        unsupported_count,
         raw: frame.clone(),
     }
 }
 
-fn classify_event_class(event_type: &str, source_kind: &str) -> &'static str {
+fn classify_event_class(event_type: &str, source_kind: &str) -> (String, Option<u64>) {
     if source_kind == "atm_mail" || source_kind == "atm_mcp" {
-        return "input.atm_mail";
+        return ("input.atm_mail".to_string(), None);
     }
     if source_kind == "user_steer" || source_kind == "tui_user" {
-        return "input.user_steer";
+        return ("input.user_steer".to_string(), None);
     }
 
-    match event_type {
+    let class = match event_type {
         "user_message" => "input.client",
         "agent_message" | "agent_message_delta" | "agent_message_chunk" | "item_delta" => {
             "assistant.output"
@@ -503,7 +531,77 @@ fn classify_event_class(event_type: &str, source_kind: &str) -> &'static str {
         "turn_started" | "turn_completed" | "task_started" | "task_complete" | "turn_idle"
         | "idle" | "done" | "item_started" | "item_completed" => "turn.lifecycle",
         "stream_error" | "error" => "stream.error",
-        _ => "unknown",
+        _ => {
+            let ty = sanitize_event_type(event_type);
+            let count = record_unsupported_event(&ty);
+            return (format!("unsupported.{ty}"), Some(count));
+        }
+    };
+    (class.to_string(), None)
+}
+
+fn sanitize_event_type(event_type: &str) -> String {
+    let raw = if event_type.trim().is_empty() {
+        "unknown"
+    } else {
+        event_type.trim()
+    };
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn record_unsupported_event(event_type: &str) -> u64 {
+    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("unsupported event counter mutex");
+    let entry = guard.entry(event_type.to_string()).or_insert(0);
+    *entry += 1;
+    *entry
+}
+
+#[cfg(test)]
+fn unsupported_event_count(event_type: &str) -> u64 {
+    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = map.lock().expect("unsupported event counter mutex");
+    guard.get(event_type).copied().unwrap_or(0)
+}
+
+fn print_stream_error(context: &str, err: &anyhow::Error, as_json: bool) -> anyhow::Result<()> {
+    if as_json {
+        let payload = serde_json::json!({
+            "v": 1,
+            "mode": "attached",
+            "class": "stream.error",
+            "context": context,
+            "message": err.to_string()
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(());
+    }
+    println!("[stream.error][{context}] {err}");
+    Ok(())
+}
+
+fn classify_control_send_error(err: &anyhow::Error) -> &'static str {
+    let kind = err
+        .chain()
+        .find_map(|e| e.downcast_ref::<std::io::Error>())
+        .map(std::io::Error::kind);
+    match kind {
+        Some(ErrorKind::NotFound) => "control.not_found",
+        Some(ErrorKind::ConnectionRefused) => "control.connection_refused",
+        Some(ErrorKind::BrokenPipe) => "control.broken_pipe",
+        Some(ErrorKind::TimedOut) => "control.timeout",
+        Some(ErrorKind::PermissionDenied) => "control.permission_denied",
+        Some(ErrorKind::WouldBlock) => "control.would_block",
+        Some(_) => "control.io_error",
+        None => "control.error",
     }
 }
 
@@ -538,6 +636,12 @@ fn clamp_three_lines(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn attach_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/attach")
+    }
 
     #[test]
     fn parse_plain_text_routes_to_agent() {
@@ -566,6 +670,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_additional_control_commands() {
+        assert_eq!(
+            parse_attach_input(":detach"),
+            AttachInput::Control {
+                verb: ControlVerb::Detach,
+                arg: None
+            }
+        );
+        assert_eq!(
+            parse_attach_input(":reject no"),
+            AttachInput::Control {
+                verb: ControlVerb::Reject,
+                arg: Some("no".to_string())
+            }
+        );
+        assert_eq!(
+            parse_attach_input(":help"),
+            AttachInput::Control {
+                verb: ControlVerb::Help,
+                arg: None
+            }
+        );
+        assert_eq!(parse_attach_input(":"), AttachInput::Ignore);
+        assert_eq!(parse_attach_input("   "), AttachInput::Ignore);
+        assert_eq!(
+            parse_attach_input(":unknown"),
+            AttachInput::Control {
+                verb: ControlVerb::Help,
+                arg: None
+            }
+        );
+    }
+
+    #[test]
     fn clamp_three_lines_applies_ellipsis() {
         let text = "a\nb\nc\nd";
         assert_eq!(clamp_three_lines(text), "a / b / c ...");
@@ -574,7 +712,7 @@ mod tests {
     #[test]
     fn classify_atm_mail_has_priority() {
         assert_eq!(
-            classify_event_class("agent_message_delta", "atm_mail"),
+            classify_event_class("agent_message_delta", "atm_mail").0,
             "input.atm_mail"
         );
     }
@@ -591,5 +729,110 @@ mod tests {
         assert_eq!(env.class, "assistant.output");
         assert_eq!(env.text, "hello");
         assert_eq!(env.source_actor, "arch-atm");
+        assert_eq!(env.unsupported_count, None);
+    }
+
+    #[test]
+    fn classify_unknown_event_emits_supported_prefix_and_counter() {
+        let (class, count1) = classify_event_class("future/event", "client_prompt");
+        let (_, count2) = classify_event_class("future/event", "client_prompt");
+        assert_eq!(class, "unsupported.future_event");
+        assert_eq!(count1, Some(1));
+        assert_eq!(count2, Some(2));
+        assert_eq!(unsupported_event_count("future_event"), 2);
+    }
+
+    #[test]
+    fn classify_control_error_uses_io_kind() {
+        let err = anyhow::Error::new(std::io::Error::new(ErrorKind::ConnectionRefused, "refused"));
+        assert_eq!(classify_control_send_error(&err), "control.connection_refused");
+    }
+
+    #[tokio::test]
+    async fn replay_tail_reads_fixture_jsonl() {
+        let fixture = attach_fixture_dir().join("replay.sample.jsonl");
+        let raw = fs::read_to_string(&fixture).expect("fixture exists");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let feed_path = temp_dir.path().join("feed.jsonl");
+        fs::write(&feed_path, raw).expect("write feed");
+
+        let (frames, pos) = tail_watch_stream_file(&feed_path, 0, "codex:test")
+            .await
+            .expect("tail succeeds");
+        assert_eq!(frames.len(), 2);
+        assert!(pos > 0);
+        assert_eq!(
+            frames[0].pointer("/event/params/type").and_then(|v| v.as_str()),
+            Some("turn_started")
+        );
+        assert_eq!(
+            frames[1].pointer("/event/params/type").and_then(|v| v.as_str()),
+            Some("item_delta")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn send_stdin_control_with_mock_daemon_ack() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let old_home = std::env::var("HOME").ok();
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            std::env::set_var("HOME", temp_dir.path());
+        }
+
+        let daemon_dir = temp_dir.path().join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).expect("daemon dir");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut req_line = String::new();
+            {
+                let mut reader = BufReader::new(&stream);
+                reader.read_line(&mut req_line).expect("read request");
+            }
+            let req: serde_json::Value = serde_json::from_str(req_line.trim()).expect("json req");
+            assert_eq!(req.get("command").and_then(|v| v.as_str()), Some("control"));
+            let socket_request_id = req
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sock-test");
+            let response = serde_json::json!({
+                "version": 1,
+                "request_id": socket_request_id,
+                "status": "ok",
+                "payload": {
+                    "request_id": "req-attach-test",
+                    "result": "ok",
+                    "duplicate": false,
+                    "detail": "mock-daemon-ack",
+                    "acked_at": "2026-02-24T00:00:00Z"
+                }
+            });
+            let mut writer = std::io::BufWriter::new(&stream);
+            writer
+                .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                .expect("write response");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+        });
+
+        let ack = send_stdin_control("atm-dev", "codex:test", "hello").expect("control ack");
+        assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
+        assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
+
+        server.join().expect("server join");
+        if let Some(home) = old_home {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+        }
     }
 }

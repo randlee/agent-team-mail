@@ -1,0 +1,3 @@
+{"frame":{"agent_id":"codex:test","source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"turn_started"}}}}
+{"frame":{"agent_id":"codex:test","source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"item_delta","delta":"hello"}}}}
+{"frame":{"agent_id":"codex:other","source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"item_delta","delta":"ignore"}}}}
