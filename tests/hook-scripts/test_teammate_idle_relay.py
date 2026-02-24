@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 import sys
 import tempfile
 from io import StringIO
@@ -162,6 +163,8 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
         sock_dir.mkdir(parents=True, exist_ok=True)
         if socket_file_exists:
             (sock_dir / "atm-daemon.sock").touch()
+            if platform.system() == "Windows":
+                (sock_dir / "atm-daemon.port").write_text("12345")
 
         mock_sock = MagicMock()
         mock_sock.__enter__ = MagicMock(return_value=mock_sock)
