@@ -152,20 +152,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_read_hook_file_missing() {
-        // Point temp dir somewhere empty — no file should exist.
-        // We test indirectly: if get_parent_pid() returns a valid PID, the file
-        // under the real temp dir simply won't exist (we haven't created it).
-        // This test just ensures the function returns Ok(None) rather than Err.
-        //
-        // We cannot easily override temp_dir(), so we rely on the file not
-        // existing at the standard path.  If by some coincidence a stale hook
-        // file exists, the staleness check will convert it to Err; that is also
-        // acceptable (the file would be legitimately stale for a test).
+        // All hook_identity tests share the same path (atm-hook-<ppid>.json) so
+        // they MUST all be #[serial] to prevent concurrent interference.
         let ppid = get_parent_pid();
         let hook_path = std::env::temp_dir().join(format!("atm-hook-{ppid}.json"));
 
-        // Remove any pre-existing file from a previous run to keep test clean.
+        // Pre-test cleanup: remove any file left by a prior test or run.
         let _ = std::fs::remove_file(&hook_path);
 
         let result = read_hook_file();
@@ -182,6 +176,9 @@ mod tests {
     fn test_read_hook_file_stale() {
         let ppid = get_parent_pid();
         let hook_path = std::env::temp_dir().join(format!("atm-hook-{ppid}.json"));
+
+        // Pre-test cleanup.
+        let _ = std::fs::remove_file(&hook_path);
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -210,6 +207,9 @@ mod tests {
         let ppid = get_parent_pid();
         let hook_path = std::env::temp_dir().join(format!("atm-hook-{ppid}.json"));
 
+        // Pre-test cleanup.
+        let _ = std::fs::remove_file(&hook_path);
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -236,6 +236,9 @@ mod tests {
         let ppid = get_parent_pid();
         let hook_path = std::env::temp_dir().join(format!("atm-hook-{ppid}.json"));
 
+        // Pre-test cleanup: ensure no leftover valid file from a prior test.
+        let _ = std::fs::remove_file(&hook_path);
+
         std::fs::write(&hook_path, b"not valid json {{{").unwrap();
 
         let result = read_hook_file();
@@ -250,9 +253,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_read_hook_file_identity_none_when_missing() {
         let ppid = get_parent_pid();
         let hook_path = std::env::temp_dir().join(format!("atm-hook-{ppid}.json"));
+        // Pre-test cleanup.
         let _ = std::fs::remove_file(&hook_path);
 
         let result = read_hook_file_identity();
