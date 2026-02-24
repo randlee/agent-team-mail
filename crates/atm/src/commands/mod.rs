@@ -13,6 +13,7 @@ pub mod launch;
 mod logs;
 mod members;
 mod read;
+mod register;
 mod request;
 mod send;
 mod status;
@@ -86,6 +87,9 @@ enum Commands {
 
     /// View and follow the unified ATM daemon log
     Logs(logs::LogsArgs),
+
+    /// Register this agent session with a team
+    Register(register::RegisterArgs),
 }
 
 impl Cli {
@@ -109,6 +113,7 @@ impl Cli {
             Commands::Tail(args) => tail::execute(args),
             Commands::Launch(args) => launch::execute(args),
             Commands::Logs(args) => logs::execute(args),
+            Commands::Register(args) => register::execute(args),
         }
     }
 }

@@ -169,6 +169,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("send")
         .arg("agent-a")
         .arg("Initial message")
@@ -246,6 +247,7 @@ fn test_lock_contention_queues_to_spool() {
     set_home_env(&mut cmd, &temp_dir);
     let output = cmd
         .env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("send")
         .arg("agent-a")
         .arg("Message during lock")
@@ -384,6 +386,7 @@ fn test_empty_json_array_inbox_ok() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("send")
         .arg("agent-a")
         .arg("Message after empty inbox")
@@ -453,6 +456,7 @@ fn test_large_inbox_10k_messages() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("send")
         .arg("agent-a")
         .arg("Message to large inbox")
@@ -476,6 +480,7 @@ fn test_large_inbox_10k_messages() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-a")
@@ -511,6 +516,7 @@ fn test_send_to_nonexistent_inbox_creates_file() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("send")
         .arg("agent-a")
         .arg("First message to new inbox")
@@ -535,6 +541,7 @@ fn test_read_nonexistent_inbox_graceful() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("read")
         .arg("--no-since-last-seen")
         .arg("agent-a")
@@ -766,6 +773,7 @@ fn test_unknown_fields_preserved_through_send() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("send")
         .arg("agent-a")
         .arg("New message")

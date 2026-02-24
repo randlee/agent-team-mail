@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use clap::{ArgAction, Args};
 
 use crate::util::addressing::parse_address;
+use crate::util::hook_identity::read_hook_file_identity;
 use crate::util::settings::get_home_dir;
 use crate::util::state::{get_last_seen, load_seen_state, save_seen_state, update_last_seen};
 
@@ -78,7 +79,29 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
+
+    // Resolve identity via hook file when the default "human" identity is in use.
+    if config.core.identity == "human" {
+        match read_hook_file_identity() {
+            Ok(Some(identity)) => {
+                config.core.identity = identity;
+            }
+            Ok(None) => {
+                anyhow::bail!(
+                    "Cannot determine reader identity: hook file not found. \
+                     Ensure the atm-identity-write.py PreToolUse hook is configured in \
+                     .claude/settings.json, or use --from <name> to specify identity explicitly."
+                );
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "Cannot determine reader identity: hook file validation failed: {e}. \
+                     Use --from <name> to specify identity explicitly."
+                );
+            }
+        }
+    }
 
     // Determine agent and team
     let (agent_name, team_name) = if let Some(ref agent_addr) = args.agent {

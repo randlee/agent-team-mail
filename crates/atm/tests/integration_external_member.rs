@@ -149,6 +149,7 @@ fn test_send_empty_message_rejected() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "send-test")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("send")
         .arg("target")
         .arg("   ") // whitespace-only message
