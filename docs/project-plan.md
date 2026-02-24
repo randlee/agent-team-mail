@@ -544,14 +544,14 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.3 Phase O: Attached CLI Parity — PLANNED
+## 17.3 Phase O: Attached CLI Parity — IN PROGRESS
 
 **Goal**: Deliver an `atm-agent-mcp attach <agent-id>` terminal mode with Codex CLI parity for output and interaction semantics while preserving ATM source attribution and daemon boundaries.
 
 | Sprint | Name | Depends On | Status |
 |--------|------|------------|--------|
-| O.1 | Attach command + stream/control wiring | M.7 | PLANNED |
-| O.2 | Renderer/runtime parity in attached mode | O.1 | PLANNED |
+| O.1 | Attach command + stream/control wiring | M.7 | IN REVIEW (PR #223) |
+| O.2 | Renderer/runtime parity in attached mode | O.1 | IN PROGRESS (PR #224) |
 | O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | O.2 | PLANNED |
 
 **Scope**:
@@ -686,13 +686,13 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **N** | N.1 | Hook test harness + process_id logging | COMPLETE | [#216](https://github.com/randlee/agent-team-mail/pull/216) |
 | **N** | N.2 | PID-based identity correlation + `atm register` | COMPLETE | [#217](https://github.com/randlee/agent-team-mail/pull/217) |
 | **N** | N.2-fix | Identity contract compliance fixes + `--as` flag | COMPLETE | [#218](https://github.com/randlee/agent-team-mail/pull/218) |
-| **O** | O.1 | Attach command + stream/control wiring | PLANNED | — |
-| **O** | O.2 | Renderer/runtime parity in attached mode | PLANNED | — |
+| **O** | O.1 | Attach command + stream/control wiring | IN REVIEW | [#223](https://github.com/randlee/agent-team-mail/pull/223) |
+| **O** | O.2 | Renderer/runtime parity in attached mode | IN PROGRESS | [#224](https://github.com/randlee/agent-team-mail/pull/224) |
 | **O** | O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | PLANNED | — |
 
 **Completed**: 91+ sprints across 20 phases (CI green)
 **Current version**: v0.18.0
-**Next**: Phase O (Attached CLI Parity) planned
+**Next**: Phase O completion (O.1 QA closure + O.2/O.3 execution)
 
 ---
 
@@ -716,7 +716,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Phase L | [#199](https://github.com/randlee/agent-team-mail/pull/199) | Merged |
 | Phase M | [#214](https://github.com/randlee/agent-team-mail/pull/214) | Merged |
 | Phase N | [#221](https://github.com/randlee/agent-team-mail/pull/221) | Pending |
-| Phase O | — | Planned |
+| Phase O | — | In Progress |
 
 ---
 

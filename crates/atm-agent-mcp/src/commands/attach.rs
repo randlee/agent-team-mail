@@ -12,8 +12,10 @@ use agent_team_mail_core::daemon_client::{query_agent_state, send_control};
 use serde::Serialize;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::time::interval;
@@ -53,6 +55,7 @@ struct AttachedRenderEnvelope {
     event_type: String,
     text: String,
     is_turn_boundary: bool,
+    unsupported_count: Option<u64>,
     raw: Value,
 }
 
@@ -72,6 +75,8 @@ impl EventApplicability {
         }
     }
 }
+
+static UNSUPPORTED_EVENT_COUNTS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
 pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     let team = resolved_team(args.team.as_deref());
@@ -97,21 +102,27 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
 
     // Initial attach replay (bounded).
-    if let Ok((replay, new_pos)) = tail_watch_stream_file(&watch_path, 0, &args.agent_id).await {
-        stream_pos = new_pos;
-        for frame in replay {
-            print_frame(&args.agent_id, frame, args.json)?;
+    match tail_watch_stream_file(&watch_path, 0, &args.agent_id).await {
+        Ok((replay, new_pos)) => {
+            stream_pos = new_pos;
+            for frame in replay {
+                print_frame(&args.agent_id, frame, args.json)?;
+            }
         }
+        Err(err) => print_stream_error("watch.tail.initial", &err, args.json)?,
     }
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Ok((frames, new_pos)) = tail_watch_stream_file(&watch_path, stream_pos, &args.agent_id).await {
-                    stream_pos = new_pos;
-                    for frame in frames {
-                        print_frame(&args.agent_id, frame, args.json)?;
+                match tail_watch_stream_file(&watch_path, stream_pos, &args.agent_id).await {
+                    Ok((frames, new_pos)) => {
+                        stream_pos = new_pos;
+                        for frame in frames {
+                            print_frame(&args.agent_id, frame, args.json)?;
+                        }
                     }
+                    Err(err) => print_stream_error("watch.tail", &err, args.json)?,
                 }
             }
             maybe_line = stdin_lines.next_line() => {
@@ -122,26 +133,45 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                     AttachInput::Ignore => {}
                     AttachInput::AgentText(text) => {
                         // Default route is agent input; control verbs must be prefixed with ':'.
-                        let ack = send_stdin_control(&team, &args.agent_id, &text)?;
-                        println!("ack {}", format_ack(&ack));
+                        match send_stdin_control(&team, &args.agent_id, &text) {
+                            Ok(ack) => println!("ack {}", format_ack(&ack)),
+                            Err(err) => {
+                                print_stream_error(classify_control_send_error(&err), &err, args.json)?
+                            }
+                        }
                     }
                     AttachInput::Control { verb, arg } => {
                         match verb {
                             ControlVerb::Help => print_input_contract(),
                             ControlVerb::Interrupt => {
-                                let ack = send_interrupt_control(&team, &args.agent_id)?;
-                                println!("ack {}", format_ack(&ack));
+                                match send_interrupt_control(&team, &args.agent_id) {
+                                    Ok(ack) => println!("ack {}", format_ack(&ack)),
+                                    Err(err) => {
+                                        print_stream_error(classify_control_send_error(&err), &err, args.json)?
+                                    }
+                                }
                             }
-                            ControlVerb::Detach => break,
+                            ControlVerb::Detach => {
+                                emit_unsupported_summary(args.json)?;
+                                break;
+                            }
                             ControlVerb::Approve => {
                                 let payload = arg.unwrap_or_else(|| "approve".to_string());
-                                let ack = send_stdin_control(&team, &args.agent_id, &payload)?;
-                                println!("ack {}", format_ack(&ack));
+                                match send_stdin_control(&team, &args.agent_id, &payload) {
+                                    Ok(ack) => println!("ack {}", format_ack(&ack)),
+                                    Err(err) => {
+                                        print_stream_error(classify_control_send_error(&err), &err, args.json)?
+                                    }
+                                }
                             }
                             ControlVerb::Reject => {
                                 let payload = arg.unwrap_or_else(|| "reject".to_string());
-                                let ack = send_stdin_control(&team, &args.agent_id, &payload)?;
-                                println!("ack {}", format_ack(&ack));
+                                match send_stdin_control(&team, &args.agent_id, &payload) {
+                                    Ok(ack) => println!("ack {}", format_ack(&ack)),
+                                    Err(err) => {
+                                        print_stream_error(classify_control_send_error(&err), &err, args.json)?
+                                    }
+                                }
                             }
                         }
                     }
@@ -150,6 +180,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
         }
     }
 
+    emit_unsupported_summary(args.json)?;
     println!("detached from {}", args.agent_id);
     Ok(())
 }
@@ -439,7 +470,7 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         .unwrap_or("unknown")
         .to_string();
     let text = extract_event_text(event).to_string();
-    let (class, applicability) = classify_event_class(&event_type, &source_kind);
+    let (class, applicability, unsupported_count) = classify_event_class(&event_type, &source_kind);
     let is_turn_boundary = matches!(
         event_type.as_str(),
         "turn_started"
@@ -476,21 +507,29 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         event_type,
         text,
         is_turn_boundary,
+        unsupported_count,
         raw: frame.clone(),
     }
 }
 
-fn classify_event_class(event_type: &str, source_kind: &str) -> (&'static str, EventApplicability) {
+fn classify_event_class(
+    event_type: &str,
+    source_kind: &str,
+) -> (String, EventApplicability, Option<u64>) {
     if source_kind == "atm_mail" || source_kind == "atm_mcp" {
-        return ("input.atm_mail", EventApplicability::Required);
+        return ("input.atm_mail".to_string(), EventApplicability::Required, None);
     }
     if source_kind == "user_steer" || source_kind == "tui_user" {
-        return ("input.user_steer", EventApplicability::Required);
+        return (
+            "input.user_steer".to_string(),
+            EventApplicability::Required,
+            None,
+        );
     }
 
     let lower = event_type.to_ascii_lowercase();
     let event_type = lower.as_str();
-    match event_type {
+    let (class, applicability) = match event_type {
         "user_message" => ("input.client", EventApplicability::Required),
         "agent_message" | "agent_message_delta" | "agent_message_chunk" | "item_delta" => {
             ("assistant.output", EventApplicability::Required)
@@ -518,7 +557,7 @@ fn classify_event_class(event_type: &str, source_kind: &str) -> (&'static str, E
             ("elicitation.request", EventApplicability::Required)
         }
         "turn_started" | "turn_completed" | "task_started" | "task_complete" | "turn_idle"
-        | "idle" | "done" | "item_started" | "item_completed" | "turn_interrupted"
+        | "idle" | "done" | "item_started" | "item_completed" | "turn_aborted" | "turn_interrupted"
         | "turn_cancelled" | "cancelled" | "interrupt" | "stream_error" | "error" => {
             ("turn.lifecycle", EventApplicability::Required)
         }
@@ -553,7 +592,96 @@ fn classify_event_class(event_type: &str, source_kind: &str) -> (&'static str, E
         other if other.starts_with("collab_") => {
             ("unsupported.collab", EventApplicability::OutOfScope)
         }
-        _ => ("unknown", EventApplicability::Required),
+        _ => {
+            let event = sanitize_event_type(event_type);
+            let count = record_unsupported_event(&event);
+            return (
+                format!("unsupported.{event}"),
+                EventApplicability::OutOfScope,
+                Some(count),
+            );
+        }
+    };
+    (class.to_string(), applicability, None)
+}
+
+fn sanitize_event_type(event_type: &str) -> String {
+    let raw = if event_type.trim().is_empty() {
+        "unknown"
+    } else {
+        event_type.trim()
+    };
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn record_unsupported_event(event_type: &str) -> u64 {
+    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("unsupported event counter mutex");
+    let entry = guard.entry(event_type.to_string()).or_insert(0);
+    *entry += 1;
+    *entry
+}
+
+fn emit_unsupported_summary(as_json: bool) -> anyhow::Result<()> {
+    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = map.lock().expect("unsupported event counter mutex");
+    if guard.is_empty() {
+        return Ok(());
+    }
+    let mut counts: Vec<(String, u64)> = guard.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    counts.sort_by(|a, b| a.0.cmp(&b.0));
+    if as_json {
+        let payload = serde_json::json!({
+            "v": 1,
+            "mode": "attached",
+            "class": "telemetry.unsupported_summary",
+            "counts": counts
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(());
+    }
+    println!("[telemetry.unsupported_summary] {:?}", counts);
+    Ok(())
+}
+
+fn print_stream_error(context: &str, err: &anyhow::Error, as_json: bool) -> anyhow::Result<()> {
+    if as_json {
+        let payload = serde_json::json!({
+            "v": 1,
+            "mode": "attached",
+            "class": "stream.error",
+            "context": context,
+            "message": err.to_string()
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(());
+    }
+    println!("[stream.error][{context}] {err}");
+    Ok(())
+}
+
+fn classify_control_send_error(err: &anyhow::Error) -> &'static str {
+    let kind = err
+        .chain()
+        .find_map(|e| e.downcast_ref::<std::io::Error>())
+        .map(std::io::Error::kind);
+    match kind {
+        Some(ErrorKind::NotFound) => "control.not_found",
+        Some(ErrorKind::ConnectionRefused) => "control.connection_refused",
+        Some(ErrorKind::BrokenPipe) => "control.broken_pipe",
+        Some(ErrorKind::TimedOut) => "control.timeout",
+        Some(ErrorKind::PermissionDenied) => "control.permission_denied",
+        Some(ErrorKind::WouldBlock) => "control.would_block",
+        Some(_) => "control.io_error",
+        None => "control.error",
     }
 }
 
@@ -572,10 +700,67 @@ fn extract_event_text(event: &Value) -> &str {
 fn render_attached_text(env: &AttachedRenderEnvelope) -> String {
     match env.class.as_str() {
         "elicitation.request" => {
+            let corr = env
+                .raw
+                .pointer("/event/params/request_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| env.raw.pointer("/event/params/id").and_then(|v| v.as_str()))
+                .unwrap_or("unknown");
+            let choices = env
+                .raw
+                .pointer("/event/params/choices")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<&str>>()
+                        .join("|")
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "n/a".to_string());
+            format!(
+                "? req={} choices={} {}",
+                corr,
+                choices,
+                if env.text.is_empty() {
+                    "input requested".to_string()
+                } else {
+                    env.text.clone()
+                }
+            )
+        }
+        "tool.exec" => {
+            let marker = match env.event_type.as_str() {
+                "exec_command_started" => ">>",
+                "exec_command_completed" => "<<",
+                "exec_command_error" => "!!",
+                _ => "·",
+            };
             if env.text.is_empty() {
-                "input requested".to_string()
+                format!("{marker} {}", env.event_type)
             } else {
-                format!("? {}", env.text)
+                format!("{marker} {}", env.text)
+            }
+        }
+        "assistant.reasoning" => {
+            if env.text.is_empty() {
+                "[reasoning]".to_string()
+            } else {
+                format!("[reasoning] {}", env.text)
+            }
+        }
+        "input.client" => {
+            if env.text.is_empty() {
+                "[INPUT]".to_string()
+            } else {
+                format!("[INPUT] {}", env.text)
+            }
+        }
+        "input.user_steer" => {
+            if env.text.is_empty() {
+                "[STEER]".to_string()
+            } else {
+                format!("[STEER] {}", env.text)
             }
         }
         "tool.lifecycle" => {
@@ -588,7 +773,20 @@ fn render_attached_text(env: &AttachedRenderEnvelope) -> String {
         }
         "file.edit" => render_diff_text(&env.text, &env.event_type),
         _ => {
-            if env.class == "unknown" {
+            if env.class.starts_with("unsupported.") {
+                env.class.clone()
+            } else if env.class == "turn.lifecycle" && env.event_type == "turn_aborted" {
+                "[ERROR] turn_aborted".to_string()
+            } else if env.class == "stream.error" {
+                format!(
+                    "[ERROR] {}",
+                    if env.text.is_empty() {
+                        env.event_type.clone()
+                    } else {
+                        env.text.clone()
+                    }
+                )
+            } else if env.class == "unknown" {
                 format!("unknown.{}", env.event_type)
             } else if env.text.is_empty() {
                 env.event_type.clone()
@@ -665,6 +863,12 @@ fn clamp_three_lines(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn attach_parity_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parity/attach")
+    }
 
     #[test]
     fn parse_plain_text_routes_to_agent() {
@@ -690,6 +894,33 @@ mod tests {
                 arg: Some("ship it".to_string())
             }
         );
+    }
+
+    #[test]
+    fn parse_additional_control_commands() {
+        assert_eq!(
+            parse_attach_input(":detach"),
+            AttachInput::Control {
+                verb: ControlVerb::Detach,
+                arg: None
+            }
+        );
+        assert_eq!(
+            parse_attach_input(":reject no"),
+            AttachInput::Control {
+                verb: ControlVerb::Reject,
+                arg: Some("no".to_string())
+            }
+        );
+        assert_eq!(
+            parse_attach_input(":help"),
+            AttachInput::Control {
+                verb: ControlVerb::Help,
+                arg: None
+            }
+        );
+        assert_eq!(parse_attach_input(":"), AttachInput::Ignore);
+        assert_eq!(parse_attach_input("  "), AttachInput::Ignore);
     }
 
     #[test]
@@ -723,9 +954,23 @@ mod tests {
 
     #[test]
     fn classify_tool_lifecycle_degraded() {
-        let (class, applicability) = classify_event_class("mcp_tool_call_begin", "client_prompt");
+        let (class, applicability, _) = classify_event_class("mcp_tool_call_begin", "client_prompt");
         assert_eq!(class, "tool.lifecycle");
         assert_eq!(applicability.as_str(), "degraded");
+    }
+
+    #[test]
+    fn classify_unknown_becomes_unsupported_out_of_scope() {
+        let (class, applicability, count) = classify_event_class("future/event", "client_prompt");
+        assert_eq!(class, "unsupported.future_event");
+        assert_eq!(applicability.as_str(), "out_of_scope");
+        assert_eq!(count, Some(1));
+    }
+
+    #[test]
+    fn classify_control_error_uses_io_kind() {
+        let err = anyhow::Error::new(std::io::Error::new(ErrorKind::ConnectionRefused, "refused"));
+        assert_eq!(classify_control_send_error(&err), "control.connection_refused");
     }
 
     #[test]
@@ -740,5 +985,32 @@ mod tests {
     fn format_mail_actor_adds_team_suffix() {
         let actor = format_mail_actor("arch-atm");
         assert!(actor.contains("arch-atm@"));
+    }
+
+    #[test]
+    fn parity_attach_fixture_classes() {
+        let input_path = attach_parity_fixture_dir().join("class-map.input.jsonl");
+        let expected_path = attach_parity_fixture_dir().join("class-map.expected.jsonl");
+        let input = fs::read_to_string(input_path).expect("input fixture");
+        let expected = fs::read_to_string(expected_path).expect("expected fixture");
+        let expected: Vec<serde_json::Value> = expected
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("expected json"))
+            .collect();
+        let actual: Vec<serde_json::Value> = input
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("frame json"))
+            .map(|frame| {
+                let env = to_attached_envelope("codex:test", &frame);
+                serde_json::json!({
+                    "event_type": env.event_type,
+                    "class": env.class,
+                    "applicability": env.applicability
+                })
+            })
+            .collect();
+        assert_eq!(actual, expected);
     }
 }

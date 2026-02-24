@@ -1,0 +1,10 @@
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"reasoning_content_delta","delta":"think"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"approval_request","message":"allow?"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"exec_command_started","message":"run"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"request_user_input","message":"choose"}}}
+{"source":{"kind":"user_steer","actor":"randlee","channel":"tui_user"},"event":{"params":{"type":"user_message","text":"pause"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"user_message","text":"prompt"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"patch_apply_begin","message":"patch"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"turn_started"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"turn_aborted"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"future_event_kind"}}}
