@@ -32,6 +32,9 @@
 
 mod agent_terminal;
 mod app;
+mod codex_adapter;
+mod codex_vendor;
+mod codex_watch;
 mod config;
 mod dashboard;
 mod events;
@@ -40,7 +43,10 @@ mod ui;
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use std::{collections::BTreeMap, process::Stdio};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    process::Stdio,
+};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -56,15 +62,15 @@ use agent_team_mail_core::{
     control::{CONTROL_SCHEMA_VERSION, ControlAck, ControlAction, ControlRequest, ControlResult},
     daemon_client::{
         AgentSummary, daemon_is_running, daemon_socket_path, query_agent_stream_state,
-        query_list_agents, send_control, subscribe_stream_events,
+        query_list_agents, send_control,
     },
-    daemon_stream::{DaemonStreamEvent, TurnStatusWire},
     event_log::{EventFields, emit_event_best_effort},
     home::get_home_dir,
     logging,
 };
 
 use app::{App, MemberRow, PendingControl};
+use codex_adapter::CodexAdapter;
 use config::{TuiConfig, load_tui_config};
 use dashboard::{get_inbox_count, read_inbox_preview, read_team_members, session_log_path};
 
@@ -73,6 +79,10 @@ use dashboard::{get_inbox_count, read_inbox_preview, read_team_members, session_
 /// Guards the one-time deprecation warning for `ATM_LOG_PATH`.
 static ATM_LOG_PATH_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+/// Replay window size used when attaching/reconnecting to watch feed.
+const WATCH_ATTACH_REPLAY_MAX_FRAMES: usize = 50;
+/// Max bytes scanned from the watch file tail to build attach replay.
+const WATCH_ATTACH_REPLAY_SCAN_BYTES: u64 = 512 * 1024;
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -190,6 +200,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     let home: PathBuf = get_home_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let mut tick = interval(Duration::from_millis(100));
+    let mut codex_adapter = CodexAdapter::new();
 
     loop {
         // ── Draw ──────────────────────────────────────────────────────────────
@@ -236,7 +247,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                 app.reset_stream();
                 app.streaming_agent = Some(agent_name.clone());
                 app.session_log_path = Some(session_log_path(&team, &agent_name));
-                app.daemon_stream_rx = subscribe_stream_events().ok().flatten();
+                app.watch_stream_path = watch_feed_path();
 
                 emit_event_best_effort(EventFields {
                     level: "info",
@@ -256,36 +267,46 @@ async fn run_app<B: ratatui::backend::Backend>(
             }
         }
 
-        // ── Live daemon stream drain (100 ms) ─────────────────────────────────
-        if let (Some(agent), Some(sub)) = (&app.streaming_agent, &app.daemon_stream_rx) {
-            let mut lines = Vec::new();
-            let mut disconnected = false;
-            loop {
-                match sub.rx.try_recv() {
-                    Ok(event) => {
-                        if event.agent() == agent {
-                            lines.push(format_stream_event_line(&event));
+        // ── Direct watch-stream tail (100 ms, MCP->TUI path) ─────────────────
+        let current_agent = app.streaming_agent.clone();
+        let current_watch_path = app.watch_stream_path.clone();
+        if let (Some(agent), Some(path)) = (current_agent, current_watch_path) {
+            match tail_watch_stream_file(&path, app.watch_stream_pos, &agent).await {
+                Ok((frames, new_pos)) => {
+                    let rewound = new_pos < app.watch_stream_pos;
+                    if rewound || new_pos > app.watch_stream_pos {
+                        app.stream_source_error = None;
+                        app.watch_stream_pos = new_pos;
+                        if !frames.is_empty() {
+                            let mut lines: Vec<String> = Vec::new();
+                            if rewound && !app.stream_lines.is_empty() {
+                                // Reconnect continuity: keep existing transcript and append replay.
+                                lines.push(String::new());
+                            }
+                            for frame in &frames {
+                                app.apply_watch_frame(frame);
+                                let adapted = codex_adapter.adapt_frame(frame);
+                                if adapted.is_turn_boundary && !app.stream_lines.is_empty() {
+                                    lines.push(String::new());
+                                }
+                                lines.push(adapted.line);
+                            }
+                            app.watch_unknown = codex_adapter.unknown_events();
+                            app.append_stream_lines(lines);
                         }
                     }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
+                }
+                Err(_) => {
+                    if app.watch_stream_pos > 0 {
+                        app.stream_source_error =
+                            Some("stream frozen: watch feed unreadable".to_string());
                     }
                 }
-            }
-            if !lines.is_empty() {
-                app.append_stream_lines(lines);
-            }
-            if disconnected {
-                app.stream_source_error =
-                    Some("live stream disconnected; using log replay".to_string());
-                app.daemon_stream_rx = None;
             }
         }
 
         // ── Session log tail (100 ms) ─────────────────────────────────────────
-        if app.daemon_stream_rx.is_none()
+        if app.watch_stream_pos == 0
             && let Some(ref log_path) = app.session_log_path.clone()
         {
             match tail_log_file(log_path, app.stream_pos).await {
@@ -496,6 +517,98 @@ async fn tail_log_file(path: &std::path::Path, pos: u64) -> Result<(Vec<String>,
     Ok((lines, pos + n as u64))
 }
 
+fn watch_feed_path() -> Option<std::path::PathBuf> {
+    let home = get_home_dir().ok()?;
+    Some(home.join(".config/atm/watch-stream/events.jsonl"))
+}
+
+async fn tail_watch_stream_file(
+    path: &std::path::Path,
+    pos: u64,
+    agent_id: &str,
+) -> Result<(Vec<serde_json::Value>, u64)> {
+    use tokio::fs::File;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    if !path.exists() {
+        return Ok((Vec::new(), pos));
+    }
+
+    let mut file = File::open(path).await?;
+    let metadata = file.metadata().await?;
+    let file_len = metadata.len();
+    if pos == 0 || file_len < pos {
+        return read_watch_replay_for_attach(path, &mut file, file_len, agent_id).await;
+    }
+    if file_len == pos {
+        return Ok((Vec::new(), pos));
+    }
+
+    file.seek(std::io::SeekFrom::Start(pos)).await?;
+    let read_len = (file_len - pos).min(256 * 1024) as usize;
+    let mut buf = vec![0u8; read_len];
+    let n = file.read(&mut buf).await?;
+    buf.truncate(n);
+
+    let chunk = String::from_utf8_lossy(&buf);
+    let mut out = Vec::new();
+    for line in chunk.lines().filter(|l| !l.trim().is_empty()) {
+        if let Ok(frame) = serde_json::from_str::<serde_json::Value>(line)
+            && frame
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| id == agent_id)
+        {
+            out.push(frame);
+        }
+    }
+    Ok((out, pos + n as u64))
+}
+
+async fn read_watch_replay_for_attach(
+    path: &std::path::Path,
+    file: &mut tokio::fs::File,
+    file_len: u64,
+    agent_id: &str,
+) -> Result<(Vec<serde_json::Value>, u64)> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    if !path.exists() || file_len == 0 {
+        return Ok((Vec::new(), 0));
+    }
+
+    let start = file_len.saturating_sub(WATCH_ATTACH_REPLAY_SCAN_BYTES);
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let mut buf = vec![0u8; (file_len - start) as usize];
+    let n = file.read(&mut buf).await?;
+    buf.truncate(n);
+
+    let chunk = String::from_utf8_lossy(&buf);
+    let mut lines = chunk.lines();
+    // Tail replay can start mid-line; drop the first partial line.
+    if start > 0 {
+        let _ = lines.next();
+    }
+
+    let mut replay: VecDeque<serde_json::Value> =
+        VecDeque::with_capacity(WATCH_ATTACH_REPLAY_MAX_FRAMES);
+    for line in lines.filter(|l| !l.trim().is_empty()) {
+        if let Ok(frame) = serde_json::from_str::<serde_json::Value>(line)
+            && frame
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| id == agent_id)
+        {
+            if replay.len() >= WATCH_ATTACH_REPLAY_MAX_FRAMES {
+                let _ = replay.pop_front();
+            }
+            replay.push_back(frame);
+        }
+    }
+
+    Ok((replay.into_iter().collect(), file_len))
+}
+
 /// Read new [`LogEventV1`] events from a JSONL log file since `pos`.
 ///
 /// Returns matching events and the updated byte position.
@@ -558,42 +671,6 @@ fn emit_stream_detach_event(team: &str, agent: &str) {
         agent_id: Some(agent.to_string()),
         ..Default::default()
     });
-}
-
-fn format_stream_event_line(event: &DaemonStreamEvent) -> String {
-    match event {
-        DaemonStreamEvent::TurnStarted {
-            turn_id, transport, ..
-        } => {
-            format!("[live] turn started ({transport}) id={turn_id}")
-        }
-        DaemonStreamEvent::TurnCompleted {
-            turn_id,
-            transport,
-            status,
-            ..
-        } => {
-            let status_s = match status {
-                TurnStatusWire::Completed => "completed",
-                TurnStatusWire::Interrupted => "interrupted",
-                TurnStatusWire::Failed => "failed",
-            };
-            format!("[live] turn {status_s} ({transport}) id={turn_id}")
-        }
-        DaemonStreamEvent::TurnIdle {
-            turn_id, transport, ..
-        } => {
-            format!("[live] turn idle ({transport}) id={turn_id}")
-        }
-        DaemonStreamEvent::StreamError {
-            session_id,
-            error_summary,
-            ..
-        } => format!("[live] stream error session={session_id}: {error_summary}"),
-        DaemonStreamEvent::DroppedCounters {
-            dropped, unknown, ..
-        } => format!("[live] dropped counters dropped={dropped} unknown={unknown}"),
-    }
 }
 
 // ── Control dispatch ──────────────────────────────────────────────────────────
@@ -733,7 +810,6 @@ fn format_ack_result(ack: &ControlAck) -> String {
 mod tests {
     use super::*;
     use agent_team_mail_core::control::{ControlAck, ControlResult};
-    use agent_team_mail_core::daemon_stream::{DaemonStreamEvent, TurnStatusWire};
 
     fn make_ack(result: ControlResult, duplicate: bool, detail: Option<&str>) -> ControlAck {
         ControlAck {
@@ -797,33 +873,6 @@ mod tests {
     fn test_format_ack_internal_error() {
         let ack = make_ack(ControlResult::InternalError, false, None);
         assert_eq!(format_ack_result(&ack), "internal error");
-    }
-
-    #[test]
-    fn test_format_stream_event_line_started() {
-        let e = DaemonStreamEvent::TurnStarted {
-            agent: "arch-ctm".to_string(),
-            thread_id: "th-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            transport: "app-server".to_string(),
-        };
-        let line = format_stream_event_line(&e);
-        assert!(line.contains("turn started"));
-        assert!(line.contains("app-server"));
-    }
-
-    #[test]
-    fn test_format_stream_event_line_completed() {
-        let e = DaemonStreamEvent::TurnCompleted {
-            agent: "arch-ctm".to_string(),
-            thread_id: "th-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            status: TurnStatusWire::Completed,
-            transport: "cli-json".to_string(),
-        };
-        let line = format_stream_event_line(&e);
-        assert!(line.contains("completed"));
-        assert!(line.contains("cli-json"));
     }
 
     #[tokio::test]
@@ -1014,5 +1063,84 @@ mod tests {
             "should read new content after recovery (stream_source_error cleared)"
         );
         assert!(new_pos > 0, "position must advance after recovery read");
+    }
+
+    #[tokio::test]
+    async fn test_tail_watch_stream_file_attach_replay_bounded_to_50() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch_path = dir.path().join("events.jsonl");
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..80 {
+            let frame = serde_json::json!({
+                "agent_id": "agent-a",
+                "event": {"params": {"type": "item_delta", "delta": format!("a-{i}")}}
+            });
+            lines.push(serde_json::to_string(&frame).unwrap());
+        }
+        for i in 0..10 {
+            let frame = serde_json::json!({
+                "agent_id": "agent-b",
+                "event": {"params": {"type": "item_delta", "delta": format!("b-{i}")}}
+            });
+            lines.push(serde_json::to_string(&frame).unwrap());
+        }
+        tokio::fs::write(&watch_path, format!("{}\n", lines.join("\n")))
+            .await
+            .unwrap();
+
+        let (frames, new_pos) = tail_watch_stream_file(&watch_path, 0, "agent-a").await.unwrap();
+        assert_eq!(
+            frames.len(),
+            50,
+            "attach replay must be bounded to last 50 frames"
+        );
+        assert!(
+            new_pos > 0,
+            "attach replay should advance position to current file length"
+        );
+        let last_delta = frames
+            .last()
+            .and_then(|f| f.pointer("/event/params/delta"))
+            .and_then(|v| v.as_str());
+        assert_eq!(last_delta, Some("a-79"));
+    }
+
+    #[tokio::test]
+    async fn test_tail_watch_stream_file_truncation_returns_reconnect_replay() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch_path = dir.path().join("events.jsonl");
+        let initial = serde_json::json!({
+            "agent_id": "agent-a",
+            "event": {"params": {"type": "item_delta", "delta": "old-old-old-old-old-old-old-old"}}
+        });
+        tokio::fs::write(&watch_path, format!("{}\n", serde_json::to_string(&initial).unwrap()))
+            .await
+            .unwrap();
+        let (_, pos_after_first) = tail_watch_stream_file(&watch_path, 0, "agent-a").await.unwrap();
+        assert!(pos_after_first > 0);
+
+        let replacement = serde_json::json!({
+            "agent_id": "agent-a",
+            "event": {"params": {"type": "item_delta", "delta": "new"}}
+        });
+        tokio::fs::write(
+            &watch_path,
+            format!("{}\n", serde_json::to_string(&replacement).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let (frames, new_pos) = tail_watch_stream_file(&watch_path, pos_after_first, "agent-a")
+            .await
+            .unwrap();
+        assert!(
+            new_pos <= pos_after_first,
+            "reconnect replay should not advance past prior position after truncation/rotation"
+        );
+        let first_delta = frames
+            .first()
+            .and_then(|f| f.pointer("/event/params/delta"))
+            .and_then(|v| v.as_str());
+        assert_eq!(first_delta, Some("new"));
     }
 }

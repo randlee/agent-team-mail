@@ -36,8 +36,113 @@ jobs:
       - name: Run clippy
         run: cargo clippy -- -D warnings
 
-  test:
+  parity-contract:
+    name: parity-contract (${{ matrix.os }})
     needs: [clippy]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-parity-contract-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-parity-contract-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-parity-contract-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run parity contract fixtures
+        run: cargo test -p agent-team-mail-mcp --test parity_contract -- --nocapture
+
+  parity-adapter:
+    name: parity-adapter (${{ matrix.os }})
+    needs: [clippy]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-parity-adapter-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-parity-adapter-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-parity-adapter-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run parity adapter goldens
+        run: cargo test -p agent-team-mail-tui parity_adapter_fixture_golden_scenarios -- --nocapture
+
+  parity-render:
+    name: parity-render (${{ matrix.os }})
+    needs: [clippy]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-parity-render-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-parity-render-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-parity-render-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run parity renderer snapshots
+        run: cargo test -p agent-team-mail-tui parity_render_fixture_combined_flow -- --nocapture
+
+  test:
+    needs: [clippy, parity-contract, parity-adapter, parity-render]
     strategy:
       fail-fast: false
       matrix:

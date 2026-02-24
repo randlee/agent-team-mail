@@ -23,11 +23,12 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::agent_terminal::expand_keys;
 use crate::app::{App, FocusPanel};
+use crate::codex_watch::render_stream_line;
 
 /// Render the full TUI frame from current [`App`] state.
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -259,7 +260,7 @@ fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
 
     let block = Block::default()
         .title(title_line)
-        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+        .borders(Borders::ALL)
         .border_type(if focused {
             BorderType::Rounded
         } else {
@@ -267,8 +268,85 @@ fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
         })
         .border_style(border_style);
 
-    // Compute visible log lines based on scroll offset and viewport height.
-    let inner_height = area.height.saturating_sub(2) as usize; // subtract top border + title
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // status rows
+            Constraint::Length(1), // progress row
+            Constraint::Min(0),    // transcript
+        ])
+        .split(inner);
+
+    let turn_status = app
+        .daemon_turn_state
+        .as_ref()
+        .map(|s| s.turn_status.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    // Status precedence rule (M.5): direct watch stream is authoritative.
+    // Daemon values are fallback only when watch metadata is absent.
+    let transport = app.resolved_watch_transport().unwrap_or("n/a");
+    let turn_id = app.resolved_watch_turn_id().unwrap_or("n/a");
+    let session_id = app.resolved_watch_session_id().unwrap_or("n/a");
+    let model = app.watch_model.as_deref().unwrap_or("n/a");
+    let context = app
+        .watch_context_window_pct
+        .map(|pct| format!("{pct:.0}%"))
+        .unwrap_or_else(|| "n/a".to_string());
+    let completed_total =
+        app.watch_turn_completed + app.watch_turn_interrupted + app.watch_turn_failed;
+    let summary_lines = vec![
+        Line::from(vec![
+            Span::styled("status ", Style::default().fg(Color::Blue)),
+            Span::styled(turn_status, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled("transport ", Style::default().fg(Color::Blue)),
+            Span::raw(transport),
+            Span::raw("  "),
+            Span::styled("turn ", Style::default().fg(Color::Blue)),
+            Span::raw(turn_id),
+        ]),
+        Line::from(vec![
+            Span::styled("session ", Style::default().fg(Color::Blue)),
+            Span::raw(session_id),
+            Span::raw("  "),
+            Span::styled("model ", Style::default().fg(Color::Blue)),
+            Span::raw(model),
+            Span::raw("  "),
+            Span::styled("context ", Style::default().fg(Color::Blue)),
+            Span::raw(context),
+        ]),
+        Line::from(vec![
+            Span::styled("events ", Style::default().fg(Color::Blue)),
+            Span::raw(format!(
+                "started={} completed={} interrupted={} failed={}  dropped={} unknown={}",
+                app.watch_turn_started,
+                app.watch_turn_completed,
+                app.watch_turn_interrupted,
+                app.watch_turn_failed,
+                app.watch_dropped,
+                app.watch_unknown
+            )),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(summary_lines), sections[0]);
+
+    let ratio = if app.watch_turn_started == 0 {
+        0.0
+    } else {
+        (completed_total as f64 / app.watch_turn_started as f64).clamp(0.0, 1.0)
+    };
+    frame.render_widget(
+        Gauge::default()
+            .gauge_style(Style::default().fg(Color::Cyan))
+            .ratio(ratio)
+            .label(format!("turn completion {:.0}%", ratio * 100.0)),
+        sections[1],
+    );
+
+    // Compute visible log lines based on scroll offset and transcript viewport.
+    let inner_height = sections[2].height as usize;
 
     // Prepend a freeze indicator line when the stream is frozen.
     let freeze_line: Option<Line> = app.stream_source_error.as_ref().map(|msg| {
@@ -290,7 +368,7 @@ fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
         .iter()
         .map(|line| {
             let expanded = expand_keys(line);
-            Line::from(Span::raw(expanded))
+            render_stream_line(&expanded)
         })
         .collect();
 
@@ -307,17 +385,14 @@ fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
         };
         frame.render_widget(
             Paragraph::new(placeholder)
-                .block(block)
                 .style(Style::default().fg(Color::DarkGray))
                 .wrap(Wrap { trim: false }),
-            area,
+            sections[2],
         );
     } else {
         frame.render_widget(
-            Paragraph::new(visible)
-                .block(block)
-                .wrap(Wrap { trim: false }),
-            area,
+            Paragraph::new(visible).wrap(Wrap { trim: false }),
+            sections[2],
         );
     }
 }

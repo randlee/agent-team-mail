@@ -44,6 +44,46 @@ fn setup_team() -> (TempDir, PathBuf) {
     (temp_dir, team_dir)
 }
 
+fn setup_team_with_members(members: &[&str]) -> (TempDir, PathBuf) {
+    let temp_dir = TempDir::new().unwrap();
+    let teams_dir = temp_dir.path().join(".claude/teams");
+    let team_dir = teams_dir.join("test-team");
+    let inboxes_dir = team_dir.join("inboxes");
+
+    fs::create_dir_all(&inboxes_dir).unwrap();
+
+    let members_json: Vec<serde_json::Value> = members
+        .iter()
+        .map(|name| {
+            serde_json::json!({
+                "agentId": format!("{name}@test-team"),
+                "name": name,
+                "agentType": "general-purpose",
+                "model": "claude-opus-4-6",
+                "joinedAt": 1770765919076u64,
+                "cwd": "/test",
+                "subscriptions": []
+            })
+        })
+        .collect();
+
+    let config = serde_json::json!({
+        "name": "test-team",
+        "createdAt": 1770765919076u64,
+        "leadAgentId": "team-lead@test-team",
+        "leadSessionId": "6075f866-f103-4be1-b2e9-8dbf66009eb9",
+        "members": members_json
+    });
+
+    fs::write(
+        team_dir.join("config.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    (temp_dir, team_dir)
+}
+
 #[test]
 fn test_read_timeout_expires() {
     let (temp_dir, team_dir) = setup_team();
@@ -233,4 +273,99 @@ fn test_read_timeout_shows_older_unread_even_when_last_seen_is_newer() {
         .success()
         .stdout(predicate::str::contains("Older unread while waiting"))
         .stdout(predicate::str::contains("From: bob"));
+}
+
+#[test]
+fn test_read_timeout_without_agent_uses_config_identity() {
+    let (temp_dir, team_dir) = setup_team_with_members(&["team-lead", "arch-ctm"]);
+
+    let inboxes_dir = team_dir.join("inboxes");
+    fs::write(inboxes_dir.join("team-lead.json"), "[]").unwrap();
+    fs::write(inboxes_dir.join("arch-ctm.json"), "[]").unwrap();
+
+    let workdir = temp_dir.path().join("repo");
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(
+        workdir.join(".atm.toml"),
+        "[core]\ndefault_team = \"test-team\"\nidentity = \"team-lead\"\n",
+    )
+    .unwrap();
+
+    let arch_inbox = inboxes_dir.join("arch-ctm.json");
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        let messages = serde_json::json!([
+            {
+                "from": "sender",
+                "text": "message for arch",
+                "timestamp": "2026-02-16T00:00:00Z",
+                "read": false,
+                "summary": "message for arch",
+                "messageId": "msg-arch-1"
+            }
+        ]);
+        fs::write(&arch_inbox, serde_json::to_string(&messages).unwrap()).unwrap();
+    });
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_IDENTITY")
+        .current_dir(&workdir)
+        .arg("read")
+        .arg("--timeout")
+        .arg("1");
+
+    cmd.assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "Timeout: No new messages for team-lead@test-team",
+        ));
+}
+
+#[test]
+fn test_read_timeout_with_explicit_agent_overrides_default_identity() {
+    let (temp_dir, team_dir) = setup_team_with_members(&["team-lead", "arch-ctm"]);
+
+    let inboxes_dir = team_dir.join("inboxes");
+    fs::write(inboxes_dir.join("team-lead.json"), "[]").unwrap();
+    fs::write(inboxes_dir.join("arch-ctm.json"), "[]").unwrap();
+
+    let workdir = temp_dir.path().join("repo");
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(
+        workdir.join(".atm.toml"),
+        "[core]\ndefault_team = \"test-team\"\nidentity = \"team-lead\"\n",
+    )
+    .unwrap();
+
+    let arch_inbox = inboxes_dir.join("arch-ctm.json");
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        let messages = serde_json::json!([
+            {
+                "from": "sender",
+                "text": "message for explicit target",
+                "timestamp": "2026-02-16T00:00:00Z",
+                "read": false,
+                "summary": "message for explicit target",
+                "messageId": "msg-arch-2"
+            }
+        ]);
+        fs::write(&arch_inbox, serde_json::to_string(&messages).unwrap()).unwrap();
+    });
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_IDENTITY")
+        .current_dir(&workdir)
+        .arg("read")
+        .arg("arch-ctm")
+        .arg("--timeout")
+        .arg("5");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("message for explicit target"))
+        .stdout(predicate::str::contains("Messages for arch-ctm@test-team"));
 }

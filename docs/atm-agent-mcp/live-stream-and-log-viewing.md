@@ -56,7 +56,7 @@ Notes:
 
 ### 3.3 Event subset for MVP rendering
 
-Use a minimal, stable subset from Codex stream notifications:
+Baseline MVP lifecycle subset:
 
 - `turn_started`
 - `item_started`
@@ -65,8 +65,14 @@ Use a minimal, stable subset from Codex stream notifications:
 - `turn_completed`
 - `turn_idle`
 
+M.3 adapter expansion (documented behavior):
+- command output and execution lifecycle: `exec_command_output_delta`, `exec_command_completed`, `exec_command_error`
+- reasoning deltas: `reasoning_content_delta`, `agent_reasoning_delta`, `reasoning_content`
+- additional lifecycle aliases: `task_complete`, `done`, `idle`
+- transport fault signal: `stream_error`
+
 Unknown events:
-- ignore for rendering,
+- are rendered as `unknown.<kind>` in watch mode for observability,
 - increment unknown-event counters and emit periodic diagnostics.
 
 ## 4. Source Attribution Model
@@ -148,6 +154,80 @@ Operational model:
 
 ## 9. References
 
-- `docs/project-plan.md` (Phase L / Sprint L.5 direct watch-stream implementation slot)
+- `docs/project-plan.md` (Phase L complete; this document captures the L.5 implementation baseline and Phase M follow-up plan)
 - `docs/tui-mvp-architecture.md` (approved exception language)
 - `docs/atm-agent-mcp/requirements.md` (FR-21, FR-22)
+- `docs/atm-agent-mcp/codex-parity-test-plan.md` (M.3/M.7 contract, golden, and renderer parity gates)
+
+## 10. Follow-up Backlog (Phase M planning input)
+
+1. Watch-stream file naming and scope
+   - Current path is a shared local feed: `~/.config/atm/watch-stream/events.jsonl`.
+   - Issue: filename implies generic global events and is ambiguous for multi-agent sessions.
+   - Follow-up: migrate to per-agent (or per-session) files, e.g. `watch-stream/<agent-id>.jsonl` (or `<session-id>.jsonl`), and reserve a separate optional aggregate file if needed.
+   - Goal: reduce cross-session ambiguity/collision risk and make operational inspection obvious.
+
+## 11. Codex CLI Look-and-Feel Parity Plan (Phase M.2-M.7)
+
+Goal:
+- Make ATM watch mode visually and behaviorally equivalent to Codex CLI for core flows, while preserving ATM-specific transport and lifecycle boundaries.
+
+Implementation principle:
+- Copy Codex CLI elements first; adapt only integration seams (`CodexAdapter`, ATM source labeling, daemon lifecycle boundary).
+
+### M.2 UI import baseline
+
+- Copy and adapt Codex rendering modules required for transcript rendering, status rows, progress, and terminal layout.
+- Keep ATM ownership of window orchestration and session selection.
+- Exit criteria:
+  - no regressions in existing TUI panes,
+  - Codex watch pane compiles/renders in all supported platforms.
+
+#### M.2 Scope Reduction Record (2026-02-23)
+
+- Copy-first target was partially met: `codex-rs/tui/src/text_formatting.rs` was vendored into
+  `crates/atm-tui/src/codex_vendor/text_formatting.rs` and integrated in the watch rendering path.
+- Full transcript/status/progress ratatui modules were **not** directly reusable from Codex CLI
+  without introducing substantial framework divergence in ATM TUI.
+- M.2 therefore keeps ATM-native watch pane composition while preserving Codex look-and-feel
+  goals through:
+  - vendored formatter reuse,
+  - parity adapter/event mapping from M.3,
+  - parity/golden verification gates in M.7.
+
+### M.3 Event adapter parity
+
+- Build `CodexAdapter` mapping ATM/MCP stream payloads into Codex-native render events.
+- Preserve event ordering, grouping, and incremental updates.
+- Exit criteria:
+  - supported stream events render without fallback text in normal runs,
+  - unknown event metrics continue to surface in diagnostics.
+
+### M.4 Input + approval + interrupt parity
+
+- Match Codex interaction semantics for prompt submit, approval prompts, rejection paths, and interrupt/cancel behavior.
+- Preserve explicit source attribution for `client_prompt`, `atm_mail`, and `user_steer`.
+- Exit criteria:
+  - approval/interrupt flows behave consistently with Codex CLI expectations.
+
+### M.5 Session/status parity
+
+- Mirror Codex status surfaces where available (session metadata, model, context usage, turn state).
+- Keep stable status regions without introducing daemon stream fan-in.
+- Exit criteria:
+  - status surfaces remain coherent across attach/detach and transport mode switches.
+
+### M.6 Replay/reconnect hardening
+
+- Harden bounded replay buffer behavior, session switching continuity, and reconnect handling.
+- Validate deterministic redraw behavior on terminal resize.
+- Exit criteria:
+  - attach replay and reconnect preserve user-visible continuity.
+
+### M.7 Golden parity harness + rollout gate
+
+- Add golden transcript/frame tests from captured Codex runs for prompt/tool/approval/error/cancel flows.
+- Gate completion on side-by-side parity acceptance review.
+- Exit criteria:
+  - parity suite passes in CI,
+  - deviations are explicitly documented and approved.
