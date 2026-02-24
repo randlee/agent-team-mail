@@ -730,6 +730,12 @@ fn render_attached_text(env: &AttachedRenderEnvelope) -> String {
             )
         }
         "tool.exec" => {
+            if env.event_type == "exec_command_output_delta" {
+                if env.text.is_empty() {
+                    return "    ".to_string();
+                }
+                return format!("    {}", env.text);
+            }
             let marker = match env.event_type.as_str() {
                 "exec_command_started" => ">>",
                 "exec_command_completed" => "<<",
@@ -979,6 +985,26 @@ mod tests {
         assert!(rendered.contains("\u{1b}[31m-old\u{1b}[0m"));
         assert!(rendered.contains("\u{1b}[32m+new\u{1b}[0m"));
         assert!(rendered.contains(" context"));
+    }
+
+    #[test]
+    fn tool_exec_output_delta_is_indented() {
+        let env = AttachedRenderEnvelope {
+            v: 1,
+            mode: "attached",
+            agent_id: "codex:test".to_string(),
+            class: "tool.exec".to_string(),
+            applicability: "required".to_string(),
+            source_kind: "client_prompt".to_string(),
+            source_actor: "arch-atm".to_string(),
+            source_channel: "mcp_primary".to_string(),
+            event_type: "exec_command_output_delta".to_string(),
+            text: "line".to_string(),
+            is_turn_boundary: false,
+            unsupported_count: None,
+            raw: serde_json::json!({}),
+        };
+        assert_eq!(render_attached_text(&env), "    line");
     }
 
     #[test]
