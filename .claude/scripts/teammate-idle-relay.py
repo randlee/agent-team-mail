@@ -24,82 +24,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-# ── Socket helper ─────────────────────────────────────────────────────────────
-
-def send_hook_event(payload: dict[str, Any]) -> None:
-    """Send hook_event to daemon socket. Fail-open: any error is logged to stderr."""
-    import socket as _socket
-    import uuid
-    atm_home = Path(os.environ.get("ATM_HOME", str(Path.home())))
-    sock_path = atm_home / ".claude" / "daemon" / "atm-daemon.sock"
-    if not sock_path.exists():
-        return
-    request = {
-        "version": 1,
-        "request_id": str(uuid.uuid4()),
-        "command": "hook-event",
-        "payload": payload,
-    }
-    msg = (json.dumps(request, separators=(",", ":")) + "\n").encode()
-    try:
-        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
-            s.settimeout(1.0)
-            s.connect(str(sock_path))
-            s.sendall(msg)
-            # Drain response (ignore content)
-            s.recv(4096)
-    except Exception as exc:  # noqa: BLE001
-        sys.stderr.write(f"[atm-hook] socket send failed: {exc}\n")
-
-
-def read_atm_toml() -> dict[str, Any] | None:
-    """Read full .atm.toml from current working directory.
-
-    Returns the parsed config dict, or None if not present / unreadable.
-    Supports Python 3.11+ (tomllib) and older versions via tomli fallback.
-    """
-    try:
-        try:
-            import tomllib
-        except ImportError:
-            try:
-                import tomli as tomllib  # type: ignore[no-redef]
-            except ImportError:
-                return None  # Cannot parse TOML; treat as absent
-
-        toml_path = Path(".atm.toml")
-        if not toml_path.exists():
-            return None
-        with toml_path.open("rb") as f:
-            return tomllib.load(f)
-    except Exception:
-        return None
-
-
-def first_str(*values: Any) -> str | None:
-    """Return first non-empty string value."""
-    for value in values:
-        if isinstance(value, str) and value.strip():
-            return value
-    return None
-
-
-def load_payload() -> dict[str, Any]:
-    """Best-effort parse stdin JSON payload."""
-    try:
-        data = json.load(sys.stdin)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    return {}
+# Import shared helpers (same directory)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from atm_hook_lib import send_hook_event, read_atm_toml, first_str, load_payload  # noqa: E402
 
 
 def append_event(event: dict[str, Any]) -> None:
     """Append one event JSON line to daemon hook event log."""
-    atm_home = Path(os.environ.get("ATM_HOME", str(Path.home())))
-    events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+    from atm_hook_lib import atm_home
+    events_file = atm_home() / ".claude" / "daemon" / "hooks" / "events.jsonl"
     events_file.parent.mkdir(parents=True, exist_ok=True)
     with events_file.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, separators=(",", ":")) + "\n")
