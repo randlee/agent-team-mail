@@ -309,7 +309,10 @@ fn test_read_timeout_without_agent_uses_config_identity() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
+        .env_remove("ATM_CONFIG")
+        .env_remove("CLAUDE_SESSION_ID")
         .current_dir(&workdir)
         .arg("read")
         .arg("--timeout")
@@ -357,7 +360,10 @@ fn test_read_timeout_with_explicit_agent_overrides_default_identity() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
+        .env_remove("ATM_CONFIG")
+        .env_remove("CLAUDE_SESSION_ID")
         .current_dir(&workdir)
         .arg("read")
         .arg("arch-ctm")
