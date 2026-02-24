@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 import sys
 import tempfile
 from io import StringIO
@@ -128,6 +129,8 @@ class TestSessionStartSocketSend(unittest.TestCase):
                 sock_path = sock_dir / "atm-daemon.sock"
                 if socket_file_exists:
                     sock_path.touch()
+                    if platform.system() == "Windows":
+                        (sock_dir / "atm-daemon.port").write_text("12345")
 
                 mock_sock_instance = MagicMock()
                 mock_sock_instance.__enter__ = MagicMock(return_value=mock_sock_instance)
@@ -173,7 +176,8 @@ class TestSessionStartSocketSend(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)
-        self.assertIn("atm-daemon.sock", calls[0])
+        if platform.system() != "Windows":
+            self.assertIn("atm-daemon.sock", calls[0])
 
     def test_socket_error_exit_zero(self):
         """Socket connection error → still exits 0 (fail-open)."""
@@ -214,6 +218,8 @@ class TestSessionStartSocketSend(unittest.TestCase):
                 sock_dir = atm_home / ".claude" / "daemon"
                 sock_dir.mkdir(parents=True, exist_ok=True)
                 (sock_dir / "atm-daemon.sock").touch()
+                if platform.system() == "Windows":
+                    (sock_dir / "atm-daemon.port").write_text("12345")
 
                 mock_sock = MagicMock()
                 mock_sock.__enter__ = MagicMock(return_value=mock_sock)
@@ -241,6 +247,8 @@ class TestSessionStartSocketSend(unittest.TestCase):
         self.assertEqual(request["payload"]["agent"], "team-lead")
         self.assertEqual(request["payload"]["team"], "atm-dev")
         self.assertEqual(request["payload"]["source"]["kind"], "claude_hook")
+        self.assertIn("process_id", request["payload"])
+        self.assertIsInstance(request["payload"]["process_id"], int)
 
 
 class TestSessionStartGuards(unittest.TestCase):

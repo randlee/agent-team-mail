@@ -13,6 +13,8 @@ Claude Code hooks are shell/Python scripts that fire at specific lifecycle point
 | `SessionStart` | Global | Session start, compact, resume | `~/.claude/scripts/session-start.py` | Announce session ID + ATM context; emit lifecycle event |
 | `SessionEnd` | Global | Session exits | `~/.claude/scripts/session-end.py` | Emit lifecycle event to mark session dead |
 | `PreToolUse(Task)` | Project | Every `Task` tool call | `.claude/scripts/gate-agent-spawns.py` | Enforce safe agent spawning rules |
+| `PreToolUse(Bash)` | Project | Every `Bash` tool call with `atm` command | `.claude/scripts/atm-identity-write.py` | Write hook file for PID-based identity correlation (Phase N.2) |
+| `PostToolUse(Bash)` | Project | After every `Bash` tool call | `.claude/scripts/atm-identity-cleanup.py` | Delete hook file after tool completes (Phase N.2) |
 | `TeammateIdle` | Project | Teammate goes idle | `.claude/scripts/teammate-idle-relay.py` | Relay idle lifecycle event to daemon |
 
 ---
@@ -173,6 +175,7 @@ Got team_name:      "wrong-team"
 ### Debug Log
 
 Every hook call (pass or block) is appended to `${TMPDIR}/gate-agent-spawns-debug.jsonl` (platform temp dir).
+Each log entry includes `process_id` (the OS PID of the hook script invocation) for diagnostics.
 The hook also writes `${TMPDIR}/atm-session-id` as an audit/debug breadcrumb.
 This breadcrumb is **not** the production session resolution path for `atm teams resume`;
 resume should use explicit `--session-id` and/or `CLAUDE_SESSION_ID`.
@@ -207,13 +210,16 @@ The event has the shape:
   "agent": "<agent name>",
   "team": "<team name>",
   "session_id": "<uuid>",
+  "process_id": 12345,
   "received_at": "2026-02-20T12:00:00Z",
   "payload": { ... original hook payload ... }
 }
 ```
 
 Team name is resolved in priority order: payload `team_name` → env `ATM_TEAM` → `.atm.toml` `default_team`.
-Agent name is resolved from: payload `name` → payload `agent` → env `ATM_IDENTITY`.
+Agent name is resolved from: payload `teammate_name` → payload `name` → payload `agent` → env `ATM_IDENTITY`.
+
+> **Note**: Claude Code sends the teammate's name as `teammate_name` in the `TeammateIdle` hook payload (not `name`). The `name` and `agent` fallbacks exist for manual testing and forward compatibility.
 
 The relay also sends the same lifecycle signal to the daemon socket (`command: "hook-event"`)
 for low-latency state updates, while keeping `events.jsonl` as a durable audit trail.
@@ -430,8 +436,16 @@ There are two payload layers:
 | `tool_input.subagent_type` | `PreToolUse(Task)` | Agent type being spawned |
 | `tool_input.name` | `PreToolUse(Task)` | Teammate name (if present, spawns named tmux teammate) |
 | `tool_input.team_name` | `PreToolUse(Task)` | Team to join (if present, adds to team) |
-| `name` | `TeammateIdle` | Name of the idle teammate |
+| `teammate_name` | `TeammateIdle` | Name of the idle teammate (Claude Code's actual field name) |
 | `team_name` | `TeammateIdle` | Team the teammate belongs to |
+| `transcript_path` | `PreToolUse`, `TeammateIdle` | Path to the session transcript JSONL file |
+| `cwd` | `PreToolUse`, `TeammateIdle` | Working directory of the calling session |
+| `permission_mode` | `PreToolUse`, `TeammateIdle` | Permission mode (e.g., `"bypassPermissions"`) |
+| `hook_event_name` | All hooks | Hook type identifier (e.g., `"PreToolUse"`, `"TeammateIdle"`) |
+| `tool_use_id` | `PreToolUse` | Unique ID for the tool invocation |
+
+> **Important**: PreToolUse payloads do **not** include any agent/teammate identity field.
+> The only hook that provides `teammate_name` is `TeammateIdle`.
 
 ### 2) ATM Daemon Socket Payload (`hook-event`)
 
@@ -441,6 +455,7 @@ There are two payload layers:
 | `session_id` | Session identifier used by daemon liveness/state tracking |
 | `agent` | ATM member identity |
 | `team` | ATM team name |
+| `process_id` | OS process ID of the hook script (for diagnostics/liveness correlation) |
 | `source.kind` | Lifecycle source discriminator (`claude_hook`, `atm_mcp`, `agent_hook`, `unknown`) |
 
 ---
@@ -459,8 +474,143 @@ All hook scripts follow these conventions:
 
 ## Known Limitations
 
-- **Project-level hooks only fire for interactive sessions.** Task-tool-spawned teammates (background agents or named teammates) do NOT trigger `PreToolUse` or `TeammateIdle` for their own Tool calls — only the parent session's hook fires when spawning them.
+- **PreToolUse hooks stop firing in the lead session after compaction.** Tested: 309 entries from prior sessions, 0 entries post-compaction in the same session. TeammateIdle hooks survive compaction. Workaround: start a fresh `claude` session.
+- **PreToolUse hooks DO fire for tmux teammates.** Each teammate is a separate Claude Code process; project hooks in `.claude/settings.json` apply to their tool calls. Confirmed: Bash, Read, and SendMessage all trigger PreToolUse in the teammate's session.
+- **Hook scripts resolve from the teammate's `cwd`** (the main repo), not from any worktree. Confirmed via `hook_source` tagging experiment.
+- **PreToolUse payload does NOT include agent/teammate identity.** Only `session_id`, `tool_name`, `tool_input`, `tool_use_id`, `cwd`, `transcript_path`, `permission_mode`. No `teammate_name` or equivalent.
+- **TeammateIdle is the only hook with `teammate_name`.** The field is `teammate_name` (not `name`). It fires after the agent goes idle, not before tool calls.
+- **Each hook invocation gets a fresh PID** but `os.getppid()` from the hook is the stable agent process PID for the session. This can be used for cross-process identity correlation (see Phase N.2 design).
+- **SessionStart may have a race condition for tmux teammates.** The tmux pane may not finish shell initialization before the claude command is sent via `send-keys`. Unverified from official docs but consistent with observed behavior (0 SessionStart entries for teammates).
 - **`SessionStart` is global, not project-scoped.** All sessions on the machine get the hook output, even in unrelated projects. The hook gracefully does nothing if `.atm.toml` is absent.
 - **`leadSessionId` must be current** for Rule 2 to work correctly. If `atm teams resume` has not been run after a session restart, the gate may incorrectly block the team lead. See `atm teams resume` documentation and issue [#141](https://github.com/randlee/agent-team-mail/issues/141).
 - **Daemon session registry is currently keyed by agent name only.** Cross-team duplicate member names can collide in session tracking until the registry is migrated to a team-scoped key (`(team, name)`).
 - **Agent-teams is pre-release** as of Claude Code v2.1.39. Hook behavior may change in future versions.
+
+---
+
+## PID-Based Identity Correlation (Phase N.2 Design)
+
+Tested approach for resolving agent identity at tool-use time without `teammate_name` in PreToolUse. Verified on macOS, Windows native, and WSL.
+
+### Process Tree Structure (confirmed)
+
+```
+Agent PID (stable per session, e.g., 11449)
+├── PreToolUse hook (child, ppid = agent PID)  ← writes hook file
+├── Bash tool → shell (child, ppid = agent PID)
+│   └── atm send/read (grandchild, ppid = shell) ← reads hook file (PostToolUse deletes)
+├── TeammateIdle hook (child, ppid = agent PID)
+```
+
+### Write: PreToolUse Hook (every tool call)
+
+The PreToolUse hook fires before every tool call as a child process of the agent.
+
+- **Only writes for `atm` commands** — checks `tool_input.command` for `atm` or `cargo run atm` substring; skips all other tool calls (no orphan files). This is a Python script and can be hand-edited if custom aliases or wrappers are used.
+- **File**: `<temp_dir>/atm-hook-<hook_pid>.json` where `hook_pid` = `os.getpid()` (changes every call)
+- **Permissions**: `0600` (owner-only read/write) on Unix — prevents spoofing/tampering in shared temp directories. On Windows, ACL-based ownership validation is not portable; implementation should log a warning and skip ownership check rather than fail (fail-open).
+- **Contents**: `{ pid: <agent_pid>, session_id, agent_name, created_at }`
+  - `agent_pid` = `os.getppid()` — the hook's parent is the stable agent process
+  - `session_id` — from the hook's stdin payload
+  - `agent_name` — resolved from daemon registry (populated by `atm register`) or null if not yet registered
+  - `created_at` — monotonic/epoch timestamp for staleness detection
+
+A new file is created on every tool call because each hook invocation gets a fresh PID.
+
+### Read: `atm` Command (spawned by Bash tool)
+
+When `atm send`, `atm read`, etc. runs inside a Bash tool call:
+
+1. `atm` gets its **parent PID** via `getppid()` — this is the shell spawned by the Bash tool
+2. Opens `<temp_dir>/atm-hook-<parent_pid>.json` — **direct file lookup**, no scanning
+3. **Validates before trusting**:
+   - File owner matches current user on Unix (prevents cross-user spoofing); skipped on Windows with warning
+   - `created_at` is within max age (e.g., 5 seconds) — rejects stale files from crashed processes or PID reuse
+   - `session_id` matches expected session if known (guard against PID reuse misattribution)
+4. Reads `session_id` + `agent_name` from the file
+5. **Does not delete** — file is cleaned up by PostToolUse hook (supports multiple `atm` calls in one Bash invocation)
+6. **Missing or unreadable file**: `atm` **rejects the call** and requires `--from <name>` to proceed. No silent fallback — a missing hook file indicates a broken hook setup and should not be masked. Same behavior for locked, permission-denied, or corrupt files.
+
+This works because the PreToolUse hook and the Bash shell share the same PID — Claude Code runs both as the same child process of the agent. The hook runs first (and can block with exit code 2), then the shell executes in the same process. So `atm`'s parent PID is always the hook file's name.
+
+**Multiple `atm` calls in one Bash invocation**: If a shell script runs `atm send foo && atm send bar`, deleting on first read would leave the second call without identity. Instead, `atm` **reads without deleting**. Cleanup is handled by a **PostToolUse hook** that deletes the hook file after the tool call completes. This ensures all `atm` invocations within a single Bash call share the same identity context, and the file is cleaned up reliably regardless of how many (or zero) `atm` calls ran. The `created_at` TTL provides additional staleness protection.
+
+### `atm register` — Unified Session Registration (replaces `atm teams resume`)
+
+One command handles both team-lead and teammate registration. Called once per session at startup (instructed via CLAUDE.md). Reads the hook file for `session_id` automatically — no more manual `--session-id` flag.
+
+#### Team-lead: `atm register <team>`
+
+Team-lead calls first (identity resolved from `.atm.toml`). This subsumes the current `atm teams resume` functionality:
+
+- Reads hook file → gets `session_id` automatically
+- Claims team lead: updates `leadSessionId` in team config
+- Auto-backup before state change
+- Liveness check on old session (daemon query, `--force` to override)
+- Marks non-lead members inactive
+- Notifies all members via inbox
+- Registers `{ agent_name: "team-lead", session_id, agent_pid }` with daemon
+
+#### Teammates: `atm register <team> <name>`
+
+Teammates call after team-lead has claimed. Passes their name explicitly:
+
+- Reads hook file → gets `session_id` automatically
+- Registers `{ agent_name, session_id, agent_pid }` with daemon
+- Solves the `agent_name` timing gap (TeammateIdle hasn't fired yet on first call)
+- Subsequent PreToolUse hook files can populate `agent_name` from the daemon registry
+
+#### CLAUDE.md Instructions
+
+```markdown
+# First thing every session:
+atm register <team>           # team-lead (name from .atm.toml identity)
+atm register <team> <name>    # teammates (name passed explicitly)
+```
+
+#### Migration from `atm teams resume`
+
+`atm teams resume` continues to work as an alias during the transition. The key improvement is that `register` reads `session_id` from the hook file (written by PreToolUse before the Bash tool runs), eliminating the biggest pain point: having to manually pass `--session-id` every session.
+
+### Identity Resolution Order
+
+For Claude Code agents (hook file expected):
+```
+1. Hook file (<temp_dir>/atm-hook-<pid>.json)  → required for Claude Code teammates
+2. If hook file missing/unreadable              → REJECT, require --from <name>
+```
+
+For non-Claude agents (Codex, Gemini, external — no hooks):
+```
+1. --from <name> CLI flag                 → explicit override (always works)
+2. ATM_IDENTITY env var                   → Codex/Gemini/external agents
+3. .atm.toml [core].identity              → fallback (team-lead default)
+```
+
+The `--from` flag works regardless of hook state — it is the universal escape hatch.
+
+### Register Ordering
+
+The intended order is team-lead registers first (the team is created by the lead's Claude Code session via `TeamCreate`), but teammate-first registration is allowed with a warning.
+
+**All members must register.** Registration validates that the provided `<name>` exists in the team's `config.json` members list. Unknown names are rejected — this prevents typos and impersonation. There is no implicit member creation through register; members must already exist in config.json (added via `TeamCreate` or `atm teams add-member`).
+
+If a teammate calls `register <team> <name>` before team-lead has registered:
+- **Allow it** — register the teammate with the provided name (update their entry in config.json)
+- **Output a warning**: `WARNING: team-lead is not registered for this team. ATM messaging will work, but Claude Code team messaging (SendMessage) will not function until team-lead registers. If this is unexpected, ask the user: "Who am I on this team?"`
+- The teammate can send/receive ATM messages (file-based), but Claude Code's built-in team messaging requires `leadSessionId` to be current
+
+When team-lead registers later, everything starts working. The teammate doesn't need to re-register.
+
+If registration fails (name not in config, team not found, etc.), the error message should strongly indicate: **ask the user who you are on this team** rather than guessing or proceeding without identity.
+
+### Open Questions
+
+- **`atm teams resume` deprecation timeline**: Keep as alias indefinitely, or sunset after one phase?
+
+### Cross-Platform Notes
+
+- `os.getpid()` and `os.getppid()` — cross-platform (Python 3.2+, Rust `std::process::id()`)
+- Parent PID from Rust: `std::os::unix::process::parent_id()` on Unix; on Windows use `winapi` or `sysinfo` crate
+- Hook file path: use `std::env::temp_dir()` (Rust) / `tempfile.gettempdir()` (Python) for cross-platform temp directory
+- `atm_hook_lib.py` abstracts socket communication (Unix domain on macOS/Linux, TCP on Windows)
