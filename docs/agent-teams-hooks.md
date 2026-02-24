@@ -173,6 +173,7 @@ Got team_name:      "wrong-team"
 ### Debug Log
 
 Every hook call (pass or block) is appended to `${TMPDIR}/gate-agent-spawns-debug.jsonl` (platform temp dir).
+Each log entry includes `process_id` (the OS PID of the hook script invocation) for diagnostics.
 The hook also writes `${TMPDIR}/atm-session-id` as an audit/debug breadcrumb.
 This breadcrumb is **not** the production session resolution path for `atm teams resume`;
 resume should use explicit `--session-id` and/or `CLAUDE_SESSION_ID`.
@@ -207,6 +208,7 @@ The event has the shape:
   "agent": "<agent name>",
   "team": "<team name>",
   "session_id": "<uuid>",
+  "process_id": 12345,
   "received_at": "2026-02-20T12:00:00Z",
   "payload": { ... original hook payload ... }
 }
@@ -441,6 +443,7 @@ There are two payload layers:
 | `session_id` | Session identifier used by daemon liveness/state tracking |
 | `agent` | ATM member identity |
 | `team` | ATM team name |
+| `process_id` | OS process ID of the hook script (for diagnostics/liveness correlation) |
 | `source.kind` | Lifecycle source discriminator (`claude_hook`, `atm_mcp`, `agent_hook`, `unknown`) |
 
 ---

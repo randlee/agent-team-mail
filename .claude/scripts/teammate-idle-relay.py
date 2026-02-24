@@ -145,6 +145,7 @@ def main() -> int:
         "agent": agent,
         "team": team,
         "session_id": payload.get("session_id"),
+        "process_id": os.getpid(),
         "received_at": received_at,
         "payload": payload,
     }
@@ -161,6 +162,7 @@ def main() -> int:
         send_hook_event({
             "event": "teammate_idle",
             "session_id": payload.get("session_id"),
+            "process_id": os.getpid(),
             "agent": agent,
             "team": team,
             "received_at": received_at,

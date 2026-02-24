@@ -107,6 +107,23 @@ class TestTeammateIdleRelayFileWrite(unittest.TestCase):
             finally:
                 os.chdir(orig_dir)
 
+    def test_event_contains_process_id(self):
+        """Event dict includes process_id field."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
+                rc = self._run(_make_payload(), atm_home=atm_home)
+                self.assertEqual(rc, 0)
+                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                event = json.loads(events_file.read_text().strip().splitlines()[0])
+                self.assertIn("process_id", event)
+                self.assertIsInstance(event["process_id"], int)
+            finally:
+                os.chdir(orig_dir)
+
     def test_exit_zero_on_bad_stdin(self):
         """Malformed stdin → exits 0 (fail-open), even with .atm.toml present."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -208,6 +225,22 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
             request["payload"]["received_at"],
             r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
         )
+
+    def test_socket_payload_contains_process_id(self):
+        """Socket payload includes process_id field."""
+        toml = '[core]\ndefault_team = "atm-dev"\nidentity = "team-lead"\n'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            rc, calls = self._run_with_mock_socket(
+                _make_payload(agent="arch-ctm", team="atm-dev", session_id="sess-pid"),
+                atm_home=atm_home,
+                toml_content=toml,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        request = json.loads(calls[0].decode().strip())
+        self.assertIn("process_id", request["payload"])
+        self.assertIsInstance(request["payload"]["process_id"], int)
 
     def test_socket_error_file_write_still_succeeds(self):
         """Socket error must not prevent the file write from succeeding."""
