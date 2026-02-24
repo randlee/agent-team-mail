@@ -53,3 +53,8 @@ O.1 introduces an attached-mode event envelope separate from watch-only string r
 - raw frame passthrough for forward compatibility
 
 This creates a stable typed contract for O.2 renderer work.
+
+## 5. Render Fallback Notes
+
+- `print_frame` intentionally preserves a generic fallback path: when a class-specific renderer is unavailable, attached mode prints class/source with either extracted text or event type.
+- Unknown/unhandled classes are surfaced explicitly (not dropped), and parity/deviation decisions are tracked in `phase-o-deviation-log.md`.

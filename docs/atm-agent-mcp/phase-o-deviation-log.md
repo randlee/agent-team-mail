@@ -27,3 +27,10 @@ Owner: `arch-ctm`
 - approved_by: team-lead
 - approved_date: 2026-02-24
 - rationale: full fault source classification deferred to production hardening phase.
+
+### DEV-O3-002: Ctrl-C maps to process exit, not interrupt control
+- Requirement context: attached mode control UX.
+- Current behavior: terminal `Ctrl-C` follows default process signal behavior and exits attached mode; it does not emit `control.interrupt.request`.
+- approved_by: team-lead
+- approved_date: 2026-02-24
+- rationale: explicit `:interrupt` command is the canonical interrupt path in Phase O; terminal-signal interception is deferred to hardening.
