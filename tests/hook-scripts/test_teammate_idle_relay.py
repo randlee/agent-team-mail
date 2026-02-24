@@ -287,6 +287,67 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
         self.assertEqual(calls, [], "No connect attempt when socket file is absent")
 
 
+class TestTeammateIdleRelayRealPayload(unittest.TestCase):
+    """Tests using real Claude Code TeammateIdle payload format."""
+
+    def _run(self, stdin_data: dict, *, atm_home: Path) -> int:
+        stdin_text = json.dumps(stdin_data)
+        with patch("sys.stdin", StringIO(stdin_text)), \
+             patch.dict(os.environ, {"ATM_HOME": str(atm_home)}):
+            mod = _load_module("teammate_idle_relay", _RELAY_PATH)
+            return mod.main()
+
+    def test_teammate_name_field_resolves_agent(self):
+        """Real Claude Code payload uses 'teammate_name' not 'name' — agent must resolve."""
+        real_payload = {
+            "session_id": "cc653838-57ee-4e48-89f2-a79380ce4d76",
+            "transcript_path": "/some/path.jsonl",
+            "cwd": "/some/cwd",
+            "permission_mode": "bypassPermissions",
+            "hook_event_name": "TeammateIdle",
+            "teammate_name": "sm-e-7",
+            "team_name": "atm-dev",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
+                rc = self._run(real_payload, atm_home=atm_home)
+                self.assertEqual(rc, 0)
+                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                self.assertTrue(events_file.exists(), "Event should be written for real payload")
+                event = json.loads(events_file.read_text().strip())
+                self.assertEqual(event["agent"], "sm-e-7")
+                self.assertEqual(event["team"], "atm-dev")
+            finally:
+                os.chdir(orig_dir)
+
+    def test_teammate_name_takes_priority_over_name(self):
+        """teammate_name should take priority over name field."""
+        payload = {
+            "teammate_name": "real-agent",
+            "name": "fallback-agent",
+            "team_name": "atm-dev",
+            "session_id": "s1",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
+                rc = self._run(payload, atm_home=atm_home)
+                self.assertEqual(rc, 0)
+                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                event = json.loads(events_file.read_text().strip())
+                self.assertEqual(event["agent"], "real-agent",
+                                 "teammate_name should be preferred over name")
+            finally:
+                os.chdir(orig_dir)
+
+
 class TestTeammateIdleRelayGuards(unittest.TestCase):
     """Tests for C-1 and I-1: .atm.toml guard and tomllib fallback."""
 

@@ -215,7 +215,9 @@ The event has the shape:
 ```
 
 Team name is resolved in priority order: payload `team_name` → env `ATM_TEAM` → `.atm.toml` `default_team`.
-Agent name is resolved from: payload `name` → payload `agent` → env `ATM_IDENTITY`.
+Agent name is resolved from: payload `teammate_name` → payload `name` → payload `agent` → env `ATM_IDENTITY`.
+
+> **Note**: Claude Code sends the teammate's name as `teammate_name` in the `TeammateIdle` hook payload (not `name`). The `name` and `agent` fallbacks exist for manual testing and forward compatibility.
 
 The relay also sends the same lifecycle signal to the daemon socket (`command: "hook-event"`)
 for low-latency state updates, while keeping `events.jsonl` as a durable audit trail.

@@ -127,6 +127,7 @@ def main() -> int:
         required_team,
     )
     agent = first_str(
+        payload.get("teammate_name"),   # Claude Code TeammateIdle payload key
         payload.get("name"),
         payload.get("agent"),
         tool_input.get("name"),
