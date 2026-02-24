@@ -1,4 +1,4 @@
-# Codex CLI vs ATM TUI Render Gap Analysis (Phase N Planning)
+# Codex CLI vs ATM TUI Render Gap Analysis (Phase O Planning)
 
 Date: 2026-02-24  
 Owner: `arch-ctm`  
@@ -59,10 +59,8 @@ These are required additions for attached CLI parity planning:
 - `user_steer`: dedicated local-steer styling distinct from both above.
 5. Expand parity fixtures to include missing classes: `file_edit_diff`, `tool_begin_end`, `request_user_input`, `plan_update`, `atm_mail_summary`, `mcp_client_input`.
 
-## 5. Phase N Work Breakdown Alignment
+## 5. Phase O Work Breakdown Alignment
 
-- `N.1`: attach stream/control wiring + typed render-event envelope.
-- `N.2`: renderer parity expansion (including diff + tool lifecycle).
-- `N.3`: control-path parity (`approval`, `request_user_input`, `interrupt/cancel`, fault state fidelity).
-- `N.4`: golden parity matrix expansion and deviation enforcement for any remaining non-parity behavior.
-- `N.5`: long-tail parity closure + hardening (remaining Codex event classes, cross-platform soak, and full-surface CI parity gate).
+- `O.1`: attach stream/control wiring + typed render-event envelope.
+- `O.2`: renderer parity expansion (including diff + tool lifecycle).
+- `O.3`: control-path parity (`approval`, `request_user_input`, `interrupt/cancel`, fault state fidelity).

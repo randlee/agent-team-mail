@@ -495,15 +495,13 @@ Notes:
 | C.1 | **Conformance testing** — MCP protocol conformance test suite (initialize, capabilities, notifications, cancellation, streaming), proxy latency benchmarks, registry stress tests | Phase B |
 | C.2 | **Packaging + polish** — `atm-agent-mcp` added to release workflow, Homebrew formula update, documentation | C.1 |
 
-### Phase N: Attached CLI Parity (5 sprints)
+### Phase O: Attached CLI Parity (3 sprints)
 
 | Sprint | Deliverable | Dependencies |
 |--------|-------------|--------------|
-| N.1 | **Attach command + wiring** — implement `attach <agent-id>`, bind one live stream, and forward user controls to the bound session | Phase C |
-| N.2 | **Renderer/runtime parity** — align terminal rendering/event grouping with Codex CLI baseline for core flows | N.1 |
-| N.3 | **Control-path parity** — approval/reject and interrupt/cancel behavior parity in attached mode, including fault surfacing | N.2 |
-| N.4 | **Golden parity + deviation governance** — side-by-side parity fixtures/tests and enforced deviation log workflow | N.3 |
-| N.5 | **Parity closure + hardening** — close long-tail Codex event-class gaps, run cross-platform parity soak, and enforce full-surface CI rollout gate | N.4 |
+| O.1 | **Attach command + wiring** — implement `attach <agent-id>`, bind one live stream, and forward user controls to the bound session | M.7 |
+| O.2 | **Renderer/runtime parity** — align terminal rendering/event grouping with Codex CLI baseline for core flows | O.1 |
+| O.3 | **Control-path parity** — approval/reject and interrupt/cancel behavior parity in attached mode, including fault surfacing | O.2 |
 
 ### Test Strategy
 
