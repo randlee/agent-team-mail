@@ -74,23 +74,29 @@ pub fn execute(args: RegisterArgs) -> Result<()> {
 /// Resolve the current session ID from hook file or environment.
 fn resolve_session_id() -> Result<String> {
     // 1. Try hook file (written by PreToolUse Bash hook).
-    match read_hook_file() {
+    let fallback_reason = match read_hook_file() {
         Ok(Some(data)) if !data.session_id.is_empty() => {
             return Ok(data.session_id);
         }
-        Ok(_) => {} // File missing or session_id blank — fall through.
+        Ok(Some(_)) => "hook file has blank session_id".to_string(),
+        Ok(None) => "hook file not found".to_string(),
         Err(e) => {
-            warn!("hook file validation failed ({}), falling back to env var", e);
+            anyhow::bail!(
+                "Cannot determine session_id: hook file validation failed: {e}. \
+                 Fix hook setup or use --force only with explicit user confirmation."
+            );
         }
-    }
+    };
 
     // 2. Bootstrap fallback: CLAUDE_SESSION_ID (register only — with mandatory warning).
     if let Ok(id) = std::env::var("CLAUDE_SESSION_ID") {
         let trimmed = id.trim().to_string();
         if !trimmed.is_empty() {
             eprintln!(
-                "WARNING: hook file not found, falling back to CLAUDE_SESSION_ID. \
+                "WARNING: {}, falling back to CLAUDE_SESSION_ID. \
                  Ensure atm-identity-write.py hook is configured in .claude/settings.json."
+                ,
+                fallback_reason
             );
             return Ok(trimmed);
         }
@@ -147,7 +153,21 @@ fn register_team_lead(
                         short
                     );
                 }
-                _ => {}
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    anyhow::bail!(
+                        "WARNING: cannot confirm liveness of existing team-lead session {}. \
+                         Use --force to take over explicitly.",
+                        existing.lead_session_id
+                    );
+                }
+                Err(e) => {
+                    anyhow::bail!(
+                        "WARNING: daemon liveness check failed ({e}). \
+                         Cannot safely replace existing team-lead session {}; use --force to override.",
+                        existing.lead_session_id
+                    );
+                }
             }
         }
     }

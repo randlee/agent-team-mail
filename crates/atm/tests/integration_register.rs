@@ -275,3 +275,112 @@ fn test_register_requires_session_id() {
         .failure()
         .stderr(predicate::str::contains("Cannot determine session_id"));
 }
+
+#[test]
+fn test_register_invalid_hook_file_does_not_fallback_to_env() {
+    let temp_dir = TempDir::new().unwrap();
+    create_test_team(
+        &temp_dir,
+        "my-team",
+        &[("team-lead", true), ("erin", false)],
+    );
+    write_atm_toml(&temp_dir, "team-lead");
+
+    // Build a stale hook file at atm-hook-<ppid>.json where ppid will be this test process.
+    let ppid = std::process::id();
+    let hook_path = temp_dir.path().join(format!("atm-hook-{ppid}.json"));
+    let stale = serde_json::json!({
+        "pid": ppid,
+        "session_id": "stale-session",
+        "agent_name": "team-lead",
+        "created_at": 0.0
+    });
+    fs::write(&hook_path, serde_json::to_string(&stale).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    configure_cmd(&mut cmd, &temp_dir);
+    cmd.env("TMPDIR", temp_dir.path())
+        .env("CLAUDE_SESSION_ID", "env-session-should-not-be-used")
+        .env("ATM_TEAM", "my-team")
+        .current_dir(temp_dir.path().join("workdir"))
+        .args(["register", "my-team"]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "hook file validation failed",
+        ));
+}
+
+#[test]
+fn test_register_conflicting_lead_session_blocks_without_force_when_daemon_unreachable() {
+    let temp_dir = TempDir::new().unwrap();
+    create_test_team(
+        &temp_dir,
+        "my-team",
+        &[("team-lead", true), ("alice", false)],
+    );
+    write_atm_toml(&temp_dir, "team-lead");
+
+    // Pre-populate leadSessionId to simulate an existing lead claim.
+    let config_path = temp_dir
+        .path()
+        .join(".claude/teams/my-team/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["leadSessionId"] = serde_json::json!("existing-live-session-xyz");
+    fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    configure_cmd(&mut cmd, &temp_dir);
+    cmd.env("CLAUDE_SESSION_ID", "new-session-id-123")
+        .env("ATM_TEAM", "my-team")
+        .current_dir(temp_dir.path().join("workdir"))
+        .args(["register", "my-team"]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot confirm liveness of existing team-lead session",
+        ))
+        .stderr(predicate::str::contains("--force"));
+}
+
+#[test]
+fn test_register_conflicting_lead_session_allows_force_when_daemon_unreachable() {
+    let temp_dir = TempDir::new().unwrap();
+    create_test_team(
+        &temp_dir,
+        "my-team",
+        &[("team-lead", true), ("alice", false)],
+    );
+    write_atm_toml(&temp_dir, "team-lead");
+
+    let config_path = temp_dir
+        .path()
+        .join(".claude/teams/my-team/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["leadSessionId"] = serde_json::json!("existing-live-session-xyz");
+    fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    configure_cmd(&mut cmd, &temp_dir);
+    cmd.env("CLAUDE_SESSION_ID", "forced-new-session-id")
+        .env("ATM_TEAM", "my-team")
+        .current_dir(temp_dir.path().join("workdir"))
+        .args(["register", "my-team", "--force"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Registered as team-lead"))
+        .stdout(predicate::str::contains("forced-new-session-id"));
+}
