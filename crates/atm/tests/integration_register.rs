@@ -302,6 +302,8 @@ fn test_register_invalid_hook_file_does_not_fallback_to_env() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     configure_cmd(&mut cmd, &temp_dir);
     cmd.env("TMPDIR", temp_dir.path())
+        .env("TMP", temp_dir.path()) // Windows uses TMP/TEMP, not TMPDIR
+        .env("TEMP", temp_dir.path())
         .env("CLAUDE_SESSION_ID", "env-session-should-not-be-used")
         .env("ATM_TEAM", "my-team")
         .current_dir(temp_dir.path().join("workdir"))
