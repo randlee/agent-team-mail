@@ -46,6 +46,7 @@ struct AttachedRenderEnvelope {
     mode: &'static str,
     agent_id: String,
     class: String,
+    applicability: String,
     source_kind: String,
     source_actor: String,
     source_channel: String,
@@ -53,6 +54,23 @@ struct AttachedRenderEnvelope {
     text: String,
     is_turn_boundary: bool,
     raw: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventApplicability {
+    Required,
+    Degraded,
+    OutOfScope,
+}
+
+impl EventApplicability {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Degraded => "degraded",
+            Self::OutOfScope => "out_of_scope",
+        }
+    }
 }
 
 pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
@@ -381,19 +399,18 @@ fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()
     }
 
     if env.class == "input.atm_mail" {
-        println!("{} <{}>", env.source_actor, clamp_three_lines(&env.text));
+        println!(
+            "{} <{}>",
+            format_mail_actor(&env.source_actor),
+            clamp_three_lines(&env.text)
+        );
         return Ok(());
     }
 
+    let rendered = render_attached_text(&env);
     println!(
-        "[{}][{}] {}",
-        env.class,
-        env.source_kind,
-        if env.text.is_empty() {
-            env.event_type
-        } else {
-            env.text
-        }
+        "[{}][{}|{}] {rendered}",
+        env.class, env.source_kind, env.applicability
     );
     Ok(())
 }
@@ -421,16 +438,8 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
-    let text = event
-        .pointer("/params/delta")
-        .and_then(|v| v.as_str())
-        .or_else(|| event.pointer("/params/text").and_then(|v| v.as_str()))
-        .or_else(|| event.pointer("/params/output").and_then(|v| v.as_str()))
-        .or_else(|| event.pointer("/params/message").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
-
-    let class = classify_event_class(&event_type, &source_kind).to_string();
+    let text = extract_event_text(event).to_string();
+    let (class, applicability) = classify_event_class(&event_type, &source_kind);
     let is_turn_boundary = matches!(
         event_type.as_str(),
         "turn_started"
@@ -459,7 +468,8 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         v: 1,
         mode: "attached",
         agent_id: agent_id.to_string(),
-        class,
+        class: class.to_string(),
+        applicability: applicability.as_str().to_string(),
         source_kind,
         source_actor,
         source_channel,
@@ -470,21 +480,23 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
     }
 }
 
-fn classify_event_class(event_type: &str, source_kind: &str) -> &'static str {
+fn classify_event_class(event_type: &str, source_kind: &str) -> (&'static str, EventApplicability) {
     if source_kind == "atm_mail" || source_kind == "atm_mcp" {
-        return "input.atm_mail";
+        return ("input.atm_mail", EventApplicability::Required);
     }
     if source_kind == "user_steer" || source_kind == "tui_user" {
-        return "input.user_steer";
+        return ("input.user_steer", EventApplicability::Required);
     }
 
+    let lower = event_type.to_ascii_lowercase();
+    let event_type = lower.as_str();
     match event_type {
-        "user_message" => "input.client",
+        "user_message" => ("input.client", EventApplicability::Required),
         "agent_message" | "agent_message_delta" | "agent_message_chunk" | "item_delta" => {
-            "assistant.output"
+            ("assistant.output", EventApplicability::Required)
         }
         "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
-            "assistant.reasoning"
+            ("assistant.reasoning", EventApplicability::Required)
         }
         "approval_prompt"
         | "approval_request"
@@ -492,19 +504,134 @@ fn classify_event_class(event_type: &str, source_kind: &str) -> &'static str {
         | "approval_approved"
         | "entered_review_mode"
         | "exited_review_mode"
-        | "item/enteredReviewMode"
-        | "item/exitedReviewMode" => "approval",
+        | "item/enteredreviewmode"
+        | "item/exitedreviewmode" => ("approval", EventApplicability::Required),
         "exec_command_started"
         | "exec_command_output_delta"
         | "exec_command_completed"
-        | "exec_command_error" => "tool.exec",
-        "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => "file.edit",
-        "request_user_input" | "elicitation_request" => "elicitation.request",
+        | "exec_command_error"
+        | "terminal_interaction" => ("tool.exec", EventApplicability::Required),
+        "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => {
+            ("file.edit", EventApplicability::Required)
+        }
+        "request_user_input" | "elicitation_request" => {
+            ("elicitation.request", EventApplicability::Required)
+        }
         "turn_started" | "turn_completed" | "task_started" | "task_complete" | "turn_idle"
-        | "idle" | "done" | "item_started" | "item_completed" => "turn.lifecycle",
-        "stream_error" | "error" => "stream.error",
-        _ => "unknown",
+        | "idle" | "done" | "item_started" | "item_completed" | "turn_interrupted"
+        | "turn_cancelled" | "cancelled" | "interrupt" | "stream_error" | "error" => {
+            ("turn.lifecycle", EventApplicability::Required)
+        }
+        "mcp_tool_call_begin"
+        | "mcp_tool_call_end"
+        | "web_search_begin"
+        | "web_search_end"
+        | "dynamic_tool_call_request"
+        | "view_image_tool_call"
+        | "tool_call"
+        | "tool_result" => ("tool.lifecycle", EventApplicability::Degraded),
+        "session_configured"
+        | "thread_name_updated"
+        | "token_count"
+        | "model_reroute"
+        | "context_compacted"
+        | "thread_rolled_back"
+        | "undo_started"
+        | "undo_completed"
+        | "background_event"
+        | "warning"
+        | "deprecation_notice"
+        | "plan_update"
+        | "plan_delta" => ("session.meta", EventApplicability::Degraded),
+        "mcp_list_tools_response" | "remote_skill_downloaded" | "skills_update_available" => {
+            ("unsupported.skills", EventApplicability::OutOfScope)
+        }
+        other if other.starts_with("list_") => ("unsupported.list", EventApplicability::OutOfScope),
+        other if other.starts_with("realtime_conversation_") => {
+            ("unsupported.realtime", EventApplicability::OutOfScope)
+        }
+        other if other.starts_with("collab_") => {
+            ("unsupported.collab", EventApplicability::OutOfScope)
+        }
+        _ => ("unknown", EventApplicability::Required),
     }
+}
+
+fn extract_event_text(event: &Value) -> &str {
+    event
+        .pointer("/params/delta")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/text").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/output").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/message").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/prompt").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/diff").and_then(|v| v.as_str()))
+        .unwrap_or("")
+}
+
+fn render_attached_text(env: &AttachedRenderEnvelope) -> String {
+    match env.class.as_str() {
+        "elicitation.request" => {
+            if env.text.is_empty() {
+                "input requested".to_string()
+            } else {
+                format!("? {}", env.text)
+            }
+        }
+        "tool.lifecycle" => {
+            let label = extract_tool_name(&env.raw).unwrap_or("tool");
+            if env.text.is_empty() {
+                format!("{label} {}", env.event_type)
+            } else {
+                format!("{label} {}: {}", env.event_type, env.text)
+            }
+        }
+        "file.edit" => render_diff_text(&env.text, &env.event_type),
+        _ => {
+            if env.class == "unknown" {
+                format!("unknown.{}", env.event_type)
+            } else if env.text.is_empty() {
+                env.event_type.clone()
+            } else {
+                env.text.clone()
+            }
+        }
+    }
+}
+
+fn extract_tool_name(frame: &Value) -> Option<&str> {
+    let event = frame.get("event").unwrap_or(frame);
+    event
+        .pointer("/params/tool_name")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/toolName").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/name").and_then(|v| v.as_str()))
+}
+
+fn render_diff_text(text: &str, fallback: &str) -> String {
+    if text.trim().is_empty() {
+        return fallback.to_string();
+    }
+    text.lines()
+        .map(|line| {
+            if line.starts_with('+') {
+                format!("\u{1b}[32m{line}\u{1b}[0m")
+            } else if line.starts_with('-') {
+                format!("\u{1b}[31m{line}\u{1b}[0m")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+fn format_mail_actor(actor: &str) -> String {
+    if actor.contains('@') {
+        return actor.to_string();
+    }
+    let team = std::env::var("ATM_TEAM").unwrap_or_else(|_| "atm-dev".to_string());
+    format!("{actor}@{}", team.trim())
 }
 
 fn clamp_three_lines(text: &str) -> String {
@@ -574,7 +701,7 @@ mod tests {
     #[test]
     fn classify_atm_mail_has_priority() {
         assert_eq!(
-            classify_event_class("agent_message_delta", "atm_mail"),
+            classify_event_class("agent_message_delta", "atm_mail").0,
             "input.atm_mail"
         );
     }
@@ -589,7 +716,29 @@ mod tests {
         let env = to_attached_envelope("codex:abc", &frame);
         assert_eq!(env.mode, "attached");
         assert_eq!(env.class, "assistant.output");
+        assert_eq!(env.applicability, "required");
         assert_eq!(env.text, "hello");
         assert_eq!(env.source_actor, "arch-atm");
+    }
+
+    #[test]
+    fn classify_tool_lifecycle_degraded() {
+        let (class, applicability) = classify_event_class("mcp_tool_call_begin", "client_prompt");
+        assert_eq!(class, "tool.lifecycle");
+        assert_eq!(applicability.as_str(), "degraded");
+    }
+
+    #[test]
+    fn render_diff_text_applies_ansi_colors() {
+        let rendered = render_diff_text("-old\n+new\n context", "turn_diff");
+        assert!(rendered.contains("\u{1b}[31m-old\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[32m+new\u{1b}[0m"));
+        assert!(rendered.contains(" context"));
+    }
+
+    #[test]
+    fn format_mail_actor_adds_team_suffix() {
+        let actor = format_mail_actor("arch-atm");
+        assert!(actor.contains("arch-atm@"));
     }
 }
