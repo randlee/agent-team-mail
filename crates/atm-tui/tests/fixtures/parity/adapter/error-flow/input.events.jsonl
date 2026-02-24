@@ -1,0 +1,1 @@
+{"source":{"kind":"atm_mail","actor":"arch-atm@atm-dev","channel":"mail_injector"},"event":{"params":{"type":"stream_error","message":"socket closed"}}}

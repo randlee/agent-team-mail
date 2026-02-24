@@ -93,20 +93,6 @@ pub async fn emit_lifecycle_event(
     session_id: &str,
     process_id: Option<u32>,
 ) {
-    // Emit structured log event for the lifecycle transition.
-    agent_team_mail_core::event_log::emit_event_best_effort(
-        agent_team_mail_core::event_log::EventFields {
-            level: "info",
-            source: "atm-agent-mcp",
-            action: kind.as_str(),
-            team: Some(team.to_string()),
-            agent_id: Some(identity.to_string()),
-            session_id: Some(session_id.to_string()),
-            result: Some("ok".to_string()),
-            ..Default::default()
-        },
-    );
-
     #[cfg(unix)]
     {
         if let Err(e) =

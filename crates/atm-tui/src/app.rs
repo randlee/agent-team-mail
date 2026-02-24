@@ -130,8 +130,32 @@ pub struct App {
     /// `"agent-stream-state"` socket command. `None` when the daemon has no
     /// stream state recorded for the agent.
     pub daemon_turn_state: Option<agent_team_mail_core::daemon_stream::AgentStreamState>,
-    /// Long-lived daemon stream subscription used for live turn/event updates.
-    pub daemon_stream_rx: Option<agent_team_mail_core::daemon_client::StreamSubscription>,
+    /// Path to direct watch-stream feed emitted by `atm-agent-mcp`.
+    pub watch_stream_path: Option<PathBuf>,
+    /// File-read byte position for incremental watch-stream tailing.
+    pub watch_stream_pos: u64,
+    /// Last session/thread identifier seen in watch frames.
+    pub watch_session_id: Option<String>,
+    /// Last model identifier seen in watch frames.
+    pub watch_model: Option<String>,
+    /// Last context window usage percent seen in watch frames.
+    pub watch_context_window_pct: Option<f64>,
+    /// Last transport observed from live daemon stream events.
+    pub watch_transport: Option<String>,
+    /// Last turn id observed from live daemon stream events.
+    pub watch_turn_id: Option<String>,
+    /// Count of `turn_started` events observed in this watch session.
+    pub watch_turn_started: u64,
+    /// Count of `turn_completed(status=completed)` events observed.
+    pub watch_turn_completed: u64,
+    /// Count of `turn_completed(status=interrupted)` events observed.
+    pub watch_turn_interrupted: u64,
+    /// Count of `turn_completed(status=failed)` events observed.
+    pub watch_turn_failed: u64,
+    /// Latest dropped-event counter value from stream telemetry.
+    pub watch_dropped: u64,
+    /// Latest unknown-event counter value from stream telemetry.
+    pub watch_unknown: u64,
 }
 
 impl App {
@@ -162,7 +186,19 @@ impl App {
             follow_mode,
             stream_scroll_offset: 0,
             daemon_turn_state: None,
-            daemon_stream_rx: None,
+            watch_stream_path: None,
+            watch_stream_pos: 0,
+            watch_session_id: None,
+            watch_model: None,
+            watch_context_window_pct: None,
+            watch_transport: None,
+            watch_turn_id: None,
+            watch_turn_started: 0,
+            watch_turn_completed: 0,
+            watch_turn_interrupted: 0,
+            watch_turn_failed: 0,
+            watch_dropped: 0,
+            watch_unknown: 0,
             log_viewer_visible: false,
             log_events: Vec::new(),
             log_scroll_offset: 0,
@@ -238,7 +274,86 @@ impl App {
         self.session_log_path = None;
         self.stream_source_error = None;
         self.stream_scroll_offset = 0;
-        self.daemon_stream_rx = None;
+        self.watch_stream_path = None;
+        self.watch_stream_pos = 0;
+        self.watch_session_id = None;
+        self.watch_model = None;
+        self.watch_context_window_pct = None;
+        self.watch_transport = None;
+        self.watch_turn_id = None;
+        self.watch_turn_started = 0;
+        self.watch_turn_completed = 0;
+        self.watch_turn_interrupted = 0;
+        self.watch_turn_failed = 0;
+        self.watch_dropped = 0;
+        self.watch_unknown = 0;
+    }
+
+    /// Apply a direct watch-stream JSON frame to watch metrics.
+    pub fn apply_watch_frame(&mut self, frame: &serde_json::Value) {
+        let event = frame.get("event").unwrap_or(frame);
+        let kind = event
+            .pointer("/params/type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        if let Some(transport) = first_string(event, &["/params/transport"]) {
+            self.watch_transport = Some(transport);
+        }
+        if let Some(turn_id) = first_string(event, &["/params/turn_id", "/params/turnId"]) {
+            self.watch_turn_id = Some(turn_id);
+        }
+        if let Some(session_id) = first_string(
+            event,
+            &[
+                "/params/_meta/threadId",
+                "/params/threadId",
+                "/params/thread_id",
+                "/params/session_id",
+                "/params/sessionId",
+            ],
+        ) {
+            self.watch_session_id = Some(session_id);
+        }
+        if let Some(model) = first_string(
+            event,
+            &[
+                "/params/model",
+                "/params/model_name",
+                "/params/modelName",
+                "/params/usage/model",
+            ],
+        ) {
+            self.watch_model = Some(model);
+        }
+        if let Some(pct) = first_f64(
+            event,
+            &[
+                "/params/usage/context_window_pct",
+                "/params/usage/contextWindowPct",
+                "/params/context_window_pct",
+                "/params/contextWindowPct",
+            ],
+        ) {
+            self.watch_context_window_pct = Some(pct);
+        }
+
+        match kind {
+            "turn_started" => {
+                self.watch_turn_started = self.watch_turn_started.saturating_add(1);
+            }
+            "turn_completed" | "task_complete" | "done" => {
+                self.watch_turn_completed = self.watch_turn_completed.saturating_add(1);
+            }
+            "turn_interrupted" | "interrupt" | "cancelled" | "turn_cancelled" => {
+                self.watch_turn_interrupted = self.watch_turn_interrupted.saturating_add(1);
+            }
+            "stream_error" | "error" => {
+                self.watch_turn_failed = self.watch_turn_failed.saturating_add(1);
+            }
+            _ => {
+                self.watch_unknown = self.watch_unknown.saturating_add(1);
+            }
+        }
     }
 
     /// Append new structured log events to [`log_events`](Self::log_events), keeping
@@ -313,6 +428,52 @@ impl App {
             _ => Some("Not live"),
         }
     }
+
+    /// Resolve transport for status surfaces with explicit precedence:
+    /// direct watch-stream fields are authoritative when present; daemon state
+    /// is only a coarse fallback when watch metadata is absent.
+    pub fn resolved_watch_transport(&self) -> Option<&str> {
+        self.watch_transport.as_deref().or_else(|| {
+            self.daemon_turn_state
+                .as_ref()
+                .and_then(|s| s.transport.as_deref())
+        })
+    }
+
+    /// Resolve turn id for status surfaces using the same precedence as
+    /// [`resolved_watch_transport`](Self::resolved_watch_transport).
+    pub fn resolved_watch_turn_id(&self) -> Option<&str> {
+        self.watch_turn_id.as_deref().or_else(|| {
+            self.daemon_turn_state
+                .as_ref()
+                .and_then(|s| s.turn_id.as_deref())
+        })
+    }
+
+    /// Resolve session/thread id for status surfaces using the same precedence
+    /// as [`resolved_watch_transport`](Self::resolved_watch_transport).
+    pub fn resolved_watch_session_id(&self) -> Option<&str> {
+        self.watch_session_id.as_deref().or_else(|| {
+            self.daemon_turn_state
+                .as_ref()
+                .and_then(|s| s.thread_id.as_deref())
+        })
+    }
+}
+
+fn first_string(value: &serde_json::Value, paths: &[&str]) -> Option<String> {
+    paths.iter().find_map(|path| {
+        value
+            .pointer(path)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn first_f64(value: &serde_json::Value, paths: &[&str]) -> Option<f64> {
+    paths.iter().find_map(|path| value.pointer(path).and_then(|v| v.as_f64()))
 }
 
 #[cfg(test)]
@@ -570,6 +731,155 @@ mod tests {
         assert_eq!(
             app.stream_scroll_offset, 0,
             "reset_stream must clear scroll offset"
+        );
+    }
+
+    #[test]
+    fn test_apply_watch_frame_updates_status_surfaces() {
+        let mut app = new_app("test");
+        let frame = serde_json::json!({
+            "event": {
+                "params": {
+                    "type": "turn_started",
+                    "transport": "app-server",
+                    "turnId": "turn-7",
+                    "_meta": { "threadId": "thread-123" },
+                    "model": "gpt-5-codex",
+                    "usage": { "contextWindowPct": 72.4 }
+                }
+            }
+        });
+        app.apply_watch_frame(&frame);
+        assert_eq!(app.watch_transport.as_deref(), Some("app-server"));
+        assert_eq!(app.watch_turn_id.as_deref(), Some("turn-7"));
+        assert_eq!(app.watch_session_id.as_deref(), Some("thread-123"));
+        assert_eq!(app.watch_model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(app.watch_context_window_pct, Some(72.4));
+        assert_eq!(app.watch_turn_started, 1);
+    }
+
+    #[test]
+    fn test_apply_watch_frame_preserves_transport_when_event_omits_it() {
+        let mut app = new_app("test");
+        app.watch_transport = Some("mcp".to_string());
+        app.watch_turn_id = Some("old-turn".to_string());
+        let frame = serde_json::json!({
+            "event": { "params": { "type": "item_delta", "delta": "hello" } }
+        });
+        app.apply_watch_frame(&frame);
+        assert_eq!(
+            app.watch_transport.as_deref(),
+            Some("mcp"),
+            "transport must remain stable when omitted by partial events"
+        );
+        assert_eq!(
+            app.watch_turn_id.as_deref(),
+            Some("old-turn"),
+            "turn id must remain stable when omitted by partial events"
+        );
+    }
+
+    #[test]
+    fn test_reset_stream_clears_watch_status_surfaces() {
+        let mut app = new_app("test");
+        app.watch_session_id = Some("thread-1".to_string());
+        app.watch_model = Some("gpt-5".to_string());
+        app.watch_context_window_pct = Some(66.0);
+        app.watch_transport = Some("mcp".to_string());
+        app.watch_turn_id = Some("turn-1".to_string());
+        app.reset_stream();
+        assert!(app.watch_session_id.is_none());
+        assert!(app.watch_model.is_none());
+        assert!(app.watch_context_window_pct.is_none());
+        assert!(app.watch_transport.is_none());
+        assert!(app.watch_turn_id.is_none());
+    }
+
+    #[test]
+    fn test_watch_status_precedence_prefers_direct_stream_values() {
+        use agent_team_mail_core::daemon_stream::{AgentStreamState, StreamTurnStatus};
+        let mut app = new_app("test");
+        app.watch_transport = Some("mcp".to_string());
+        app.watch_turn_id = Some("turn-watch".to_string());
+        app.watch_session_id = Some("thread-watch".to_string());
+        app.daemon_turn_state = Some(AgentStreamState {
+            transport: Some("app-server".to_string()),
+            turn_id: Some("turn-daemon".to_string()),
+            thread_id: Some("thread-daemon".to_string()),
+            turn_status: StreamTurnStatus::Busy,
+        });
+        assert_eq!(app.resolved_watch_transport(), Some("mcp"));
+        assert_eq!(app.resolved_watch_turn_id(), Some("turn-watch"));
+        assert_eq!(app.resolved_watch_session_id(), Some("thread-watch"));
+    }
+
+    #[test]
+    fn test_watch_status_falls_back_to_daemon_when_watch_missing() {
+        use agent_team_mail_core::daemon_stream::{AgentStreamState, StreamTurnStatus};
+        let mut app = new_app("test");
+        app.daemon_turn_state = Some(AgentStreamState {
+            transport: Some("app-server".to_string()),
+            turn_id: Some("turn-daemon".to_string()),
+            thread_id: Some("thread-daemon".to_string()),
+            turn_status: StreamTurnStatus::Busy,
+        });
+        assert_eq!(app.resolved_watch_transport(), Some("app-server"));
+        assert_eq!(app.resolved_watch_turn_id(), Some("turn-daemon"));
+        assert_eq!(app.resolved_watch_session_id(), Some("thread-daemon"));
+    }
+
+    #[test]
+    fn test_reset_and_replay_restore_watch_status_coherently() {
+        let mut app = new_app("test");
+        let replay_frame = serde_json::json!({
+            "event": {
+                "params": {
+                    "type": "turn_started",
+                    "transport": "mcp",
+                    "turnId": "turn-attach",
+                    "_meta": { "threadId": "thread-attach" },
+                    "model": "gpt-5-codex",
+                    "usage": { "contextWindowPct": 64.0 }
+                }
+            }
+        });
+        app.apply_watch_frame(&replay_frame);
+        let before = (
+            app.watch_transport.clone(),
+            app.watch_turn_id.clone(),
+            app.watch_session_id.clone(),
+            app.watch_model.clone(),
+            app.watch_context_window_pct,
+        );
+
+        app.reset_stream();
+        app.apply_watch_frame(&replay_frame);
+        let after = (
+            app.watch_transport.clone(),
+            app.watch_turn_id.clone(),
+            app.watch_session_id.clone(),
+            app.watch_model.clone(),
+            app.watch_context_window_pct,
+        );
+
+        assert_eq!(
+            before, after,
+            "re-attach replay must restore watch status surfaces after detach/reset"
+        );
+    }
+
+    #[test]
+    fn test_transport_mode_switch_does_not_leave_stale_transport_after_reset() {
+        let mut app = new_app("test");
+        app.watch_transport = Some("mcp".to_string());
+        app.reset_stream();
+        let transportless = serde_json::json!({
+            "event": { "params": { "type": "item_delta", "delta": "hello" } }
+        });
+        app.apply_watch_frame(&transportless);
+        assert!(
+            app.watch_transport.is_none(),
+            "transport-less events after reset must not retain stale transport"
         );
     }
 
