@@ -233,7 +233,7 @@ Implementation principle:
   - parity suite passes in CI,
   - deviations are explicitly documented and approved.
 
-## 12. Attached Terminal Parity Plan (Phase N.1-N.4)
+## 12. Attached Terminal Parity Plan (Phase N.1-N.5)
 
 Goal:
 - Deliver `atm-agent-mcp attach <agent-id>` as an interactive terminal mode with Codex CLI parity for attached-session workflows.
@@ -248,6 +248,7 @@ Sprint outline:
 - N.2 Renderer/runtime parity for core attached flows.
 - N.3 Control-path parity (approval/reject, interrupt/cancel, explicit fault states).
 - N.4 Golden parity fixtures plus deviation-log governance.
+- N.5 Parity closure + hardening for long-tail event classes, soak, and CI rollout gating.
 
 Acceptance focus:
 - Attached mode shows parity for prompt lifecycle, tool streaming, approval/reject, interrupt/cancel, and fatal/error paths.

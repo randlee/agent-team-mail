@@ -534,6 +534,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | N.2 | Renderer/runtime parity in attached mode | N.1 | PLANNED |
 | N.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | N.2 | PLANNED |
 | N.4 | Golden parity + deviation governance | N.3 | PLANNED |
+| N.5 | Parity closure + hardening (long-tail event classes, soak, CI rollout gate) | N.4 | PLANNED |
 
 **Scope**:
 - Add `attach <agent-id>` as an interactive terminal entrypoint bound to one active session.
@@ -667,6 +668,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **N** | N.2 | Renderer/runtime parity in attached mode | PLANNED | — |
 | **N** | N.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | PLANNED | — |
 | **N** | N.4 | Golden parity + deviation governance | PLANNED | — |
+| **N** | N.5 | Parity closure + hardening (long-tail event classes, soak, CI rollout gate) | PLANNED | — |
 
 **Completed**: 88+ sprints across 19 phases (CI green)
 **Current version**: v0.17.0

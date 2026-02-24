@@ -65,3 +65,4 @@ These are required additions for attached CLI parity planning:
 - `N.2`: renderer parity expansion (including diff + tool lifecycle).
 - `N.3`: control-path parity (`approval`, `request_user_input`, `interrupt/cancel`, fault state fidelity).
 - `N.4`: golden parity matrix expansion and deviation enforcement for any remaining non-parity behavior.
+- `N.5`: long-tail parity closure + hardening (remaining Codex event classes, cross-platform soak, and full-surface CI parity gate).
