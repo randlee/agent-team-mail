@@ -16,6 +16,9 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_TEAM")
+        .env_remove("ATM_CONFIG")
+        .env_remove("CLAUDE_SESSION_ID")
         .env("ATM_IDENTITY", "team-lead") // default identity; individual tests can override
         .current_dir(&workdir);
 }
@@ -680,6 +683,93 @@ fn test_read_updates_last_seen_from_displayed_messages_only() {
         .as_str()
         .unwrap();
     assert!(ts.starts_with("2026-02-11T11:00:00"));
+}
+
+/// Test: `atm read` (own inbox) with no identity sources → must reject
+#[test]
+fn test_read_own_inbox_no_identity_rejects() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_TEAM", "test-team")
+        .env_remove("ATM_IDENTITY")
+        .env_remove("CLAUDE_SESSION_ID")
+        .current_dir(&workdir) // workdir has no .atm.toml → identity stays "human"
+        .arg("read")
+        .arg("--no-since-last-seen");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicates::str::contains("Cannot determine reader identity"));
+}
+
+/// Test: `atm read --as myname` with no hook file → succeeds using explicit identity
+#[test]
+fn test_read_own_inbox_with_as_flag_succeeds() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    // Put a message in team-lead's inbox
+    let messages = vec![serde_json::json!({
+        "from": "test-agent",
+        "text": "Hello team-lead",
+        "timestamp": "2026-02-11T10:00:00Z",
+        "read": false,
+        "message_id": "msg-as-001"
+    })];
+    create_test_inbox(&team_dir, "team-lead", messages);
+
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_TEAM", "test-team")
+        .env_remove("ATM_IDENTITY")
+        .current_dir(&workdir) // no .atm.toml in workdir
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("--as")
+        .arg("team-lead");
+
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("Hello team-lead"));
+}
+
+/// Test: `--as` overrides ATM_IDENTITY when both are set
+#[test]
+fn test_read_as_flag_overrides_atm_identity() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    // team-lead's inbox has a message
+    let messages = vec![serde_json::json!({
+        "from": "test-agent",
+        "text": "For team-lead only",
+        "timestamp": "2026-02-11T10:00:00Z",
+        "read": false,
+        "message_id": "msg-as-002"
+    })];
+    create_test_inbox(&team_dir, "team-lead", messages);
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "test-agent") // would read test-agent inbox without --as
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("--as")
+        .arg("team-lead");
+
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("For team-lead only"));
 }
 
 /// Regression test: `atm read arch-ctm` run as team-lead must never modify arch-ctm's read flags.
