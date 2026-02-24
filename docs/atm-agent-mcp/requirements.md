@@ -335,6 +335,8 @@ Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-view
 - **FR-23.7**: Attached mode MUST render MCP client/user input as a distinct input class (not merged with assistant/tool output), with stable styling semantics.
 - **FR-23.8**: Attached mode MUST render ATM mail input as `sender@team <short-message>`, where `<short-message>` is clamped to at most 3 visible lines with overflow ellipsis.
 - **FR-23.9**: Attached mode MUST render file-edit/patch diffs with Codex-equivalent red/green semantics for add/remove hunks.
+- **FR-23.10**: Attached-mode event handling MUST follow an explicit applicability matrix (`Required` | `Degraded` | `Out-of-Scope`) maintained at `docs/atm-agent-mcp/phase-o-event-applicability-matrix.md`.
+- **FR-23.11**: `Degraded` and `Out-of-Scope` classes MUST never be silently dropped; they MUST produce explicit fallback rendering or structured `unsupported/unknown` telemetry with counters.
 
 ---
 

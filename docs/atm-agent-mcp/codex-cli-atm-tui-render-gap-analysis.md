@@ -35,6 +35,27 @@ Legend:
 | Collaboration events | `Collab*` begin/end events | Gap | No multi-agent collab event rendering in ATM |
 | Skills/list responses | `McpListToolsResponse`, `List*Skills*`, `RemoteSkillDownloaded`, `SkillsUpdateAvailable` | Gap | No parity surface in watch transcript |
 
+Coverage note:
+- Codex protocol currently exposes 70+ `EventMsg` variants. The matrix above groups events by rendered data class (not one-row-per-variant). Long-tail categories (realtime, collab, skills/list/meta responses) must still be explicitly tracked in fixture coverage before parity sign-off.
+
+## 2.1 Renderer Complexity Assessment (Critical)
+
+The parity effort is constrained by Codex renderer architecture, not only event mapping:
+
+- Codex TUI is a full component/layout system (Renderable traits, column/row/flex/inset composition), not a thin formatter wrapper.
+- High-complexity files indicate subsystem scope:
+  - `chatwidget.rs` (~305KB)
+  - `diff_render.rs` (~53KB)
+  - `exec_cell` module (~34KB)
+  - `approval_overlay` module (~28KB)
+  - `markdown_render.rs` (~25KB)
+- `diff_render` is a major subsystem (hunks, wrapping, syntax/highlight behavior, navigation-oriented structure), not a simple red/green text transform.
+- Approval UX is also a subsystem (keyboard navigation, multi-option state machine, modal lifecycle), not just one request/response event.
+
+Planning implication:
+- O.2 should be treated as the primary implementation-risk sprint due to renderer/layout integration complexity.
+- O.3 should absorb golden/hardening closure using the existing M.7 harness, rather than introducing a separate hardening sprint.
+
 ## 3. Required ATM-Specific Input Types
 
 These are required additions for attached CLI parity planning:
@@ -62,5 +83,5 @@ These are required additions for attached CLI parity planning:
 ## 5. Phase O Work Breakdown Alignment
 
 - `O.1`: attach stream/control wiring + typed render-event envelope.
-- `O.2`: renderer parity expansion (including diff + tool lifecycle).
-- `O.3`: control-path parity (`approval`, `request_user_input`, `interrupt/cancel`, fault state fidelity).
+- `O.2`: renderer parity expansion (including diff/tool lifecycle and layout-aligned presentation); highest complexity/risk sprint.
+- `O.3`: control-path parity (`approval`, `request_user_input`, `interrupt/cancel`, fault state fidelity) plus golden fixture completion and hardening closure via the existing M.7 parity harness.

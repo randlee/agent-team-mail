@@ -6,6 +6,7 @@ Scope: `atm-agent-mcp` + `atm-tui` Codex watch parity validation
 
 Companion analysis:
 - `docs/atm-agent-mcp/codex-cli-atm-tui-render-gap-analysis.md` (type-by-type Codex vs ATM render mapping and remediation priorities)
+- `docs/atm-agent-mcp/phase-o-event-applicability-matrix.md` (explicit Required/Degraded/Out-of-Scope event class decisions)
 
 ## 1. Goal
 
@@ -177,6 +178,7 @@ Only after these are green should subjective user validation begin.
 - Keep fixture payloads minimal but semantically complete.
 - Keep deterministic sanitization rules in one helper module to avoid fixture churn.
 - Do not route continuous stream through daemon for parity tests; keep MCP->TUI stream path direct per Phase L/M architecture.
+- Apply event coverage selection from `phase-o-event-applicability-matrix.md`; any class marked `Degraded` or `Out-of-Scope` must still have explicit fallback/telemetry checks.
 
 ## 9. M.7 Deviation Log
 
