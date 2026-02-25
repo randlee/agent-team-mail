@@ -108,20 +108,31 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
-    fn setup_atm_home(dir: &TempDir) {
+    fn setup_atm_home(dir: &TempDir) -> Option<String> {
+        let original = std::env::var("ATM_HOME").ok();
         // SAFETY: tests are serialised via #[serial]; no concurrent env mutation.
         unsafe { std::env::set_var("ATM_HOME", dir.path().to_str().unwrap()) };
+        original
     }
 
-    fn teardown_atm_home() {
-        unsafe { std::env::remove_var("ATM_HOME") };
+    fn teardown_atm_home(original: Option<String>) {
+        match original {
+            Some(value) => {
+                // SAFETY: tests are serialised via #[serial]; no concurrent env mutation.
+                unsafe { std::env::set_var("ATM_HOME", value) };
+            }
+            None => {
+                // SAFETY: tests are serialised via #[serial]; no concurrent env mutation.
+                unsafe { std::env::remove_var("ATM_HOME") };
+            }
+        }
     }
 
     #[tokio::test]
     #[serial]
     async fn test_write_read_roundtrip() {
         let dir = TempDir::new().unwrap();
-        setup_atm_home(&dir);
+        let original = setup_atm_home(&dir);
 
         let content = "## Summary\n- Did some work\n- State is good";
         write_summary("team", "dev", "thread-abc", content)
@@ -129,7 +140,7 @@ mod tests {
             .unwrap();
         let read_back = read_summary("team", "dev", "thread-abc").await;
 
-        teardown_atm_home();
+        teardown_atm_home(original);
 
         assert_eq!(read_back, Some(content.to_string()));
     }
@@ -138,11 +149,11 @@ mod tests {
     #[serial]
     async fn test_read_returns_none_when_missing() {
         let dir = TempDir::new().unwrap();
-        setup_atm_home(&dir);
+        let original = setup_atm_home(&dir);
 
         let result = read_summary("no-team", "no-id", "no-thread").await;
 
-        teardown_atm_home();
+        teardown_atm_home(original);
 
         assert!(result.is_none());
     }
@@ -151,11 +162,11 @@ mod tests {
     #[serial]
     async fn test_summary_path_construction() {
         let dir = TempDir::new().unwrap();
-        setup_atm_home(&dir);
+        let original = setup_atm_home(&dir);
 
         let path = summary_path("atm-dev", "arch-ctm", "thread-123");
 
-        teardown_atm_home();
+        teardown_atm_home(original);
 
         // The path should contain all three components in order
         let path_str = path.to_string_lossy();
@@ -185,12 +196,12 @@ mod tests {
     #[serial]
     async fn test_write_creates_parent_dirs() {
         let dir = TempDir::new().unwrap();
-        setup_atm_home(&dir);
+        let original = setup_atm_home(&dir);
 
         // Deeply nested path should be created automatically
         let result = write_summary("deep-team", "deep-id", "deep-thread", "content").await;
 
-        teardown_atm_home();
+        teardown_atm_home(original);
 
         assert!(result.is_ok());
     }
@@ -209,7 +220,7 @@ mod tests {
     #[serial]
     async fn test_write_summary_overwrites_existing() {
         let dir = TempDir::new().unwrap();
-        setup_atm_home(&dir);
+        let original = setup_atm_home(&dir);
 
         write_summary("team", "id", "tid", "first content")
             .await
@@ -220,7 +231,7 @@ mod tests {
 
         let result = read_summary("team", "id", "tid").await;
 
-        teardown_atm_home();
+        teardown_atm_home(original);
 
         assert_eq!(result, Some("second content".to_string()));
     }
@@ -229,7 +240,7 @@ mod tests {
     #[serial]
     async fn test_read_summary_different_combinations() {
         let dir = TempDir::new().unwrap();
-        setup_atm_home(&dir);
+        let original = setup_atm_home(&dir);
 
         write_summary("t1", "i1", "b1", "content-1").await.unwrap();
         write_summary("t2", "i2", "b2", "content-2").await.unwrap();
@@ -238,7 +249,7 @@ mod tests {
         let r2 = read_summary("t2", "i2", "b2").await;
         let r3 = read_summary("t1", "i2", "b1").await; // wrong identity
 
-        teardown_atm_home();
+        teardown_atm_home(original);
 
         assert_eq!(r1, Some("content-1".to_string()));
         assert_eq!(r2, Some("content-2".to_string()));

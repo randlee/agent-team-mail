@@ -154,6 +154,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | F | Team Installer | `atm team init` package installer | PLANNED |
 | G | Codex Multi-Transport Hardening | App-server, unified turns, mail injection parity | COMPLETE |
 | L | Logging Overhaul | Daemon fan-in architecture, unified JSONL writer | COMPLETE |
+| P | Attach Path Hardening Closure | Close O-R carry-forward attach deviations and parity hardening | COMPLETE |
 
 ---
 
@@ -394,7 +395,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ## 16. Phase E: ATM Core Bug Fixes — COMPLETE (v0.15.0)
 
-**Integration PR**: TBD (pending)
+**Integration PR**: [#166](https://github.com/randlee/agent-team-mail/pull/166)
 
 | Sprint | Name | PR |
 |--------|------|----|
