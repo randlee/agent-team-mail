@@ -616,7 +616,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | P.2 | Attach replay boundary + checkpoint continuity | P.1 | M | COMPLETE ([#243](https://github.com/randlee/agent-team-mail/pull/243)) |
 | P.3 | Attach unsupported-event summary flush parity | P.1 | S | COMPLETE ([#244](https://github.com/randlee/agent-team-mail/pull/244)) |
 | P.4 | Attach stdin sanitization hardening | P.1 | M | COMPLETE ([#245](https://github.com/randlee/agent-team-mail/pull/245)) |
-| P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | P.2,P.3,P.4 | S | COMPLETE (this PR) |
+| P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | P.2,P.3,P.4 | S | COMPLETE ([#246](https://github.com/randlee/agent-team-mail/pull/246)) |
 
 **Deviation closure mapping**:
 - P.1: DEV-OR5-001, DEV-OR5-002
@@ -631,6 +631,13 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - P.2: QA-010 (`AdaptedWatchLine` applicability field parity carry-forward)
 - P.3: QA-004 (below-threshold boundary coverage for `unknown_summary()`)
 - P.4: QA-003 (unit tests for `StreamErrorProxy`/`StreamErrorChild`/`StreamErrorUpstream`/`StreamErrorFatal` render variants)
+
+**P.5 closeout disposition**:
+- QA-W2 resolved in P.1 (#242)
+- QA-W3 resolved in P.1 (#242)
+- QA-010 resolved in P.2 (#243)
+- QA-004 resolved in P.3 (#244)
+- QA-003 resolved in P.4 (#245)
 
 ---
 
@@ -765,7 +772,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **P** | P.2 | Attach replay boundary + checkpoint continuity | COMPLETE | [#243](https://github.com/randlee/agent-team-mail/pull/243) |
 | **P** | P.3 | Attach unsupported-event summary flush parity | COMPLETE | [#244](https://github.com/randlee/agent-team-mail/pull/244) |
 | **P** | P.4 | Attach stdin sanitization hardening | COMPLETE | [#245](https://github.com/randlee/agent-team-mail/pull/245) |
-| **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | COMPLETE | this PR |
+| **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | COMPLETE | [#246](https://github.com/randlee/agent-team-mail/pull/246) |
 
 **Completed**: 99+ sprints across 21 phases (CI green)
 **Current version**: v0.20.0

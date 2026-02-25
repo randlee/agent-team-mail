@@ -215,14 +215,22 @@ fn print_attach_banner(agent_id: &str, team: &str, watch_path: &Path) {
 }
 
 fn print_input_contract() {
-    println!("input routing:");
-    println!("  plain text      -> agent input (stdin control)");
-    println!("  :interrupt      -> interrupt control request");
-    println!("  :approve [text] -> correlated elicitation approve");
-    println!("  :reject [text]  -> correlated elicitation reject");
-    println!("  Ctrl-C / SIGINT -> exits attach mode (does not send interrupt control)");
-    println!("  :help           -> show routing contract");
-    println!("  :detach         -> detach and exit");
+    for line in input_contract_lines() {
+        println!("{line}");
+    }
+}
+
+fn input_contract_lines() -> [&'static str; 8] {
+    [
+        "input routing:",
+        "  plain text      -> agent input (stdin control)",
+        "  :interrupt      -> interrupt control request",
+        "  :approve [text] -> correlated elicitation approve",
+        "  :reject [text]  -> correlated elicitation reject",
+        "  Ctrl-C / SIGINT -> exits attach mode (does not send interrupt control)",
+        "  :help           -> show routing contract",
+        "  :detach         -> detach and exit",
+    ]
 }
 
 fn resolved_team(arg: Option<&str>) -> String {
@@ -1158,6 +1166,13 @@ mod tests {
                 arg: Some("ship it".to_string())
             }
         );
+    }
+
+    #[test]
+    fn input_contract_includes_ctrl_c_sigint_line() {
+        assert!(input_contract_lines()
+            .iter()
+            .any(|line| line.contains("Ctrl-C / SIGINT")));
     }
 
     #[test]

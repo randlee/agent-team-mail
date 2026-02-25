@@ -55,6 +55,7 @@ Owner: `arch-ctm`
 - closed_date: 2026-02-25
 - closed_by: arch-ctm
 - implementation_ref: https://github.com/randlee/agent-team-mail/pull/242
+- validation_status: verified
 
 ### DEV-OR5-002: attach path fatal reconnect hint deferred
 - Requirement context: FR-23.20 fatal-path operator guidance.
@@ -65,6 +66,7 @@ Owner: `arch-ctm`
 - closed_date: 2026-02-25
 - closed_by: arch-ctm
 - implementation_ref: https://github.com/randlee/agent-team-mail/pull/242
+- validation_status: verified
 
 ### DEV-OR5-003: attach replay remains fixed-window clip
 - Requirement context: FR-23.21 turn-boundary-aware replay behavior.
@@ -118,7 +120,7 @@ Owner: `arch-ctm`
 - rationale: Ctrl-C follows default process signal behavior (DEV-O3-002); explicit documentation deferred to help-text hardening pass.
 - closed_date: 2026-02-25
 - closed_by: arch-ctm
-- implementation_ref: this Phase P.5 PR
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/246
 - validation_status: implemented + validated
 
 ## Phase P Closure Note (2026-02-25)
@@ -129,4 +131,4 @@ All approved O-R.5 attach-path deviations are now closed and validated:
 - P.2: DEV-OR5-003, DEV-OR5-004 (PR #243)
 - P.3: DEV-OR5-005 (PR #244)
 - P.4: DEV-OR5-006 (PR #245)
-- P.5: DEV-OR5-007 (this PR)
+- P.5: DEV-OR5-007 (PR #246)
