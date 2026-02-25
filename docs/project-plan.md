@@ -2,7 +2,7 @@
 
 **Version**: 0.5
 **Date**: 2026-02-25
-**Status**: Phase O-R complete (v0.20.0). Phase P implementation complete; integration QA in progress.
+**Status**: Phase P complete (v0.21.0).
 
 ---
 
@@ -776,8 +776,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | COMPLETE | [#246](https://github.com/randlee/agent-team-mail/pull/246) |
 
 **Completed**: 99+ sprints across 21 phases (CI green)
-**Current version**: v0.20.0
-**Next**: Integration QA and Phase P completion PR to `develop`
+**Current version**: v0.21.0
+**Next**: Phase P completion PR to `develop` (pending merge)
 
 ---
 
