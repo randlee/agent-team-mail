@@ -41,6 +41,11 @@ enum RenderClass {
     PlanUpdate,
     PlanDelta,
     Unsupported,
+    StreamWarning,
+    StreamErrorProxy,
+    StreamErrorChild,
+    StreamErrorUpstream,
+    StreamErrorFatal,
     StreamError,
     InputClient,
     InputUserSteer,
@@ -263,6 +268,48 @@ fn parse_stream_line(raw_line: &str) -> ParsedLine {
     if let Some(rest) = trimmed.strip_prefix("unknown.") {
         return ParsedLine {
             class: RenderClass::Unsupported,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("stream.warning ") {
+        return ParsedLine {
+            class: RenderClass::StreamWarning,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("stream.error.proxy.fatal ") {
+        return ParsedLine {
+            class: RenderClass::StreamErrorFatal,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("stream.error.child.fatal ") {
+        return ParsedLine {
+            class: RenderClass::StreamErrorFatal,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("stream.error.upstream.fatal ") {
+        return ParsedLine {
+            class: RenderClass::StreamErrorFatal,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("stream.error.proxy ") {
+        return ParsedLine {
+            class: RenderClass::StreamErrorProxy,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("stream.error.child ") {
+        return ParsedLine {
+            class: RenderClass::StreamErrorChild,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("stream.error.upstream ") {
+        return ParsedLine {
+            class: RenderClass::StreamErrorUpstream,
             body: rest.to_string(),
         };
     }
@@ -809,6 +856,53 @@ fn render_spec(class: RenderClass, body: &str) -> RenderSpec {
             label_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             body_style: Style::default(),
         },
+        RenderClass::StreamErrorProxy => RenderSpec {
+            icon: "! ",
+            icon_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            label: "Proxy error ",
+            label_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::StreamErrorChild => RenderSpec {
+            icon: "! ",
+            icon_style: Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+            label: "Child error ",
+            label_style: Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::StreamErrorUpstream => RenderSpec {
+            icon: "! ",
+            icon_style: Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD),
+            label: "Upstream error ",
+            label_style: Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::StreamErrorFatal => RenderSpec {
+            icon: "✖ ",
+            icon_style: Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+            label: "Fatal stream error ",
+            label_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            body_style: Style::default().add_modifier(Modifier::BOLD),
+        },
+        RenderClass::StreamWarning => RenderSpec {
+            icon: "⚠ ",
+            icon_style: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            label: "Stream warning ",
+            label_style: Style::default().fg(Color::Yellow),
+            body_style: Style::default(),
+        },
         RenderClass::InputClient => RenderSpec {
             icon: "→ ",
             icon_style: Style::default()
@@ -1044,6 +1138,18 @@ mod tests {
     fn renders_reasoning_section_break_prefix() {
         let rendered = rendered_text(render_stream_line("reasoning.section_break planning"));
         assert!(rendered.contains("Reasoning section"));
+    }
+
+    #[test]
+    fn renders_error_source_classes() {
+        let proxy = rendered_text(render_stream_line("stream.error.proxy socket closed"));
+        assert!(proxy.contains("Proxy error"));
+        let child = rendered_text(render_stream_line("stream.error.child exited"));
+        assert!(child.contains("Child error"));
+        let upstream = rendered_text(render_stream_line("stream.error.upstream timeout"));
+        assert!(upstream.contains("Upstream error"));
+        let fatal = rendered_text(render_stream_line("stream.error.proxy.fatal unrecoverable"));
+        assert!(fatal.contains("Fatal stream error"));
     }
 
     #[test]

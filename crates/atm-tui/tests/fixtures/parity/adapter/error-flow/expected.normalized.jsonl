@@ -1,1 +1,1 @@
-{"line":"[atm_mail|arch-atm@atm-dev|mail_injector] stream.error socket closed","is_turn_boundary":true}
+{"line":"[atm_mail|arch-atm@atm-dev|mail_injector] stream.error.proxy socket closed","is_turn_boundary":true}

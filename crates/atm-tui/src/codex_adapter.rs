@@ -4,6 +4,7 @@
 //! preserving stream order and incremental updates.
 
 use crate::codex_vendor::text_formatting::format_json_compact;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct AdaptedWatchLine {
@@ -14,6 +15,7 @@ pub struct AdaptedWatchLine {
 #[derive(Debug, Default)]
 pub struct CodexAdapter {
     unknown_events: u64,
+    unknown_by_type: BTreeMap<String, u64>,
 }
 
 impl CodexAdapter {
@@ -23,6 +25,19 @@ impl CodexAdapter {
 
     pub fn unknown_events(&self) -> u64 {
         self.unknown_events
+    }
+
+    pub fn unknown_summary(&self, warn_threshold: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        for (event_type, count) in &self.unknown_by_type {
+            out.push(format!("unsupported.summary {event_type}={count}"));
+            if *count >= warn_threshold {
+                out.push(format!(
+                    "stream.warning unsupported event '{event_type}' seen {count} times"
+                ));
+            }
+        }
+        out
     }
 
     pub fn adapt_frame(&mut self, frame: &serde_json::Value) -> AdaptedWatchLine {
@@ -210,14 +225,33 @@ impl CodexAdapter {
                 line: format!("{source_badge} turn.interrupted {text}"),
                 is_turn_boundary: true,
             },
-            "stream_error" | "error" => AdaptedWatchLine {
-                line: format!("{source_badge} stream.error {text}"),
-                is_turn_boundary: true,
+            "stream_error" | "error" => {
+                let fatal = is_fatal_error(event, &text);
+                let rendered = if fatal {
+                    format!("{text} [detach/reconnect recommended]")
+                } else {
+                    text.clone()
+                };
+                AdaptedWatchLine {
+                    line: format!(
+                        "{source_badge} stream.error.{}{} {rendered}",
+                        error_source(event),
+                        if fatal { ".fatal" } else { "" }
+                    ),
+                    is_turn_boundary: true,
+                }
+            }
+            "stream_warning" => AdaptedWatchLine {
+                line: format!("{source_badge} stream.warning {text}"),
+                is_turn_boundary: false,
             },
             other => {
                 self.unknown_events = self.unknown_events.saturating_add(1);
+                let key = sanitize_event_type(other);
+                let entry = self.unknown_by_type.entry(key.clone()).or_insert(0);
+                *entry = entry.saturating_add(1);
                 AdaptedWatchLine {
-                    line: format!("{source_badge} unknown.{other}"),
+                    line: format!("{source_badge} unknown.{key}"),
                     is_turn_boundary: false,
                 }
             }
@@ -259,6 +293,45 @@ fn format_mail_actor(actor: &str) -> String {
     }
     let team = std::env::var("ATM_TEAM").unwrap_or_else(|_| "atm-dev".to_string());
     format!("{actor}@{}", team.trim())
+}
+
+fn sanitize_event_type(event_type: &str) -> String {
+    if event_type.trim().is_empty() {
+        return "unknown".to_string();
+    }
+    event_type
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn error_source(event: &serde_json::Value) -> &'static str {
+    let src = event
+        .pointer("/params/error_source")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/errorSource").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/source").and_then(|v| v.as_str()))
+        .unwrap_or("proxy");
+    match src {
+        "child" => "child",
+        "upstream" | "upstream_mcp" => "upstream",
+        _ => "proxy",
+    }
+}
+
+fn is_fatal_error(event: &serde_json::Value, text: &str) -> bool {
+    event
+        .pointer("/params/fatal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || text.to_ascii_lowercase().contains("fatal")
 }
 
 fn is_reasoning_section_break(event: &serde_json::Value) -> bool {
@@ -414,6 +487,18 @@ mod tests {
     }
 
     #[test]
+    fn maps_stream_error_source_and_fatal() {
+        let mut adapter = CodexAdapter::new();
+        let frame = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"stream_error","error_source":"child","fatal":true,"message":"boom"}}
+        });
+        let out = adapter.adapt_frame(&frame);
+        assert!(out.line.contains("stream.error.child.fatal"));
+        assert!(out.line.contains("detach/reconnect recommended"));
+    }
+
+    #[test]
     fn maps_file_edit_events() {
         let mut adapter = CodexAdapter::new();
         let frame = serde_json::json!({
@@ -471,6 +556,21 @@ mod tests {
                 .line
                 .contains("<line1 / line2 / line3 ...>")
         );
+    }
+
+    #[test]
+    fn unknown_summary_contains_threshold_warning() {
+        let mut adapter = CodexAdapter::new();
+        let frame = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"future/event"}}
+        });
+        for _ in 0..5 {
+            let _ = adapter.adapt_frame(&frame);
+        }
+        let summary = adapter.unknown_summary(5);
+        assert!(summary.iter().any(|l| l.contains("unsupported.summary")));
+        assert!(summary.iter().any(|l| l.contains("stream.warning")));
     }
 
     #[test]
