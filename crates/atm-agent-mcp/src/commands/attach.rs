@@ -419,14 +419,99 @@ fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()
     };
     match env.class.as_str() {
         "input.atm_mail" => println!("{} <{}>", env.source_actor, clamp_three_lines(&env.text)),
-        "assistant.output" => println!("assistant: {payload}"),
-        "assistant.reasoning" => println!("reasoning: {payload}"),
+        "assistant.output" => println!("assistant: {}", render_markdown_text(&payload)),
+        "assistant.reasoning" => {
+            if is_reasoning_section_break(&env.raw) {
+                println!("reasoning: {}", format_reasoning_section_break(&payload));
+            } else {
+                println!("reasoning: {payload}");
+            }
+        }
         "turn.lifecycle" => println!("turn: {payload}"),
         "approval" => println!("approval: {payload}"),
         "elicitation.request" => println!("input-request: {payload}"),
+        "file.edit" => print_file_edit_lines(&payload),
         _ => println!("[{}][{}] {}", env.class, env.source_kind, payload),
     }
     Ok(())
+}
+
+fn is_reasoning_section_break(raw: &Value) -> bool {
+    if raw
+        .pointer("/event/params/section_break")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if raw
+        .pointer("/event/params/is_section_break")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    raw.pointer("/event/params/delta_type")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            raw.pointer("/event/params/reasoning_delta/type")
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| {
+            raw.pointer("/event/params/content/type")
+                .and_then(|v| v.as_str())
+        })
+        .is_some_and(|v| v.eq_ignore_ascii_case("section_break"))
+}
+
+fn format_reasoning_section_break(payload: &str) -> String {
+    if payload.trim().is_empty() {
+        "----".to_string()
+    } else {
+        format!("---- {} ----", payload.trim())
+    }
+}
+
+fn render_markdown_text(payload: &str) -> String {
+    let trimmed = payload.trim();
+    if trimmed.starts_with("```") {
+        let lang = trimmed
+            .trim_start_matches('`')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        if lang.is_empty() {
+            return "[code-block]".to_string();
+        }
+        return format!("[code-block:{lang}]");
+    }
+    if trimmed.starts_with('#') {
+        return trimmed.to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("- ") {
+        return format!("• {rest}");
+    }
+    payload.to_string()
+}
+
+fn print_file_edit_lines(payload: &str) {
+    let normalized = payload.replace("\\n", "\n");
+    let mut printed = false;
+    for line in normalized.lines() {
+        printed = true;
+        if line.starts_with('+') && !line.starts_with("+++") {
+            println!("file-edit: [+] {}", line.trim_start_matches('+').trim_start());
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            println!("file-edit: [-] {}", line.trim_start_matches('-').trim_start());
+        } else if line.starts_with("@@") {
+            println!("file-edit: [@@] {}", line.trim_start_matches("@@").trim_start());
+        } else {
+            println!("file-edit: {line}");
+        }
+    }
+    if !printed {
+        println!("file-edit:");
+    }
 }
 
 fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope {
@@ -768,6 +853,22 @@ mod tests {
         assert_eq!(count1, Some(1));
         assert_eq!(count2, Some(2));
         assert_eq!(unsupported_event_count("future_event"), 2);
+    }
+
+    #[test]
+    fn markdown_render_hints_code_block_and_bullet() {
+        assert_eq!(render_markdown_text("```rust"), "[code-block:rust]");
+        assert_eq!(render_markdown_text("- item"), "• item");
+        assert_eq!(render_markdown_text("# heading"), "# heading");
+    }
+
+    #[test]
+    fn reasoning_section_break_detected_from_delta_type() {
+        let frame = serde_json::json!({
+            "event":{"params":{"type":"reasoning_content_delta","delta_type":"section_break"}}
+        });
+        assert!(is_reasoning_section_break(&frame));
+        assert_eq!(format_reasoning_section_break("plan"), "---- plan ----");
     }
 
     #[test]

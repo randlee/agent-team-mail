@@ -1,0 +1,7 @@
+{"line":"file.edit @@ -1,2 +1,2"}
+{"line":"file.edit +added line"}
+{"line":"file.edit -removed line"}
+{"line":"reasoning.section_break Analysis"}
+{"line":"```rust"}
+{"line":"## Heading"}
+{"line":"- bullet point"}

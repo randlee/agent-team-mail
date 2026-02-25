@@ -46,6 +46,8 @@ enum RenderClass {
     InputUserSteer,
     InputAtmMail,
     ElicitationRequest,
+    Reasoning,
+    ReasoningSectionBreak,
     StreamCounters,
     MarkdownFence,
     MarkdownHeading,
@@ -87,6 +89,7 @@ pub fn render_stream_lines_with_width(raw_line: &str, max_width: usize) -> Vec<L
 
 fn parse_stream_line(raw_line: &str) -> ParsedLine {
     let trimmed = raw_line.trim();
+    let (_, trimmed) = split_source_badge(trimmed);
 
     if let Some(rest) = trimmed.strip_prefix("turn.started ") {
         return ParsedLine {
@@ -263,13 +266,6 @@ fn parse_stream_line(raw_line: &str) -> ParsedLine {
             body: rest.to_string(),
         };
     }
-    // Legacy cmd token retained for older fixtures/transcripts.
-    if let Some(rest) = trimmed.strip_prefix("cmd ") {
-        return ParsedLine {
-            class: RenderClass::CmdOutput,
-            body: rest.to_string(),
-        };
-    }
     if let Some(rest) = trimmed.strip_prefix("stream.error ") {
         return ParsedLine {
             class: RenderClass::StreamError,
@@ -297,6 +293,18 @@ fn parse_stream_line(raw_line: &str) -> ParsedLine {
     if let Some(rest) = trimmed.strip_prefix("elicitation.request ") {
         return ParsedLine {
             class: RenderClass::ElicitationRequest,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("reasoning.section_break") {
+        return ParsedLine {
+            class: RenderClass::ReasoningSectionBreak,
+            body: rest.trim().to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("reasoning ") {
+        return ParsedLine {
+            class: RenderClass::Reasoning,
             body: rest.to_string(),
         };
     }
@@ -334,20 +342,24 @@ fn parse_stream_line(raw_line: &str) -> ParsedLine {
 fn render_parsed_line(parsed: &ParsedLine, max_width: usize) -> Vec<Line<'static>> {
     match parsed.class {
         RenderClass::Plain => wrap_plain_line(&parsed.body, max_width, Style::default()),
-        RenderClass::MarkdownFence => {
-            wrap_plain_line(&parsed.body, max_width, Style::default().fg(Color::Cyan))
-        }
+        RenderClass::MarkdownFence => render_markdown_fence_line(&parsed.body, max_width),
         RenderClass::MarkdownHeading => wrap_plain_line(
             &parsed.body,
             max_width,
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
         ),
         RenderClass::MarkdownBullet => render_bullet_line(&parsed.body, max_width),
+        RenderClass::ReasoningSectionBreak => render_reasoning_section_break(&parsed.body, max_width),
         class => render_class_line(class, &parsed.body, max_width),
     }
 }
 
 fn render_class_line(class: RenderClass, body: &str, max_width: usize) -> Vec<Line<'static>> {
+    if class == RenderClass::FileEdit {
+        return render_file_edit_line(body, max_width);
+    }
     let spec = render_spec(class, body);
     let icon_width = spec.icon.chars().count();
     let label_width = spec.label.chars().count();
@@ -379,6 +391,132 @@ fn render_class_line(class: RenderClass, body: &str, max_width: usize) -> Vec<Li
         ]));
     }
     out
+}
+
+fn split_source_badge(line: &str) -> (Option<&str>, &str) {
+    if !line.starts_with('[') {
+        return (None, line);
+    }
+    if let Some(close_idx) = line.find(']') {
+        let badge = &line[..=close_idx];
+        let rest = line[(close_idx + 1)..].trim_start();
+        return (Some(badge), rest);
+    }
+    (None, line)
+}
+
+fn render_markdown_fence_line(body: &str, max_width: usize) -> Vec<Line<'static>> {
+    let lang = body
+        .trim_start_matches('`')
+        .split_whitespace()
+        .next()
+        .unwrap_or_default();
+    let label = if lang.is_empty() {
+        "Code block".to_string()
+    } else {
+        format!("Code block [{lang}]")
+    };
+    wrap_plain_line(
+        &label,
+        max_width,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn render_reasoning_section_break(body: &str, max_width: usize) -> Vec<Line<'static>> {
+    let label = if body.is_empty() {
+        "Reasoning section".to_string()
+    } else {
+        format!("Reasoning section: {body}")
+    };
+    wrap_plain_line(
+        &label,
+        max_width,
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )
+}
+
+fn render_file_edit_line(body: &str, max_width: usize) -> Vec<Line<'static>> {
+    let normalized = body.replace("\\n", "\n");
+    let spec = render_spec(RenderClass::FileEdit, &normalized);
+    let icon_width = spec.icon.chars().count();
+    let label_width = spec.label.chars().count();
+    let body_width = split_widths(icon_width, label_width, max_width).2.max(1);
+    let mut out: Vec<Line<'static>> = Vec::new();
+
+    for (line_idx, raw_line) in normalized.lines().enumerate() {
+        let (prefix, text, style) = classify_diff_line(raw_line);
+        let wrap_width = body_width.saturating_sub(prefix.chars().count()).max(1);
+        let wrapped = wrap_text(text, wrap_width);
+        for (wrap_idx, chunk) in wrapped.iter().enumerate() {
+            if line_idx == 0 && wrap_idx == 0 {
+                out.push(Line::from(vec![
+                    Span::styled(spec.icon.to_string(), spec.icon_style),
+                    Span::styled(spec.label.to_string(), spec.label_style),
+                    Span::styled(prefix.to_string(), style),
+                    Span::styled(chunk.to_string(), style),
+                ]));
+            } else {
+                let indent = " ".repeat(icon_width + label_width);
+                let marker = if wrap_idx == 0 {
+                    prefix.to_string()
+                } else {
+                    " ".repeat(prefix.chars().count())
+                };
+                out.push(Line::from(vec![
+                    Span::raw(indent),
+                    Span::styled(marker, style),
+                    Span::styled(chunk.to_string(), style),
+                ]));
+            }
+        }
+    }
+
+    if out.is_empty() {
+        out.push(Line::from(vec![
+            Span::styled(spec.icon.to_string(), spec.icon_style),
+            Span::styled(spec.label.to_string(), spec.label_style),
+        ]));
+    }
+    out
+}
+
+fn classify_diff_line(line: &str) -> (&'static str, &str, Style) {
+    if line.starts_with("@@") {
+        return (
+            "@@ ",
+            line.trim_start_matches("@@").trim_start(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    if line.starts_with('+') && !line.starts_with("+++") {
+        return (
+            "+ ",
+            line.trim_start_matches('+').trim_start(),
+            Style::default().fg(Color::Green),
+        );
+    }
+    if line.starts_with('-') && !line.starts_with("---") {
+        return (
+            "- ",
+            line.trim_start_matches('-').trim_start(),
+            Style::default().fg(Color::Red),
+        );
+    }
+    if line.starts_with("diff ")
+        || line.starts_with("index ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+    {
+        return ("~ ", line, Style::default().fg(Color::Yellow));
+    }
+    ("  ", line, Style::default())
 }
 
 fn render_bullet_line(body: &str, max_width: usize) -> Vec<Line<'static>> {
@@ -701,6 +839,24 @@ fn render_spec(class: RenderClass, body: &str) -> RenderSpec {
             label_style: Style::default().fg(Color::Magenta),
             body_style: Style::default(),
         },
+        RenderClass::Reasoning => RenderSpec {
+            icon: "⋯ ",
+            icon_style: Style::default().fg(Color::DarkGray),
+            label: "Reasoning ",
+            label_style: Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+            body_style: Style::default().fg(Color::DarkGray),
+        },
+        RenderClass::ReasoningSectionBreak => RenderSpec {
+            icon: "⋮ ",
+            icon_style: Style::default().fg(Color::DarkGray),
+            label: "Reasoning section ",
+            label_style: Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC | Modifier::BOLD),
+            body_style: Style::default().fg(Color::DarkGray),
+        },
         RenderClass::StreamCounters => RenderSpec {
             icon: "≈ ",
             icon_style: Style::default()
@@ -847,6 +1003,13 @@ mod tests {
     }
 
     #[test]
+    fn strips_source_badge_before_classification() {
+        let line = render_stream_line("[client_prompt|arch-atm|mcp_primary] cmd.begin ls");
+        let rendered = rendered_text(line);
+        assert!(rendered.contains("Command begin"));
+    }
+
+    #[test]
     fn renders_approval_prefix() {
         let line = render_stream_line("approval.exec.request allow command");
         let rendered = rendered_text(line);
@@ -859,6 +1022,22 @@ mod tests {
         assert!(cmd.contains("Command"));
         let file_edit = rendered_text(render_stream_line("file.edit patch begin"));
         assert!(file_edit.contains("File edit"));
+    }
+
+    #[test]
+    fn renders_file_edit_diff_markers() {
+        let rendered = rendered_text(render_stream_line("file.edit turn_diff @@ hunk"));
+        assert!(rendered.contains("@@"));
+        let rendered_add = rendered_text(render_stream_line("file.edit +added line"));
+        assert!(rendered_add.contains("+ "));
+        let rendered_del = rendered_text(render_stream_line("file.edit -removed line"));
+        assert!(rendered_del.contains("- "));
+    }
+
+    #[test]
+    fn renders_reasoning_section_break_prefix() {
+        let rendered = rendered_text(render_stream_line("reasoning.section_break planning"));
+        assert!(rendered.contains("Reasoning section"));
     }
 
     #[test]
@@ -920,6 +1099,7 @@ mod tests {
             "detach-reattach",
             "cross-transport",
             "degraded-events",
+            "diff-markdown-reasoning",
         ];
 
         for scenario_name in scenarios {

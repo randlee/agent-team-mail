@@ -34,3 +34,12 @@ Owner: `arch-ctm`
 - approved_by: team-lead
 - approved_date: 2026-02-24
 - rationale: explicit `:interrupt` command is the canonical interrupt path in Phase O; terminal-signal interception is deferred to hardening.
+
+## O-R.4
+
+### DEV-OR4-001: Markdown rendering is semantic-first, not full ANSI syntax highlighting
+- Requirement context: FR-23.20 markdown parity hardening in attached/watch output.
+- Current behavior: renderer recognizes headings, bullets, and code fences with syntax labels (`[code-block:<lang>]`) and improved wrapping, but does not implement full token-level syntax highlighting.
+- approved_by: team-lead
+- approved_date: 2026-02-25
+- rationale: preserves high-signal readability while avoiding a heavy lexer/highlighter dependency in Phase O-R.4; full token highlighting can be evaluated in post-parity UX hardening.
