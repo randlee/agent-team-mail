@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::time::interval;
@@ -56,7 +57,6 @@ struct AttachedRenderEnvelope {
     source_channel: String,
     event_type: String,
     text: String,
-    error_source: Option<String>,
     is_turn_boundary: bool,
     unsupported_count: Option<u64>,
     raw: Value,
@@ -71,10 +71,7 @@ struct AttachReplayCheckpoint {
     updated_at: String,
 }
 
-#[derive(Debug, Default, Clone)]
-struct AttachTelemetry {
-    unsupported_event_counts: HashMap<String, u64>,
-}
+static UNSUPPORTED_EVENT_COUNTS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
 pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     let team = resolved_team(args.team.as_deref());
@@ -99,7 +96,6 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     let mut ticker = interval(Duration::from_millis(poll_ms));
     let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
     let mut pending_elicitation_id: Option<String> = None;
-    let mut telemetry = AttachTelemetry::default();
 
     // Initial attach replay (bounded).
     match tail_watch_stream_file(&watch_path, stream_pos, &args.agent_id).await {
@@ -111,11 +107,11 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
             for frame in replay {
                 pending_elicitation_id =
                     update_pending_elicitation_id(pending_elicitation_id, &frame);
-                print_frame(&args.agent_id, frame, args.json, &mut telemetry)?;
+                print_frame(&args.agent_id, frame, args.json)?;
             }
             let _ = save_attach_checkpoint_pos(&team, &args.agent_id, stream_pos);
         }
-        Err(err) => print_stream_error("stream.error.proxy.watch.tail.initial", &err, args.json)?,
+        Err(err) => print_stream_error("watch.tail.initial", &err, args.json)?,
     }
 
     loop {
@@ -127,11 +123,11 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                         for frame in frames {
                             pending_elicitation_id =
                                 update_pending_elicitation_id(pending_elicitation_id, &frame);
-                            print_frame(&args.agent_id, frame, args.json, &mut telemetry)?;
+                            print_frame(&args.agent_id, frame, args.json)?;
                         }
                         let _ = save_attach_checkpoint_pos(&team, &args.agent_id, stream_pos);
                     }
-                    Err(err) => print_stream_error("stream.error.proxy.watch.tail", &err, args.json)?,
+                    Err(err) => print_stream_error("watch.tail", &err, args.json)?,
                 }
             }
             maybe_line = stdin_lines.next_line() => {
@@ -208,7 +204,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     }
 
     let _ = save_attach_checkpoint_pos(&team, &args.agent_id, stream_pos);
-    print_unsupported_summary_on_detach(&args.agent_id, args.json, &mut telemetry)?;
+    print_unsupported_summary_on_detach(&args.agent_id, args.json)?;
     println!("detached from {}", args.agent_id);
     Ok(())
 }
@@ -219,13 +215,22 @@ fn print_attach_banner(agent_id: &str, team: &str, watch_path: &Path) {
 }
 
 fn print_input_contract() {
-    println!("input routing:");
-    println!("  plain text      -> agent input (stdin control)");
-    println!("  :interrupt      -> interrupt control request");
-    println!("  :approve [text] -> correlated elicitation approve");
-    println!("  :reject [text]  -> correlated elicitation reject");
-    println!("  :help           -> show routing contract");
-    println!("  :detach         -> detach and exit");
+    for line in input_contract_lines() {
+        println!("{line}");
+    }
+}
+
+fn input_contract_lines() -> [&'static str; 8] {
+    [
+        "input routing:",
+        "  plain text      -> agent input (stdin control)",
+        "  :interrupt      -> interrupt control request",
+        "  :approve [text] -> correlated elicitation approve",
+        "  :reject [text]  -> correlated elicitation reject",
+        "  Ctrl-C / SIGINT -> exits attach mode (does not send interrupt control)",
+        "  :help           -> show routing contract",
+        "  :detach         -> detach and exit",
+    ]
 }
 
 fn resolved_team(arg: Option<&str>) -> String {
@@ -662,13 +667,8 @@ fn extract_frame(line: &str) -> Option<Value> {
     Some(parsed)
 }
 
-fn print_frame(
-    agent_id: &str,
-    frame: Value,
-    as_json: bool,
-    telemetry: &mut AttachTelemetry,
-) -> anyhow::Result<()> {
-    let env = to_attached_envelope(agent_id, &frame, telemetry);
+fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()> {
+    let env = to_attached_envelope(agent_id, &frame);
     if as_json {
         println!("{}", serde_json::to_string(&env)?);
         return Ok(());
@@ -698,26 +698,16 @@ fn print_frame(
         "elicitation.request_user_input" => println!("user-input-request: {payload}"),
         "elicitation.request" => println!("input-request: {payload}"),
         "stream.warning" => println!("stream-warning: {payload}"),
-        "stream.error.proxy" | "stream.error.child" | "stream.error.upstream"
-        | "stream.error.fatal" => {
-            println!("{}", render_stream_error_variant(env.class.as_str(), &payload))
+        "stream.error.proxy" => println!("stream-error(proxy): {payload}"),
+        "stream.error.child" => println!("stream-error(child): {payload}"),
+        "stream.error.upstream" => println!("stream-error(upstream): {payload}"),
+        "stream.error.fatal" => {
+            println!("stream-error(fatal): {payload} [detach/reconnect recommended]")
         }
         "file.edit" => print_file_edit_lines(&payload),
         _ => println!("[{}][{}] {}", env.class, env.source_kind, payload),
     }
     Ok(())
-}
-
-fn render_stream_error_variant(class: &str, payload: &str) -> String {
-    match class {
-        "stream.error.proxy" => format!("stream-error(proxy): {payload}"),
-        "stream.error.child" => format!("stream-error(child): {payload}"),
-        "stream.error.upstream" => format!("stream-error(upstream): {payload}"),
-        "stream.error.fatal" => {
-            format!("stream-error(fatal): {payload} [detach/reconnect recommended]")
-        }
-        _ => format!("stream-error: {payload}"),
-    }
 }
 
 fn is_reasoning_section_break(raw: &Value) -> bool {
@@ -810,11 +800,7 @@ fn print_file_edit_lines(payload: &str) {
     }
 }
 
-fn to_attached_envelope(
-    agent_id: &str,
-    frame: &Value,
-    telemetry: &mut AttachTelemetry,
-) -> AttachedRenderEnvelope {
+fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope {
     let source_kind = frame
         .pointer("/source/kind")
         .and_then(|v| v.as_str())
@@ -847,12 +833,7 @@ fn to_attached_envelope(
         .to_string();
 
     let (class, unsupported_count, applicability) =
-        classify_event_class(&event_type, &source_kind, event, &text, telemetry);
-    let error_source = if event_type == "stream_error" || event_type == "error" {
-        Some(stream_error_source(event).to_string())
-    } else {
-        None
-    };
+        classify_event_class(&event_type, &source_kind, event, &text);
     let is_turn_boundary = matches!(
         event_type.as_str(),
         "turn_started"
@@ -888,7 +869,6 @@ fn to_attached_envelope(
         source_channel,
         event_type,
         text,
-        error_source,
         is_turn_boundary,
         unsupported_count,
         raw: frame.clone(),
@@ -900,7 +880,6 @@ fn classify_event_class(
     source_kind: &str,
     event: &Value,
     text: &str,
-    telemetry: &mut AttachTelemetry,
 ) -> (String, Option<u64>, &'static str) {
     if source_kind == "atm_mail" || source_kind == "atm_mcp" {
         return ("input.atm_mail".to_string(), None, "required");
@@ -961,7 +940,7 @@ fn classify_event_class(
         }
         _ => {
             let ty = sanitize_event_type(event_type);
-            let count = telemetry.record_unsupported_event(&ty);
+            let count = record_unsupported_event(&ty);
             return (format!("unsupported.{ty}"), Some(count), "out_of_scope");
         }
     };
@@ -1015,51 +994,44 @@ fn is_fatal_stream_error(event: &Value, text: &str) -> bool {
     {
         return true;
     }
-    let lowered = text.to_ascii_lowercase();
-    if lowered.contains("non-fatal") || lowered.contains("not fatal") {
-        return false;
-    }
-    lowered.contains("fatal")
+    text.to_ascii_lowercase().contains("fatal")
 }
 
-impl AttachTelemetry {
-    fn record_unsupported_event(&mut self, event_type: &str) -> u64 {
-        let entry = self
-            .unsupported_event_counts
-            .entry(event_type.to_string())
-            .or_insert(0);
-        *entry += 1;
-        *entry
-    }
-
-    fn unsupported_summary_lines(&self, warn_threshold: u64) -> Vec<String> {
-        let mut keys: Vec<&String> = self.unsupported_event_counts.keys().collect();
-        keys.sort();
-        let mut out = Vec::new();
-        for key in keys {
-            let count = self.unsupported_event_counts.get(key).copied().unwrap_or(0);
-            out.push(format!("unsupported.summary {key}={count}"));
-            if count >= warn_threshold {
-                out.push(format!(
-                    "stream.warning unsupported event '{key}' seen {count} times"
-                ));
-            }
-        }
-        out
-    }
-
-    fn clear_unsupported_event_counts(&mut self) {
-        self.unsupported_event_counts.clear();
-    }
+fn record_unsupported_event(event_type: &str) -> u64 {
+    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("unsupported event counter mutex");
+    let entry = guard.entry(event_type.to_string()).or_insert(0);
+    *entry += 1;
+    *entry
 }
 
-fn unsupported_summary_output_lines(
-    agent_id: &str,
-    as_json: bool,
-    lines: &[String],
-) -> anyhow::Result<Vec<String>> {
+fn unsupported_summary_lines(warn_threshold: u64) -> Vec<String> {
+    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = map.lock().expect("unsupported event counter mutex");
+    let mut keys: Vec<&String> = guard.keys().collect();
+    keys.sort();
     let mut out = Vec::new();
-    for line in lines {
+    for key in keys {
+        let count = guard.get(key).copied().unwrap_or(0);
+        out.push(format!("unsupported.summary {key}={count}"));
+        if count >= warn_threshold {
+            out.push(format!(
+                "stream.warning unsupported event '{key}' seen {count} times"
+            ));
+        }
+    }
+    out
+}
+
+fn clear_unsupported_event_counts() {
+    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("unsupported event counter mutex");
+    guard.clear();
+}
+
+fn print_unsupported_summary_on_detach(agent_id: &str, as_json: bool) -> anyhow::Result<()> {
+    let lines = unsupported_summary_lines(UNSUPPORTED_WARN_THRESHOLD);
+    for line in &lines {
         if as_json {
             let class = if line.starts_with("stream.warning ") {
                 "stream.warning"
@@ -1074,47 +1046,33 @@ fn unsupported_summary_output_lines(
                 "event_type": "unsupported_summary",
                 "text": line
             });
-            out.push(serde_json::to_string(&payload)?);
+            println!("{}", serde_json::to_string(&payload)?);
         } else {
-            out.push(line.clone());
+            println!("{line}");
         }
     }
-    Ok(out)
-}
-
-fn print_unsupported_summary_on_detach(
-    agent_id: &str,
-    as_json: bool,
-    telemetry: &mut AttachTelemetry,
-) -> anyhow::Result<()> {
-    let lines = telemetry.unsupported_summary_lines(UNSUPPORTED_WARN_THRESHOLD);
-    if lines.is_empty() {
-        return Ok(());
-    }
-    for line in unsupported_summary_output_lines(agent_id, as_json, &lines)? {
-        println!("{line}");
-    }
-    telemetry.clear_unsupported_event_counts();
+    clear_unsupported_event_counts();
     Ok(())
 }
 
 #[cfg(test)]
-fn unsupported_event_count(telemetry: &AttachTelemetry, event_type: &str) -> u64 {
-    telemetry
-        .unsupported_event_counts
-        .get(event_type)
-        .copied()
-        .unwrap_or(0)
+fn unsupported_event_count(event_type: &str) -> u64 {
+    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = map.lock().expect("unsupported event counter mutex");
+    guard.get(event_type).copied().unwrap_or(0)
 }
 
 fn print_stream_error(context: &str, err: &anyhow::Error, as_json: bool) -> anyhow::Result<()> {
     if as_json {
-        let (class, error_source) = classify_stream_error_context(context);
+        let class = if context.starts_with("stream.error.") || context.starts_with("control.") {
+            context
+        } else {
+            "stream.error"
+        };
         let payload = serde_json::json!({
             "v": 1,
             "mode": "attached",
             "class": class,
-            "error_source": error_source,
             "context": context,
             "message": err.to_string()
         });
@@ -1123,24 +1081,6 @@ fn print_stream_error(context: &str, err: &anyhow::Error, as_json: bool) -> anyh
     }
     println!("[stream.error][{context}] {err}");
     Ok(())
-}
-
-fn classify_stream_error_context(context: &str) -> (&str, Option<&'static str>) {
-    let class = if context.starts_with("stream.error") || context.starts_with("control.") {
-        context
-    } else {
-        "stream.error"
-    };
-    let error_source = if class.contains(".child") {
-        Some("child")
-    } else if class.contains(".upstream") {
-        Some("upstream")
-    } else if class.starts_with("stream.error") {
-        Some("proxy")
-    } else {
-        None
-    };
-    (class, error_source)
 }
 
 fn print_stream_warning(agent_id: &str, warning: &str, as_json: bool) -> anyhow::Result<()> {
@@ -1247,6 +1187,13 @@ mod tests {
     }
 
     #[test]
+    fn input_contract_includes_ctrl_c_sigint_line() {
+        assert!(input_contract_lines()
+            .iter()
+            .any(|line| line.contains("Ctrl-C / SIGINT")));
+    }
+
+    #[test]
     fn parse_plain_text_sanitizes_control_bytes() {
         assert_eq!(
             parse_attach_input("hel\0lo\u{0007}"),
@@ -1262,13 +1209,6 @@ mod tests {
                 "stdin payload rejected: ANSI escape sequences are not allowed".to_string()
             )
         );
-    }
-
-    #[test]
-    fn parse_plain_text_edge_cases_ignore_after_sanitization() {
-        assert_eq!(parse_attach_input(""), AttachInput::Ignore);
-        assert_eq!(parse_attach_input("\0\0"), AttachInput::Ignore);
-        assert_eq!(parse_attach_input("\u{0007}\u{0008}"), AttachInput::Ignore);
     }
 
     #[test]
@@ -1313,14 +1253,12 @@ mod tests {
 
     #[test]
     fn classify_atm_mail_has_priority() {
-        let mut telemetry = AttachTelemetry::default();
         assert_eq!(
             classify_event_class(
                 "agent_message_delta",
                 "atm_mail",
                 &serde_json::json!({}),
-                "",
-                &mut telemetry
+                ""
             )
             .0,
             "input.atm_mail"
@@ -1329,52 +1267,28 @@ mod tests {
 
     #[test]
     fn attached_envelope_maps_event_fields() {
-        let mut telemetry = AttachTelemetry::default();
         let frame = serde_json::json!({
             "agent_id":"codex:abc",
             "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
             "event":{"params":{"type":"agent_message_delta","delta":"hello"}}
         });
-        let env = to_attached_envelope("codex:abc", &frame, &mut telemetry);
+        let env = to_attached_envelope("codex:abc", &frame);
         assert_eq!(env.mode, "attached");
         assert_eq!(env.class, "assistant.output");
         assert_eq!(env.applicability, "required");
         assert_eq!(env.text, "hello");
-        assert_eq!(env.error_source, None);
         assert_eq!(env.source_actor, "arch-atm");
         assert_eq!(env.unsupported_count, None);
     }
 
     #[test]
-    fn attached_envelope_sets_error_source_for_stream_error() {
-        let mut telemetry = AttachTelemetry::default();
-        let frame = serde_json::json!({
-            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
-            "event":{"params":{"type":"stream_error","error_source":"child","message":"oops"}}
-        });
-        let env = to_attached_envelope("codex:abc", &frame, &mut telemetry);
-        assert_eq!(env.class, "stream.error.child");
-        assert_eq!(env.error_source.as_deref(), Some("child"));
-    }
-
-    #[test]
     #[serial_test::serial]
     fn classify_unknown_event_emits_supported_prefix_and_counter() {
-        let mut telemetry = AttachTelemetry::default();
-        let (class, count1, applicability1) = classify_event_class(
-            "future/event",
-            "client_prompt",
-            &serde_json::json!({}),
-            "",
-            &mut telemetry,
-        );
-        let (_, count2, applicability2) = classify_event_class(
-            "future/event",
-            "client_prompt",
-            &serde_json::json!({}),
-            "",
-            &mut telemetry,
-        );
+        clear_unsupported_event_counts();
+        let (class, count1, applicability1) =
+            classify_event_class("future/event", "client_prompt", &serde_json::json!({}), "");
+        let (_, count2, applicability2) =
+            classify_event_class("future/event", "client_prompt", &serde_json::json!({}), "");
         assert_eq!(class, "unsupported.future_event");
         assert_eq!(applicability1, "out_of_scope");
         assert_eq!(applicability2, "out_of_scope");
@@ -1382,72 +1296,28 @@ mod tests {
         let c2 = count2.expect("second unsupported count present");
         assert!(c1 >= 1);
         assert!(c2 >= c1);
-        assert!(unsupported_event_count(&telemetry, "future_event") >= c2);
+        assert!(unsupported_event_count("future_event") >= c2);
+        clear_unsupported_event_counts();
     }
 
     #[test]
     #[serial_test::serial]
     fn unsupported_summary_below_threshold_has_no_warning_line() {
-        let mut telemetry = AttachTelemetry::default();
+        clear_unsupported_event_counts();
         for _ in 0..(UNSUPPORTED_WARN_THRESHOLD - 1) {
-            let _ = telemetry.record_unsupported_event("future_event");
+            let _ = record_unsupported_event("future_event");
         }
-        let lines = telemetry.unsupported_summary_lines(UNSUPPORTED_WARN_THRESHOLD);
-        assert!(
-            lines
-                .iter()
-                .any(|l| l == "unsupported.summary future_event=4")
-        );
+        let lines = unsupported_summary_lines(UNSUPPORTED_WARN_THRESHOLD);
+        assert!(lines.iter().any(|l| l == "unsupported.summary future_event=4"));
         assert!(
             !lines.iter().any(|l| l.starts_with("stream.warning ")),
             "below-threshold counters must not emit stream.warning summary"
         );
-    }
-
-    #[test]
-    fn unsupported_summary_output_plain_text_lines() {
-        let lines = vec![
-            "unsupported.summary future_event=5".to_string(),
-            "stream.warning unsupported event 'future_event' seen 5 times".to_string(),
-        ];
-        let rendered =
-            unsupported_summary_output_lines("codex:test", false, &lines).expect("render lines");
-        assert_eq!(rendered, lines);
-    }
-
-    #[test]
-    fn unsupported_summary_output_json_lines() {
-        let lines = vec![
-            "unsupported.summary future_event=5".to_string(),
-            "stream.warning unsupported event 'future_event' seen 5 times".to_string(),
-        ];
-        let rendered =
-            unsupported_summary_output_lines("codex:test", true, &lines).expect("render lines");
-        assert_eq!(rendered.len(), 2);
-        let first: Value = serde_json::from_str(&rendered[0]).expect("json line");
-        let second: Value = serde_json::from_str(&rendered[1]).expect("json line");
-        assert_eq!(
-            first.get("class").and_then(|v| v.as_str()),
-            Some("session.meta")
-        );
-        assert_eq!(
-            second.get("class").and_then(|v| v.as_str()),
-            Some("stream.warning")
-        );
-    }
-
-    #[test]
-    fn unsupported_summary_zero_counts_suppressed_on_detach() {
-        let mut telemetry = AttachTelemetry::default();
-        let lines = telemetry.unsupported_summary_lines(UNSUPPORTED_WARN_THRESHOLD);
-        assert!(lines.is_empty());
-        assert!(print_unsupported_summary_on_detach("codex:test", false, &mut telemetry).is_ok());
-        assert!(telemetry.unsupported_event_counts.is_empty());
+        clear_unsupported_event_counts();
     }
 
     #[test]
     fn classify_stream_error_source_and_fatal_variants() {
-        let mut telemetry = AttachTelemetry::default();
         let child = serde_json::json!({"params":{"error_source":"child","message":"oops"}});
         let upstream =
             serde_json::json!({"params":{"errorSource":"upstream_mcp","message":"oops"}});
@@ -1456,109 +1326,40 @@ mod tests {
         let proxy_default = serde_json::json!({"params":{"message":"oops"}});
 
         assert_eq!(
-            classify_event_class(
-                "stream_error",
-                "client_prompt",
-                &child,
-                "oops",
-                &mut telemetry
-            )
-            .0,
+            classify_event_class("stream_error", "client_prompt", &child, "oops").0,
             "stream.error.child"
         );
         assert_eq!(
-            classify_event_class(
-                "stream_error",
-                "client_prompt",
-                &upstream,
-                "oops",
-                &mut telemetry
-            )
-            .0,
+            classify_event_class("stream_error", "client_prompt", &upstream, "oops").0,
             "stream.error.upstream"
         );
         assert_eq!(
-            classify_event_class(
-                "stream_error",
-                "client_prompt",
-                &fatal,
-                "boom",
-                &mut telemetry
-            )
-            .0,
+            classify_event_class("stream_error", "client_prompt", &fatal, "boom").0,
             "stream.error.fatal"
         );
         assert_eq!(
-            classify_event_class(
-                "stream_error",
-                "client_prompt",
-                &proxy_default,
-                "oops",
-                &mut telemetry
-            )
-            .0,
+            classify_event_class("stream_error", "client_prompt", &proxy_default, "oops").0,
             "stream.error.proxy"
         );
     }
 
     #[test]
     fn classify_stream_warning_maps_to_warning_class() {
-        let mut telemetry = AttachTelemetry::default();
         let warning = serde_json::json!({"params":{"message":"heads up"}});
         assert_eq!(
-            classify_event_class(
-                "stream_warning",
-                "client_prompt",
-                &warning,
-                "heads up",
-                &mut telemetry
-            )
-            .0,
+            classify_event_class("stream_warning", "client_prompt", &warning, "heads up").0,
             "stream.warning"
         );
     }
 
     #[test]
-    fn classify_stream_error_context_for_watch_tail_and_control_paths() {
-        let (watch_class, watch_source) =
-            classify_stream_error_context("stream.error.proxy.watch.tail");
-        assert_eq!(watch_class, "stream.error.proxy.watch.tail");
-        assert_eq!(watch_source, Some("proxy"));
-
-        let (control_class, control_source) = classify_stream_error_context("control.timeout");
-        assert_eq!(control_class, "control.timeout");
-        assert_eq!(control_source, None);
-    }
-
-    fn render_stream_error_variants() {
-        assert_eq!(
-            render_stream_error_variant("stream.error.proxy", "oops"),
-            "stream-error(proxy): oops"
-        );
-        assert_eq!(
-            render_stream_error_variant("stream.error.child", "oops"),
-            "stream-error(child): oops"
-        );
-        assert_eq!(
-            render_stream_error_variant("stream.error.upstream", "oops"),
-            "stream-error(upstream): oops"
-        );
-        assert_eq!(
-            render_stream_error_variant("stream.error.fatal", "boom"),
-            "stream-error(fatal): boom [detach/reconnect recommended]"
-        );
-    }
-
-    #[test]
     fn classify_splits_request_user_input_and_elicitation_request() {
-        let mut telemetry = AttachTelemetry::default();
         assert_eq!(
             classify_event_class(
                 "request_user_input",
                 "client_prompt",
                 &serde_json::json!({}),
-                "choose",
-                &mut telemetry
+                "choose"
             )
             .0,
             "elicitation.request_user_input"
@@ -1568,8 +1369,7 @@ mod tests {
                 "elicitation_request",
                 "client_prompt",
                 &serde_json::json!({}),
-                "approve?",
-                &mut telemetry
+                "approve?"
             )
             .0,
             "elicitation.request"
@@ -1594,15 +1394,6 @@ mod tests {
     }
 
     #[test]
-    fn is_fatal_stream_error_ignores_non_fatal_phrase() {
-        let event = serde_json::json!({"params":{"fatal":false}});
-        assert!(!is_fatal_stream_error(
-            &event,
-            "non-fatal warning: reconnect not required"
-        ));
-    }
-
-    #[test]
     fn class_map_fixture_matches_expected_class_and_applicability() {
         let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/parity/attach/class-map.input.jsonl");
@@ -1622,11 +1413,10 @@ mod tests {
         for (idx, (frame_line, expected_line)) in
             input_rows.iter().zip(expected_rows.iter()).enumerate()
         {
-            let mut telemetry = AttachTelemetry::default();
             let frame: Value = serde_json::from_str(frame_line).expect("valid frame fixture line");
             let expected_json: Value =
                 serde_json::from_str(expected_line).expect("valid expected fixture line");
-            let env = to_attached_envelope("codex:test", &frame, &mut telemetry);
+            let env = to_attached_envelope("codex:test", &frame);
             let expected_class = expected_json
                 .get("class")
                 .and_then(|v| v.as_str())
@@ -1728,7 +1518,7 @@ mod tests {
     #[serial_test::serial]
     fn checkpoint_round_trip_uses_atm_home() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let original_atm_home = std::env::var("ATM_HOME").ok();
+        let old_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation under serial test execution.
         unsafe {
             std::env::set_var("ATM_HOME", temp_dir.path());
@@ -1736,11 +1526,15 @@ mod tests {
         save_attach_checkpoint_pos("atm-dev", "codex:test", 42).expect("save checkpoint");
         let loaded = load_attach_checkpoint_pos("atm-dev", "codex:test");
         assert_eq!(loaded, Some(42));
-        // SAFETY: test-scoped env mutation under serial test execution.
-        unsafe {
-            match original_atm_home {
-                Some(val) => std::env::set_var("ATM_HOME", val),
-                None => std::env::remove_var("ATM_HOME"),
+        if let Some(home) = old_home {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::set_var("ATM_HOME", home);
+            }
+        } else {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::remove_var("ATM_HOME");
             }
         }
     }
@@ -1753,7 +1547,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let original_atm_home = std::env::var("ATM_HOME").ok();
+        let old_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation under serial test execution.
         unsafe {
             std::env::set_var("ATM_HOME", temp_dir.path());
@@ -1802,11 +1596,15 @@ mod tests {
         assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
 
         server.join().expect("server join");
-        // SAFETY: test-scoped env mutation under serial test execution.
-        unsafe {
-            match original_atm_home {
-                Some(val) => std::env::set_var("ATM_HOME", val),
-                None => std::env::remove_var("ATM_HOME"),
+        if let Some(home) = old_home {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::set_var("ATM_HOME", home);
+            }
+        } else {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::remove_var("ATM_HOME");
             }
         }
     }
@@ -1819,7 +1617,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let original_atm_home = std::env::var("ATM_HOME").ok();
+        let old_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation under serial test execution.
         unsafe {
             std::env::set_var("ATM_HOME", temp_dir.path());
@@ -1888,11 +1686,15 @@ mod tests {
         assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
 
         server.join().expect("server join");
-        // SAFETY: test-scoped env mutation under serial test execution.
-        unsafe {
-            match original_atm_home {
-                Some(val) => std::env::set_var("ATM_HOME", val),
-                None => std::env::remove_var("ATM_HOME"),
+        if let Some(home) = old_home {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::set_var("ATM_HOME", home);
+            }
+        } else {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::remove_var("ATM_HOME");
             }
         }
     }

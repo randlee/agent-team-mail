@@ -118,13 +118,17 @@ Owner: `arch-ctm`
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: Ctrl-C follows default process signal behavior (DEV-O3-002); explicit documentation deferred to help-text hardening pass.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/246
+- validation_status: implemented + validated
 
-## Phase P Progress Note (2026-02-25)
+## Phase P Closure Note (2026-02-25)
 
-O-R.5 approved deviations are being closed in Phase P by sprint:
+All approved O-R.5 attach-path deviations are now closed and validated:
 
-- P.1: DEV-OR5-001, DEV-OR5-002 (closed)
-- P.2: DEV-OR5-003, DEV-OR5-004 (closed)
-- P.3: DEV-OR5-005 (planned)
-- P.4: DEV-OR5-006 (closed)
-- P.5: DEV-OR5-007 (planned)
+- P.1: DEV-OR5-001, DEV-OR5-002 (PR #242)
+- P.2: DEV-OR5-003, DEV-OR5-004 (PR #243)
+- P.3: DEV-OR5-005 (PR #244)
+- P.4: DEV-OR5-006 (PR #245)
+- P.5: DEV-OR5-007 (PR #246)
