@@ -41,6 +41,7 @@ enum AttachInput {
         verb: ControlVerb,
         arg: Option<String>,
     },
+    Invalid(String),
     Ignore,
 }
 
@@ -135,6 +136,9 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                 };
                 match parse_attach_input(&line) {
                     AttachInput::Ignore => {}
+                    AttachInput::Invalid(reason) => {
+                        print_stream_warning(&args.agent_id, &reason, args.json)?;
+                    }
                     AttachInput::AgentText(text) => {
                         // Default route is agent input; control verbs must be prefixed with ':'.
                         match send_stdin_control(&team, &args.agent_id, &text) {
@@ -241,7 +245,11 @@ fn parse_attach_input(line: &str) -> AttachInput {
     }
 
     if !trimmed.starts_with(':') {
-        return AttachInput::AgentText(trimmed.to_string());
+        return match sanitize_stdin_payload(trimmed) {
+            Ok(payload) if payload.is_empty() => AttachInput::Ignore,
+            Ok(payload) => AttachInput::AgentText(payload),
+            Err(reason) => AttachInput::Invalid(reason),
+        };
     }
 
     let command = trimmed.trim_start_matches(':').trim();
@@ -283,6 +291,16 @@ fn parse_attach_input(line: &str) -> AttachInput {
             arg: None,
         },
     }
+}
+
+fn sanitize_stdin_payload(payload: &str) -> Result<String, String> {
+    if payload.contains('\u{1b}') {
+        return Err("stdin payload rejected: ANSI escape sequences are not allowed".to_string());
+    }
+
+    let stripped_nul = payload.replace('\0', "");
+    let filtered: String = stripped_nul.chars().filter(|ch| !ch.is_control()).collect();
+    Ok(filtered.trim().to_string())
 }
 
 fn send_stdin_control(team: &str, agent_id: &str, text: &str) -> anyhow::Result<ControlAck> {
@@ -1005,6 +1023,23 @@ fn print_stream_error(context: &str, err: &anyhow::Error, as_json: bool) -> anyh
     Ok(())
 }
 
+fn print_stream_warning(agent_id: &str, warning: &str, as_json: bool) -> anyhow::Result<()> {
+    if as_json {
+        let payload = serde_json::json!({
+            "v": 1,
+            "mode": "attached",
+            "agent_id": agent_id,
+            "class": "stream.warning",
+            "event_type": "stdin_sanitization",
+            "text": warning
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(());
+    }
+    println!("stream-warning: {warning}");
+    Ok(())
+}
+
 fn classify_control_send_error(err: &anyhow::Error) -> &'static str {
     let kind = err
         .chain()
@@ -1083,6 +1118,24 @@ mod tests {
                 verb: ControlVerb::Approve,
                 arg: Some("ship it".to_string())
             }
+        );
+    }
+
+    #[test]
+    fn parse_plain_text_sanitizes_control_bytes() {
+        assert_eq!(
+            parse_attach_input("hel\0lo\u{0007}"),
+            AttachInput::AgentText("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_plain_text_rejects_ansi_sequences() {
+        assert_eq!(
+            parse_attach_input("hello \u{1b}[31mred"),
+            AttachInput::Invalid(
+                "stdin payload rejected: ANSI escape sequences are not allowed".to_string()
+            )
         );
     }
 
@@ -1188,6 +1241,7 @@ mod tests {
         let child = serde_json::json!({"params":{"error_source":"child","message":"oops"}});
         let upstream = serde_json::json!({"params":{"errorSource":"upstream_mcp","message":"oops"}});
         let fatal = serde_json::json!({"params":{"fatal":true,"error_source":"proxy","message":"boom"}});
+        let proxy_default = serde_json::json!({"params":{"message":"oops"}});
 
         assert_eq!(
             classify_event_class("stream_error", "client_prompt", &child, "oops").0,
@@ -1200,6 +1254,24 @@ mod tests {
         assert_eq!(
             classify_event_class("stream_error", "client_prompt", &fatal, "boom").0,
             "stream.error.fatal"
+        );
+        assert_eq!(
+            classify_event_class("stream_error", "client_prompt", &proxy_default, "oops").0,
+            "stream.error.proxy"
+        );
+    }
+
+    #[test]
+    fn classify_stream_warning_path() {
+        assert_eq!(
+            classify_event_class(
+                "stream_warning",
+                "client_prompt",
+                &serde_json::json!({"params":{"message":"warn"}}),
+                "warn"
+            )
+            .0,
+            "stream.warning"
         );
     }
 
