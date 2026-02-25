@@ -613,7 +613,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
 | P.1 | Attach error-source + fatal reconnect parity | O-R.5 | M | COMPLETE ([#242](https://github.com/randlee/agent-team-mail/pull/242)) |
-| P.2 | Attach replay boundary + checkpoint continuity | P.1 | M | PLANNED |
+| P.2 | Attach replay boundary + checkpoint continuity | P.1 | M | COMPLETE ([#243](https://github.com/randlee/agent-team-mail/pull/243)) |
 | P.3 | Attach unsupported-event summary flush parity | P.1 | S | COMPLETE ([#244](https://github.com/randlee/agent-team-mail/pull/244)) |
 | P.4 | Attach stdin sanitization hardening | P.1 | M | PLANNED |
 | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | P.2,P.3,P.4 | S | PLANNED |
@@ -762,7 +762,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **O-R** | O-R.4 | Diff + markdown + reasoning render parity hardening | COMPLETE | [#235](https://github.com/randlee/agent-team-mail/pull/235) |
 | **O-R** | O-R.5 | Error/replay/telemetry/session hardening closure | COMPLETE | [#236](https://github.com/randlee/agent-team-mail/pull/236), [#237](https://github.com/randlee/agent-team-mail/pull/237) |
 | **P** | P.1 | Attach error-source + fatal reconnect parity | COMPLETE | [#242](https://github.com/randlee/agent-team-mail/pull/242) |
-| **P** | P.2 | Attach replay boundary + checkpoint continuity | PLANNED | — |
+| **P** | P.2 | Attach replay boundary + checkpoint continuity | COMPLETE | [#243](https://github.com/randlee/agent-team-mail/pull/243) |
 | **P** | P.3 | Attach unsupported-event summary flush parity | COMPLETE | [#244](https://github.com/randlee/agent-team-mail/pull/244) |
 | **P** | P.4 | Attach stdin sanitization hardening | PLANNED | — |
 | **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | PLANNED | — |

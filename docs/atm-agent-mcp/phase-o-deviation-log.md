@@ -69,18 +69,26 @@ Owner: `arch-ctm`
 - validation_status: verified
 
 ### DEV-OR5-003: attach replay remains fixed-window clip
-- Requirement context: FR-23.22 turn-boundary-aware replay behavior.
+- Requirement context: FR-23.21 turn-boundary-aware replay behavior.
 - Current behavior: TUI replay now applies turn-boundary shaping + truncation warning; attach replay remains fixed 50-frame clipping.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: replay hardening landed in TUI watch path; attach replay parity deferred.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/243
+- validation_status: implemented + validated
 
 ### DEV-OR5-004: attach replay checkpoint persistence deferred
-- Requirement context: FR-23.22 session-scoped replay checkpoint continuity.
+- Requirement context: FR-23.24 session-scoped replay checkpoint continuity.
 - Current behavior: checkpoint persistence is implemented in TUI watch path only.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: checkpointing added where re-attach continuity is user-visible in the TUI; attach checkpointing deferred.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/243
+- validation_status: implemented + validated
 
 ### DEV-OR5-005: attach unsupported-event summary flush deferred
 - Requirement context: FR-23.22 unsupported-event telemetry summary.
@@ -112,7 +120,7 @@ Owner: `arch-ctm`
 O-R.5 approved deviations are being closed in Phase P by sprint:
 
 - P.1: DEV-OR5-001, DEV-OR5-002 (closed)
-- P.2: DEV-OR5-003, DEV-OR5-004 (planned)
+- P.2: DEV-OR5-003, DEV-OR5-004 (closed)
 - P.3: DEV-OR5-005 (planned)
 - P.4: DEV-OR5-006 (planned)
 - P.5: DEV-OR5-007 (planned)

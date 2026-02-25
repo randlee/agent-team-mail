@@ -483,7 +483,17 @@ fn save_attach_checkpoint_pos(team: &str, agent_id: &str, pos: u64) -> anyhow::R
         pos,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
-    std::fs::write(path, serde_json::to_string_pretty(&checkpoint)?)?;
+    let data = serde_json::to_string_pretty(&checkpoint)?;
+    let temp_path = path.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::write(&temp_path, data)?;
+    if let Err(err) = std::fs::rename(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
     Ok(())
 }
 
