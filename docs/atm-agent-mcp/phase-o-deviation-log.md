@@ -75,7 +75,7 @@ Owner: `arch-ctm`
 - rationale: checkpointing added where re-attach continuity is user-visible in the TUI; attach checkpointing deferred.
 
 ### DEV-OR5-005: attach unsupported-event summary flush deferred
-- Requirement context: FR-23.23 unsupported-event telemetry summary.
+- Requirement context: FR-23.22 unsupported-event telemetry summary.
 - Current behavior: unsupported-event summary/warning flush is implemented in TUI flow; attach path does not flush per-session summary on detach/exit.
 - approved_by: team-lead
 - approved_date: 2026-02-25
@@ -87,6 +87,10 @@ Owner: `arch-ctm`
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: TUI-first scope for O-R.5; attach stdin sanitization deferred to input-hardening phase.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/245
+- validation_status: implemented + validated
 
 ### DEV-OR5-007: attach help text missing Ctrl-C/SIGINT documentation
 - Requirement context: FR-23.25, GAP-014 help text completeness.
@@ -95,12 +99,12 @@ Owner: `arch-ctm`
 - approved_date: 2026-02-25
 - rationale: Ctrl-C follows default process signal behavior (DEV-O3-002); explicit documentation deferred to help-text hardening pass.
 
-## Phase P Planning Note (2026-02-25)
+## Phase P Progress Note (2026-02-25)
 
-All O-R.5 approved deviations remain open by design and are planned for closure in Phase P:
+O-R.5 approved deviations are being closed in Phase P by sprint:
 
-- P.1: DEV-OR5-001, DEV-OR5-002
-- P.2: DEV-OR5-003, DEV-OR5-004
-- P.3: DEV-OR5-005
-- P.4: DEV-OR5-006
-- P.5: DEV-OR5-007
+- P.1: DEV-OR5-001, DEV-OR5-002 (planned)
+- P.2: DEV-OR5-003, DEV-OR5-004 (planned)
+- P.3: DEV-OR5-005 (planned)
+- P.4: DEV-OR5-006 (closed)
+- P.5: DEV-OR5-007 (planned)

@@ -478,7 +478,17 @@ fn save_attach_checkpoint_pos(team: &str, agent_id: &str, pos: u64) -> anyhow::R
         pos,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
-    std::fs::write(path, serde_json::to_string_pretty(&checkpoint)?)?;
+    let data = serde_json::to_string_pretty(&checkpoint)?;
+    let temp_path = path.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::write(&temp_path, data)?;
+    if let Err(err) = std::fs::rename(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
     Ok(())
 }
 
@@ -656,16 +666,26 @@ fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()
         "elicitation.request_user_input" => println!("user-input-request: {payload}"),
         "elicitation.request" => println!("input-request: {payload}"),
         "stream.warning" => println!("stream-warning: {payload}"),
-        "stream.error.proxy" => println!("stream-error(proxy): {payload}"),
-        "stream.error.child" => println!("stream-error(child): {payload}"),
-        "stream.error.upstream" => println!("stream-error(upstream): {payload}"),
-        "stream.error.fatal" => {
-            println!("stream-error(fatal): {payload} [detach/reconnect recommended]")
+        "stream.error.proxy" | "stream.error.child" | "stream.error.upstream"
+        | "stream.error.fatal" => {
+            println!("{}", render_stream_error_variant(env.class.as_str(), &payload))
         }
         "file.edit" => print_file_edit_lines(&payload),
         _ => println!("[{}][{}] {}", env.class, env.source_kind, payload),
     }
     Ok(())
+}
+
+fn render_stream_error_variant(class: &str, payload: &str) -> String {
+    match class {
+        "stream.error.proxy" => format!("stream-error(proxy): {payload}"),
+        "stream.error.child" => format!("stream-error(child): {payload}"),
+        "stream.error.upstream" => format!("stream-error(upstream): {payload}"),
+        "stream.error.fatal" => {
+            format!("stream-error(fatal): {payload} [detach/reconnect recommended]")
+        }
+        _ => format!("stream-error: {payload}"),
+    }
 }
 
 fn is_reasoning_section_break(raw: &Value) -> bool {
@@ -1140,6 +1160,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_plain_text_edge_cases_ignore_after_sanitization() {
+        assert_eq!(parse_attach_input(""), AttachInput::Ignore);
+        assert_eq!(parse_attach_input("\0\0"), AttachInput::Ignore);
+        assert_eq!(parse_attach_input("\u{0007}\u{0008}"), AttachInput::Ignore);
+    }
+
+    #[test]
     fn parse_additional_control_commands() {
         assert_eq!(
             parse_attach_input(":detach"),
@@ -1272,6 +1299,26 @@ mod tests {
             )
             .0,
             "stream.warning"
+        );
+    }
+
+    #[test]
+    fn render_stream_error_variants() {
+        assert_eq!(
+            render_stream_error_variant("stream.error.proxy", "oops"),
+            "stream-error(proxy): oops"
+        );
+        assert_eq!(
+            render_stream_error_variant("stream.error.child", "oops"),
+            "stream-error(child): oops"
+        );
+        assert_eq!(
+            render_stream_error_variant("stream.error.upstream", "oops"),
+            "stream-error(upstream): oops"
+        );
+        assert_eq!(
+            render_stream_error_variant("stream.error.fatal", "boom"),
+            "stream-error(fatal): boom [detach/reconnect recommended]"
         );
     }
 
@@ -1439,7 +1486,7 @@ mod tests {
     #[serial_test::serial]
     fn checkpoint_round_trip_uses_atm_home() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let old_home = std::env::var("ATM_HOME").ok();
+        let original_atm_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation under serial test execution.
         unsafe {
             std::env::set_var("ATM_HOME", temp_dir.path());
@@ -1447,10 +1494,11 @@ mod tests {
         save_attach_checkpoint_pos("atm-dev", "codex:test", 42).expect("save checkpoint");
         let loaded = load_attach_checkpoint_pos("atm-dev", "codex:test");
         assert_eq!(loaded, Some(42));
-        if let Some(home) = old_home {
-            // SAFETY: test-scoped env mutation under serial test execution.
-            unsafe {
-                std::env::set_var("ATM_HOME", home);
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            match original_atm_home {
+                Some(val) => std::env::set_var("ATM_HOME", val),
+                None => std::env::remove_var("ATM_HOME"),
             }
         }
     }
@@ -1463,7 +1511,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let old_home = std::env::var("ATM_HOME").ok();
+        let original_atm_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation under serial test execution.
         unsafe {
             std::env::set_var("ATM_HOME", temp_dir.path());
@@ -1512,10 +1560,11 @@ mod tests {
         assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
 
         server.join().expect("server join");
-        if let Some(home) = old_home {
-            // SAFETY: test-scoped env mutation under serial test execution.
-            unsafe {
-                std::env::set_var("ATM_HOME", home);
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            match original_atm_home {
+                Some(val) => std::env::set_var("ATM_HOME", val),
+                None => std::env::remove_var("ATM_HOME"),
             }
         }
     }
@@ -1528,7 +1577,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let old_home = std::env::var("ATM_HOME").ok();
+        let original_atm_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation under serial test execution.
         unsafe {
             std::env::set_var("ATM_HOME", temp_dir.path());
@@ -1597,10 +1646,11 @@ mod tests {
         assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
 
         server.join().expect("server join");
-        if let Some(home) = old_home {
-            // SAFETY: test-scoped env mutation under serial test execution.
-            unsafe {
-                std::env::set_var("ATM_HOME", home);
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            match original_atm_home {
+                Some(val) => std::env::set_var("ATM_HOME", val),
+                None => std::env::remove_var("ATM_HOME"),
             }
         }
     }
