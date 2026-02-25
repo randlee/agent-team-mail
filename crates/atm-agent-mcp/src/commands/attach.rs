@@ -410,11 +410,24 @@ fn watch_feed_path(agent_id: &str) -> Option<PathBuf> {
 }
 
 fn safe_agent_id(agent_id: &str) -> Cow<'_, str> {
-    if agent_id.contains('/') || agent_id.contains('\\') {
-        Cow::Owned(agent_id.replace(['/', '\\'], "_"))
-    } else {
-        Cow::Borrowed(agent_id)
+    if agent_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Cow::Borrowed(agent_id);
     }
+    Cow::Owned(
+        agent_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect(),
+    )
 }
 
 fn attach_checkpoint_path(team: &str, agent_id: &str) -> Option<PathBuf> {
@@ -1047,6 +1060,11 @@ mod tests {
             parse_attach_input("hello"),
             AttachInput::AgentText("hello".to_string())
         );
+    }
+
+    #[test]
+    fn safe_agent_id_sanitizes_windows_unsafe_chars() {
+        assert_eq!(safe_agent_id("codex:test/abc\\x").as_ref(), "codex_test_abc_x");
     }
 
     #[test]
