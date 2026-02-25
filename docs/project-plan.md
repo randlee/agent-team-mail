@@ -573,23 +573,33 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
-| O-R.1 | Structured attach renderer (replace generic `[class][source_kind]` output) | O.3 | M | PLANNED |
-| O-R.2 | Dedicated render paths for required classes (approval/elicitation/tool/turn/file-edit) | O-R.1 | M | PLANNED |
-| O-R.3 | File-edit diff rendering parity (`patch_apply*` / `turn_diff`, red/green semantics) | O-R.2 | L | PLANNED |
-| O-R.4 | Envelope applicability contract fix (`applicability` emitted + fixture alignment) | O-R.1 | S | PLANNED |
+| O-R.1 | Structured renderer foundation + applicability contract alignment | O.3 | M | PLANNED |
+| O-R.2 | Required event coverage expansion + unflattened class rendering | O-R.1 | L | PLANNED |
+| O-R.3 | Approval/elicitation interaction parity + correlated response routing | O-R.2 | L | PLANNED |
+| O-R.4 | Diff + markdown + reasoning render parity hardening | O-R.2 | L | PLANNED |
+| O-R.5 | Error/replay/telemetry/session hardening closure | O-R.3,O-R.4 | M | PLANNED |
 
 **Deliverables and acceptance criteria**:
-- O-R.1 deliverables: typed attached renderer layer for required classes; removal of generic-only render path for required classes.
-- O-R.1 acceptance: no required event class is displayed only as `[class][source_kind] <text>` in normal attach mode.
-- O-R.2 deliverables: class-specific rendering functions for `approval`, `elicitation.request`, `tool.exec`, `turn.lifecycle`, and `file.edit`.
-- O-R.2 acceptance: golden fixtures assert class-specific output tokens for each required class and pass in CI.
-- O-R.3 deliverables: add/remove hunk rendering for `patch_apply_begin`/`patch_apply_end`/`turn_diff` with Codex-equivalent red/green semantics.
-- O-R.3 acceptance: parity fixtures include diff scenarios and verify stable output ordering/format in attach mode.
-- O-R.4 deliverables: attach envelope includes `applicability` from event matrix mapping; fixtures updated to assert required/degraded/out_of_scope classification.
-- O-R.4 acceptance: contract tests verify emitted envelope schema and applicability values for representative event types.
+- O-R.1 deliverables: replace the generic attached print path for required classes with structured rendering primitives; add `applicability` field to attached JSON envelope.
+- O-R.1 acceptance: required classes no longer rely on `[class][source_kind]` fallback; contract fixtures pass for applicability classification.
+- O-R.2 deliverables: implement missing required event families (`mcp_tool_call_*`, `web_search_*`, `plan_*`, `session_configured`, `token_count`, `exec_command_begin`) and split flattened class handlers.
+- O-R.2 acceptance: golden fixtures include representative events for each new family; no required family falls back to `unsupported.*` during fixture runs.
+- O-R.3 deliverables: build approval/elicitation render+interaction parity with correlated response routing (no stdin-only approval shortcut), and distinct handling of `request_user_input`/`elicitation_request`/exec-approval/patch-approval events.
+- O-R.3 acceptance: approval parity fixtures assert correlation-preserving round trip and class-distinct rendering for each approval/elicitation subtype.
+- O-R.4 deliverables: implement file diff red/green rendering for `patch_apply*`/`turn_diff`; improve reasoning section-break handling and markdown rendering parity.
+- O-R.4 acceptance: diff/reasoning/markdown fixtures pass across supported viewports with stable output snapshots.
+- O-R.5 deliverables: add error-source classification (`proxy`/`child`/`upstream`), replay boundary/truncation signaling, unsupported-event summary on detach/end, stdin sanitization, checkpoint continuity, and help text parity for Ctrl-C behavior.
+- O-R.5 acceptance: hardening fixtures validate replay/truncation/error-source/telemetry behavior and docs/help output matches runtime behavior.
+
+**Gap-ID mapping**:
+- O-R.1: GAP-008, GAP-015
+- O-R.2: GAP-003, GAP-004
+- O-R.3: GAP-002, GAP-005
+- O-R.4: GAP-001, GAP-006, GAP-012
+- O-R.5: GAP-009, GAP-010, GAP-011, GAP-013, GAP-014
 
 **References**:
-- `docs/atm-agent-mcp/requirements.md` (FR-23.12 through FR-23.15)
+- `docs/atm-agent-mcp/requirements.md` (FR-23.12 through FR-23.25)
 - `docs/atm-agent-mcp/codex-cli-atm-tui-render-gap-analysis.md` (current-state evidence and remediation map)
 - `docs/atm-agent-mcp/phase-o-event-applicability-matrix.md` (required/degraded/out_of_scope policy)
 
@@ -717,10 +727,11 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **O** | O.1 | Attach command + stream/control wiring | COMPLETE | [#223](https://github.com/randlee/agent-team-mail/pull/223) |
 | **O** | O.2 | Renderer/runtime parity in attached mode | COMPLETE | [#224](https://github.com/randlee/agent-team-mail/pull/224) |
 | **O** | O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | COMPLETE | [#225](https://github.com/randlee/agent-team-mail/pull/225) |
-| **O-R** | O-R.1 | Structured attach renderer (replace generic output) | PLANNED | — |
-| **O-R** | O-R.2 | Dedicated render paths for required classes | PLANNED | — |
-| **O-R** | O-R.3 | File-edit diff rendering parity | PLANNED | — |
-| **O-R** | O-R.4 | Envelope applicability contract fix | PLANNED | — |
+| **O-R** | O-R.1 | Structured renderer foundation + applicability contract alignment | PLANNED | — |
+| **O-R** | O-R.2 | Required event coverage expansion + unflattened class rendering | PLANNED | — |
+| **O-R** | O-R.3 | Approval/elicitation interaction parity + correlated response routing | PLANNED | — |
+| **O-R** | O-R.4 | Diff + markdown + reasoning render parity hardening | PLANNED | — |
+| **O-R** | O-R.5 | Error/replay/telemetry/session hardening closure | PLANNED | — |
 
 **Completed**: 94+ sprints across 20 phases (CI green)
 **Current version**: v0.18.0

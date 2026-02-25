@@ -341,6 +341,16 @@ Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-view
 - **FR-23.13**: Attached mode MUST provide dedicated render paths for required classes `approval`, `elicitation.request`, `tool.exec`, `turn.lifecycle`, and `file.edit`; class output MUST not be flattened into one shared formatter.
 - **FR-23.14**: File-edit parity MUST include explicit add/remove hunk presentation for `patch_apply_begin`/`patch_apply_end`/`turn_diff` using Codex-equivalent red/green semantics and stable line ordering.
 - **FR-23.15**: Attached JSON envelope output MUST include event applicability classification (`required` | `degraded` | `out_of_scope`) derived from the maintained applicability matrix, and parity fixtures MUST assert emitted applicability values.
+- **FR-23.16**: Attached mode MUST preserve distinct event handling for `request_user_input`, `elicitation_request`, `exec_approval_request`, and `apply_patch_approval_request`; these events MUST NOT be collapsed into one generic approval class.
+- **FR-23.17**: Attached mode MUST implement approval response routing through the proxy elicitation/response channel with correlation IDs; approval decisions MUST NOT be delivered only as uncorrelated stdin text.
+- **FR-23.18**: Attached mode MUST cover required Codex parity event classes including `mcp_tool_call_begin/end`, `web_search_begin/end`, `plan_update/plan_delta`, `session_configured`, `token_count`, and `exec_command_begin`.
+- **FR-23.19**: Attached reasoning rendering MUST preserve section-break semantics where available (for example, reasoning section boundaries vs plain delta text).
+- **FR-23.20**: Attached mode MUST surface error-source classification (`proxy`, `child`, `upstream`) in both human-readable output and JSON envelope for stream/control failures.
+- **FR-23.21**: Replay behavior MUST be turn-boundary-aware and MUST surface truncation indicators when replay context is clipped by replay limits.
+- **FR-23.22**: Attached mode MUST emit unsupported-event telemetry summaries at detach/session end (counts by event type/class) in addition to per-event fallback markers.
+- **FR-23.23**: Attached mode MUST sanitize operator stdin control payloads before forwarding to control channels to prevent malformed control injection.
+- **FR-23.24**: Re-attach replay continuity SHOULD persist a session-scoped checkpoint marker (last replayed position/turn marker) to reduce duplicate replay after process restarts.
+- **FR-23.25**: Attached help/UX contract MUST explicitly document `Ctrl-C`/SIGINT behavior and match implemented detach/interrupt semantics.
 
 ---
 

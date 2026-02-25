@@ -130,9 +130,34 @@ The following four gaps remain as explicit follow-up planning items for attached
 
 ## 7. Remediation Summary
 
-| Gap | Sprint | Size | Deliverable | Acceptance gate |
-|---|---|---|---|---|
-| Structured renderer replacement | O-R.1 | M | Typed attached renderer for required classes | No required class rendered only via generic fallback |
-| Unflatten required classes | O-R.2 | M | Dedicated render paths for approval/elicitation/tool/turn/file-edit | Fixture coverage for class-specific tokens/ordering |
-| File-edit diff parity | O-R.3 | L | Red/green diff rendering for `patch_apply*` and `turn_diff` | Diff fixtures in CI parity suite pass |
-| Applicability contract fix | O-R.4 | S | `applicability` emitted in attach envelope + fixture alignment | Contract tests assert expected applicability values |
+| Sprint | Size | GAP IDs | Deliverable focus |
+|---|---|---|---|
+| O-R.1 | M | GAP-008, GAP-015 | Structured renderer foundation + applicability contract alignment |
+| O-R.2 | L | GAP-003, GAP-004 | Required event coverage expansion + unflattened class rendering |
+| O-R.3 | L | GAP-002, GAP-005 | Approval/elicitation interaction parity + correlated response routing |
+| O-R.4 | L | GAP-001, GAP-006, GAP-012 | Diff + reasoning + markdown parity hardening |
+| O-R.5 | M | GAP-009, GAP-010, GAP-011, GAP-013, GAP-014 | Error/replay/telemetry/session hardening closure |
+
+## 8. GAP-ID Verification Matrix (2026-02-25)
+
+Verification policy for this update:
+- `Confirmed`: directly verified in local implementation (`crates/atm-agent-mcp/src/commands/attach.rs` and related parity fixtures).
+- `Not confirmed`: insufficient direct evidence in this worktree; excluded from new FR/sprint commitments until confirmed.
+
+| GAP ID | Status | Verification summary | Primary evidence |
+|---|---|---|---|
+| GAP-001 | Confirmed | No diff renderer in attached output path; file-edit class is mapped but printed through generic formatter. | `attach.rs:415`, `attach.rs:529` |
+| GAP-002 | Confirmed | No interactive approval modal path; approval/reject are CLI commands routed via stdin control. | `attach.rs:175`, `attach.rs:231`, `attach.rs:246` |
+| GAP-003 | Confirmed | Required families like `mcp_tool_call_*`, `plan_*`, `session_configured`, `token_count`, `exec_command_begin` are not classified. | `attach.rs:509-540` |
+| GAP-004 | Confirmed | `request_user_input` and `elicitation_request` are collapsed to one class; approval subtypes are flattened into one class. | `attach.rs:517-530` |
+| GAP-005 | Confirmed | Approval commands (`:approve`, `:reject`) use `send_stdin_control` (stdin action), not a dedicated correlated elicitation response path in this command. | `attach.rs:175`, `attach.rs:139-149`, `attach.rs:246-261` |
+| GAP-006 | Confirmed | Reasoning section-break-specific handling is absent; only delta/content reasoning kinds are mapped. | `attach.rs:514-516` |
+| GAP-007 | Not confirmed | Potential end-to-end source-attribution loss was not reproducible from local attach implementation alone. | `attach.rs:429-443`, `attach.rs:490-493` |
+| GAP-008 | Confirmed | Attached renderer uses a thin formatter with one generic `println!` path for most classes. | `attach.rs:403-425` |
+| GAP-009 | Confirmed | Error output lacks explicit source class (`proxy`/`child`/`upstream`) in emitted payload/human line. | `attach.rs:575-588` |
+| GAP-010 | Confirmed | Replay is frame-count bounded only; no turn-boundary awareness or truncation warning emission. | `attach.rs:378-392` |
+| GAP-011 | Confirmed | Unsupported counts are tracked, but no detach/session-end summary emission path exists. | `attach.rs:560-566`, `attach.rs:162` |
+| GAP-012 | Confirmed | Attached output path does not include markdown-aware rendering stage; raw text/event display is used. | `attach.rs:415-423` |
+| GAP-013 | Confirmed | User input is trimmed/parsed but not sanitized before forwarding as stdin payload. | `attach.rs:195-216`, `attach.rs:246-261` |
+| GAP-014 | Confirmed | Input help text does not document `Ctrl-C` behavior. | `attach.rs:171-179` |
+| GAP-015 | Confirmed | Re-attach uses tail replay scan only; no persisted checkpoint marker in attach command path. | `attach.rs:356-393` |
