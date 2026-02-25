@@ -495,6 +495,8 @@ fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()
     };
     match env.class.as_str() {
         "input.atm_mail" => println!("{} <{}>", env.source_actor, clamp_three_lines(&env.text)),
+        "input.client" => println!("client: {payload}"),
+        "input.user_steer" => println!("steer: {payload}"),
         "assistant.output" => println!("assistant: {}", render_markdown_text(&payload)),
         "assistant.reasoning" => {
             if is_reasoning_section_break(&env.raw) {
@@ -507,7 +509,15 @@ fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()
         "approval.exec" | "approval.patch" | "approval.review" => {
             println!("approval: {payload}")
         }
+        "elicitation.request_user_input" => println!("user-input-request: {payload}"),
         "elicitation.request" => println!("input-request: {payload}"),
+        "stream.warning" => println!("stream-warning: {payload}"),
+        "stream.error.proxy" => println!("stream-error(proxy): {payload}"),
+        "stream.error.child" => println!("stream-error(child): {payload}"),
+        "stream.error.upstream" => println!("stream-error(upstream): {payload}"),
+        "stream.error.fatal" => {
+            println!("stream-error(fatal): {payload} [detach/reconnect recommended]")
+        }
         "file.edit" => print_file_edit_lines(&payload),
         _ => println!("[{}][{}] {}", env.class, env.source_kind, payload),
     }
@@ -627,7 +637,8 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         .unwrap_or("")
         .to_string();
 
-    let (class, unsupported_count, applicability) = classify_event_class(&event_type, &source_kind);
+    let (class, unsupported_count, applicability) =
+        classify_event_class(&event_type, &source_kind, event, &text);
     let is_turn_boundary = matches!(
         event_type.as_str(),
         "turn_started"
@@ -672,6 +683,8 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
 fn classify_event_class(
     event_type: &str,
     source_kind: &str,
+    event: &Value,
+    text: &str,
 ) -> (String, Option<u64>, &'static str) {
     if source_kind == "atm_mail" || source_kind == "atm_mcp" {
         return ("input.atm_mail".to_string(), None, "required");
@@ -705,7 +718,8 @@ fn classify_event_class(
             "tool.lifecycle"
         }
         "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => "file.edit",
-        "request_user_input" | "elicitation_request" => "elicitation.request",
+        "request_user_input" => "elicitation.request_user_input",
+        "elicitation_request" => "elicitation.request",
         "session_configured"
         | "thread_name_updated"
         | "token_count"
@@ -717,7 +731,18 @@ fn classify_event_class(
         "plan_update" | "plan_delta" => "plan.update",
         "turn_started" | "turn_completed" | "turn_aborted" | "task_started" | "task_complete"
         | "turn_idle" | "idle" | "done" | "item_started" | "item_completed" => "turn.lifecycle",
-        "stream_error" | "error" => "stream.error",
+        "stream_warning" => "stream.warning",
+        "stream_error" | "error" => {
+            if is_fatal_stream_error(event, text) {
+                "stream.error.fatal"
+            } else {
+                match stream_error_source(event) {
+                    "child" => "stream.error.child",
+                    "upstream" => "stream.error.upstream",
+                    _ => "stream.error.proxy",
+                }
+            }
+        }
         _ => {
             let ty = sanitize_event_type(event_type);
             let count = record_unsupported_event(&ty);
@@ -746,6 +771,31 @@ fn sanitize_event_type(event_type: &str) -> String {
             }
         })
         .collect()
+}
+
+fn stream_error_source(event: &Value) -> &'static str {
+    let source = event
+        .pointer("/params/error_source")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/errorSource").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/source").and_then(|v| v.as_str()))
+        .unwrap_or("proxy");
+    match source {
+        "child" => "child",
+        "upstream" | "upstream_mcp" => "upstream",
+        _ => "proxy",
+    }
+}
+
+fn is_fatal_stream_error(event: &Value, text: &str) -> bool {
+    if event
+        .pointer("/params/fatal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    text.to_ascii_lowercase().contains("fatal")
 }
 
 fn record_unsupported_event(event_type: &str) -> u64 {
@@ -903,7 +953,7 @@ mod tests {
     #[test]
     fn classify_atm_mail_has_priority() {
         assert_eq!(
-            classify_event_class("agent_message_delta", "atm_mail").0,
+            classify_event_class("agent_message_delta", "atm_mail", &serde_json::json!({}), "").0,
             "input.atm_mail"
         );
     }
@@ -926,14 +976,60 @@ mod tests {
 
     #[test]
     fn classify_unknown_event_emits_supported_prefix_and_counter() {
-        let (class, count1, applicability1) = classify_event_class("future/event", "client_prompt");
-        let (_, count2, applicability2) = classify_event_class("future/event", "client_prompt");
+        let (class, count1, applicability1) =
+            classify_event_class("future/event", "client_prompt", &serde_json::json!({}), "");
+        let (_, count2, applicability2) =
+            classify_event_class("future/event", "client_prompt", &serde_json::json!({}), "");
         assert_eq!(class, "unsupported.future_event");
         assert_eq!(applicability1, "out_of_scope");
         assert_eq!(applicability2, "out_of_scope");
         assert_eq!(count1, Some(1));
         assert_eq!(count2, Some(2));
         assert_eq!(unsupported_event_count("future_event"), 2);
+    }
+
+    #[test]
+    fn classify_stream_error_source_and_fatal_variants() {
+        let child = serde_json::json!({"params":{"error_source":"child","message":"oops"}});
+        let upstream = serde_json::json!({"params":{"errorSource":"upstream_mcp","message":"oops"}});
+        let fatal = serde_json::json!({"params":{"fatal":true,"error_source":"proxy","message":"boom"}});
+
+        assert_eq!(
+            classify_event_class("stream_error", "client_prompt", &child, "oops").0,
+            "stream.error.child"
+        );
+        assert_eq!(
+            classify_event_class("stream_error", "client_prompt", &upstream, "oops").0,
+            "stream.error.upstream"
+        );
+        assert_eq!(
+            classify_event_class("stream_error", "client_prompt", &fatal, "boom").0,
+            "stream.error.fatal"
+        );
+    }
+
+    #[test]
+    fn classify_splits_request_user_input_and_elicitation_request() {
+        assert_eq!(
+            classify_event_class(
+                "request_user_input",
+                "client_prompt",
+                &serde_json::json!({}),
+                "choose"
+            )
+            .0,
+            "elicitation.request_user_input"
+        );
+        assert_eq!(
+            classify_event_class(
+                "elicitation_request",
+                "client_prompt",
+                &serde_json::json!({}),
+                "approve?"
+            )
+            .0,
+            "elicitation.request"
+        );
     }
 
     #[test]
