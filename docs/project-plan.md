@@ -544,15 +544,15 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.3 Phase O: Attached CLI Parity — IN PROGRESS
+## 17.3 Phase O: Attached CLI Parity — COMPLETE
 
 **Goal**: Deliver an `atm-agent-mcp attach <agent-id>` terminal mode with Codex CLI parity for output and interaction semantics while preserving ATM source attribution and daemon boundaries.
 
-| Sprint | Name | Depends On | Status |
-|--------|------|------------|--------|
-| O.1 | Attach command + stream/control wiring | M.7 | IN REVIEW (PR #223) |
-| O.2 | Renderer/runtime parity in attached mode | O.1 | IN PROGRESS (PR #224) |
-| O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | O.2 | PLANNED |
+| Sprint | Name | Depends On | Status | PR |
+|--------|------|------------|--------|----|
+| O.1 | Attach command + stream/control wiring | M.7 | COMPLETE | [#223](https://github.com/randlee/agent-team-mail/pull/223) |
+| O.2 | Renderer/runtime parity in attached mode | O.1 | COMPLETE | [#224](https://github.com/randlee/agent-team-mail/pull/224) |
+| O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | O.2 | COMPLETE | [#225](https://github.com/randlee/agent-team-mail/pull/225) |
 
 **Scope**:
 - Add `attach <agent-id>` as an interactive terminal entrypoint bound to one active session.
@@ -564,6 +564,44 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - `docs/atm-agent-mcp/requirements.md` (FR-13.9, FR-23, Phase O sprint contract)
 - `docs/atm-agent-mcp/live-stream-and-log-viewing.md` (watch and attached parity planning alignment)
 - `docs/atm-agent-mcp/phase-o-event-applicability-matrix.md` (explicit event class scope for O.1/O.2/O.3)
+
+---
+
+## 17.4 Phase O-R: Attach Renderer Parity Closure — PLANNED
+
+**Goal**: Close the remaining attached-renderer parity gaps identified in post-Phase O review, with explicit deliverables and CI-verifiable acceptance criteria.
+
+| Sprint | Name | Depends On | Size | Status |
+|--------|------|------------|------|--------|
+| O-R.1 | Structured renderer foundation + applicability contract alignment | O.3 | M | PLANNED |
+| O-R.2 | Required event coverage expansion + unflattened class rendering | O-R.1 | L | PLANNED |
+| O-R.3 | Approval/elicitation interaction parity + correlated response routing | O-R.2 | L | PLANNED |
+| O-R.4 | Diff + markdown + reasoning render parity hardening | O-R.2 | L | PLANNED |
+| O-R.5 | Error/replay/telemetry/session hardening closure | O-R.3,O-R.4 | M | PLANNED |
+
+**Deliverables and acceptance criteria**:
+- O-R.1 deliverables: replace the generic attached print path for required classes with structured rendering primitives; add `applicability` field to attached JSON envelope.
+- O-R.1 acceptance: required classes no longer rely on `[class][source_kind]` fallback; contract fixtures pass for applicability classification.
+- O-R.2 deliverables: implement missing required event families (`mcp_tool_call_*`, `web_search_*`, `plan_*`, `session_configured`, `token_count`, `exec_command_begin`) and split flattened class handlers.
+- O-R.2 acceptance: golden fixtures include representative events for each new family; no required family falls back to `unsupported.*` during fixture runs.
+- O-R.3 deliverables: build approval/elicitation render+interaction parity with correlated response routing (no stdin-only approval shortcut), and distinct handling of `request_user_input`/`elicitation_request`/exec-approval/patch-approval events.
+- O-R.3 acceptance: approval parity fixtures assert correlation-preserving round trip and class-distinct rendering for each approval/elicitation subtype.
+- O-R.4 deliverables: implement file diff red/green rendering for `patch_apply*`/`turn_diff`; improve reasoning section-break handling and markdown rendering parity.
+- O-R.4 acceptance: diff/reasoning/markdown fixtures pass across supported viewports with stable output snapshots.
+- O-R.5 deliverables: add error-source classification (`proxy`/`child`/`upstream`), replay boundary/truncation signaling, unsupported-event summary on detach/end, stdin sanitization, checkpoint continuity, and help text parity for Ctrl-C behavior.
+- O-R.5 acceptance: hardening fixtures validate replay/truncation/error-source/telemetry behavior and docs/help output matches runtime behavior.
+
+**Gap-ID mapping**:
+- O-R.1: GAP-008, GAP-015
+- O-R.2: GAP-003, GAP-004
+- O-R.3: GAP-002, GAP-005
+- O-R.4: GAP-001, GAP-006, GAP-012
+- O-R.5: GAP-009, GAP-010, GAP-011, GAP-013, GAP-014
+
+**References**:
+- `docs/atm-agent-mcp/requirements.md` (FR-23.12 through FR-23.25)
+- `docs/atm-agent-mcp/codex-cli-atm-tui-render-gap-analysis.md` (current-state evidence and remediation map)
+- `docs/atm-agent-mcp/phase-o-event-applicability-matrix.md` (required/degraded/out_of_scope policy)
 
 ---
 
@@ -686,11 +724,16 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **N** | N.1 | Hook test harness + process_id logging | COMPLETE | [#216](https://github.com/randlee/agent-team-mail/pull/216) |
 | **N** | N.2 | PID-based identity correlation + `atm register` | COMPLETE | [#217](https://github.com/randlee/agent-team-mail/pull/217) |
 | **N** | N.2-fix | Identity contract compliance fixes + `--as` flag | COMPLETE | [#218](https://github.com/randlee/agent-team-mail/pull/218) |
-| **O** | O.1 | Attach command + stream/control wiring | IN REVIEW | [#223](https://github.com/randlee/agent-team-mail/pull/223) |
-| **O** | O.2 | Renderer/runtime parity in attached mode | IN PROGRESS | [#224](https://github.com/randlee/agent-team-mail/pull/224) |
-| **O** | O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | PLANNED | — |
+| **O** | O.1 | Attach command + stream/control wiring | COMPLETE | [#223](https://github.com/randlee/agent-team-mail/pull/223) |
+| **O** | O.2 | Renderer/runtime parity in attached mode | COMPLETE | [#224](https://github.com/randlee/agent-team-mail/pull/224) |
+| **O** | O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | COMPLETE | [#225](https://github.com/randlee/agent-team-mail/pull/225) |
+| **O-R** | O-R.1 | Structured renderer foundation + applicability contract alignment | PLANNED | — |
+| **O-R** | O-R.2 | Required event coverage expansion + unflattened class rendering | PLANNED | — |
+| **O-R** | O-R.3 | Approval/elicitation interaction parity + correlated response routing | PLANNED | — |
+| **O-R** | O-R.4 | Diff + markdown + reasoning render parity hardening | PLANNED | — |
+| **O-R** | O-R.5 | Error/replay/telemetry/session hardening closure | PLANNED | — |
 
-**Completed**: 91+ sprints across 20 phases (CI green)
+**Completed**: 94+ sprints across 20 phases (CI green)
 **Current version**: v0.19.0
 **Next**: Phase O-R renderer parity sprints
 
