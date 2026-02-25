@@ -27,7 +27,7 @@ use ratatui::{
 };
 
 use crate::agent_terminal::expand_keys;
-use crate::app::{App, FocusPanel};
+use crate::app::{App, ApprovalPromptKind, FocusPanel};
 use crate::codex_watch::render_stream_lines_with_width;
 
 /// Render the full TUI frame from current [`App`] state.
@@ -46,6 +46,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, outer[0], app);
     draw_body(frame, outer[1], app);
+    draw_approval_modal(frame, outer[1], app);
     draw_status_bar(frame, outer[2], app);
 }
 
@@ -560,7 +561,17 @@ fn draw_log_viewer(frame: &mut Frame, area: Rect, app: &App) {
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let text = if app.confirm_interrupt_pending {
+    let text = if app.approval_prompt.is_some() {
+        Line::from(vec![
+            Span::styled(
+                " Approval pending ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("[Enter/Y approve, N reject, Esc close]"),
+        ])
+    } else if app.confirm_interrupt_pending {
         // Interrupt confirmation dialog takes highest priority in the status bar.
         Line::from(vec![
             Span::styled(
@@ -655,6 +666,54 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(text).style(Style::default().bg(Color::DarkGray)),
         area,
+    );
+}
+
+fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(prompt) = app.approval_prompt.as_ref() else {
+        return;
+    };
+    let width = area.width.min(72);
+    let height = 7u16.min(area.height.saturating_sub(2)).max(3);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let modal = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let title = match prompt.kind {
+        ApprovalPromptKind::Exec => " Exec Approval ",
+        ApprovalPromptKind::Patch => " Patch Approval ",
+        ApprovalPromptKind::UserInput => " Input Request ",
+        ApprovalPromptKind::Review => " Review Decision ",
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Magenta));
+    let input_hint = if app.approval_input.is_empty() {
+        "<optional message>".to_string()
+    } else {
+        app.approval_input.clone()
+    };
+    let content = vec![
+        Line::from(vec![
+            Span::styled("id: ", Style::default().fg(Color::Blue)),
+            Span::raw(prompt.id.as_str()),
+        ]),
+        Line::from(prompt.prompt.as_str()),
+        Line::from(vec![
+            Span::styled("reply: ", Style::default().fg(Color::Blue)),
+            Span::raw(input_hint),
+        ]),
+        Line::from("Enter/Y approve | N reject | Esc close"),
+    ];
+    frame.render_widget(
+        Paragraph::new(content).block(block).wrap(Wrap { trim: false }),
+        modal,
     );
 }
 

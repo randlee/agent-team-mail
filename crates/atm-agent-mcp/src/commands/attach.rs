@@ -258,6 +258,8 @@ fn send_stdin_control(team: &str, agent_id: &str, text: &str) -> anyhow::Result<
         action: ControlAction::Stdin,
         payload: Some(text.to_string()),
         content_ref: None,
+        elicitation_id: None,
+        decision: None,
     };
     send_control(&req)
 }
@@ -276,6 +278,8 @@ fn send_interrupt_control(team: &str, agent_id: &str) -> anyhow::Result<ControlA
         action: ControlAction::Interrupt,
         payload: None,
         content_ref: None,
+        elicitation_id: None,
+        decision: None,
     };
     send_control(&req)
 }
