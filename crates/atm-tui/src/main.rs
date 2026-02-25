@@ -1306,12 +1306,13 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_replay_checkpoint_roundtrip() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let old_home = std::env::var("HOME").ok();
+        let old_atm_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation.
         unsafe {
-            std::env::set_var("HOME", dir.path());
+            std::env::set_var("ATM_HOME", dir.path());
         }
 
         save_replay_checkpoint("atm-dev", "arch-ctm", Some("thread-123"), 42);
@@ -1319,10 +1320,12 @@ mod tests {
         assert_eq!(loaded.pos, 42);
         assert_eq!(loaded.session_id.as_deref(), Some("thread-123"));
 
-        if let Some(home) = old_home {
-            // SAFETY: test-scoped env mutation.
-            unsafe {
-                std::env::set_var("HOME", home);
+        // SAFETY: test-scoped env mutation.
+        unsafe {
+            if let Some(atm_home) = old_atm_home {
+                std::env::set_var("ATM_HOME", atm_home);
+            } else {
+                std::env::remove_var("ATM_HOME");
             }
         }
     }
