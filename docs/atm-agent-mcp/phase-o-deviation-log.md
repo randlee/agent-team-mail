@@ -47,39 +47,59 @@ Owner: `arch-ctm`
 ## O-R.5
 
 ### DEV-OR5-001: attach path error_source classification deferred
-- Requirement context: FR-23.21 error classification parity.
+- Requirement context: FR-23.20 error classification parity.
 - Current behavior: O-R.5 implements `error_source` classification (`proxy`/`child`/`upstream`) in the TUI watch path; attach CLI continues generic `stream.error` formatting.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: O-R.5 implementation scope targeted the TUI watch pipeline first; attach-path parity is deferred follow-up.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/242
+- validation_status: verified
 
 ### DEV-OR5-002: attach path fatal reconnect hint deferred
-- Requirement context: FR-23.21 fatal-path operator guidance.
+- Requirement context: FR-23.20 fatal-path operator guidance.
 - Current behavior: TUI watch rendering appends fatal reconnect guidance; attach CLI does not yet emit the same hint text.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: bounded-scope hardening in O-R.5 prioritized live TUI operator surface.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/242
+- validation_status: verified
 
 ### DEV-OR5-003: attach replay remains fixed-window clip
-- Requirement context: FR-23.22 turn-boundary-aware replay behavior.
+- Requirement context: FR-23.21 turn-boundary-aware replay behavior.
 - Current behavior: TUI replay now applies turn-boundary shaping + truncation warning; attach replay remains fixed 50-frame clipping.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: replay hardening landed in TUI watch path; attach replay parity deferred.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/243
+- validation_status: implemented + validated
 
 ### DEV-OR5-004: attach replay checkpoint persistence deferred
-- Requirement context: FR-23.22 session-scoped replay checkpoint continuity.
+- Requirement context: FR-23.24 session-scoped replay checkpoint continuity.
 - Current behavior: checkpoint persistence is implemented in TUI watch path only.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: checkpointing added where re-attach continuity is user-visible in the TUI; attach checkpointing deferred.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/243
+- validation_status: implemented + validated
 
 ### DEV-OR5-005: attach unsupported-event summary flush deferred
-- Requirement context: FR-23.23 unsupported-event telemetry summary.
+- Requirement context: FR-23.22 unsupported-event telemetry summary.
 - Current behavior: unsupported-event summary/warning flush is implemented in TUI flow; attach path does not flush per-session summary on detach/exit.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: telemetry closure delivered for TUI watch path in O-R.5; attach telemetry flush deferred.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/244
+- validation_status: implemented + validated
 
 ### DEV-OR5-006: attach stdin payload sanitization deferred
 - Requirement context: FR-23.23 stdin input sanitization.
@@ -87,6 +107,10 @@ Owner: `arch-ctm`
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: TUI-first scope for O-R.5; attach stdin sanitization deferred to input-hardening phase.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/245
+- validation_status: implemented + validated
 
 ### DEV-OR5-007: attach help text missing Ctrl-C/SIGINT documentation
 - Requirement context: FR-23.25, GAP-014 help text completeness.
@@ -94,13 +118,17 @@ Owner: `arch-ctm`
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: Ctrl-C follows default process signal behavior (DEV-O3-002); explicit documentation deferred to help-text hardening pass.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/246
+- validation_status: implemented + validated
 
-## Phase P Planning Note (2026-02-25)
+## Phase P Closure Note (2026-02-25)
 
-All O-R.5 approved deviations remain open by design and are planned for closure in Phase P:
+All approved O-R.5 attach-path deviations are now closed and validated:
 
-- P.1: DEV-OR5-001, DEV-OR5-002
-- P.2: DEV-OR5-003, DEV-OR5-004
-- P.3: DEV-OR5-005
-- P.4: DEV-OR5-006
-- P.5: DEV-OR5-007
+- P.1: DEV-OR5-001, DEV-OR5-002 (PR #242)
+- P.2: DEV-OR5-003, DEV-OR5-004 (PR #243)
+- P.3: DEV-OR5-005 (PR #244)
+- P.4: DEV-OR5-006 (PR #245)
+- P.5: DEV-OR5-007 (PR #246)

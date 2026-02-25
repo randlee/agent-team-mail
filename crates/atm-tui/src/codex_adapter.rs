@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 pub struct AdaptedWatchLine {
     pub line: String,
     pub is_turn_boundary: bool,
+    #[allow(dead_code)]
+    pub applicability: &'static str,
 }
 
 #[derive(Debug, Default)]
@@ -79,18 +81,21 @@ impl CodexAdapter {
                     clamp_three_lines(raw_text)
                 ),
                 is_turn_boundary: false,
+                applicability: "required",
             };
         }
         if kind == "user_message" && (source_kind == "user_steer" || source_kind == "tui_user") {
             return AdaptedWatchLine {
                 line: format!("{source_badge} input.user_steer {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             };
         }
         if kind == "user_message" {
             return AdaptedWatchLine {
                 line: format!("{source_badge} input.client {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             };
         }
 
@@ -98,18 +103,22 @@ impl CodexAdapter {
             "turn_started" => AdaptedWatchLine {
                 line: format!("{source_badge} turn.started"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "item_started" => AdaptedWatchLine {
                 line: format!("{source_badge} item.started"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "item_delta" | "agent_message_delta" | "agent_message_chunk" => AdaptedWatchLine {
                 line: format!("{source_badge} item.delta {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "item_completed" => AdaptedWatchLine {
                 line: format!("{source_badge} item.completed"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "turn_completed" | "task_complete" | "done" => AdaptedWatchLine {
                 line: if let Some(status) = event.pointer("/params/status").and_then(|v| v.as_str())
@@ -119,96 +128,119 @@ impl CodexAdapter {
                     format!("{source_badge} turn.completed")
                 },
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "turn_aborted" => AdaptedWatchLine {
                 line: format!("{source_badge} turn.completed status=failed"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "turn_idle" | "idle" => AdaptedWatchLine {
                 line: format!("{source_badge} turn.idle"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "exec_command_begin" | "exec_command_started" => AdaptedWatchLine {
                 line: format!("{source_badge} cmd.begin {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "exec_command_output_delta" => AdaptedWatchLine {
                 line: format!("{source_badge} cmd.output {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "exec_command_completed" => AdaptedWatchLine {
                 line: format!("{source_badge} cmd.completed {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "exec_command_error" => AdaptedWatchLine {
                 line: format!("{source_badge} cmd.error {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "exec_approval_request" | "approval_prompt" | "approval_request" => AdaptedWatchLine {
                 line: format!("{source_badge} approval.exec.request {text}"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "apply_patch_approval_request" => AdaptedWatchLine {
                 line: format!("{source_badge} approval.patch.request {text}"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "entered_review_mode" | "item/enteredReviewMode" => AdaptedWatchLine {
                 line: format!("{source_badge} approval.review.entered {text}"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "exited_review_mode" | "item/exitedReviewMode" => AdaptedWatchLine {
                 line: format!("{source_badge} approval.review.exited {text}"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => {
                 AdaptedWatchLine {
                     line: format!("{source_badge} file.edit {kind} {text}"),
                     is_turn_boundary: false,
+                    applicability: "required",
                 }
             }
             "approval_rejected" | "reject" | "rejected" => AdaptedWatchLine {
                 line: format!("{source_badge} approval.review.rejected {text}"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "approval_approved" | "approved" => AdaptedWatchLine {
                 line: format!("{source_badge} approval.review.resolved {text}"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "request_user_input" | "elicitation_request" => AdaptedWatchLine {
                 line: format!("{source_badge} elicitation.request {text}"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "mcp_tool_call_begin" => AdaptedWatchLine {
                 line: format!("{source_badge} tool.mcp.begin {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "mcp_tool_call_end" => AdaptedWatchLine {
                 line: format!("{source_badge} tool.mcp.end {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "web_search_begin" => AdaptedWatchLine {
                 line: format!("{source_badge} tool.web_search.begin {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "web_search_end" => AdaptedWatchLine {
                 line: format!("{source_badge} tool.web_search.end {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "plan_update" => AdaptedWatchLine {
                 line: format!("{source_badge} plan.update {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "plan_delta" => AdaptedWatchLine {
                 line: format!("{source_badge} plan.delta {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "session_configured" => AdaptedWatchLine {
                 line: format!("{source_badge} session.configured {text}"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "token_count" => AdaptedWatchLine {
                 line: format!("{source_badge} session.token_count {text}"),
                 is_turn_boundary: false,
+                applicability: "required",
             },
             "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
                 let normalized = if is_reasoning_section_break(event) {
@@ -219,11 +251,13 @@ impl CodexAdapter {
                 AdaptedWatchLine {
                     line: format!("{source_badge} {normalized} {text}"),
                     is_turn_boundary: false,
+                    applicability: "required",
                 }
             }
             "turn_interrupted" | "interrupt" | "cancelled" | "turn_cancelled" => AdaptedWatchLine {
                 line: format!("{source_badge} turn.interrupted {text}"),
                 is_turn_boundary: true,
+                applicability: "required",
             },
             "stream_error" | "error" => {
                 let fatal = is_fatal_error(event, &text);
@@ -239,11 +273,13 @@ impl CodexAdapter {
                         if fatal { ".fatal" } else { "" }
                     ),
                     is_turn_boundary: true,
+                    applicability: "degraded",
                 }
             }
             "stream_warning" => AdaptedWatchLine {
                 line: format!("{source_badge} stream.warning {text}"),
                 is_turn_boundary: false,
+                applicability: "degraded",
             },
             other => {
                 self.unknown_events = self.unknown_events.saturating_add(1);
@@ -253,6 +289,7 @@ impl CodexAdapter {
                 AdaptedWatchLine {
                     line: format!("{source_badge} unknown.{key}"),
                     is_turn_boundary: false,
+                    applicability: "out_of_scope",
                 }
             }
         }
@@ -316,7 +353,11 @@ fn error_source(event: &serde_json::Value) -> &'static str {
     let src = event
         .pointer("/params/error_source")
         .and_then(|v| v.as_str())
-        .or_else(|| event.pointer("/params/errorSource").and_then(|v| v.as_str()))
+        .or_else(|| {
+            event
+                .pointer("/params/errorSource")
+                .and_then(|v| v.as_str())
+        })
         .or_else(|| event.pointer("/params/source").and_then(|v| v.as_str()))
         .unwrap_or("proxy");
     match src {
@@ -357,7 +398,11 @@ fn is_reasoning_section_break(event: &serde_json::Value) -> bool {
                 .pointer("/params/reasoning_delta/type")
                 .and_then(|v| v.as_str())
         })
-        .or_else(|| event.pointer("/params/content/type").and_then(|v| v.as_str()))
+        .or_else(|| {
+            event
+                .pointer("/params/content/type")
+                .and_then(|v| v.as_str())
+        })
         .is_some_and(|t| t.eq_ignore_ascii_case("section_break"))
 }
 
@@ -496,6 +541,31 @@ mod tests {
         let out = adapter.adapt_frame(&frame);
         assert!(out.line.contains("stream.error.child.fatal"));
         assert!(out.line.contains("detach/reconnect recommended"));
+        assert_eq!(out.applicability, "degraded");
+    }
+
+    #[test]
+    fn propagates_applicability_required_degraded_and_out_of_scope() {
+        let mut adapter = CodexAdapter::new();
+        let required = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"turn_started"}}
+        });
+        let degraded = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"stream_warning","message":"warn"}}
+        });
+        let out_of_scope = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"future_event_type"}}
+        });
+
+        assert_eq!(adapter.adapt_frame(&required).applicability, "required");
+        assert_eq!(adapter.adapt_frame(&degraded).applicability, "degraded");
+        assert_eq!(
+            adapter.adapt_frame(&out_of_scope).applicability,
+            "out_of_scope"
+        );
     }
 
     #[test]
