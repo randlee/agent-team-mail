@@ -734,7 +734,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **O-R** | O-R.5 | Error/replay/telemetry/session hardening closure | PLANNED | — |
 
 **Completed**: 94+ sprints across 20 phases (CI green)
-**Current version**: v0.19.0
+**Current version**: v0.20.0
 **Next**: Phase O-R renderer parity sprints
 
 ---
