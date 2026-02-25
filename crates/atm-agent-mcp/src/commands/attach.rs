@@ -83,12 +83,15 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     let mut stream_pos: u64 = 0;
     let mut ticker = interval(Duration::from_millis(poll_ms));
     let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut pending_elicitation_id: Option<String> = None;
 
     // Initial attach replay (bounded).
     match tail_watch_stream_file(&watch_path, 0, &args.agent_id).await {
         Ok((replay, new_pos)) => {
             stream_pos = new_pos;
             for frame in replay {
+                pending_elicitation_id =
+                    update_pending_elicitation_id(pending_elicitation_id, &frame);
                 print_frame(&args.agent_id, frame, args.json)?;
             }
         }
@@ -102,6 +105,8 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                     Ok((frames, new_pos)) => {
                         stream_pos = new_pos;
                         for frame in frames {
+                            pending_elicitation_id =
+                                update_pending_elicitation_id(pending_elicitation_id, &frame);
                             print_frame(&args.agent_id, frame, args.json)?;
                         }
                     }
@@ -136,8 +141,17 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                             }
                             ControlVerb::Detach => break,
                             ControlVerb::Approve => {
-                                let payload = arg.unwrap_or_else(|| "approve".to_string());
-                                match send_stdin_control(&team, &args.agent_id, &payload) {
+                                let Some(elicitation_id) = pending_elicitation_id.clone() else {
+                                    println!("ack no pending elicitation id to approve");
+                                    continue;
+                                };
+                                match send_elicitation_response_control(
+                                    &team,
+                                    &args.agent_id,
+                                    &elicitation_id,
+                                    "approve",
+                                    arg.as_deref(),
+                                ) {
                                     Ok(ack) => println!("ack {}", format_ack(&ack)),
                                     Err(err) => {
                                         print_stream_error(classify_control_send_error(&err), &err, args.json)?
@@ -145,8 +159,17 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                                 }
                             }
                             ControlVerb::Reject => {
-                                let payload = arg.unwrap_or_else(|| "reject".to_string());
-                                match send_stdin_control(&team, &args.agent_id, &payload) {
+                                let Some(elicitation_id) = pending_elicitation_id.clone() else {
+                                    println!("ack no pending elicitation id to reject");
+                                    continue;
+                                };
+                                match send_elicitation_response_control(
+                                    &team,
+                                    &args.agent_id,
+                                    &elicitation_id,
+                                    "reject",
+                                    arg.as_deref(),
+                                ) {
                                     Ok(ack) => println!("ack {}", format_ack(&ack)),
                                     Err(err) => {
                                         print_stream_error(classify_control_send_error(&err), &err, args.json)?
@@ -173,8 +196,8 @@ fn print_input_contract() {
     println!("input routing:");
     println!("  plain text      -> agent input (stdin control)");
     println!("  :interrupt      -> interrupt control request");
-    println!("  :approve [text] -> approval response via stdin");
-    println!("  :reject [text]  -> rejection response via stdin");
+    println!("  :approve [text] -> correlated elicitation approve");
+    println!("  :reject [text]  -> correlated elicitation reject");
     println!("  :help           -> show routing contract");
     println!("  :detach         -> detach and exit");
 }
@@ -258,6 +281,8 @@ fn send_stdin_control(team: &str, agent_id: &str, text: &str) -> anyhow::Result<
         action: ControlAction::Stdin,
         payload: Some(text.to_string()),
         content_ref: None,
+        elicitation_id: None,
+        decision: None,
     };
     send_control(&req)
 }
@@ -276,6 +301,34 @@ fn send_interrupt_control(team: &str, agent_id: &str) -> anyhow::Result<ControlA
         action: ControlAction::Interrupt,
         payload: None,
         content_ref: None,
+        elicitation_id: None,
+        decision: None,
+    };
+    send_control(&req)
+}
+
+fn send_elicitation_response_control(
+    team: &str,
+    agent_id: &str,
+    elicitation_id: &str,
+    decision: &str,
+    note: Option<&str>,
+) -> anyhow::Result<ControlAck> {
+    let req = ControlRequest {
+        v: CONTROL_SCHEMA_VERSION,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        msg_type: "control.elicitation.response".to_string(),
+        signal: None,
+        sent_at: chrono::Utc::now().to_rfc3339(),
+        team: team.to_string(),
+        session_id: String::new(),
+        agent_id: agent_id.to_string(),
+        sender: "attach_cli".to_string(),
+        action: ControlAction::ElicitationResponse,
+        payload: note.map(str::to_string),
+        content_ref: None,
+        elicitation_id: Some(elicitation_id.to_string()),
+        decision: Some(decision.to_string()),
     };
     send_control(&req)
 }
@@ -286,6 +339,33 @@ fn format_ack(ack: &ControlAck) -> String {
         "request_id={} result={:?} duplicate={} {}",
         ack.request_id, ack.result, ack.duplicate, detail
     )
+}
+
+fn update_pending_elicitation_id(current: Option<String>, frame: &Value) -> Option<String> {
+    let event = frame.get("event").unwrap_or(frame);
+    let kind = event
+        .pointer("/params/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    match kind {
+        "exec_approval_request" | "approval_prompt" | "approval_request"
+        | "apply_patch_approval_request" | "request_user_input" | "elicitation_request" => {
+            extract_elicitation_id(event).or(current)
+        }
+        "approval_approved" | "approval_rejected" | "approval_resolved" => None,
+        _ => current,
+    }
+}
+
+fn extract_elicitation_id(event: &Value) -> Option<String> {
+    event
+        .pointer("/params/elicitation_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/approval_id").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/request_id").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/id").and_then(|v| v.as_str()))
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn watch_feed_path(agent_id: &str) -> Option<PathBuf> {
@@ -822,6 +902,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pending_elicitation_id_tracks_and_clears() {
+        let approval = serde_json::json!({
+            "event":{"params":{"type":"approval_request","elicitation_id":"eli-123"}}
+        });
+        let resolved = serde_json::json!({
+            "event":{"params":{"type":"approval_approved"}}
+        });
+        let pending = update_pending_elicitation_id(None, &approval);
+        assert_eq!(pending.as_deref(), Some("eli-123"));
+        let cleared = update_pending_elicitation_id(pending, &resolved);
+        assert_eq!(cleared, None);
+    }
+
     #[tokio::test]
     async fn replay_tail_reads_fixture_jsonl() {
         let fixture = attach_fixture_dir().join("replay.sample.jsonl");
@@ -902,6 +996,91 @@ mod tests {
         });
 
         let ack = send_stdin_control("atm-dev", "codex:test", "hello").expect("control ack");
+        assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
+        assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
+
+        server.join().expect("server join");
+        if let Some(home) = old_home {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::set_var("ATM_HOME", home);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn send_elicitation_response_control_with_mock_daemon_ack() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let old_home = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            std::env::set_var("ATM_HOME", temp_dir.path());
+        }
+
+        let daemon_dir = temp_dir.path().join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).expect("daemon dir");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut req_line = String::new();
+            {
+                let mut reader = BufReader::new(&stream);
+                reader.read_line(&mut req_line).expect("read request");
+            }
+            let req: serde_json::Value = serde_json::from_str(req_line.trim()).expect("json req");
+            let payload = req.get("payload").expect("payload");
+            assert_eq!(
+                payload.get("action").and_then(|v| v.as_str()),
+                Some("elicitation_response")
+            );
+            assert_eq!(
+                payload.get("elicitation_id").and_then(|v| v.as_str()),
+                Some("eli-123")
+            );
+            assert_eq!(
+                payload.get("decision").and_then(|v| v.as_str()),
+                Some("approve")
+            );
+
+            let socket_request_id = req
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sock-test");
+            let response = serde_json::json!({
+                "version": 1,
+                "request_id": socket_request_id,
+                "status": "ok",
+                "payload": {
+                    "request_id": "req-attach-elicitation-test",
+                    "result": "ok",
+                    "duplicate": false,
+                    "detail": "mock-daemon-ack",
+                    "acked_at": "2026-02-25T00:00:00Z"
+                }
+            });
+            let mut writer = std::io::BufWriter::new(&stream);
+            writer
+                .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                .expect("write response");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+        });
+
+        let ack = send_elicitation_response_control(
+            "atm-dev",
+            "codex:test",
+            "eli-123",
+            "approve",
+            Some("looks good"),
+        )
+        .expect("control ack");
         assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
         assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
 

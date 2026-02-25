@@ -697,24 +697,35 @@ async fn execute_control(
     let request_id = uuid::Uuid::new_v4().to_string();
     let sent_at = chrono::Utc::now().to_rfc3339();
 
-    let (control_action, payload) = match &action {
-        PendingControl::Stdin(text) => (ControlAction::Stdin, Some(text.clone())),
-        PendingControl::Interrupt => (ControlAction::Interrupt, None),
+    let (control_action, payload, elicitation_id, decision) = match &action {
+        PendingControl::Stdin(text) => (ControlAction::Stdin, Some(text.clone()), None, None),
+        PendingControl::Interrupt => (ControlAction::Interrupt, None, None, None),
+        PendingControl::ElicitationResponse {
+            elicitation_id,
+            decision,
+            text,
+        } => (
+            ControlAction::ElicitationResponse,
+            text.clone(),
+            Some(elicitation_id.clone()),
+            Some(decision.clone()),
+        ),
     };
 
     // Select per-action timeout from config before control_action is moved.
     let timeout_secs = match &control_action {
-        ControlAction::Stdin => stdin_timeout_secs,
+        ControlAction::Stdin | ControlAction::ElicitationResponse => stdin_timeout_secs,
         ControlAction::Interrupt => interrupt_timeout_secs,
     };
 
     let msg_type = match &control_action {
         ControlAction::Stdin => "control.stdin.request".to_string(),
         ControlAction::Interrupt => "control.interrupt.request".to_string(),
+        ControlAction::ElicitationResponse => "control.elicitation.response".to_string(),
     };
     let signal = match &control_action {
         ControlAction::Interrupt => Some("interrupt".to_string()),
-        ControlAction::Stdin => None,
+        ControlAction::Stdin | ControlAction::ElicitationResponse => None,
     };
 
     let request = ControlRequest {
@@ -730,6 +741,8 @@ async fn execute_control(
         action: control_action,
         payload,
         content_ref: None,
+        elicitation_id,
+        decision,
     };
 
     emit_event_best_effort(EventFields {
