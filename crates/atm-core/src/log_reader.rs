@@ -591,7 +591,6 @@ mod tests {
     // ── test_nonexistent_file_returns_empty ───────────────────────────────────
 
     #[test]
-    #[serial]
     fn test_nonexistent_file_returns_empty() {
         let tmp = TempDir::new().expect("temp dir");
         let path = tmp.path().join("no-such-file.jsonl");
@@ -610,6 +609,7 @@ mod tests {
     #[test]
     fn test_follow_mode() {
         use std::io::Write;
+        use std::sync::mpsc;
         use std::sync::{Arc, Mutex};
 
         // Create an initial log file with 2 events.
@@ -632,8 +632,11 @@ mod tests {
         let log_path_clone = log_path.clone();
 
         // Spawn a thread that appends 3 events after a short delay.
+        // 700ms initial delay gives the follow thread time to open the file and
+        // seek to the end before any events are written.  Events are written
+        // 150ms apart so all 3 arrive well within the 10s test timeout below.
         let writer_thread = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(600));
+            std::thread::sleep(Duration::from_millis(700));
             let mut file = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&log_path_clone)
@@ -644,9 +647,13 @@ mod tests {
                 ev.action = format!("follow_event_{i}");
                 writeln!(file, "{}", serde_json::to_string(&ev).unwrap()).unwrap();
                 file.flush().unwrap();
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(150));
             }
         });
+
+        // Use a channel so the test can detect a stuck follow thread and fail
+        // with a clear diagnostic message instead of hanging forever.
+        let (done_tx, done_rx) = mpsc::channel::<()>();
 
         // Run follow on a reader thread, stopping after 3 events.
         let filter = LogFilter::default();
@@ -661,9 +668,19 @@ mod tests {
                     guard.len() < 3
                 })
                 .expect("follow should succeed");
+            // Signal the main thread that follow completed.
+            let _ = done_tx.send(());
         });
 
         writer_thread.join().expect("writer thread joined");
+
+        // Wait for the follow thread to finish with a generous timeout.
+        // 10 seconds is far more than needed (total expected time ≈ 700 + 3*150 + 1*500 = ~1.7s)
+        // but still prevents an infinite hang on pathological CI runners.
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("follow thread did not finish within 10s — possible deadlock");
+
         follow_thread.join().expect("follow thread joined");
 
         let guard = collected.lock().unwrap();

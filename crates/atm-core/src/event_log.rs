@@ -101,11 +101,13 @@ pub fn emit_event_best_effort(mut fields: EventFields) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     /// Verify that `fields_to_log_event` does NOT set session_id to "unknown"
     /// when no session ID is available.  The LogEventV1 schema uses Option<String>
     /// and None is the correct value when no session is active.
     #[test]
+    #[serial]
     fn test_fields_to_log_event_session_id_none_when_unset() {
         // Ensure the env var is absent for this test.
         // SAFETY: direct env manipulation — this test reads from_env directly.
