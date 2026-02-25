@@ -56,6 +56,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use serde::{Deserialize, Serialize};
 use tokio::time::interval;
 
 use agent_team_mail_core::{
@@ -83,6 +84,18 @@ static ATM_LOG_PATH_WARNED: std::sync::atomic::AtomicBool =
 const WATCH_ATTACH_REPLAY_MAX_FRAMES: usize = 50;
 /// Max bytes scanned from the watch file tail to build attach replay.
 const WATCH_ATTACH_REPLAY_SCAN_BYTES: u64 = 512 * 1024;
+/// Threshold for unsupported-event warning lines.
+const UNSUPPORTED_WARN_THRESHOLD: u64 = 5;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReplayCheckpoint {
+    v: u8,
+    team: String,
+    agent: String,
+    session_id: Option<String>,
+    pos: u64,
+    updated_at: String,
+}
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -248,6 +261,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                 app.streaming_agent = Some(agent_name.clone());
                 app.session_log_path = Some(session_log_path(&team, &agent_name));
                 app.watch_stream_path = watch_feed_path();
+                if let Some(checkpoint) = load_replay_checkpoint(&team, &agent_name) {
+                    app.watch_stream_pos = checkpoint.pos;
+                }
 
                 emit_event_best_effort(EventFields {
                     level: "info",
@@ -293,6 +309,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                             }
                             app.watch_unknown = codex_adapter.unknown_events();
                             app.append_stream_lines(lines);
+                            save_replay_checkpoint(
+                                &team,
+                                &agent,
+                                app.resolved_watch_session_id(),
+                                app.watch_stream_pos,
+                            );
                         }
                     }
                 }
@@ -368,6 +390,12 @@ async fn run_app<B: ratatui::backend::Backend>(
         if event::poll(Duration::from_millis(0))? {
             let ev = event::read()?;
             if events::handle_event(&ev, &mut app) || app.should_quit {
+                if app.should_quit {
+                    let summary = codex_adapter.unknown_summary(UNSUPPORTED_WARN_THRESHOLD);
+                    if !summary.is_empty() {
+                        app.append_stream_lines(summary);
+                    }
+                }
                 break;
             }
         }
@@ -592,6 +620,7 @@ async fn read_watch_replay_for_attach(
 
     let mut replay: VecDeque<serde_json::Value> =
         VecDeque::with_capacity(WATCH_ATTACH_REPLAY_MAX_FRAMES);
+    let mut dropped: usize = 0;
     for line in lines.filter(|l| !l.trim().is_empty()) {
         if let Ok(frame) = serde_json::from_str::<serde_json::Value>(line)
             && frame
@@ -601,12 +630,105 @@ async fn read_watch_replay_for_attach(
         {
             if replay.len() >= WATCH_ATTACH_REPLAY_MAX_FRAMES {
                 let _ = replay.pop_front();
+                dropped = dropped.saturating_add(1);
             }
             replay.push_back(frame);
         }
     }
+    let mut replay_vec: Vec<serde_json::Value> = replay.into_iter().collect();
+    if let Some(start_idx) = find_last_turn_boundary_start(&replay_vec)
+        && start_idx > 0
+    {
+        replay_vec = replay_vec.split_off(start_idx);
+    }
+    if dropped > 0 {
+        replay_vec.insert(
+            0,
+            synthetic_stream_warning(
+                agent_id,
+                format!(
+                    "partial replay: dropped {dropped} frames beyond replay cap {}",
+                    WATCH_ATTACH_REPLAY_MAX_FRAMES
+                ),
+            ),
+        );
+    }
 
-    Ok((replay.into_iter().collect(), file_len))
+    Ok((replay_vec, file_len))
+}
+
+fn find_last_turn_boundary_start(frames: &[serde_json::Value]) -> Option<usize> {
+    frames.iter().rposition(|frame| {
+        frame
+            .pointer("/event/params/type")
+            .and_then(|v| v.as_str())
+            .or_else(|| frame.pointer("/params/type").and_then(|v| v.as_str()))
+            .is_some_and(|ty| {
+                matches!(
+                    ty,
+                    "turn_started"
+                        | "turn_completed"
+                        | "turn_aborted"
+                        | "turn_interrupted"
+                        | "turn_cancelled"
+                        | "done"
+                        | "idle"
+                        | "turn_idle"
+                )
+            })
+    })
+}
+
+fn synthetic_stream_warning(agent_id: &str, message: String) -> serde_json::Value {
+    serde_json::json!({
+        "agent_id": agent_id,
+        "source": {
+            "kind": "watch_replay",
+            "actor": "atm-tui",
+            "channel": "local_replay"
+        },
+        "event": {
+            "params": {
+                "type": "stream_warning",
+                "message": message
+            }
+        }
+    })
+}
+
+fn replay_checkpoint_path(team: &str, agent: &str) -> Option<std::path::PathBuf> {
+    let home = get_home_dir().ok()?;
+    Some(
+        home.join(".config/atm/watch-stream/checkpoints")
+            .join(team)
+            .join(format!("{agent}.json")),
+    )
+}
+
+fn load_replay_checkpoint(team: &str, agent: &str) -> Option<ReplayCheckpoint> {
+    let path = replay_checkpoint_path(team, agent)?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn save_replay_checkpoint(team: &str, agent: &str, session_id: Option<&str>, pos: u64) {
+    let Some(path) = replay_checkpoint_path(team, agent) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let checkpoint = ReplayCheckpoint {
+        v: 1,
+        team: team.to_string(),
+        agent: agent.to_string(),
+        session_id: session_id.map(str::to_string),
+        pos,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    if let Ok(data) = serde_json::to_vec_pretty(&checkpoint) {
+        let _ = std::fs::write(path, data);
+    }
 }
 
 /// Read new [`LogEventV1`] events from a JSONL log file since `pos`.
@@ -697,24 +819,35 @@ async fn execute_control(
     let request_id = uuid::Uuid::new_v4().to_string();
     let sent_at = chrono::Utc::now().to_rfc3339();
 
-    let (control_action, payload) = match &action {
-        PendingControl::Stdin(text) => (ControlAction::Stdin, Some(text.clone())),
-        PendingControl::Interrupt => (ControlAction::Interrupt, None),
+    let (control_action, payload, elicitation_id, decision) = match &action {
+        PendingControl::Stdin(text) => (ControlAction::Stdin, Some(text.clone()), None, None),
+        PendingControl::Interrupt => (ControlAction::Interrupt, None, None, None),
+        PendingControl::ElicitationResponse {
+            elicitation_id,
+            decision,
+            text,
+        } => (
+            ControlAction::ElicitationResponse,
+            text.clone(),
+            Some(elicitation_id.clone()),
+            Some(decision.clone()),
+        ),
     };
 
     // Select per-action timeout from config before control_action is moved.
     let timeout_secs = match &control_action {
-        ControlAction::Stdin => stdin_timeout_secs,
+        ControlAction::Stdin | ControlAction::ElicitationResponse => stdin_timeout_secs,
         ControlAction::Interrupt => interrupt_timeout_secs,
     };
 
     let msg_type = match &control_action {
         ControlAction::Stdin => "control.stdin.request".to_string(),
         ControlAction::Interrupt => "control.interrupt.request".to_string(),
+        ControlAction::ElicitationResponse => "control.elicitation.response".to_string(),
     };
     let signal = match &control_action {
         ControlAction::Interrupt => Some("interrupt".to_string()),
-        ControlAction::Stdin => None,
+        ControlAction::Stdin | ControlAction::ElicitationResponse => None,
     };
 
     let request = ControlRequest {
@@ -730,6 +863,8 @@ async fn execute_control(
         action: control_action,
         payload,
         content_ref: None,
+        elicitation_id,
+        decision,
     };
 
     emit_event_best_effort(EventFields {
@@ -1089,10 +1224,26 @@ mod tests {
             .unwrap();
 
         let (frames, new_pos) = tail_watch_stream_file(&watch_path, 0, "agent-a").await.unwrap();
+        let replay_frames = frames
+            .iter()
+            .filter(|f| {
+                f.pointer("/event/params/type")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|ty| ty != "stream_warning")
+            })
+            .count();
         assert_eq!(
-            frames.len(),
+            replay_frames,
             50,
             "attach replay must be bounded to last 50 frames"
+        );
+        assert!(
+            frames.iter().any(|f| {
+                f.pointer("/event/params/type")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|ty| ty == "stream_warning")
+            }),
+            "truncated replay should emit stream_warning frame"
         );
         assert!(
             new_pos > 0,
@@ -1137,10 +1288,45 @@ mod tests {
             new_pos <= pos_after_first,
             "reconnect replay should not advance past prior position after truncation/rotation"
         );
-        let first_delta = frames
-            .first()
-            .and_then(|f| f.pointer("/event/params/delta"))
-            .and_then(|v| v.as_str());
+        let first_delta = frames.iter().find_map(|f| {
+            f.pointer("/event/params/delta")
+                .and_then(|v| v.as_str())
+        });
         assert_eq!(first_delta, Some("new"));
+    }
+
+    #[test]
+    fn test_find_last_turn_boundary_start_prefers_recent_turn() {
+        let frames = vec![
+            serde_json::json!({"event":{"params":{"type":"item_delta"}}}),
+            serde_json::json!({"event":{"params":{"type":"turn_started"}}}),
+            serde_json::json!({"event":{"params":{"type":"item_delta"}}}),
+        ];
+        assert_eq!(find_last_turn_boundary_start(&frames), Some(1));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_replay_checkpoint_roundtrip() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let old_atm_home = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-scoped env mutation.
+        unsafe {
+            std::env::set_var("ATM_HOME", dir.path());
+        }
+
+        save_replay_checkpoint("atm-dev", "arch-ctm", Some("thread-123"), 42);
+        let loaded = load_replay_checkpoint("atm-dev", "arch-ctm").expect("checkpoint");
+        assert_eq!(loaded.pos, 42);
+        assert_eq!(loaded.session_id.as_deref(), Some("thread-123"));
+
+        // SAFETY: test-scoped env mutation.
+        unsafe {
+            if let Some(atm_home) = old_atm_home {
+                std::env::set_var("ATM_HOME", atm_home);
+            } else {
+                std::env::remove_var("ATM_HOME");
+            }
+        }
     }
 }

@@ -1246,6 +1246,8 @@ mod tests {
             action: ControlAction::Stdin,
             payload: Some("hello".to_string()),
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         };
 
         let result = send_control(&req);
@@ -1276,6 +1278,8 @@ mod tests {
             action: ControlAction::Interrupt,
             payload: None,
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         };
 
         // The socket-level request_id is an independent correlation ID generated

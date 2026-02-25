@@ -2442,6 +2442,7 @@ Session ending. Write a concise summary of:\n\
             let drain_team = self.team.clone();
             let drain_stdin = Arc::clone(&self.shared_child_stdin);
             let drain_thread_to_agent = Arc::clone(&self.thread_to_agent);
+            let drain_elicitation_registry = Arc::clone(&self.elicitation_registry);
             Some(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 // Skip the first immediate tick
@@ -2462,6 +2463,13 @@ Session ending. Write a concise summary of:\n\
                             Duration::from_secs(600),
                         )
                         .await;
+                        drain_elicitation_queue_for_agents(
+                            &drain_team,
+                            &agent_ids,
+                            stdin_arc,
+                            &drain_elicitation_registry,
+                        )
+                        .await;
                     }
                 }
             }))
@@ -2479,6 +2487,7 @@ Session ending. Write a concise summary of:\n\
         let shared_stdin_for_reader = Arc::clone(&self.shared_child_stdin);
         let queues_for_reader = Arc::clone(&self.queues);
         let request_counter_for_reader = Arc::clone(&self.request_counter);
+        let elicitation_registry_for_reader = Arc::clone(&self.elicitation_registry);
         let team_for_reader = self.team.clone();
         let idle_flag_for_reader = idle_flag;
         let thread_to_agent_for_reader = Arc::clone(&self.thread_to_agent);
@@ -2516,6 +2525,8 @@ Session ending. Write a concise summary of:\n\
                             };
                             let drain_team = team_for_reader.clone();
                             let drain_stdin = Arc::clone(&shared_stdin_for_reader);
+                            let drain_elicitation_registry =
+                                Arc::clone(&elicitation_registry_for_reader);
                             tokio::spawn(async move {
                                 let stdin_guard = drain_stdin.lock().await;
                                 if let Some(ref stdin_arc) = *stdin_guard {
@@ -2524,6 +2535,13 @@ Session ending. Write a concise summary of:\n\
                                         &agent_ids,
                                         stdin_arc,
                                         Duration::from_secs(600),
+                                    )
+                                    .await;
+                                    drain_elicitation_queue_for_agents(
+                                        &drain_team,
+                                        &agent_ids,
+                                        stdin_arc,
+                                        &drain_elicitation_registry,
                                     )
                                     .await;
                                 }
@@ -3199,6 +3217,86 @@ async fn drain_stdin_queue_for_agents(
             Err(e) => {
                 tracing::warn!(agent_id, error = %e, "stdin queue drain error");
             }
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct QueuedElicitationResponse {
+    elicitation_id: String,
+    decision: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+async fn drain_elicitation_queue_for_agents(
+    team: &str,
+    agent_ids: &[String],
+    shared_stdin: &Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
+    elicitation_registry: &Arc<Mutex<ElicitationRegistry>>,
+) {
+    let home = match agent_team_mail_core::home::get_home_dir() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    for agent_id in agent_ids {
+        let dir = home
+            .join(".config/atm/agent-sessions")
+            .join(team)
+            .join(agent_id)
+            .join("elicitation_queue");
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = match tokio::fs::read_to_string(&path).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(agent_id, path=%path.display(), error=%e, "failed reading elicitation queue entry");
+                    continue;
+                }
+            };
+            let queued: QueuedElicitationResponse = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(agent_id, path=%path.display(), error=%e, "invalid elicitation queue entry");
+                    let _ = tokio::fs::remove_file(&path).await;
+                    continue;
+                }
+            };
+            let response = serde_json::json!({
+                "id": queued.elicitation_id,
+                "result": {
+                    "decision": queued.decision,
+                    "text": queued.text,
+                }
+            });
+            let maybe = elicitation_registry
+                .lock()
+                .await
+                .resolve_for_downstream_id(&serde_json::json!(queued.elicitation_id), response);
+            let Some(downstream) = maybe else {
+                // Keep entry on disk until the matching elicitation is registered.
+                continue;
+            };
+            let serialized = match serde_json::to_string(&downstream) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(agent_id, error=%e, "failed serializing elicitation downstream response");
+                    continue;
+                }
+            };
+            let mut stdin = shared_stdin.lock().await;
+            if let Err(e) = write_newline_delimited(&mut *stdin, &serialized).await {
+                tracing::warn!(agent_id, error=%e, "failed writing elicitation response to child stdin");
+                continue;
+            }
+            let _ = tokio::fs::remove_file(&path).await;
         }
     }
 }

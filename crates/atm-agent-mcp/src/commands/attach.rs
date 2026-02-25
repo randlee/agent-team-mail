@@ -48,6 +48,7 @@ struct AttachedRenderEnvelope {
     mode: &'static str,
     agent_id: String,
     class: String,
+    applicability: String,
     source_kind: String,
     source_actor: String,
     source_channel: String,
@@ -82,12 +83,15 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     let mut stream_pos: u64 = 0;
     let mut ticker = interval(Duration::from_millis(poll_ms));
     let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut pending_elicitation_id: Option<String> = None;
 
     // Initial attach replay (bounded).
     match tail_watch_stream_file(&watch_path, 0, &args.agent_id).await {
         Ok((replay, new_pos)) => {
             stream_pos = new_pos;
             for frame in replay {
+                pending_elicitation_id =
+                    update_pending_elicitation_id(pending_elicitation_id, &frame);
                 print_frame(&args.agent_id, frame, args.json)?;
             }
         }
@@ -101,6 +105,8 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                     Ok((frames, new_pos)) => {
                         stream_pos = new_pos;
                         for frame in frames {
+                            pending_elicitation_id =
+                                update_pending_elicitation_id(pending_elicitation_id, &frame);
                             print_frame(&args.agent_id, frame, args.json)?;
                         }
                     }
@@ -135,8 +141,17 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                             }
                             ControlVerb::Detach => break,
                             ControlVerb::Approve => {
-                                let payload = arg.unwrap_or_else(|| "approve".to_string());
-                                match send_stdin_control(&team, &args.agent_id, &payload) {
+                                let Some(elicitation_id) = pending_elicitation_id.clone() else {
+                                    println!("ack no pending elicitation id to approve");
+                                    continue;
+                                };
+                                match send_elicitation_response_control(
+                                    &team,
+                                    &args.agent_id,
+                                    &elicitation_id,
+                                    "approve",
+                                    arg.as_deref(),
+                                ) {
                                     Ok(ack) => println!("ack {}", format_ack(&ack)),
                                     Err(err) => {
                                         print_stream_error(classify_control_send_error(&err), &err, args.json)?
@@ -144,8 +159,17 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                                 }
                             }
                             ControlVerb::Reject => {
-                                let payload = arg.unwrap_or_else(|| "reject".to_string());
-                                match send_stdin_control(&team, &args.agent_id, &payload) {
+                                let Some(elicitation_id) = pending_elicitation_id.clone() else {
+                                    println!("ack no pending elicitation id to reject");
+                                    continue;
+                                };
+                                match send_elicitation_response_control(
+                                    &team,
+                                    &args.agent_id,
+                                    &elicitation_id,
+                                    "reject",
+                                    arg.as_deref(),
+                                ) {
                                     Ok(ack) => println!("ack {}", format_ack(&ack)),
                                     Err(err) => {
                                         print_stream_error(classify_control_send_error(&err), &err, args.json)?
@@ -172,8 +196,8 @@ fn print_input_contract() {
     println!("input routing:");
     println!("  plain text      -> agent input (stdin control)");
     println!("  :interrupt      -> interrupt control request");
-    println!("  :approve [text] -> approval response via stdin");
-    println!("  :reject [text]  -> rejection response via stdin");
+    println!("  :approve [text] -> correlated elicitation approve");
+    println!("  :reject [text]  -> correlated elicitation reject");
     println!("  :help           -> show routing contract");
     println!("  :detach         -> detach and exit");
 }
@@ -257,6 +281,8 @@ fn send_stdin_control(team: &str, agent_id: &str, text: &str) -> anyhow::Result<
         action: ControlAction::Stdin,
         payload: Some(text.to_string()),
         content_ref: None,
+        elicitation_id: None,
+        decision: None,
     };
     send_control(&req)
 }
@@ -275,6 +301,34 @@ fn send_interrupt_control(team: &str, agent_id: &str) -> anyhow::Result<ControlA
         action: ControlAction::Interrupt,
         payload: None,
         content_ref: None,
+        elicitation_id: None,
+        decision: None,
+    };
+    send_control(&req)
+}
+
+fn send_elicitation_response_control(
+    team: &str,
+    agent_id: &str,
+    elicitation_id: &str,
+    decision: &str,
+    note: Option<&str>,
+) -> anyhow::Result<ControlAck> {
+    let req = ControlRequest {
+        v: CONTROL_SCHEMA_VERSION,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        msg_type: "control.elicitation.response".to_string(),
+        signal: None,
+        sent_at: chrono::Utc::now().to_rfc3339(),
+        team: team.to_string(),
+        session_id: String::new(),
+        agent_id: agent_id.to_string(),
+        sender: "attach_cli".to_string(),
+        action: ControlAction::ElicitationResponse,
+        payload: note.map(str::to_string),
+        content_ref: None,
+        elicitation_id: Some(elicitation_id.to_string()),
+        decision: Some(decision.to_string()),
     };
     send_control(&req)
 }
@@ -285,6 +339,33 @@ fn format_ack(ack: &ControlAck) -> String {
         "request_id={} result={:?} duplicate={} {}",
         ack.request_id, ack.result, ack.duplicate, detail
     )
+}
+
+fn update_pending_elicitation_id(current: Option<String>, frame: &Value) -> Option<String> {
+    let event = frame.get("event").unwrap_or(frame);
+    let kind = event
+        .pointer("/params/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    match kind {
+        "exec_approval_request" | "approval_prompt" | "approval_request"
+        | "apply_patch_approval_request" | "request_user_input" | "elicitation_request" => {
+            extract_elicitation_id(event).or(current)
+        }
+        "approval_approved" | "approval_rejected" | "approval_resolved" => None,
+        _ => current,
+    }
+}
+
+fn extract_elicitation_id(event: &Value) -> Option<String> {
+    event
+        .pointer("/params/elicitation_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/approval_id").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/request_id").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/id").and_then(|v| v.as_str()))
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn watch_feed_path(agent_id: &str) -> Option<PathBuf> {
@@ -407,22 +488,111 @@ fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()
         return Ok(());
     }
 
-    if env.class == "input.atm_mail" {
-        println!("{} <{}>", env.source_actor, clamp_three_lines(&env.text));
-        return Ok(());
-    }
-
-    println!(
-        "[{}][{}] {}",
-        env.class,
-        env.source_kind,
-        if env.text.is_empty() {
-            env.event_type
-        } else {
-            env.text
+    let payload = if env.text.is_empty() {
+        env.event_type.clone()
+    } else {
+        env.text.clone()
+    };
+    match env.class.as_str() {
+        "input.atm_mail" => println!("{} <{}>", env.source_actor, clamp_three_lines(&env.text)),
+        "assistant.output" => println!("assistant: {}", render_markdown_text(&payload)),
+        "assistant.reasoning" => {
+            if is_reasoning_section_break(&env.raw) {
+                println!("reasoning: {}", format_reasoning_section_break(&payload));
+            } else {
+                println!("reasoning: {payload}");
+            }
         }
-    );
+        "turn.lifecycle" => println!("turn: {payload}"),
+        "approval.exec" | "approval.patch" | "approval.review" => {
+            println!("approval: {payload}")
+        }
+        "elicitation.request" => println!("input-request: {payload}"),
+        "file.edit" => print_file_edit_lines(&payload),
+        _ => println!("[{}][{}] {}", env.class, env.source_kind, payload),
+    }
     Ok(())
+}
+
+fn is_reasoning_section_break(raw: &Value) -> bool {
+    if raw
+        .pointer("/event/params/section_break")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if raw
+        .pointer("/event/params/is_section_break")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    raw.pointer("/event/params/delta_type")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            raw.pointer("/event/params/reasoning_delta/type")
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| {
+            raw.pointer("/event/params/content/type")
+                .and_then(|v| v.as_str())
+        })
+        .is_some_and(|v| v.eq_ignore_ascii_case("section_break"))
+}
+
+fn format_reasoning_section_break(payload: &str) -> String {
+    if payload.trim().is_empty() {
+        "----".to_string()
+    } else {
+        format!("---- {} ----", payload.trim())
+    }
+}
+
+fn render_markdown_text(payload: &str) -> String {
+    let trimmed = payload.trim();
+    if trimmed.starts_with("```") {
+        let lang = trimmed
+            .trim_start_matches('`')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        if lang.is_empty() {
+            return "[code-block]".to_string();
+        }
+        return format!("[code-block:{lang}]");
+    }
+    if trimmed.starts_with('#') {
+        return trimmed.to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("- ") {
+        return format!("• {rest}");
+    }
+    if let Some(rest) = trimmed.strip_prefix("* ") {
+        return format!("• {rest}");
+    }
+    payload.to_string()
+}
+
+fn print_file_edit_lines(payload: &str) {
+    let normalized = payload.replace("\\n", "\n");
+    let mut printed = false;
+    for line in normalized.lines() {
+        printed = true;
+        if line.starts_with('+') && !line.starts_with("+++") {
+            println!("file-edit: [+] {}", line.trim_start_matches('+').trim_start());
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            println!("file-edit: [-] {}", line.trim_start_matches('-').trim_start());
+        } else if line.starts_with("@@") {
+            println!("file-edit: [@@] {}", line.trim_start_matches("@@").trim_start());
+        } else {
+            println!("file-edit: {line}");
+        }
+    }
+    if !printed {
+        println!("file-edit:");
+    }
 }
 
 fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope {
@@ -457,7 +627,7 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         .unwrap_or("")
         .to_string();
 
-    let (class, unsupported_count) = classify_event_class(&event_type, &source_kind);
+    let (class, unsupported_count, applicability) = classify_event_class(&event_type, &source_kind);
     let is_turn_boundary = matches!(
         event_type.as_str(),
         "turn_started"
@@ -487,6 +657,7 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         mode: "attached",
         agent_id: agent_id.to_string(),
         class,
+        applicability: applicability.to_string(),
         source_kind,
         source_actor,
         source_channel,
@@ -498,12 +669,15 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
     }
 }
 
-fn classify_event_class(event_type: &str, source_kind: &str) -> (String, Option<u64>) {
+fn classify_event_class(
+    event_type: &str,
+    source_kind: &str,
+) -> (String, Option<u64>, &'static str) {
     if source_kind == "atm_mail" || source_kind == "atm_mcp" {
-        return ("input.atm_mail".to_string(), None);
+        return ("input.atm_mail".to_string(), None, "required");
     }
     if source_kind == "user_steer" || source_kind == "tui_user" {
-        return ("input.user_steer".to_string(), None);
+        return ("input.user_steer".to_string(), None, "required");
     }
 
     let class = match event_type {
@@ -514,30 +688,47 @@ fn classify_event_class(event_type: &str, source_kind: &str) -> (String, Option<
         "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
             "assistant.reasoning"
         }
-        "approval_prompt"
-        | "approval_request"
-        | "approval_rejected"
+        "exec_approval_request" | "approval_prompt" | "approval_request" => "approval.exec",
+        "apply_patch_approval_request" => "approval.patch",
+        "approval_rejected"
         | "approval_approved"
         | "entered_review_mode"
         | "exited_review_mode"
         | "item/enteredReviewMode"
-        | "item/exitedReviewMode" => "approval",
-        "exec_command_started"
+        | "item/exitedReviewMode" => "approval.review",
+        "exec_command_begin"
+        | "exec_command_started"
         | "exec_command_output_delta"
         | "exec_command_completed"
         | "exec_command_error" => "tool.exec",
+        "mcp_tool_call_begin" | "mcp_tool_call_end" | "web_search_begin" | "web_search_end" => {
+            "tool.lifecycle"
+        }
         "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => "file.edit",
         "request_user_input" | "elicitation_request" => "elicitation.request",
-        "turn_started" | "turn_completed" | "task_started" | "task_complete" | "turn_idle"
-        | "idle" | "done" | "item_started" | "item_completed" => "turn.lifecycle",
+        "session_configured"
+        | "thread_name_updated"
+        | "token_count"
+        | "model_reroute"
+        | "context_compacted"
+        | "thread_rolled_back"
+        | "undo_started"
+        | "undo_completed" => "session.meta",
+        "plan_update" | "plan_delta" => "plan.update",
+        "turn_started" | "turn_completed" | "turn_aborted" | "task_started" | "task_complete"
+        | "turn_idle" | "idle" | "done" | "item_started" | "item_completed" => "turn.lifecycle",
         "stream_error" | "error" => "stream.error",
         _ => {
             let ty = sanitize_event_type(event_type);
             let count = record_unsupported_event(&ty);
-            return (format!("unsupported.{ty}"), Some(count));
+            return (format!("unsupported.{ty}"), Some(count), "out_of_scope");
         }
     };
-    (class.to_string(), None)
+    let applicability = match class {
+        "tool.lifecycle" | "session.meta" | "plan.update" => "degraded",
+        _ => "required",
+    };
+    (class.to_string(), None, applicability)
 }
 
 fn sanitize_event_type(event_type: &str) -> String {
@@ -727,6 +918,7 @@ mod tests {
         let env = to_attached_envelope("codex:abc", &frame);
         assert_eq!(env.mode, "attached");
         assert_eq!(env.class, "assistant.output");
+        assert_eq!(env.applicability, "required");
         assert_eq!(env.text, "hello");
         assert_eq!(env.source_actor, "arch-atm");
         assert_eq!(env.unsupported_count, None);
@@ -734,18 +926,101 @@ mod tests {
 
     #[test]
     fn classify_unknown_event_emits_supported_prefix_and_counter() {
-        let (class, count1) = classify_event_class("future/event", "client_prompt");
-        let (_, count2) = classify_event_class("future/event", "client_prompt");
+        let (class, count1, applicability1) = classify_event_class("future/event", "client_prompt");
+        let (_, count2, applicability2) = classify_event_class("future/event", "client_prompt");
         assert_eq!(class, "unsupported.future_event");
+        assert_eq!(applicability1, "out_of_scope");
+        assert_eq!(applicability2, "out_of_scope");
         assert_eq!(count1, Some(1));
         assert_eq!(count2, Some(2));
         assert_eq!(unsupported_event_count("future_event"), 2);
     }
 
     #[test]
+    fn markdown_render_hints_code_block_and_bullet() {
+        assert_eq!(render_markdown_text("```rust"), "[code-block:rust]");
+        assert_eq!(render_markdown_text("- item"), "• item");
+        assert_eq!(render_markdown_text("* item"), "• item");
+        assert_eq!(render_markdown_text("# heading"), "# heading");
+    }
+
+    #[test]
+    fn reasoning_section_break_detected_from_delta_type() {
+        let frame = serde_json::json!({
+            "event":{"params":{"type":"reasoning_content_delta","delta_type":"section_break"}}
+        });
+        assert!(is_reasoning_section_break(&frame));
+        assert_eq!(format_reasoning_section_break("plan"), "---- plan ----");
+    }
+
+    #[test]
+    fn class_map_fixture_matches_expected_class_and_applicability() {
+        let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/parity/attach/class-map.input.jsonl");
+        let expected_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/parity/attach/class-map.expected.jsonl");
+
+        let input = fs::read_to_string(input_path).expect("input fixture");
+        let expected = fs::read_to_string(expected_path).expect("expected fixture");
+        let input_rows: Vec<&str> = input.lines().filter(|l| !l.trim().is_empty()).collect();
+        let expected_rows: Vec<&str> = expected.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            input_rows.len(),
+            expected_rows.len(),
+            "fixture row count must match"
+        );
+
+        for (idx, (frame_line, expected_line)) in
+            input_rows.iter().zip(expected_rows.iter()).enumerate()
+        {
+            let frame: Value = serde_json::from_str(frame_line).expect("valid frame fixture line");
+            let expected_json: Value =
+                serde_json::from_str(expected_line).expect("valid expected fixture line");
+            let env = to_attached_envelope("codex:test", &frame);
+            let expected_class = expected_json
+                .get("class")
+                .and_then(|v| v.as_str())
+                .expect("expected class");
+            let expected_applicability = expected_json
+                .get("applicability")
+                .and_then(|v| v.as_str())
+                .expect("expected applicability");
+            assert_eq!(
+                env.class,
+                expected_class,
+                "class mismatch at row {}",
+                idx + 1
+            );
+            assert_eq!(
+                env.applicability,
+                expected_applicability,
+                "applicability mismatch at row {}",
+                idx + 1
+            );
+        }
+    }
+
+    #[test]
     fn classify_control_error_uses_io_kind() {
         let err = anyhow::Error::new(std::io::Error::new(ErrorKind::ConnectionRefused, "refused"));
-        assert_eq!(classify_control_send_error(&err), "control.connection_refused");
+        assert_eq!(
+            classify_control_send_error(&err),
+            "control.connection_refused"
+        );
+    }
+
+    #[test]
+    fn pending_elicitation_id_tracks_and_clears() {
+        let approval = serde_json::json!({
+            "event":{"params":{"type":"approval_request","elicitation_id":"eli-123"}}
+        });
+        let resolved = serde_json::json!({
+            "event":{"params":{"type":"approval_approved"}}
+        });
+        let pending = update_pending_elicitation_id(None, &approval);
+        assert_eq!(pending.as_deref(), Some("eli-123"));
+        let cleared = update_pending_elicitation_id(pending, &resolved);
+        assert_eq!(cleared, None);
     }
 
     #[tokio::test]
@@ -762,11 +1037,15 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert!(pos > 0);
         assert_eq!(
-            frames[0].pointer("/event/params/type").and_then(|v| v.as_str()),
+            frames[0]
+                .pointer("/event/params/type")
+                .and_then(|v| v.as_str()),
             Some("turn_started")
         );
         assert_eq!(
-            frames[1].pointer("/event/params/type").and_then(|v| v.as_str()),
+            frames[1]
+                .pointer("/event/params/type")
+                .and_then(|v| v.as_str()),
             Some("item_delta")
         );
     }
@@ -824,6 +1103,91 @@ mod tests {
         });
 
         let ack = send_stdin_control("atm-dev", "codex:test", "hello").expect("control ack");
+        assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
+        assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
+
+        server.join().expect("server join");
+        if let Some(home) = old_home {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::set_var("ATM_HOME", home);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn send_elicitation_response_control_with_mock_daemon_ack() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let old_home = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            std::env::set_var("ATM_HOME", temp_dir.path());
+        }
+
+        let daemon_dir = temp_dir.path().join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).expect("daemon dir");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut req_line = String::new();
+            {
+                let mut reader = BufReader::new(&stream);
+                reader.read_line(&mut req_line).expect("read request");
+            }
+            let req: serde_json::Value = serde_json::from_str(req_line.trim()).expect("json req");
+            let payload = req.get("payload").expect("payload");
+            assert_eq!(
+                payload.get("action").and_then(|v| v.as_str()),
+                Some("elicitation_response")
+            );
+            assert_eq!(
+                payload.get("elicitation_id").and_then(|v| v.as_str()),
+                Some("eli-123")
+            );
+            assert_eq!(
+                payload.get("decision").and_then(|v| v.as_str()),
+                Some("approve")
+            );
+
+            let socket_request_id = req
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sock-test");
+            let response = serde_json::json!({
+                "version": 1,
+                "request_id": socket_request_id,
+                "status": "ok",
+                "payload": {
+                    "request_id": "req-attach-elicitation-test",
+                    "result": "ok",
+                    "duplicate": false,
+                    "detail": "mock-daemon-ack",
+                    "acked_at": "2026-02-25T00:00:00Z"
+                }
+            });
+            let mut writer = std::io::BufWriter::new(&stream);
+            writer
+                .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                .expect("write response");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+        });
+
+        let ack = send_elicitation_response_control(
+            "atm-dev",
+            "codex:test",
+            "eli-123",
+            "approve",
+            Some("looks good"),
+        )
+        .expect("control ack");
         assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
         assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
 

@@ -1288,6 +1288,7 @@ fn control_action_name(action: &ControlAction) -> &'static str {
     match action {
         ControlAction::Stdin => "control_stdin",
         ControlAction::Interrupt => "control_interrupt",
+        ControlAction::ElicitationResponse => "control_elicitation_response",
     }
 }
 
@@ -1388,6 +1389,20 @@ pub(crate) fn validate_control_request(control: &ControlRequest) -> Option<Strin
             DEFAULT_MAX_MESSAGE_BYTES
         ));
     }
+    if matches!(control.action, ControlAction::ElicitationResponse) {
+        let Some(elicitation_id) = control.elicitation_id.as_deref() else {
+            return Some("elicitation_response requires elicitation_id".to_string());
+        };
+        if elicitation_id.trim().is_empty() {
+            return Some("elicitation_id cannot be empty".to_string());
+        }
+        let Some(decision) = control.decision.as_deref() else {
+            return Some("elicitation_response requires decision".to_string());
+        };
+        if !matches!(decision, "approve" | "reject") {
+            return Some("decision must be 'approve' or 'reject'".to_string());
+        }
+    }
     None
 }
 
@@ -1452,6 +1467,35 @@ async fn enqueue_stdin_message(
     tokio::fs::write(path, content.as_bytes())
         .await
         .map_err(|e| format!("failed to write stdin_queue file: {e}"))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn enqueue_elicitation_response(
+    home: &std::path::Path,
+    team: &str,
+    agent_id: &str,
+    elicitation_id: &str,
+    decision: &str,
+    text: Option<&str>,
+) -> Result<(), String> {
+    let dir = home
+        .join(".config/atm/agent-sessions")
+        .join(team)
+        .join(agent_id)
+        .join("elicitation_queue");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("failed to create elicitation_queue dir: {e}"))?;
+    let path = dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+    let payload = serde_json::json!({
+        "elicitation_id": elicitation_id,
+        "decision": decision,
+        "text": text,
+    });
+    tokio::fs::write(path, serde_json::to_vec(&payload).map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| format!("failed to write elicitation_queue file: {e}"))?;
     Ok(())
 }
 
@@ -1587,6 +1631,48 @@ async fn process_control_request(
                         Some(format!("enqueue failed: {e}")),
                     ),
                 }
+            }
+        }
+        ControlAction::ElicitationResponse => {
+            let elicitation_id = control
+                .elicitation_id
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let decision = control
+                .decision
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let text = control
+                .payload
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            match enqueue_elicitation_response(
+                home,
+                &control.team,
+                &control.agent_id,
+                &elicitation_id,
+                &decision,
+                text,
+            )
+            .await
+            {
+                Ok(()) => control_ack(
+                    &control.request_id,
+                    ControlResult::Ok,
+                    false,
+                    Some("queued elicitation response".to_string()),
+                ),
+                Err(e) => control_ack(
+                    &control.request_id,
+                    ControlResult::InternalError,
+                    false,
+                    Some(format!("enqueue failed: {e}")),
+                ),
             }
         }
     };
@@ -2496,6 +2582,8 @@ mod tests {
             action: ControlAction::Stdin,
             payload: Some("hello from control".to_string()),
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         };
 
         let dd = make_dd_in(&tmp);
@@ -2506,6 +2594,57 @@ mod tests {
         let qdir = tmp
             .path()
             .join(".config/atm/agent-sessions/atm-dev/arch-ctm/stdin_queue");
+        assert!(qdir.exists());
+        let mut rd = tokio::fs::read_dir(qdir).await.unwrap();
+        let mut files = 0usize;
+        while let Ok(Some(_)) = rd.next_entry().await {
+            files += 1;
+        }
+        assert_eq!(files, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_control_elicitation_response_enqueues_payload() {
+        use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_store = make_store();
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Busy);
+        }
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert("arch-ctm", "sess-elicit", std::process::id());
+        }
+
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: Uuid::new_v4().to_string(),
+            msg_type: "control.elicitation.response".to_string(),
+            signal: None,
+            sent_at: chrono::Utc::now().to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-elicit".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "tui".to_string(),
+            action: ControlAction::ElicitationResponse,
+            payload: Some("allow with guard".to_string()),
+            content_ref: None,
+            elicitation_id: Some("req-77".to_string()),
+            decision: Some("approve".to_string()),
+        };
+        let dd = make_dd_in(&tmp);
+        let ack = process_control_request(req, tmp.path(), &state_store, &sr, &dd).await;
+        assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
+        let qdir = tmp
+            .path()
+            .join(".config/atm/agent-sessions/atm-dev/arch-ctm/elicitation_queue");
         assert!(qdir.exists());
         let mut rd = tokio::fs::read_dir(qdir).await.unwrap();
         let mut files = 0usize;
@@ -2549,6 +2688,8 @@ mod tests {
             action: ControlAction::Stdin,
             payload: Some("payload".to_string()),
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         };
 
         let dd = make_dd_in(&tmp);
@@ -2606,6 +2747,8 @@ mod tests {
             action: ControlAction::Interrupt,
             payload: None,
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         };
         let (dd, _dd_dir) = make_dd();
         let ack = process_control_request(req, _dd_dir.path(), &state_store, &sr, &dd).await;
@@ -2653,6 +2796,8 @@ mod tests {
             action: ControlAction::Interrupt,
             payload: None,
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         };
 
         let (dd, _dd_dir) = make_dd();
@@ -2703,6 +2848,8 @@ mod tests {
             action: ControlAction::Stdin,
             payload: Some("payload".to_string()),
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         };
         let (dd, _dd_dir) = make_dd();
         let ack = process_control_request(req, _dd_dir.path(), &state_store, &sr, &dd).await;
@@ -3758,6 +3905,8 @@ mod tests {
             action: ControlAction::Stdin,
             payload: Some("hello".to_string()),
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         }
     }
 
