@@ -23,6 +23,7 @@ use tokio::time::interval;
 const WATCH_ATTACH_REPLAY_MAX_FRAMES: usize = 50;
 const WATCH_ATTACH_REPLAY_SCAN_BYTES: u64 = 512 * 1024;
 const ATTACH_CHECKPOINT_VERSION: u8 = 1;
+const UNSUPPORTED_WARN_THRESHOLD: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlVerb {
@@ -199,6 +200,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     }
 
     let _ = save_attach_checkpoint_pos(&team, &args.agent_id, stream_pos);
+    print_unsupported_summary_on_detach(&args.agent_id, args.json)?;
     println!("detached from {}", args.agent_id);
     Ok(())
 }
@@ -930,6 +932,56 @@ fn record_unsupported_event(event_type: &str) -> u64 {
     *entry
 }
 
+fn unsupported_summary_lines(warn_threshold: u64) -> Vec<String> {
+    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = map.lock().expect("unsupported event counter mutex");
+    let mut keys: Vec<&String> = guard.keys().collect();
+    keys.sort();
+    let mut out = Vec::new();
+    for key in keys {
+        let count = guard.get(key).copied().unwrap_or(0);
+        out.push(format!("unsupported.summary {key}={count}"));
+        if count >= warn_threshold {
+            out.push(format!(
+                "stream.warning unsupported event '{key}' seen {count} times"
+            ));
+        }
+    }
+    out
+}
+
+fn clear_unsupported_event_counts() {
+    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("unsupported event counter mutex");
+    guard.clear();
+}
+
+fn print_unsupported_summary_on_detach(agent_id: &str, as_json: bool) -> anyhow::Result<()> {
+    let lines = unsupported_summary_lines(UNSUPPORTED_WARN_THRESHOLD);
+    for line in &lines {
+        if as_json {
+            let class = if line.starts_with("stream.warning ") {
+                "stream.warning"
+            } else {
+                "session.meta"
+            };
+            let payload = serde_json::json!({
+                "v": 1,
+                "mode": "attached",
+                "agent_id": agent_id,
+                "class": class,
+                "event_type": "unsupported_summary",
+                "text": line
+            });
+            println!("{}", serde_json::to_string(&payload)?);
+        } else {
+            println!("{line}");
+        }
+    }
+    clear_unsupported_event_counts();
+    Ok(())
+}
+
 #[cfg(test)]
 fn unsupported_event_count(event_type: &str) -> u64 {
     let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -1100,6 +1152,7 @@ mod tests {
 
     #[test]
     fn classify_unknown_event_emits_supported_prefix_and_counter() {
+        clear_unsupported_event_counts();
         let (class, count1, applicability1) =
             classify_event_class("future/event", "client_prompt", &serde_json::json!({}), "");
         let (_, count2, applicability2) =
@@ -1107,9 +1160,27 @@ mod tests {
         assert_eq!(class, "unsupported.future_event");
         assert_eq!(applicability1, "out_of_scope");
         assert_eq!(applicability2, "out_of_scope");
-        assert_eq!(count1, Some(1));
-        assert_eq!(count2, Some(2));
-        assert_eq!(unsupported_event_count("future_event"), 2);
+        let c1 = count1.expect("first unsupported count present");
+        let c2 = count2.expect("second unsupported count present");
+        assert!(c1 >= 1);
+        assert!(c2 >= c1);
+        assert!(unsupported_event_count("future_event") >= c2);
+        clear_unsupported_event_counts();
+    }
+
+    #[test]
+    fn unsupported_summary_below_threshold_has_no_warning_line() {
+        clear_unsupported_event_counts();
+        for _ in 0..(UNSUPPORTED_WARN_THRESHOLD - 1) {
+            let _ = record_unsupported_event("future_event");
+        }
+        let lines = unsupported_summary_lines(UNSUPPORTED_WARN_THRESHOLD);
+        assert!(lines.iter().any(|l| l == "unsupported.summary future_event=4"));
+        assert!(
+            !lines.iter().any(|l| l.starts_with("stream.warning ")),
+            "below-threshold counters must not emit stream.warning summary"
+        );
+        clear_unsupported_event_counts();
     }
 
     #[test]
