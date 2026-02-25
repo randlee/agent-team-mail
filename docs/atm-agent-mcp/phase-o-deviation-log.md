@@ -61,18 +61,26 @@ Owner: `arch-ctm`
 - rationale: bounded-scope hardening in O-R.5 prioritized live TUI operator surface.
 
 ### DEV-OR5-003: attach replay remains fixed-window clip
-- Requirement context: FR-23.22 turn-boundary-aware replay behavior.
+- Requirement context: FR-23.21 turn-boundary-aware replay behavior.
 - Current behavior: TUI replay now applies turn-boundary shaping + truncation warning; attach replay remains fixed 50-frame clipping.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: replay hardening landed in TUI watch path; attach replay parity deferred.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/243
+- validation_status: implemented + validated
 
 ### DEV-OR5-004: attach replay checkpoint persistence deferred
-- Requirement context: FR-23.22 session-scoped replay checkpoint continuity.
+- Requirement context: FR-23.24 session-scoped replay checkpoint continuity.
 - Current behavior: checkpoint persistence is implemented in TUI watch path only.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: checkpointing added where re-attach continuity is user-visible in the TUI; attach checkpointing deferred.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/243
+- validation_status: implemented + validated
 
 ### DEV-OR5-005: attach unsupported-event summary flush deferred
 - Requirement context: FR-23.23 unsupported-event telemetry summary.
