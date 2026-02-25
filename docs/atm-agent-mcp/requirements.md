@@ -351,6 +351,8 @@ Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-view
 - **FR-23.23**: Attached mode MUST sanitize operator stdin control payloads before forwarding to control channels to prevent malformed control injection.
 - **FR-23.24**: Re-attach replay continuity SHOULD persist a session-scoped checkpoint marker (last replayed position/turn marker) to reduce duplicate replay after process restarts.
 - **FR-23.25**: Attached help/UX contract MUST explicitly document `Ctrl-C`/SIGINT behavior and match implemented detach/interrupt semantics.
+- **FR-23.26**: Approved attach-path deviations logged under `DEV-OR5-001..DEV-OR5-007` MUST be fully remediated in the next parity-hardening phase before attach-path parity can be marked complete.
+- **FR-23.27**: Attach-path parity completion gate MUST require `docs/atm-agent-mcp/phase-o-deviation-log.md` entries `DEV-OR5-001..DEV-OR5-007` to be closed (implemented and validated), not merely acknowledged.
 
 ---
 

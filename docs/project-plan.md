@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
-**Version**: 0.4
-**Date**: 2026-02-23
-**Status**: Phase N complete (v0.18.0). Phase O planning in progress.
+**Version**: 0.5
+**Date**: 2026-02-25
+**Status**: Phase O-R complete (v0.20.0). Phase P planning in progress.
 
 ---
 
@@ -455,7 +455,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | G.6 | Mail injection parity + queue semantics | [#173](https://github.com/randlee/agent-team-mail/pull/173) |
 | G.7 | TUI streaming normalization + daemon pubsub/UDP fanout | [#174](https://github.com/randlee/agent-team-mail/pull/174), [#176](https://github.com/randlee/agent-team-mail/pull/176) |
 | G.8 | Cross-platform reliability + soak testing | [#177](https://github.com/randlee/agent-team-mail/pull/177) |
-| G.9 | Docs finalization + release gate | PLANNED |
+| G.9 | Docs finalization + release gate | [#178](https://github.com/randlee/agent-team-mail/pull/178) |
 
 **Dependency graph**: G.1 → G.3 → G.4 → {G.5, G.6} parallel; G.4 + G.6 → G.7; G.7 → G.2; G.5 + G.6 + G.7 → G.8; G.2 + G.8 → G.9
 
@@ -567,17 +567,17 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.4 Phase O-R: Attach Renderer Parity Closure — PLANNED
+## 17.4 Phase O-R: Attach Renderer Parity Closure — COMPLETE (v0.20.0)
 
 **Goal**: Close the remaining attached-renderer parity gaps identified in post-Phase O review, with explicit deliverables and CI-verifiable acceptance criteria.
 
-| Sprint | Name | Depends On | Size | Status |
-|--------|------|------------|------|--------|
-| O-R.1 | Structured renderer foundation + applicability contract alignment | O.3 | M | PLANNED |
-| O-R.2 | Required event coverage expansion + unflattened class rendering | O-R.1 | L | PLANNED |
-| O-R.3 | Approval/elicitation interaction parity + correlated response routing | O-R.2 | L | PLANNED |
-| O-R.4 | Diff + markdown + reasoning render parity hardening | O-R.2 | L | PLANNED |
-| O-R.5 | Error/replay/telemetry/session hardening closure | O-R.3,O-R.4 | M | PLANNED |
+| Sprint | Name | Depends On | Size | Status | PR |
+|--------|------|------------|------|--------|----|
+| O-R.1 | Structured renderer foundation + applicability contract alignment | O.3 | M | COMPLETE | [#232](https://github.com/randlee/agent-team-mail/pull/232) |
+| O-R.2 | Required event coverage expansion + unflattened class rendering | O-R.1 | L | COMPLETE | [#233](https://github.com/randlee/agent-team-mail/pull/233) |
+| O-R.3 | Approval/elicitation interaction parity + correlated response routing | O-R.2 | L | COMPLETE | [#234](https://github.com/randlee/agent-team-mail/pull/234) |
+| O-R.4 | Diff + markdown + reasoning render parity hardening | O-R.2 | L | COMPLETE | [#235](https://github.com/randlee/agent-team-mail/pull/235) |
+| O-R.5 | Error/replay/telemetry/session hardening closure | O-R.3,O-R.4 | M | COMPLETE | [#236](https://github.com/randlee/agent-team-mail/pull/236), [#237](https://github.com/randlee/agent-team-mail/pull/237) |
 
 **Deliverables and acceptance criteria**:
 - O-R.1 deliverables: replace the generic attached print path for required classes with structured rendering primitives; add `applicability` field to attached JSON envelope.
@@ -602,6 +602,35 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - `docs/atm-agent-mcp/requirements.md` (FR-23.12 through FR-23.25)
 - `docs/atm-agent-mcp/codex-cli-atm-tui-render-gap-analysis.md` (current-state evidence and remediation map)
 - `docs/atm-agent-mcp/phase-o-event-applicability-matrix.md` (required/degraded/out_of_scope policy)
+- Integration completion PR: [#238](https://github.com/randlee/agent-team-mail/pull/238)
+
+---
+
+## 17.5 Phase P: Attach Path Hardening Closure — PLANNED
+
+**Goal**: Close all approved attach-path deviations carried from O-R so attach-mode behavior matches TUI parity commitments across error classification, replay continuity, telemetry closure, and operator input contract hardening.
+
+| Sprint | Name | Depends On | Size | Status |
+|--------|------|------------|------|--------|
+| P.1 | Attach error-source + fatal reconnect parity | O-R.5 | M | PLANNED |
+| P.2 | Attach replay boundary + checkpoint continuity | P.1 | M | PLANNED |
+| P.3 | Attach unsupported-event summary flush parity | P.1 | S | PLANNED |
+| P.4 | Attach stdin sanitization hardening | P.1 | M | PLANNED |
+| P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | P.2,P.3,P.4 | S | PLANNED |
+
+**Deviation closure mapping**:
+- P.1: DEV-OR5-001, DEV-OR5-002
+- P.2: DEV-OR5-003, DEV-OR5-004
+- P.3: DEV-OR5-005
+- P.4: DEV-OR5-006
+- P.5: DEV-OR5-007
+
+**Carry-forward warnings mapped to Phase P**:
+- P.1: QA-W2 (`print_frame` class-arm coverage for `input.client`, `input.user_steer`, `stream.error`, `stream.warning`)
+- P.1: QA-W3 (`elicitation.request` split handling: `request_user_input` vs `elicitation_request`)
+- P.2: QA-010 (`AdaptedWatchLine` applicability field parity carry-forward)
+- P.3: QA-004 (below-threshold boundary coverage for `unknown_summary()`)
+- P.4: QA-003 (unit tests for `StreamErrorProxy`/`StreamErrorChild`/`StreamErrorUpstream`/`StreamErrorFatal` render variants)
 
 ---
 
@@ -727,15 +756,20 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **O** | O.1 | Attach command + stream/control wiring | COMPLETE | [#223](https://github.com/randlee/agent-team-mail/pull/223) |
 | **O** | O.2 | Renderer/runtime parity in attached mode | COMPLETE | [#224](https://github.com/randlee/agent-team-mail/pull/224) |
 | **O** | O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | COMPLETE | [#225](https://github.com/randlee/agent-team-mail/pull/225) |
-| **O-R** | O-R.1 | Structured renderer foundation + applicability contract alignment | PLANNED | — |
-| **O-R** | O-R.2 | Required event coverage expansion + unflattened class rendering | PLANNED | — |
-| **O-R** | O-R.3 | Approval/elicitation interaction parity + correlated response routing | PLANNED | — |
-| **O-R** | O-R.4 | Diff + markdown + reasoning render parity hardening | PLANNED | — |
-| **O-R** | O-R.5 | Error/replay/telemetry/session hardening closure | PLANNED | — |
+| **O-R** | O-R.1 | Structured renderer foundation + applicability contract alignment | COMPLETE | [#232](https://github.com/randlee/agent-team-mail/pull/232) |
+| **O-R** | O-R.2 | Required event coverage expansion + unflattened class rendering | COMPLETE | [#233](https://github.com/randlee/agent-team-mail/pull/233) |
+| **O-R** | O-R.3 | Approval/elicitation interaction parity + correlated response routing | COMPLETE | [#234](https://github.com/randlee/agent-team-mail/pull/234) |
+| **O-R** | O-R.4 | Diff + markdown + reasoning render parity hardening | COMPLETE | [#235](https://github.com/randlee/agent-team-mail/pull/235) |
+| **O-R** | O-R.5 | Error/replay/telemetry/session hardening closure | COMPLETE | [#236](https://github.com/randlee/agent-team-mail/pull/236), [#237](https://github.com/randlee/agent-team-mail/pull/237) |
+| **P** | P.1 | Attach error-source + fatal reconnect parity | PLANNED | — |
+| **P** | P.2 | Attach replay boundary + checkpoint continuity | PLANNED | — |
+| **P** | P.3 | Attach unsupported-event summary flush parity | PLANNED | — |
+| **P** | P.4 | Attach stdin sanitization hardening | PLANNED | — |
+| **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | PLANNED | — |
 
-**Completed**: 94+ sprints across 20 phases (CI green)
+**Completed**: 99+ sprints across 21 phases (CI green)
 **Current version**: v0.20.0
-**Next**: Phase O-R renderer parity sprints
+**Next**: Phase P attach-path hardening closure
 
 ---
 
@@ -758,8 +792,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Phase G | [#178](https://github.com/randlee/agent-team-mail/pull/178) | Merged |
 | Phase L | [#199](https://github.com/randlee/agent-team-mail/pull/199) | Merged |
 | Phase M | [#214](https://github.com/randlee/agent-team-mail/pull/214) | Merged |
-| Phase N | [#221](https://github.com/randlee/agent-team-mail/pull/221) | Pending |
-| Phase O | — | In Progress |
+| Phase N | [#221](https://github.com/randlee/agent-team-mail/pull/221) | Merged |
+| Phase O-R | [#238](https://github.com/randlee/agent-team-mail/pull/238) | Merged |
 
 ---
 
@@ -834,6 +868,6 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 
 ---
 
-**Document Version**: 0.3
-**Last Updated**: 2026-02-23
+**Document Version**: 0.5
+**Last Updated**: 2026-02-25
 **Maintained By**: Claude (ARCH-ATM)
