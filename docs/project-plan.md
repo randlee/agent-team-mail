@@ -544,15 +544,15 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.3 Phase O: Attached CLI Parity — IN PROGRESS
+## 17.3 Phase O: Attached CLI Parity — COMPLETE
 
 **Goal**: Deliver an `atm-agent-mcp attach <agent-id>` terminal mode with Codex CLI parity for output and interaction semantics while preserving ATM source attribution and daemon boundaries.
 
-| Sprint | Name | Depends On | Status |
-|--------|------|------------|--------|
-| O.1 | Attach command + stream/control wiring | M.7 | IN REVIEW (PR #223) |
-| O.2 | Renderer/runtime parity in attached mode | O.1 | IN PROGRESS (PR #224) |
-| O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | O.2 | PLANNED |
+| Sprint | Name | Depends On | Status | PR |
+|--------|------|------------|--------|----|
+| O.1 | Attach command + stream/control wiring | M.7 | COMPLETE | [#223](https://github.com/randlee/agent-team-mail/pull/223) |
+| O.2 | Renderer/runtime parity in attached mode | O.1 | COMPLETE | [#224](https://github.com/randlee/agent-team-mail/pull/224) |
+| O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | O.2 | COMPLETE | [#225](https://github.com/randlee/agent-team-mail/pull/225) |
 
 **Scope**:
 - Add `attach <agent-id>` as an interactive terminal entrypoint bound to one active session.
@@ -564,6 +564,34 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - `docs/atm-agent-mcp/requirements.md` (FR-13.9, FR-23, Phase O sprint contract)
 - `docs/atm-agent-mcp/live-stream-and-log-viewing.md` (watch and attached parity planning alignment)
 - `docs/atm-agent-mcp/phase-o-event-applicability-matrix.md` (explicit event class scope for O.1/O.2/O.3)
+
+---
+
+## 17.4 Phase O-R: Attach Renderer Parity Closure — PLANNED
+
+**Goal**: Close the remaining attached-renderer parity gaps identified in post-Phase O review, with explicit deliverables and CI-verifiable acceptance criteria.
+
+| Sprint | Name | Depends On | Size | Status |
+|--------|------|------------|------|--------|
+| O-R.1 | Structured attach renderer (replace generic `[class][source_kind]` output) | O.3 | M | PLANNED |
+| O-R.2 | Dedicated render paths for required classes (approval/elicitation/tool/turn/file-edit) | O-R.1 | M | PLANNED |
+| O-R.3 | File-edit diff rendering parity (`patch_apply*` / `turn_diff`, red/green semantics) | O-R.2 | L | PLANNED |
+| O-R.4 | Envelope applicability contract fix (`applicability` emitted + fixture alignment) | O-R.1 | S | PLANNED |
+
+**Deliverables and acceptance criteria**:
+- O-R.1 deliverables: typed attached renderer layer for required classes; removal of generic-only render path for required classes.
+- O-R.1 acceptance: no required event class is displayed only as `[class][source_kind] <text>` in normal attach mode.
+- O-R.2 deliverables: class-specific rendering functions for `approval`, `elicitation.request`, `tool.exec`, `turn.lifecycle`, and `file.edit`.
+- O-R.2 acceptance: golden fixtures assert class-specific output tokens for each required class and pass in CI.
+- O-R.3 deliverables: add/remove hunk rendering for `patch_apply_begin`/`patch_apply_end`/`turn_diff` with Codex-equivalent red/green semantics.
+- O-R.3 acceptance: parity fixtures include diff scenarios and verify stable output ordering/format in attach mode.
+- O-R.4 deliverables: attach envelope includes `applicability` from event matrix mapping; fixtures updated to assert required/degraded/out_of_scope classification.
+- O-R.4 acceptance: contract tests verify emitted envelope schema and applicability values for representative event types.
+
+**References**:
+- `docs/atm-agent-mcp/requirements.md` (FR-23.12 through FR-23.15)
+- `docs/atm-agent-mcp/codex-cli-atm-tui-render-gap-analysis.md` (current-state evidence and remediation map)
+- `docs/atm-agent-mcp/phase-o-event-applicability-matrix.md` (required/degraded/out_of_scope policy)
 
 ---
 
@@ -686,13 +714,17 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **N** | N.1 | Hook test harness + process_id logging | COMPLETE | [#216](https://github.com/randlee/agent-team-mail/pull/216) |
 | **N** | N.2 | PID-based identity correlation + `atm register` | COMPLETE | [#217](https://github.com/randlee/agent-team-mail/pull/217) |
 | **N** | N.2-fix | Identity contract compliance fixes + `--as` flag | COMPLETE | [#218](https://github.com/randlee/agent-team-mail/pull/218) |
-| **O** | O.1 | Attach command + stream/control wiring | IN REVIEW | [#223](https://github.com/randlee/agent-team-mail/pull/223) |
-| **O** | O.2 | Renderer/runtime parity in attached mode | IN PROGRESS | [#224](https://github.com/randlee/agent-team-mail/pull/224) |
-| **O** | O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | PLANNED | — |
+| **O** | O.1 | Attach command + stream/control wiring | COMPLETE | [#223](https://github.com/randlee/agent-team-mail/pull/223) |
+| **O** | O.2 | Renderer/runtime parity in attached mode | COMPLETE | [#224](https://github.com/randlee/agent-team-mail/pull/224) |
+| **O** | O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | COMPLETE | [#225](https://github.com/randlee/agent-team-mail/pull/225) |
+| **O-R** | O-R.1 | Structured attach renderer (replace generic output) | PLANNED | — |
+| **O-R** | O-R.2 | Dedicated render paths for required classes | PLANNED | — |
+| **O-R** | O-R.3 | File-edit diff rendering parity | PLANNED | — |
+| **O-R** | O-R.4 | Envelope applicability contract fix | PLANNED | — |
 
-**Completed**: 91+ sprints across 20 phases (CI green)
+**Completed**: 94+ sprints across 20 phases (CI green)
 **Current version**: v0.18.0
-**Next**: Phase O completion (O.1 QA closure + O.2/O.3 execution)
+**Next**: Phase O-R renderer parity closure planning/execution
 
 ---
 

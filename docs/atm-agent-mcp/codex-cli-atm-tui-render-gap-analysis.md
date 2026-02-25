@@ -1,6 +1,6 @@
-# Codex CLI vs ATM TUI Render Gap Analysis (Phase O Planning)
+# Codex CLI vs ATM TUI Render Gap Analysis (Attached Mode)
 
-Date: 2026-02-24  
+Date: 2026-02-25  
 Owner: `arch-ctm`  
 Scope: visual/rendered data parity for attached CLI mode (`atm-agent-mcp attach <agent-id>`) and current watch-mode baseline
 
@@ -85,3 +85,54 @@ These are required additions for attached CLI parity planning:
 - `O.1`: attach stream/control wiring + typed render-event envelope.
 - `O.2`: renderer parity expansion (including diff/tool lifecycle and layout-aligned presentation); highest complexity/risk sprint.
 - `O.3`: control-path parity (`approval`, `request_user_input`, `interrupt/cancel`, fault state fidelity) plus golden fixture completion and hardening closure via the existing M.7 parity harness.
+
+## 6. Current-State Audit (2026-02-25)
+
+The following four gaps remain as explicit follow-up planning items for attached mode:
+
+### Gap 1: Structured attach renderer not implemented (generic output path still dominant)
+
+- Current behavior: most events are rendered via one generic formatter as `[class][source_kind] <text-or-event-type>`.
+- Evidence:
+  - `crates/atm-agent-mcp/src/commands/attach.rs:403` (`print_frame` entrypoint)
+  - `crates/atm-agent-mcp/src/commands/attach.rs:415` (generic `println!` path)
+  - `crates/atm-agent-mcp/src/commands/attach.rs:410` (only `input.atm_mail` special-cased)
+- Impact: required classes do not get Codex-like structured presentation.
+- Planned remediation sprint: `O-R.1` (size `M`).
+
+### Gap 2: Required classes are classified but flattened (no dedicated render paths)
+
+- Current behavior: classification maps required classes (`approval`, `elicitation.request`, `tool.exec`, `turn.lifecycle`, `file.edit`) but output still flows through shared generic formatter.
+- Evidence:
+  - `crates/atm-agent-mcp/src/commands/attach.rs:501` (`classify_event_class`)
+  - `crates/atm-agent-mcp/src/commands/attach.rs:509` to `:533` (required-class mapping)
+  - `crates/atm-agent-mcp/src/commands/attach.rs:415` (shared generic rendering sink)
+- Impact: class-specific semantics are collapsed; parity assertions cannot validate per-class UX.
+- Planned remediation sprint: `O-R.2` (size `M`).
+
+### Gap 3: File-edit diff rendering parity missing in attach path
+
+- Current behavior: file-edit events are mapped (`patch_apply_*`, `turn_diff`, `file_change`) but not rendered with red/green diff semantics.
+- Evidence:
+  - `crates/atm-agent-mcp/src/commands/attach.rs:529` (`file.edit` classification)
+  - `crates/atm-agent-mcp/src/commands/attach.rs:415` (no diff-specific renderer in output path)
+- Impact: FR-23.9 parity expectation is only partially satisfied in attached CLI UX.
+- Planned remediation sprint: `O-R.3` (size `L`).
+
+### Gap 4: Applicability contract drift (fixture expects field, envelope omits it)
+
+- Current behavior: attach envelope schema does not include `applicability`.
+- Evidence:
+  - `crates/atm-agent-mcp/src/commands/attach.rs:45` to `:59` (`AttachedRenderEnvelope` fields)
+  - `crates/atm-agent-mcp/tests/fixtures/parity/attach/class-map.expected.jsonl:1` to `:10` (fixture expects `applicability`)
+- Impact: required/degraded/out_of_scope policy is not represented in attached JSON envelope contract.
+- Planned remediation sprint: `O-R.4` (size `S`).
+
+## 7. Remediation Summary
+
+| Gap | Sprint | Size | Deliverable | Acceptance gate |
+|---|---|---|---|---|
+| Structured renderer replacement | O-R.1 | M | Typed attached renderer for required classes | No required class rendered only via generic fallback |
+| Unflatten required classes | O-R.2 | M | Dedicated render paths for approval/elicitation/tool/turn/file-edit | Fixture coverage for class-specific tokens/ordering |
+| File-edit diff parity | O-R.3 | L | Red/green diff rendering for `patch_apply*` and `turn_diff` | Diff fixtures in CI parity suite pass |
+| Applicability contract fix | O-R.4 | S | `applicability` emitted in attach envelope + fixture alignment | Contract tests assert expected applicability values |
