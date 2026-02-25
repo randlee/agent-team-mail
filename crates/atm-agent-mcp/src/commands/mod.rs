@@ -2,6 +2,7 @@
 //!
 //! Each module corresponds to a top-level subcommand exposed by the CLI.
 
+pub mod attach;
 pub mod config_cmd;
 pub mod serve;
 pub mod sessions;

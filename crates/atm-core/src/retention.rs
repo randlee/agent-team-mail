@@ -455,11 +455,15 @@ mod tests {
             .write_all(b"# Report")
             .unwrap();
 
-        // Wait a bit to ensure files have a measurable age
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Wait long enough that the files have a measurable age on any platform.
+        // Using 500ms sleep with a 200ms threshold gives a comfortable margin
+        // even on filesystems with coarse mtime resolution (e.g. FAT32 2s granularity
+        // on Windows is irrelevant here since we use std::time mtime which is fine-grained).
+        std::thread::sleep(std::time::Duration::from_millis(500));
 
-        // Clean files older than 50ms (both should be deleted)
-        let max_age = Duration::milliseconds(50);
+        // Clean files older than 200ms (both should be deleted).
+        // This threshold is well within the 500ms sleep window above.
+        let max_age = Duration::milliseconds(200);
         let result = super::clean_report_files(&report_dir, &max_age).unwrap();
 
         assert_eq!(result.deleted_count, 2);
@@ -553,11 +557,12 @@ mod tests {
         File::create(&txt_file).unwrap().write_all(b"text").unwrap();
         File::create(&log_file).unwrap().write_all(b"log").unwrap();
 
-        // Wait for files to age
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Wait for files to age (500ms sleep, 200ms threshold — same margin as the
+        // other timing test above).
+        std::thread::sleep(std::time::Duration::from_millis(500));
 
-        // Clean files older than 50ms
-        let max_age = Duration::milliseconds(50);
+        // Clean files older than 200ms
+        let max_age = Duration::milliseconds(200);
         let result = super::clean_report_files(&report_dir, &max_age).unwrap();
 
         // Only json and md should be deleted

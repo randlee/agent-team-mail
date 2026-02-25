@@ -9,6 +9,26 @@
             "command": "python3 .claude/scripts/gate-agent-spawns.py"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/scripts/atm-identity-write.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/scripts/atm-identity-cleanup.py"
+          }
+        ]
       }
     ],
     "TeammateIdle": [

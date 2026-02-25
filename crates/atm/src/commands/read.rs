@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use clap::{ArgAction, Args};
 
 use crate::util::addressing::parse_address;
+use crate::util::hook_identity::read_hook_file_identity;
 use crate::util::settings::get_home_dir;
 use crate::util::state::{get_last_seen, load_seen_state, save_seen_state, update_last_seen};
 
@@ -65,6 +66,10 @@ pub struct ReadArgs {
     /// Wait for new messages (timeout in seconds). Exit 0 if message received, 1 if timeout
     #[arg(long)]
     timeout: Option<u64>,
+
+    /// Override reader identity (default: hook file → ATM_IDENTITY → .atm.toml → reject)
+    #[arg(long = "as", value_name = "NAME")]
+    reader_as: Option<String>,
 }
 
 /// Execute the read command
@@ -78,7 +83,37 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
+
+    // Identity resolution order:
+    // 1. --as <name> wins (explicit reader override)
+    // 2. hook file (when identity is still the default "human" sentinel)
+    // 3. ATM_IDENTITY / .atm.toml (already resolved to non-"human" in config)
+    // 4. Reject — no silent fallback
+    if let Some(ref name) = args.reader_as {
+        config.core.identity = name.clone();
+    } else if config.core.identity == "human" {
+        match read_hook_file_identity() {
+            Ok(Some(identity)) => {
+                config.core.identity = identity;
+            }
+            Ok(None) => {
+                anyhow::bail!(
+                    "Cannot determine reader identity: hook file not found. \
+                     Ensure the atm-identity-write.py PreToolUse hook is configured in \
+                     .claude/settings.json, or use --as <name> to specify identity explicitly. \
+                     Ask the user who you are on this team."
+                );
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "Cannot determine reader identity: hook file validation failed: {e}. \
+                     Use --as <name> to specify identity explicitly. \
+                     Ask the user who you are on this team."
+                );
+            }
+        }
+    }
 
     // Determine agent and team
     let (agent_name, team_name) = if let Some(ref agent_addr) = args.agent {

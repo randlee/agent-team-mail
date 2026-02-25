@@ -1,0 +1,8 @@
+{"line":"[client_prompt|arch-atm|mcp_primary] turn.started","is_turn_boundary":true}
+{"line":"[client_prompt|arch-atm|mcp_primary] item.started","is_turn_boundary":false}
+{"line":"[client_prompt|arch-atm|mcp_primary] item.delta step 1","is_turn_boundary":false}
+{"line":"[client_prompt|arch-atm|mcp_primary] item.completed","is_turn_boundary":false}
+{"line":"[client_prompt|arch-atm|mcp_primary] item.started","is_turn_boundary":false}
+{"line":"[client_prompt|arch-atm|mcp_primary] item.delta step 2","is_turn_boundary":false}
+{"line":"[client_prompt|arch-atm|mcp_primary] item.completed","is_turn_boundary":false}
+{"line":"[client_prompt|arch-atm|mcp_primary] turn.completed status=completed","is_turn_boundary":true}

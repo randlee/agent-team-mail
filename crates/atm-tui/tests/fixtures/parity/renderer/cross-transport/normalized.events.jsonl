@@ -1,0 +1,3 @@
+{"line":"turn.started transport=mcp"}
+{"line":"approval.request approve command"}
+{"line":"turn.completed status=completed transport=app-server"}

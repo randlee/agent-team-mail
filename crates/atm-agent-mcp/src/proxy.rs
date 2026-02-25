@@ -2809,42 +2809,84 @@ fn should_publish_watch_event(event: &Value) -> bool {
         .pointer("/params/type")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    matches!(
-        kind,
+    if kind.is_empty() {
+        return false;
+    }
+    let lower = kind.to_ascii_lowercase();
+
+    if matches!(
+        lower.as_str(),
         "task_started"
             | "task_complete"
+            | "user_message"
             | "approval_prompt"
             | "approval_request"
             | "approval_rejected"
             | "approval_approved"
             | "entered_review_mode"
             | "exited_review_mode"
-            | "item/enteredReviewMode"
-            | "item/exitedReviewMode"
+            | "item/enteredreviewmode"
+            | "item/exitedreviewmode"
             | "agent_message_delta"
             | "agent_message"
             | "agent_message_completed"
             | "agent_message_chunk"
+            | "agent_message_content_delta"
             | "reasoning_content_delta"
             | "agent_reasoning_delta"
+            | "reasoning_raw_content_delta"
             | "reasoning_content"
+            | "terminal_interaction"
             | "exec_command_output_delta"
             | "exec_command_started"
             | "exec_command_completed"
             | "exec_command_error"
+            | "request_user_input"
+            | "elicitation_request"
+            | "patch_apply_begin"
+            | "patch_apply_end"
+            | "turn_diff"
+            | "file_change"
             | "item_started"
             | "item_completed"
             | "thread_status_changed"
             | "turn_started"
             | "turn_completed"
+            | "turn_aborted"
             | "turn_interrupted"
             | "turn_cancelled"
             | "cancelled"
             | "interrupt"
             | "idle"
             | "done"
+            | "shutdown_complete"
+            | "session_configured"
+            | "thread_name_updated"
+            | "token_count"
+            | "model_reroute"
+            | "context_compacted"
+            | "thread_rolled_back"
+            | "undo_started"
+            | "undo_completed"
+            | "background_event"
+            | "warning"
+            | "error"
+            | "deprecation_notice"
+            | "plan_update"
+            | "plan_delta"
+            | "mcp_list_tools_response"
+            | "remote_skill_downloaded"
+            | "skills_update_available"
             | "stream_error"
-    )
+    ) {
+        return true;
+    }
+
+    lower.starts_with("mcp_tool_call_")
+        || lower.starts_with("web_search_")
+        || lower.starts_with("realtime_conversation_")
+        || lower.starts_with("collab_")
+        || lower.starts_with("list_")
 }
 
 fn extract_stream_error_event(
@@ -3991,6 +4033,7 @@ mod tests {
         let canonical_kinds = vec![
             "task_started",
             "task_complete",
+            "user_message",
             "approval_prompt",
             "approval_request",
             "approval_rejected",
@@ -4003,30 +4046,73 @@ mod tests {
             "agent_message",
             "agent_message_completed",
             "agent_message_chunk",
+            "agent_message_content_delta",
             "reasoning_content_delta",
             "agent_reasoning_delta",
+            "reasoning_raw_content_delta",
             "reasoning_content",
             "exec_command_output_delta",
             "exec_command_started",
             "exec_command_completed",
             "exec_command_error",
+            "terminal_interaction",
+            "request_user_input",
+            "elicitation_request",
+            "patch_apply_begin",
+            "patch_apply_end",
+            "turn_diff",
+            "file_change",
             "item_started",
             "item_completed",
             "thread_status_changed",
             "turn_started",
             "turn_completed",
+            "turn_aborted",
             "turn_interrupted",
             "turn_cancelled",
             "cancelled",
             "interrupt",
             "idle",
             "done",
+            "shutdown_complete",
+            "session_configured",
+            "thread_name_updated",
+            "token_count",
+            "model_reroute",
+            "context_compacted",
+            "thread_rolled_back",
+            "undo_started",
+            "undo_completed",
+            "background_event",
+            "warning",
+            "error",
+            "deprecation_notice",
+            "plan_update",
+            "plan_delta",
+            "mcp_list_tools_response",
+            "remote_skill_downloaded",
+            "skills_update_available",
             "stream_error",
         ];
         for kind in canonical_kinds {
             let event = json!({"params":{"type":kind}});
             assert!(should_publish_watch_event(&event), "kind={kind}");
         }
+        assert!(should_publish_watch_event(
+            &json!({"params":{"type":"mcp_tool_call_begin"}})
+        ));
+        assert!(should_publish_watch_event(
+            &json!({"params":{"type":"web_search_end"}})
+        ));
+        assert!(should_publish_watch_event(
+            &json!({"params":{"type":"realtime_conversation_started"}})
+        ));
+        assert!(should_publish_watch_event(
+            &json!({"params":{"type":"collab_agent_message"}})
+        ));
+        assert!(should_publish_watch_event(
+            &json!({"params":{"type":"list_project_templates"}})
+        ));
         assert!(!should_publish_watch_event(
             &json!({"params":{"type":"unknown_new_event_kind"}})
         ));

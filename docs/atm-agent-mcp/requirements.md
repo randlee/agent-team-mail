@@ -214,6 +214,7 @@ Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-view
 - **FR-13.6**: `atm-agent-mcp summary <agent-id>` — display saved summary.
 - **FR-13.7**: High-level flags SHOULD be supported for common profiles: `--fast`, `--subagents`, and `--readonly`/`--explore`.
 - **FR-13.8**: Downstream execution mode is config-driven (`transport = "mcp" | "cli-json" | "app-server"`). CLI MAY add `--transport` later.
+- **FR-13.9**: `atm-agent-mcp attach <agent-id>` MUST be supported for an interactive terminal mode that subscribes to one live session stream and forwards user controls to that same session.
 
 ### FR-14: Request Timeouts
 
@@ -321,6 +322,36 @@ Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-view
 - **FR-22.2**: Watch stream events delivered to `atm-tui` MUST preserve source metadata so UI can render origin badges/labels.
 - **FR-22.3**: Structured logs for turn/request lifecycle MUST include `source.kind` and `source.actor` fields where available.
 
+### FR-23: Attached Terminal Parity (Codex CLI Baseline)
+
+> **Design Decision**: ATM must provide an attached terminal mode that matches Codex CLI output and interaction behavior for a selected `agent_id`, while preserving ATM source attribution metadata.
+
+- **FR-23.1**: `attach <agent-id>` MUST render core flows at Codex-CLI parity: prompt lifecycle, streaming tool output, approval/reject, interrupt/cancel, errors/fatal, and turn completion.
+- **FR-23.2**: Attached mode MUST accept user input/steer actions and route them through the MCP session bound to the attached `agent_id`.
+- **FR-23.3**: Attached mode MUST preserve `source.kind` attribution (`client_prompt`, `atm_mail`, `user_steer`) without degrading Codex-equivalent formatting/ordering.
+- **FR-23.4**: Attach/detach/re-attach MUST preserve continuity via bounded replay, with no out-of-order render or duplicate replay artifacts.
+- **FR-23.5**: Transport/session failures in attached mode MUST surface explicit error states (proxy vs child vs upstream MCP), never silent stalls.
+- **FR-23.6**: Any intentional output/behavior deviation from Codex CLI MUST be captured in a maintained deviation log with rationale and approval.
+- **FR-23.7**: Attached mode MUST render MCP client/user input as a distinct input class (not merged with assistant/tool output), with stable styling semantics.
+- **FR-23.8**: Attached mode MUST render ATM mail input as `sender@team <short-message>`, where `<short-message>` is clamped to at most 3 visible lines with overflow ellipsis.
+- **FR-23.9**: Attached mode MUST render file-edit/patch diffs with Codex-equivalent red/green semantics for add/remove hunks.
+- **FR-23.10**: Attached-mode event handling MUST follow an explicit applicability matrix (`Required` | `Degraded` | `Out-of-Scope`) maintained at `docs/atm-agent-mcp/phase-o-event-applicability-matrix.md`.
+- **FR-23.11**: `Degraded` and `Out-of-Scope` classes MUST never be silently dropped; they MUST produce explicit fallback rendering or structured `unsupported/unknown` telemetry with counters.
+- **FR-23.12**: Attached mode MUST use a structured renderer for `Required` event classes; generic fallback output (`[class][source_kind] <text-or-type>`) is permitted only for `Degraded` and `Out-of-Scope` classes.
+- **FR-23.13**: Attached mode MUST provide dedicated render paths for required classes `approval`, `elicitation.request`, `tool.exec`, `turn.lifecycle`, and `file.edit`; class output MUST not be flattened into one shared formatter.
+- **FR-23.14**: File-edit parity MUST include explicit add/remove hunk presentation for `patch_apply_begin`/`patch_apply_end`/`turn_diff` using Codex-equivalent red/green semantics and stable line ordering.
+- **FR-23.15**: Attached JSON envelope output MUST include event applicability classification (`required` | `degraded` | `out_of_scope`) derived from the maintained applicability matrix, and parity fixtures MUST assert emitted applicability values.
+- **FR-23.16**: Attached mode MUST preserve distinct event handling for `request_user_input`, `elicitation_request`, `exec_approval_request`, and `apply_patch_approval_request`; these events MUST NOT be collapsed into one generic approval class.
+- **FR-23.17**: Attached mode MUST implement approval response routing through the proxy elicitation/response channel with correlation IDs; approval decisions MUST NOT be delivered only as uncorrelated stdin text.
+- **FR-23.18**: Attached mode MUST cover required Codex parity event classes including `mcp_tool_call_begin/end`, `web_search_begin/end`, `plan_update/plan_delta`, `session_configured`, `token_count`, and `exec_command_begin`.
+- **FR-23.19**: Attached reasoning rendering MUST preserve section-break semantics where available (for example, reasoning section boundaries vs plain delta text).
+- **FR-23.20**: Attached mode MUST surface error-source classification (`proxy`, `child`, `upstream`) in both human-readable output and JSON envelope for stream/control failures.
+- **FR-23.21**: Replay behavior MUST be turn-boundary-aware and MUST surface truncation indicators when replay context is clipped by replay limits.
+- **FR-23.22**: Attached mode MUST emit unsupported-event telemetry summaries at detach/session end (counts by event type/class) in addition to per-event fallback markers.
+- **FR-23.23**: Attached mode MUST sanitize operator stdin control payloads before forwarding to control channels to prevent malformed control injection.
+- **FR-23.24**: Re-attach replay continuity SHOULD persist a session-scoped checkpoint marker (last replayed position/turn marker) to reduce duplicate replay after process restarts.
+- **FR-23.25**: Attached help/UX contract MUST explicitly document `Ctrl-C`/SIGINT behavior and match implemented detach/interrupt semantics.
+
 ---
 
 ## 4. Non-Functional Requirements
@@ -342,6 +373,7 @@ Live stream + log-viewing addendum: `docs/atm-agent-mcp/live-stream-and-log-view
 - MUST work with Codex CLI v0.103+ MCP server protocol.
 - MUST work on macOS, Linux, and Windows. Codex CLI supports Windows; `atm-agent-mcp` MUST compile and pass tests on all three platforms. CI MUST include Windows in the test matrix.
 - MUST integrate with existing `atm-core` config and IO primitives.
+- Attached terminal parity MUST be re-verified when Codex CLI baseline version changes.
 
 ### NFR-5: Observability
 - Structured logging via `tracing` crate.
@@ -478,6 +510,14 @@ Notes:
 |--------|-------------|--------------|
 | C.1 | **Conformance testing** — MCP protocol conformance test suite (initialize, capabilities, notifications, cancellation, streaming), proxy latency benchmarks, registry stress tests | Phase B |
 | C.2 | **Packaging + polish** — `atm-agent-mcp` added to release workflow, Homebrew formula update, documentation | C.1 |
+
+### Phase O: Attached CLI Parity (3 sprints)
+
+| Sprint | Deliverable | Dependencies |
+|--------|-------------|--------------|
+| O.1 | **Attach command + wiring** — implement `attach <agent-id>`, bind one live stream, and forward user controls to the bound session | M.7 |
+| O.2 | **Renderer/runtime parity** — align terminal rendering/event grouping with Codex CLI baseline for core flows | O.1 |
+| O.3 | **Control-path parity** — approval/reject and interrupt/cancel behavior parity in attached mode, including fault surfacing | O.2 |
 
 ### Test Strategy
 

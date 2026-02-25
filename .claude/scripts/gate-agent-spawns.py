@@ -31,6 +31,7 @@ Exit codes: 0 = Allow, 2 = Block
 """
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -86,10 +87,11 @@ def main() -> int:
         # Can't parse input - allow by default (fail open)
         return 0
 
-    # Log for debugging
+    # Log for debugging (include process_id for diagnostics)
     try:
+        log_entry = {**data, "process_id": os.getpid()}
         with DEBUG_LOG.open("a") as f:
-            f.write(json.dumps(data) + "\n")
+            f.write(json.dumps(log_entry) + "\n")
     except Exception:
         pass
 

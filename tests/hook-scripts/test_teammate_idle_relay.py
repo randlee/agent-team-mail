@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 import sys
 import tempfile
 from io import StringIO
@@ -107,6 +108,23 @@ class TestTeammateIdleRelayFileWrite(unittest.TestCase):
             finally:
                 os.chdir(orig_dir)
 
+    def test_event_contains_process_id(self):
+        """Event dict includes process_id field."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
+                rc = self._run(_make_payload(), atm_home=atm_home)
+                self.assertEqual(rc, 0)
+                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                event = json.loads(events_file.read_text().strip().splitlines()[0])
+                self.assertIn("process_id", event)
+                self.assertIsInstance(event["process_id"], int)
+            finally:
+                os.chdir(orig_dir)
+
     def test_exit_zero_on_bad_stdin(self):
         """Malformed stdin → exits 0 (fail-open), even with .atm.toml present."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -145,6 +163,8 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
         sock_dir.mkdir(parents=True, exist_ok=True)
         if socket_file_exists:
             (sock_dir / "atm-daemon.sock").touch()
+            if platform.system() == "Windows":
+                (sock_dir / "atm-daemon.port").write_text("12345")
 
         mock_sock = MagicMock()
         mock_sock.__enter__ = MagicMock(return_value=mock_sock)
@@ -209,6 +229,22 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
             r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
         )
 
+    def test_socket_payload_contains_process_id(self):
+        """Socket payload includes process_id field."""
+        toml = '[core]\ndefault_team = "atm-dev"\nidentity = "team-lead"\n'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            rc, calls = self._run_with_mock_socket(
+                _make_payload(agent="arch-ctm", team="atm-dev", session_id="sess-pid"),
+                atm_home=atm_home,
+                toml_content=toml,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        request = json.loads(calls[0].decode().strip())
+        self.assertIn("process_id", request["payload"])
+        self.assertIsInstance(request["payload"]["process_id"], int)
+
     def test_socket_error_file_write_still_succeeds(self):
         """Socket error must not prevent the file write from succeeding."""
         toml = '[core]\ndefault_team = "atm-dev"\nidentity = "team-lead"\n'
@@ -252,6 +288,67 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [], "No connect attempt when socket file is absent")
+
+
+class TestTeammateIdleRelayRealPayload(unittest.TestCase):
+    """Tests using real Claude Code TeammateIdle payload format."""
+
+    def _run(self, stdin_data: dict, *, atm_home: Path) -> int:
+        stdin_text = json.dumps(stdin_data)
+        with patch("sys.stdin", StringIO(stdin_text)), \
+             patch.dict(os.environ, {"ATM_HOME": str(atm_home)}):
+            mod = _load_module("teammate_idle_relay", _RELAY_PATH)
+            return mod.main()
+
+    def test_teammate_name_field_resolves_agent(self):
+        """Real Claude Code payload uses 'teammate_name' not 'name' — agent must resolve."""
+        real_payload = {
+            "session_id": "cc653838-57ee-4e48-89f2-a79380ce4d76",
+            "transcript_path": "/some/path.jsonl",
+            "cwd": "/some/cwd",
+            "permission_mode": "bypassPermissions",
+            "hook_event_name": "TeammateIdle",
+            "teammate_name": "sm-e-7",
+            "team_name": "atm-dev",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
+                rc = self._run(real_payload, atm_home=atm_home)
+                self.assertEqual(rc, 0)
+                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                self.assertTrue(events_file.exists(), "Event should be written for real payload")
+                event = json.loads(events_file.read_text().strip())
+                self.assertEqual(event["agent"], "sm-e-7")
+                self.assertEqual(event["team"], "atm-dev")
+            finally:
+                os.chdir(orig_dir)
+
+    def test_teammate_name_takes_priority_over_name(self):
+        """teammate_name should take priority over name field."""
+        payload = {
+            "teammate_name": "real-agent",
+            "name": "fallback-agent",
+            "team_name": "atm-dev",
+            "session_id": "s1",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            atm_home = Path(tmpdir)
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
+                rc = self._run(payload, atm_home=atm_home)
+                self.assertEqual(rc, 0)
+                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                event = json.loads(events_file.read_text().strip())
+                self.assertEqual(event["agent"], "real-agent",
+                                 "teammate_name should be preferred over name")
+            finally:
+                os.chdir(orig_dir)
 
 
 class TestTeammateIdleRelayGuards(unittest.TestCase):
