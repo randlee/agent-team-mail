@@ -349,7 +349,6 @@ mod tests {
     use super::*;
     use crate::logging_event::{LogEventV1, new_log_event};
     use chrono::{Duration as ChronoDuration, Utc};
-    use serial_test::serial;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 

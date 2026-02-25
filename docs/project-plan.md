@@ -691,8 +691,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **O** | O.3 | Control-path parity (approval/reject, interrupt/cancel, fault states) | PLANNED | — |
 
 **Completed**: 91+ sprints across 20 phases (CI green)
-**Current version**: v0.18.0
-**Next**: Phase O completion (O.1 QA closure + O.2/O.3 execution)
+**Current version**: v0.19.0
+**Next**: Phase O-R renderer parity sprints
 
 ---
 
