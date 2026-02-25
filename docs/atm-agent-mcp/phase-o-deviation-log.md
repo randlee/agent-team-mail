@@ -47,18 +47,24 @@ Owner: `arch-ctm`
 ## O-R.5
 
 ### DEV-OR5-001: attach path error_source classification deferred
-- Requirement context: FR-23.21 error classification parity.
+- Requirement context: FR-23.20 error classification parity.
 - Current behavior: O-R.5 implements `error_source` classification (`proxy`/`child`/`upstream`) in the TUI watch path; attach CLI continues generic `stream.error` formatting.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: O-R.5 implementation scope targeted the TUI watch pipeline first; attach-path parity is deferred follow-up.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/242
 
 ### DEV-OR5-002: attach path fatal reconnect hint deferred
-- Requirement context: FR-23.21 fatal-path operator guidance.
+- Requirement context: FR-23.20 fatal-path operator guidance.
 - Current behavior: TUI watch rendering appends fatal reconnect guidance; attach CLI does not yet emit the same hint text.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: bounded-scope hardening in O-R.5 prioritized live TUI operator surface.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/242
 
 ### DEV-OR5-003: attach replay remains fixed-window clip
 - Requirement context: FR-23.21 turn-boundary-aware replay behavior.
