@@ -384,10 +384,12 @@ fn update_pending_elicitation_id(current: Option<String>, frame: &Value) -> Opti
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     match kind {
-        "exec_approval_request" | "approval_prompt" | "approval_request"
-        | "apply_patch_approval_request" | "request_user_input" | "elicitation_request" => {
-            extract_elicitation_id(event).or(current)
-        }
+        "exec_approval_request"
+        | "approval_prompt"
+        | "approval_request"
+        | "apply_patch_approval_request"
+        | "request_user_input"
+        | "elicitation_request" => extract_elicitation_id(event).or(current),
         "approval_approved" | "approval_rejected" | "approval_resolved" => None,
         _ => current,
     }
@@ -397,7 +399,11 @@ fn extract_elicitation_id(event: &Value) -> Option<String> {
     event
         .pointer("/params/elicitation_id")
         .and_then(|v| v.as_str())
-        .or_else(|| event.pointer("/params/approval_id").and_then(|v| v.as_str()))
+        .or_else(|| {
+            event
+                .pointer("/params/approval_id")
+                .and_then(|v| v.as_str())
+        })
         .or_else(|| event.pointer("/params/request_id").and_then(|v| v.as_str()))
         .or_else(|| event.pointer("/params/id").and_then(|v| v.as_str()))
         .filter(|v| !v.trim().is_empty())
@@ -478,7 +484,17 @@ fn save_attach_checkpoint_pos(team: &str, agent_id: &str, pos: u64) -> anyhow::R
         pos,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
-    std::fs::write(path, serde_json::to_string_pretty(&checkpoint)?)?;
+    let data = serde_json::to_string_pretty(&checkpoint)?;
+    let temp_path = path.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::write(&temp_path, data)?;
+    if let Err(err) = std::fs::rename(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
     Ok(())
 }
 
@@ -575,11 +591,15 @@ async fn read_watch_replay_for_attach(
             replay.push(frame);
         }
     }
-    let (replay, truncated) = trim_replay_to_recent_turn_boundary(replay, WATCH_ATTACH_REPLAY_MAX_FRAMES);
+    let (replay, truncated) =
+        trim_replay_to_recent_turn_boundary(replay, WATCH_ATTACH_REPLAY_MAX_FRAMES);
     Ok((replay, file_len, truncated))
 }
 
-fn trim_replay_to_recent_turn_boundary(replay: Vec<Value>, max_frames: usize) -> (Vec<Value>, bool) {
+fn trim_replay_to_recent_turn_boundary(
+    replay: Vec<Value>,
+    max_frames: usize,
+) -> (Vec<Value>, bool) {
     if replay.len() <= max_frames {
         return (replay, false);
     }
@@ -735,11 +755,20 @@ fn print_file_edit_lines(payload: &str) {
     for line in normalized.lines() {
         printed = true;
         if line.starts_with('+') && !line.starts_with("+++") {
-            println!("file-edit: [+] {}", line.trim_start_matches('+').trim_start());
+            println!(
+                "file-edit: [+] {}",
+                line.trim_start_matches('+').trim_start()
+            );
         } else if line.starts_with('-') && !line.starts_with("---") {
-            println!("file-edit: [-] {}", line.trim_start_matches('-').trim_start());
+            println!(
+                "file-edit: [-] {}",
+                line.trim_start_matches('-').trim_start()
+            );
         } else if line.starts_with("@@") {
-            println!("file-edit: [@@] {}", line.trim_start_matches("@@").trim_start());
+            println!(
+                "file-edit: [@@] {}",
+                line.trim_start_matches("@@").trim_start()
+            );
         } else {
             println!("file-edit: {line}");
         }
@@ -921,7 +950,11 @@ fn stream_error_source(event: &Value) -> &'static str {
     let source = event
         .pointer("/params/error_source")
         .and_then(|v| v.as_str())
-        .or_else(|| event.pointer("/params/errorSource").and_then(|v| v.as_str()))
+        .or_else(|| {
+            event
+                .pointer("/params/errorSource")
+                .and_then(|v| v.as_str())
+        })
         .or_else(|| event.pointer("/params/source").and_then(|v| v.as_str()))
         .unwrap_or("proxy");
     match source {
@@ -1182,7 +1215,13 @@ mod tests {
     #[test]
     fn classify_atm_mail_has_priority() {
         assert_eq!(
-            classify_event_class("agent_message_delta", "atm_mail", &serde_json::json!({}), "").0,
+            classify_event_class(
+                "agent_message_delta",
+                "atm_mail",
+                &serde_json::json!({}),
+                ""
+            )
+            .0,
             "input.atm_mail"
         );
     }
@@ -1239,8 +1278,10 @@ mod tests {
     #[test]
     fn classify_stream_error_source_and_fatal_variants() {
         let child = serde_json::json!({"params":{"error_source":"child","message":"oops"}});
-        let upstream = serde_json::json!({"params":{"errorSource":"upstream_mcp","message":"oops"}});
-        let fatal = serde_json::json!({"params":{"fatal":true,"error_source":"proxy","message":"boom"}});
+        let upstream =
+            serde_json::json!({"params":{"errorSource":"upstream_mcp","message":"oops"}});
+        let fatal =
+            serde_json::json!({"params":{"fatal":true,"error_source":"proxy","message":"boom"}});
         let proxy_default = serde_json::json!({"params":{"message":"oops"}});
 
         assert_eq!(
@@ -1430,7 +1471,9 @@ mod tests {
         assert!(truncated);
         assert_eq!(trimmed.len(), 2);
         assert_eq!(
-            trimmed[0].pointer("/event/params/type").and_then(|v| v.as_str()),
+            trimmed[0]
+                .pointer("/event/params/type")
+                .and_then(|v| v.as_str()),
             Some("turn_completed")
         );
     }
@@ -1451,6 +1494,11 @@ mod tests {
             // SAFETY: test-scoped env mutation under serial test execution.
             unsafe {
                 std::env::set_var("ATM_HOME", home);
+            }
+        } else {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::remove_var("ATM_HOME");
             }
         }
     }
@@ -1516,6 +1564,11 @@ mod tests {
             // SAFETY: test-scoped env mutation under serial test execution.
             unsafe {
                 std::env::set_var("ATM_HOME", home);
+            }
+        } else {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::remove_var("ATM_HOME");
             }
         }
     }
@@ -1601,6 +1654,11 @@ mod tests {
             // SAFETY: test-scoped env mutation under serial test execution.
             unsafe {
                 std::env::set_var("ATM_HOME", home);
+            }
+        } else {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::remove_var("ATM_HOME");
             }
         }
     }
