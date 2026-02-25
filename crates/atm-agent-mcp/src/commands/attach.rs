@@ -220,6 +220,7 @@ fn print_input_contract() {
     println!("  :interrupt      -> interrupt control request");
     println!("  :approve [text] -> correlated elicitation approve");
     println!("  :reject [text]  -> correlated elicitation reject");
+    println!("  Ctrl-C / SIGINT -> exits attach mode (does not send interrupt control)");
     println!("  :help           -> show routing contract");
     println!("  :detach         -> detach and exit");
 }

@@ -606,7 +606,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.5 Phase P: Attach Path Hardening Closure — PLANNED
+## 17.5 Phase P: Attach Path Hardening Closure — IN PROGRESS
 
 **Goal**: Close all approved attach-path deviations carried from O-R so attach-mode behavior matches TUI parity commitments across error classification, replay continuity, telemetry closure, and operator input contract hardening.
 
@@ -614,9 +614,9 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 |--------|------|------------|------|--------|
 | P.1 | Attach error-source + fatal reconnect parity | O-R.5 | M | COMPLETE ([#242](https://github.com/randlee/agent-team-mail/pull/242)) |
 | P.2 | Attach replay boundary + checkpoint continuity | P.1 | M | COMPLETE ([#243](https://github.com/randlee/agent-team-mail/pull/243)) |
-| P.3 | Attach unsupported-event summary flush parity | P.1 | S | PLANNED |
-| P.4 | Attach stdin sanitization hardening | P.1 | M | PLANNED |
-| P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | P.2,P.3,P.4 | S | PLANNED |
+| P.3 | Attach unsupported-event summary flush parity | P.1 | S | COMPLETE ([#244](https://github.com/randlee/agent-team-mail/pull/244)) |
+| P.4 | Attach stdin sanitization hardening | P.1 | M | COMPLETE ([#245](https://github.com/randlee/agent-team-mail/pull/245)) |
+| P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | P.2,P.3,P.4 | S | COMPLETE (this PR) |
 
 **Deviation closure mapping**:
 - P.1: DEV-OR5-001, DEV-OR5-002
@@ -763,9 +763,9 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **O-R** | O-R.5 | Error/replay/telemetry/session hardening closure | COMPLETE | [#236](https://github.com/randlee/agent-team-mail/pull/236), [#237](https://github.com/randlee/agent-team-mail/pull/237) |
 | **P** | P.1 | Attach error-source + fatal reconnect parity | COMPLETE | [#242](https://github.com/randlee/agent-team-mail/pull/242) |
 | **P** | P.2 | Attach replay boundary + checkpoint continuity | COMPLETE | [#243](https://github.com/randlee/agent-team-mail/pull/243) |
-| **P** | P.3 | Attach unsupported-event summary flush parity | PLANNED | — |
-| **P** | P.4 | Attach stdin sanitization hardening | PLANNED | — |
-| **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | PLANNED | — |
+| **P** | P.3 | Attach unsupported-event summary flush parity | COMPLETE | [#244](https://github.com/randlee/agent-team-mail/pull/244) |
+| **P** | P.4 | Attach stdin sanitization hardening | COMPLETE | [#245](https://github.com/randlee/agent-team-mail/pull/245) |
+| **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | COMPLETE | this PR |
 
 **Completed**: 99+ sprints across 21 phases (CI green)
 **Current version**: v0.20.0
