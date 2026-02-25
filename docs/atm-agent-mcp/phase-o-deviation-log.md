@@ -80,6 +80,10 @@ Owner: `arch-ctm`
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: telemetry closure delivered for TUI watch path in O-R.5; attach telemetry flush deferred.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/244
+- validation_status: implemented + validated
 
 ### DEV-OR5-006: attach stdin payload sanitization deferred
 - Requirement context: FR-23.23 stdin input sanitization.
