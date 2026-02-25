@@ -41,7 +41,17 @@ pub async fn write_summary(
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(&path, content).await
+    let tmp_path = path.with_extension(format!(
+        "md.tmp.{}.{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    tokio::fs::write(&tmp_path, content).await?;
+    if let Err(err) = tokio::fs::rename(&tmp_path, &path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// Read a session summary from disk.

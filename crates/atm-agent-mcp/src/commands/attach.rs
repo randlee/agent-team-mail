@@ -1282,6 +1282,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn classify_unknown_event_emits_supported_prefix_and_counter() {
         clear_unsupported_event_counts();
         let (class, count1, applicability1) =
@@ -1300,6 +1301,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn unsupported_summary_below_threshold_has_no_warning_line() {
         clear_unsupported_event_counts();
         for _ in 0..(UNSUPPORTED_WARN_THRESHOLD - 1) {
