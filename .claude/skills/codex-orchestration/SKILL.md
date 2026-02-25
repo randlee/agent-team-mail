@@ -52,9 +52,11 @@ git push -u origin integrate/phase-{P}
 
 Spawn once per phase. The quality-mgr persists across all sprints.
 
+Use the Task tool with `name` parameter to spawn as a tmux teammate:
+
 ```json
 {
-  "subagent_type": "quality-mgr",
+  "subagent_type": "general-purpose",
   "name": "quality-mgr",
   "team_name": "atm-dev",
   "model": "sonnet",
@@ -62,7 +64,18 @@ Spawn once per phase. The quality-mgr persists across all sprints.
 }
 ```
 
-### 4. Send First Sprint Assignment to arch-ctm
+**Tmux teammate launch troubleshooting**: If the pane opens but the Claude process doesn't start, manually launch in the pane with all three required flags:
+
+```bash
+CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 /Users/randlee/.local/share/claude/versions/<VERSION> \
+  --agent-id quality-mgr@atm-dev \
+  --agent-name quality-mgr \
+  --team-name atm-dev
+```
+
+All three flags (`--agent-id`, `--agent-name`, `--team-name`) are required together — omitting any one causes an error.
+
+### 4. Send O.1 Assignment to arch-ctm
 
 ```bash
 atm send arch-ctm "Phase {P} Sprint {P}.1 assignment: {title}
@@ -86,52 +99,35 @@ When complete: commit, push, create PR targeting integrate/phase-{P}, then notif
 
 ```
 Timeline:
-  arch-ctm:     [── S.1 dev ──][push]──fixes──[── S.2 dev ──][push]──fixes──[── S.3 dev ──]
-  team-lead:    assign S.1 ─────────→ create S.2 worktree ──→ assign S.2 ──→ create S.3 ...
-  quality-mgr:              [── QA S.1 ──]            [── QA S.2 ──]           [── QA S.3 ──]
+  arch-ctm:     [── S.1 ──]──fixes──[── S.2 ──]──fixes──[── S.3 ──]
+  quality-mgr:         [── QA S.1 ──]      [── QA S.2 ──]     [── QA S.3 ──]
+  team-lead:    assign S.1 → track → assign S.2 → track → assign S.3 → track
 ```
 
 ### When arch-ctm Completes Sprint S
 
-1. **arch-ctm commits, pushes, creates PR**, and sends completion message via ATM CLI with PR number.
-
-2. **Team-lead creates worktree for S+1** immediately after arch-ctm pushes, based on sprint S branch:
+1. **arch-ctm sends completion message** via ATM CLI with PR number
+2. **Team-lead creates worktree for S+1** based on sprint S branch:
    ```
    /sc-git-worktree --create feature/p{P}-s{N+1}-{slug} feature/p{P}-s{N}-{slug}
    ```
    All worktrees chain: S+1 bases on S, so later sprints include earlier work.
-
-3. **Team-lead assigns QA to quality-mgr** (in parallel) via SendMessage:
+3. **Team-lead assigns QA to quality-mgr** via SendMessage:
    ```
    "Run QA on Sprint {P}.{S}. Worktree: {path}. Sprint deliverables: {summary}.
     Design docs: {list}. PR: #{N}."
    ```
-
 4. **Team-lead checks for outstanding findings** from earlier sprints:
    - If findings exist for S-2 or S-1: send fix assignment to arch-ctm BEFORE S+1 assignment
-   - If no findings: send S+1 assignment immediately on the new worktree
-
+   - If no findings: send S+1 assignment immediately
 5. **arch-ctm addresses fixes first, then starts S+1**
-
-### Worktree Creation Timing
-
-**CRITICAL**: Team-lead creates the next sprint worktree as soon as arch-ctm pushes and reports completion — do NOT wait for QA to finish. This keeps arch-ctm productive:
-
-```
-arch-ctm pushes S.1 → team-lead creates S.2 worktree immediately
-                     → team-lead assigns QA on S.1 (parallel)
-                     → team-lead sends S.2 assignment to arch-ctm
-```
-
-If there are outstanding fix requests, arch-ctm works fixes first on the original sprint worktree, then moves to the new worktree for S+1.
 
 ### When arch-ctm Has Outstanding Findings
 
 Priority order for arch-ctm:
 1. Fix findings on oldest sprint first (S-2 before S-1)
-2. Push fixes to the original sprint branch/PR
-3. After fixes merge to integration branch, **merge integration branch into the active sprint worktree** before continuing
-4. Then proceed to next sprint
+2. Merge fixes forward into later sprint worktrees
+3. Then proceed to next sprint
 
 Fix workflow:
 ```bash
@@ -143,15 +139,13 @@ Fix workflow:
 
 ### Merge Forward Protocol
 
-After fixes merge to `integrate/phase-{P}`, arch-ctm is responsible for merging the integration branch into any active sprint worktree before continuing work:
-
-```bash
-# arch-ctm runs in the active sprint worktree:
-git fetch origin
-git merge origin/integrate/phase-{P}
-```
-
-This ensures later sprints include all fixes from earlier sprints. **arch-ctm owns this merge** — team-lead instructs but does not perform it.
+After fixes merge to `integrate/phase-{P}`:
+- arch-ctm must merge integration branch into any active sprint worktree before continuing:
+  ```bash
+  git fetch origin
+  git merge origin/integrate/phase-{P}
+  ```
+- This ensures later sprints include all fixes from earlier sprints
 
 ## QA Coordination
 
@@ -172,13 +166,6 @@ Re-run QA on Sprint {P}.{S} (post-fix).
 Worktree: {path}
 Fixed findings: {list of QA IDs addressed}
 ```
-
-### quality-mgr Requirements
-
-- **ALWAYS** launch rust-qa-agent and atm-qa-agent as **background agents** (`run_in_background: true`)
-- **NEVER** run agents in foreground (blocks the coordinator)
-- Both agents run in parallel per sprint
-- Report PASS/FAIL with finding IDs to team-lead
 
 ### quality-mgr → team-lead Reports
 
@@ -254,6 +241,3 @@ After all sprints pass QA and merge to integration branch:
 - Do NOT communicate with arch-ctm via SendMessage — use ATM CLI only
 - Do NOT reuse quality-mgr across phases — spawn fresh per phase
 - Do NOT clean up worktrees without user approval
-- Do NOT wait for QA to create the next sprint worktree — create it as soon as arch-ctm pushes
-- Do NOT perform merge-forward yourself — instruct arch-ctm to merge integration branch into his active worktree
-- Do NOT run quality-mgr agents in foreground — always background
