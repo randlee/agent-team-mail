@@ -567,6 +567,9 @@ fn render_markdown_text(payload: &str) -> String {
     if let Some(rest) = trimmed.strip_prefix("- ") {
         return format!("• {rest}");
     }
+    if let Some(rest) = trimmed.strip_prefix("* ") {
+        return format!("• {rest}");
+    }
     payload.to_string()
 }
 
@@ -935,6 +938,7 @@ mod tests {
     fn markdown_render_hints_code_block_and_bullet() {
         assert_eq!(render_markdown_text("```rust"), "[code-block:rust]");
         assert_eq!(render_markdown_text("- item"), "• item");
+        assert_eq!(render_markdown_text("* item"), "• item");
         assert_eq!(render_markdown_text("# heading"), "# heading");
     }
 

@@ -379,6 +379,12 @@ fn parse_stream_line(raw_line: &str) -> ParsedLine {
             body: body.to_string(),
         };
     }
+    if let Some(body) = trimmed.strip_prefix("* ") {
+        return ParsedLine {
+            class: RenderClass::MarkdownBullet,
+            body: body.to_string(),
+        };
+    }
 
     ParsedLine {
         class: RenderClass::Plain,
