@@ -263,13 +263,6 @@ fn parse_stream_line(raw_line: &str) -> ParsedLine {
             body: rest.to_string(),
         };
     }
-    // Legacy cmd token retained for older fixtures/transcripts.
-    if let Some(rest) = trimmed.strip_prefix("cmd ") {
-        return ParsedLine {
-            class: RenderClass::CmdOutput,
-            body: rest.to_string(),
-        };
-    }
     if let Some(rest) = trimmed.strip_prefix("stream.error ") {
         return ParsedLine {
             class: RenderClass::StreamError,
