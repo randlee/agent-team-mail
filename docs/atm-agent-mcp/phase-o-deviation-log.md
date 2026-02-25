@@ -80,3 +80,17 @@ Owner: `arch-ctm`
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: telemetry closure delivered for TUI watch path in O-R.5; attach telemetry flush deferred.
+
+### DEV-OR5-006: attach stdin payload sanitization deferred
+- Requirement context: FR-23.23 stdin input sanitization.
+- Current behavior: `parse_attach_input()` trims whitespace only before forwarding payload to `send_stdin_control()`. No null-byte stripping, control-character filtering, or ANSI-sequence rejection.
+- approved_by: team-lead
+- approved_date: 2026-02-25
+- rationale: TUI-first scope for O-R.5; attach stdin sanitization deferred to input-hardening phase.
+
+### DEV-OR5-007: attach help text missing Ctrl-C/SIGINT documentation
+- Requirement context: FR-23.25, GAP-014 help text completeness.
+- Current behavior: `print_input_contract()` omits Ctrl-C/SIGINT behavior description.
+- approved_by: team-lead
+- approved_date: 2026-02-25
+- rationale: Ctrl-C follows default process signal behavior (DEV-O3-002); explicit documentation deferred to help-text hardening pass.
