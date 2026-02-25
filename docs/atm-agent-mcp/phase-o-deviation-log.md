@@ -83,11 +83,15 @@ Owner: `arch-ctm`
 - rationale: checkpointing added where re-attach continuity is user-visible in the TUI; attach checkpointing deferred.
 
 ### DEV-OR5-005: attach unsupported-event summary flush deferred
-- Requirement context: FR-23.23 unsupported-event telemetry summary.
+- Requirement context: FR-23.22 unsupported-event telemetry summary.
 - Current behavior: unsupported-event summary/warning flush is implemented in TUI flow; attach path does not flush per-session summary on detach/exit.
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: telemetry closure delivered for TUI watch path in O-R.5; attach telemetry flush deferred.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/244
+- validation_status: implemented + validated
 
 ### DEV-OR5-006: attach stdin payload sanitization deferred
 - Requirement context: FR-23.23 stdin input sanitization.
