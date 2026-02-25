@@ -33,8 +33,10 @@ thiserror = "2"
 tracing.workspace = true
 uuid = { version = "1", features = ["v4"] }
 dirs = "5"
-libc = "0.2"
 chrono = { version = "0.4", default-features = true, features = ["clock"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
