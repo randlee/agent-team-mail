@@ -2,7 +2,7 @@
 
 **Version**: 0.5
 **Date**: 2026-02-25
-**Status**: Phase O-R complete (v0.20.0). Phase P planning in progress.
+**Status**: Phase O-R complete (v0.20.0). Phase P implementation complete; integration QA in progress.
 
 ---
 
@@ -606,7 +606,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.5 Phase P: Attach Path Hardening Closure — IN PROGRESS
+## 17.5 Phase P: Attach Path Hardening Closure — COMPLETE
 
 **Goal**: Close all approved attach-path deviations carried from O-R so attach-mode behavior matches TUI parity commitments across error classification, replay continuity, telemetry closure, and operator input contract hardening.
 
@@ -776,7 +776,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 **Completed**: 99+ sprints across 21 phases (CI green)
 **Current version**: v0.20.0
-**Next**: Phase P attach-path hardening closure
+**Next**: Integration QA and Phase P completion PR to `develop`
 
 ---
 
