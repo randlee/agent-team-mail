@@ -11,3 +11,9 @@
 {"event_type":"turn_started","class":"turn.lifecycle","applicability":"required"}
 {"event_type":"turn_aborted","class":"turn.lifecycle","applicability":"required"}
 {"event_type":"future_event_kind","class":"unsupported.future_event_kind","applicability":"out_of_scope"}
+{"event_type":"stream_error","class":"stream.error.proxy","applicability":"required"}
+{"event_type":"stream_error","class":"stream.error.child","applicability":"required"}
+{"event_type":"stream_error","class":"stream.error.upstream","applicability":"required"}
+{"event_type":"stream_error","class":"stream.error.fatal","applicability":"required"}
+{"event_type":"stream_warning","class":"stream.warning","applicability":"required"}
+{"event_type":"elicitation_request","class":"elicitation.request","applicability":"required"}

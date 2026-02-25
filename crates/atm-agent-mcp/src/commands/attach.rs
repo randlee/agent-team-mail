@@ -95,7 +95,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                 print_frame(&args.agent_id, frame, args.json)?;
             }
         }
-        Err(err) => print_stream_error("watch.tail.initial", &err, args.json)?,
+        Err(err) => print_stream_error("stream.error.proxy.watch.tail.initial", &err, args.json)?,
     }
 
     loop {
@@ -110,7 +110,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                             print_frame(&args.agent_id, frame, args.json)?;
                         }
                     }
-                    Err(err) => print_stream_error("watch.tail", &err, args.json)?,
+                    Err(err) => print_stream_error("stream.error.proxy.watch.tail", &err, args.json)?,
                 }
             }
             maybe_line = stdin_lines.next_line() => {
@@ -348,10 +348,12 @@ fn update_pending_elicitation_id(current: Option<String>, frame: &Value) -> Opti
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     match kind {
-        "exec_approval_request" | "approval_prompt" | "approval_request"
-        | "apply_patch_approval_request" | "request_user_input" | "elicitation_request" => {
-            extract_elicitation_id(event).or(current)
-        }
+        "exec_approval_request"
+        | "approval_prompt"
+        | "approval_request"
+        | "apply_patch_approval_request"
+        | "request_user_input"
+        | "elicitation_request" => extract_elicitation_id(event).or(current),
         "approval_approved" | "approval_rejected" | "approval_resolved" => None,
         _ => current,
     }
@@ -361,7 +363,11 @@ fn extract_elicitation_id(event: &Value) -> Option<String> {
     event
         .pointer("/params/elicitation_id")
         .and_then(|v| v.as_str())
-        .or_else(|| event.pointer("/params/approval_id").and_then(|v| v.as_str()))
+        .or_else(|| {
+            event
+                .pointer("/params/approval_id")
+                .and_then(|v| v.as_str())
+        })
         .or_else(|| event.pointer("/params/request_id").and_then(|v| v.as_str()))
         .or_else(|| event.pointer("/params/id").and_then(|v| v.as_str()))
         .filter(|v| !v.trim().is_empty())
@@ -591,11 +597,20 @@ fn print_file_edit_lines(payload: &str) {
     for line in normalized.lines() {
         printed = true;
         if line.starts_with('+') && !line.starts_with("+++") {
-            println!("file-edit: [+] {}", line.trim_start_matches('+').trim_start());
+            println!(
+                "file-edit: [+] {}",
+                line.trim_start_matches('+').trim_start()
+            );
         } else if line.starts_with('-') && !line.starts_with("---") {
-            println!("file-edit: [-] {}", line.trim_start_matches('-').trim_start());
+            println!(
+                "file-edit: [-] {}",
+                line.trim_start_matches('-').trim_start()
+            );
         } else if line.starts_with("@@") {
-            println!("file-edit: [@@] {}", line.trim_start_matches("@@").trim_start());
+            println!(
+                "file-edit: [@@] {}",
+                line.trim_start_matches("@@").trim_start()
+            );
         } else {
             println!("file-edit: {line}");
         }
@@ -777,7 +792,11 @@ fn stream_error_source(event: &Value) -> &'static str {
     let source = event
         .pointer("/params/error_source")
         .and_then(|v| v.as_str())
-        .or_else(|| event.pointer("/params/errorSource").and_then(|v| v.as_str()))
+        .or_else(|| {
+            event
+                .pointer("/params/errorSource")
+                .and_then(|v| v.as_str())
+        })
         .or_else(|| event.pointer("/params/source").and_then(|v| v.as_str()))
         .unwrap_or("proxy");
     match source {
@@ -795,7 +814,11 @@ fn is_fatal_stream_error(event: &Value, text: &str) -> bool {
     {
         return true;
     }
-    text.to_ascii_lowercase().contains("fatal")
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("non-fatal") || lowered.contains("not fatal") {
+        return false;
+    }
+    lowered.contains("fatal")
 }
 
 fn record_unsupported_event(event_type: &str) -> u64 {
@@ -815,15 +838,12 @@ fn unsupported_event_count(event_type: &str) -> u64 {
 
 fn print_stream_error(context: &str, err: &anyhow::Error, as_json: bool) -> anyhow::Result<()> {
     if as_json {
-        let class = if context.starts_with("stream.error.") || context.starts_with("control.") {
-            context
-        } else {
-            "stream.error"
-        };
+        let (class, error_source) = classify_stream_error_context(context);
         let payload = serde_json::json!({
             "v": 1,
             "mode": "attached",
             "class": class,
+            "error_source": error_source,
             "context": context,
             "message": err.to_string()
         });
@@ -832,6 +852,24 @@ fn print_stream_error(context: &str, err: &anyhow::Error, as_json: bool) -> anyh
     }
     println!("[stream.error][{context}] {err}");
     Ok(())
+}
+
+fn classify_stream_error_context(context: &str) -> (&str, Option<&'static str>) {
+    let class = if context.starts_with("stream.error") || context.starts_with("control.") {
+        context
+    } else {
+        "stream.error"
+    };
+    let error_source = if class.contains(".child") {
+        Some("child")
+    } else if class.contains(".upstream") {
+        Some("upstream")
+    } else if class.starts_with("stream.error") {
+        Some("proxy")
+    } else {
+        None
+    };
+    (class, error_source)
 }
 
 fn classify_control_send_error(err: &anyhow::Error) -> &'static str {
@@ -958,7 +996,13 @@ mod tests {
     #[test]
     fn classify_atm_mail_has_priority() {
         assert_eq!(
-            classify_event_class("agent_message_delta", "atm_mail", &serde_json::json!({}), "").0,
+            classify_event_class(
+                "agent_message_delta",
+                "atm_mail",
+                &serde_json::json!({}),
+                ""
+            )
+            .0,
             "input.atm_mail"
         );
     }
@@ -996,8 +1040,10 @@ mod tests {
     #[test]
     fn classify_stream_error_source_and_fatal_variants() {
         let child = serde_json::json!({"params":{"error_source":"child","message":"oops"}});
-        let upstream = serde_json::json!({"params":{"errorSource":"upstream_mcp","message":"oops"}});
-        let fatal = serde_json::json!({"params":{"fatal":true,"error_source":"proxy","message":"boom"}});
+        let upstream =
+            serde_json::json!({"params":{"errorSource":"upstream_mcp","message":"oops"}});
+        let fatal =
+            serde_json::json!({"params":{"fatal":true,"error_source":"proxy","message":"boom"}});
         let proxy_default = serde_json::json!({"params":{"message":"oops"}});
 
         assert_eq!(
@@ -1025,6 +1071,18 @@ mod tests {
             classify_event_class("stream_warning", "client_prompt", &warning, "heads up").0,
             "stream.warning"
         );
+    }
+
+    #[test]
+    fn classify_stream_error_context_for_watch_tail_and_control_paths() {
+        let (watch_class, watch_source) =
+            classify_stream_error_context("stream.error.proxy.watch.tail");
+        assert_eq!(watch_class, "stream.error.proxy.watch.tail");
+        assert_eq!(watch_source, Some("proxy"));
+
+        let (control_class, control_source) = classify_stream_error_context("control.timeout");
+        assert_eq!(control_class, "control.timeout");
+        assert_eq!(control_source, None);
     }
 
     #[test]
@@ -1066,6 +1124,15 @@ mod tests {
         });
         assert!(is_reasoning_section_break(&frame));
         assert_eq!(format_reasoning_section_break("plan"), "---- plan ----");
+    }
+
+    #[test]
+    fn is_fatal_stream_error_ignores_non_fatal_phrase() {
+        let event = serde_json::json!({"params":{"fatal":false}});
+        assert!(!is_fatal_stream_error(
+            &event,
+            "non-fatal warning: reconnect not required"
+        ));
     }
 
     #[test]
