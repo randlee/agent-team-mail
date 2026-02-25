@@ -1,0 +1,10 @@
+» Command begin run integration
+⋯ MCP tool begin read_file
+⋯ MCP tool end read_file
+⋯ Search begin parity gap
+⋯ Search end parity gap
+◉ Session configured session=s1
+◉ Token count 321
+☰ Plan update add-step
+☰ Plan delta +step-detail
+? Unsupported future_event

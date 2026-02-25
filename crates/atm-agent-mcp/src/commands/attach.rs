@@ -518,20 +518,33 @@ fn classify_event_class(
         "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
             "assistant.reasoning"
         }
-        "approval_prompt"
-        | "approval_request"
-        | "approval_rejected"
+        "exec_approval_request" | "approval_prompt" | "approval_request" => "approval.exec",
+        "apply_patch_approval_request" => "approval.patch",
+        "approval_rejected"
         | "approval_approved"
         | "entered_review_mode"
         | "exited_review_mode"
         | "item/enteredReviewMode"
-        | "item/exitedReviewMode" => "approval",
-        "exec_command_started"
+        | "item/exitedReviewMode" => "approval.review",
+        "exec_command_begin"
+        | "exec_command_started"
         | "exec_command_output_delta"
         | "exec_command_completed"
         | "exec_command_error" => "tool.exec",
+        "mcp_tool_call_begin" | "mcp_tool_call_end" | "web_search_begin" | "web_search_end" => {
+            "tool.lifecycle"
+        }
         "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => "file.edit",
         "request_user_input" | "elicitation_request" => "elicitation.request",
+        "session_configured"
+        | "thread_name_updated"
+        | "token_count"
+        | "model_reroute"
+        | "context_compacted"
+        | "thread_rolled_back"
+        | "undo_started"
+        | "undo_completed" => "session.meta",
+        "plan_update" | "plan_delta" => "plan.update",
         "turn_started" | "turn_completed" | "turn_aborted" | "task_started" | "task_complete"
         | "turn_idle" | "idle" | "done" | "item_started" | "item_completed" => "turn.lifecycle",
         "stream_error" | "error" => "stream.error",
@@ -541,7 +554,11 @@ fn classify_event_class(
             return (format!("unsupported.{ty}"), Some(count), "out_of_scope");
         }
     };
-    (class.to_string(), None, "required")
+    let applicability = match class {
+        "tool.lifecycle" | "session.meta" | "plan.update" => "degraded",
+        _ => "required",
+    };
+    (class.to_string(), None, applicability)
 }
 
 fn sanitize_event_type(event_type: &str) -> String {

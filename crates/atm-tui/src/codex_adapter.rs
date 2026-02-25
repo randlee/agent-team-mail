@@ -113,38 +113,87 @@ impl CodexAdapter {
                 line: format!("{source_badge} turn.idle"),
                 is_turn_boundary: true,
             },
-            "exec_command_output_delta" | "exec_command_completed" | "exec_command_error" => {
-                AdaptedWatchLine {
-                    line: format!("{source_badge} cmd {text}"),
-                    is_turn_boundary: false,
-                }
-            }
+            "exec_command_begin" | "exec_command_started" => AdaptedWatchLine {
+                line: format!("{source_badge} cmd.begin {text}"),
+                is_turn_boundary: false,
+            },
+            "exec_command_output_delta" => AdaptedWatchLine {
+                line: format!("{source_badge} cmd.output {text}"),
+                is_turn_boundary: false,
+            },
+            "exec_command_completed" => AdaptedWatchLine {
+                line: format!("{source_badge} cmd.completed {text}"),
+                is_turn_boundary: false,
+            },
+            "exec_command_error" => AdaptedWatchLine {
+                line: format!("{source_badge} cmd.error {text}"),
+                is_turn_boundary: false,
+            },
+            "exec_approval_request" | "approval_prompt" | "approval_request" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.exec.request {text}"),
+                is_turn_boundary: true,
+            },
+            "apply_patch_approval_request" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.patch.request {text}"),
+                is_turn_boundary: true,
+            },
+            "entered_review_mode" | "item/enteredReviewMode" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.review.entered {text}"),
+                is_turn_boundary: true,
+            },
+            "exited_review_mode" | "item/exitedReviewMode" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.review.exited {text}"),
+                is_turn_boundary: true,
+            },
             "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => {
                 AdaptedWatchLine {
                     line: format!("{source_badge} file.edit {text}"),
                     is_turn_boundary: false,
                 }
             }
-            "approval_prompt"
-            | "approval_request"
-            | "entered_review_mode"
-            | "item/enteredReviewMode" => AdaptedWatchLine {
-                line: format!("{source_badge} approval.request {text}"),
-                is_turn_boundary: true,
-            },
             "approval_rejected" | "reject" | "rejected" => AdaptedWatchLine {
-                line: format!("{source_badge} approval.rejected {text}"),
+                line: format!("{source_badge} approval.review.rejected {text}"),
                 is_turn_boundary: true,
             },
-            "approval_approved" | "approved" | "item/exitedReviewMode" | "exited_review_mode" => {
-                AdaptedWatchLine {
-                    line: format!("{source_badge} approval.resolved {text}"),
-                    is_turn_boundary: true,
-                }
-            }
+            "approval_approved" | "approved" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.review.resolved {text}"),
+                is_turn_boundary: true,
+            },
             "request_user_input" | "elicitation_request" => AdaptedWatchLine {
                 line: format!("{source_badge} elicitation.request {text}"),
                 is_turn_boundary: true,
+            },
+            "mcp_tool_call_begin" => AdaptedWatchLine {
+                line: format!("{source_badge} tool.mcp.begin {text}"),
+                is_turn_boundary: false,
+            },
+            "mcp_tool_call_end" => AdaptedWatchLine {
+                line: format!("{source_badge} tool.mcp.end {text}"),
+                is_turn_boundary: false,
+            },
+            "web_search_begin" => AdaptedWatchLine {
+                line: format!("{source_badge} tool.web_search.begin {text}"),
+                is_turn_boundary: false,
+            },
+            "web_search_end" => AdaptedWatchLine {
+                line: format!("{source_badge} tool.web_search.end {text}"),
+                is_turn_boundary: false,
+            },
+            "plan_update" => AdaptedWatchLine {
+                line: format!("{source_badge} plan.update {text}"),
+                is_turn_boundary: false,
+            },
+            "plan_delta" => AdaptedWatchLine {
+                line: format!("{source_badge} plan.delta {text}"),
+                is_turn_boundary: false,
+            },
+            "session_configured" => AdaptedWatchLine {
+                line: format!("{source_badge} session.configured {text}"),
+                is_turn_boundary: true,
+            },
+            "token_count" => AdaptedWatchLine {
+                line: format!("{source_badge} session.token_count {text}"),
+                is_turn_boundary: false,
             },
             "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
                 AdaptedWatchLine {
@@ -269,20 +318,54 @@ mod tests {
             adapter
                 .adapt_frame(&approval)
                 .line
-                .contains("approval.request")
+                .contains("approval.exec.request")
         );
         assert!(
             adapter
                 .adapt_frame(&rejected)
                 .line
-                .contains("approval.rejected")
+                .contains("approval.review.rejected")
         );
         assert!(
             adapter
                 .adapt_frame(&resolved)
                 .line
-                .contains("approval.resolved")
+                .contains("approval.review.resolved")
         );
+        assert_eq!(adapter.unknown_events(), 0);
+    }
+
+    #[test]
+    fn maps_new_required_and_degraded_event_families() {
+        let mut adapter = CodexAdapter::new();
+        let cases = [
+            ("exec_command_begin", "cmd.begin"),
+            ("mcp_tool_call_begin", "tool.mcp.begin"),
+            ("mcp_tool_call_end", "tool.mcp.end"),
+            ("web_search_begin", "tool.web_search.begin"),
+            ("web_search_end", "tool.web_search.end"),
+            ("plan_update", "plan.update"),
+            ("plan_delta", "plan.delta"),
+            ("session_configured", "session.configured"),
+            ("token_count", "session.token_count"),
+            ("request_user_input", "elicitation.request"),
+            ("exec_approval_request", "approval.exec.request"),
+            ("apply_patch_approval_request", "approval.patch.request"),
+            ("entered_review_mode", "approval.review.entered"),
+            ("exited_review_mode", "approval.review.exited"),
+        ];
+
+        for (event_type, expected) in cases {
+            let frame = serde_json::json!({
+                "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+                "event":{"params":{"type":event_type,"message":"m"}}
+            });
+            let line = adapter.adapt_frame(&frame).line;
+            assert!(
+                line.contains(expected),
+                "event {event_type} expected mapping {expected}, got {line}"
+            );
+        }
         assert_eq!(adapter.unknown_events(), 0);
     }
 

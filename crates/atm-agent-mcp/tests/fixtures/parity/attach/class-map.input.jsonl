@@ -2,6 +2,9 @@
 {"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"approval_request","message":"allow?"}}}
 {"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"exec_command_started","message":"run"}}}
 {"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"request_user_input","message":"choose"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"mcp_tool_call_begin","message":"tool"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"session_configured","message":"session ok"}}}
+{"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"plan_update","message":"plan"}}}
 {"source":{"kind":"user_steer","actor":"randlee","channel":"tui_user"},"event":{"params":{"type":"user_message","text":"pause"}}}
 {"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"user_message","text":"prompt"}}}
 {"source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},"event":{"params":{"type":"patch_apply_begin","message":"patch"}}}

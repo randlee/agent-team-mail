@@ -1,3 +1,3 @@
 {"line":"[client_prompt|arch-atm|mcp_primary] turn.started","is_turn_boundary":true}
-{"line":"[client_prompt|arch-atm|mcp_primary] cmd npm test","is_turn_boundary":false}
-{"line":"[client_prompt|arch-atm|mcp_primary] approval.request approve?","is_turn_boundary":true}
+{"line":"[client_prompt|arch-atm|mcp_primary] cmd.output npm test","is_turn_boundary":false}
+{"line":"[client_prompt|arch-atm|mcp_primary] approval.exec.request approve?","is_turn_boundary":true}
