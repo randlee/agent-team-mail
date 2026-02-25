@@ -28,7 +28,7 @@ use ratatui::{
 
 use crate::agent_terminal::expand_keys;
 use crate::app::{App, FocusPanel};
-use crate::codex_watch::render_stream_line;
+use crate::codex_watch::render_stream_lines_with_width;
 
 /// Render the full TUI frame from current [`App`] state.
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -364,11 +364,12 @@ fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
     // When follow mode is off, the offset is the user's chosen scroll position.
     let bottom = app.stream_scroll_offset.min(app.stream_lines.len());
     let start = bottom.saturating_sub(inner_height.max(1));
+    let render_width = sections[2].width.saturating_sub(1) as usize;
     let mut visible: Vec<Line> = app.stream_lines[start..bottom]
         .iter()
-        .map(|line| {
+        .flat_map(|line| {
             let expanded = expand_keys(line);
-            render_stream_line(&expanded)
+            render_stream_lines_with_width(&expanded, render_width)
         })
         .collect();
 

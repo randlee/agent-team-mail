@@ -1,235 +1,482 @@
 //! Codex watch-pane rendering helpers adapted for ATM TUI.
 //!
-//! This module provides a light-weight rendering layer for stream lines and
-//! daemon turn events so the watch pane aligns with Codex CLI-style transcript
-//! and status presentation.
+//! This module provides a structured rendering foundation for stream lines:
+//! - classify raw normalized lines into render classes,
+//! - apply class-specific icon/label/styling,
+//! - wrap body content using terminal-width-aware layout constraints.
 
 use ratatui::{
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderClass {
+    TurnStarted,
+    TurnCompleted,
+    TurnIdle,
+    TurnInterrupted,
+    ApprovalRequested,
+    ApprovalRejected,
+    ApprovalResolved,
+    StreamError,
+    InputClient,
+    InputUserSteer,
+    InputAtmMail,
+    ElicitationRequest,
+    StreamCounters,
+    MarkdownFence,
+    MarkdownHeading,
+    MarkdownBullet,
+    Plain,
+}
+
+#[derive(Debug, Clone)]
+struct RenderSpec {
+    icon: &'static str,
+    icon_style: Style,
+    label: &'static str,
+    label_style: Style,
+    body_style: Style,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedLine {
+    class: RenderClass,
+    body: String,
+}
+
 /// Render one watch-stream line with simple semantic highlighting.
 ///
-/// This intentionally keeps formatting deterministic and dependency-light.
+/// Kept for compatibility with existing call sites/tests. For viewport-aware
+/// rendering in the TUI, use `render_stream_lines_with_width`.
 pub fn render_stream_line(raw_line: &str) -> Line<'static> {
+    render_stream_lines_with_width(raw_line, usize::MAX)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Line::from(Span::raw(String::new())))
+}
+
+/// Render one normalized stream line into one or more terminal-width-aware lines.
+pub fn render_stream_lines_with_width(raw_line: &str, max_width: usize) -> Vec<Line<'static>> {
+    let parsed = parse_stream_line(raw_line);
+    render_parsed_line(&parsed, max_width.max(1))
+}
+
+fn parse_stream_line(raw_line: &str) -> ParsedLine {
     let trimmed = raw_line.trim();
 
     if let Some(rest) = trimmed.strip_prefix("turn.started ") {
-        return Line::from(vec![
-            Span::styled(
-                "▶ ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Turn started ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(rest.to_string()),
-        ]);
-    }
-
-    if let Some(rest) = trimmed.strip_prefix("turn.completed ") {
-        let color = if rest.contains("status=failed") {
-            Color::Red
-        } else if rest.contains("status=interrupted") {
-            Color::Yellow
-        } else {
-            Color::Green
+        return ParsedLine {
+            class: RenderClass::TurnStarted,
+            body: rest.to_string(),
         };
-        return Line::from(vec![
-            Span::styled(
-                "✓ ",
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Turn completed ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(rest.to_string()),
-        ]);
     }
-
+    if let Some(rest) = trimmed.strip_prefix("turn.completed ") {
+        return ParsedLine {
+            class: RenderClass::TurnCompleted,
+            body: rest.to_string(),
+        };
+    }
     if let Some(rest) = trimmed.strip_prefix("turn.idle ") {
-        return Line::from(vec![
-            Span::styled("• ", Style::default().fg(Color::Blue)),
-            Span::styled("Turn idle ", Style::default().fg(Color::Blue)),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::TurnIdle,
+            body: rest.to_string(),
+        };
     }
-
     if let Some(rest) = trimmed.strip_prefix("turn.interrupted ") {
-        return Line::from(vec![
-            Span::styled(
-                "⏹ ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Turn interrupted ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::TurnInterrupted,
+            body: rest.to_string(),
+        };
     }
-
     if let Some(rest) = trimmed.strip_prefix("approval.request ") {
-        return Line::from(vec![
-            Span::styled(
-                "? ",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Approval requested ",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::ApprovalRequested,
+            body: rest.to_string(),
+        };
     }
-
     if let Some(rest) = trimmed.strip_prefix("approval.rejected ") {
-        return Line::from(vec![
-            Span::styled(
-                "✗ ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Approval rejected ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::ApprovalRejected,
+            body: rest.to_string(),
+        };
     }
-
     if let Some(rest) = trimmed.strip_prefix("approval.resolved ") {
-        return Line::from(vec![
-            Span::styled(
-                "✓ ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Approval resolved ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::ApprovalResolved,
+            body: rest.to_string(),
+        };
     }
-
     if let Some(rest) = trimmed.strip_prefix("stream.error ") {
-        return Line::from(vec![
-            Span::styled(
-                "! ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Stream error ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::StreamError,
+            body: rest.to_string(),
+        };
     }
-
     if let Some(rest) = trimmed.strip_prefix("input.client ") {
-        return Line::from(vec![
-            Span::styled(
-                "→ ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Client input ", Style::default().fg(Color::Cyan)),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::InputClient,
+            body: rest.to_string(),
+        };
     }
-
     if let Some(rest) = trimmed.strip_prefix("input.user_steer ") {
-        return Line::from(vec![
-            Span::styled(
-                "↪ ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Steer input ", Style::default().fg(Color::Yellow)),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::InputUserSteer,
+            body: rest.to_string(),
+        };
     }
-
     if let Some(rest) = trimmed.strip_prefix("input.atm_mail ") {
-        return Line::from(vec![
-            Span::styled(
-                "✉ ",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("ATM mail ", Style::default().fg(Color::Magenta)),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::InputAtmMail,
+            body: rest.to_string(),
+        };
     }
-
     if let Some(rest) = trimmed.strip_prefix("elicitation.request ") {
-        return Line::from(vec![
-            Span::styled(
-                "? ",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Input requested ", Style::default().fg(Color::Magenta)),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::ElicitationRequest,
+            body: rest.to_string(),
+        };
     }
-
     if let Some(rest) = trimmed.strip_prefix("stream.counters ") {
-        return Line::from(vec![
-            Span::styled(
-                "≈ ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Counters ", Style::default().fg(Color::Yellow)),
-            Span::raw(rest.to_string()),
-        ]);
+        return ParsedLine {
+            class: RenderClass::StreamCounters,
+            body: rest.to_string(),
+        };
     }
-
     if trimmed.starts_with("```") {
-        return Line::from(Span::styled(
-            trimmed.to_string(),
-            Style::default().fg(Color::Cyan),
-        ));
+        return ParsedLine {
+            class: RenderClass::MarkdownFence,
+            body: trimmed.to_string(),
+        };
     }
-
     if trimmed.starts_with('#') {
-        return Line::from(Span::styled(
-            trimmed.to_string(),
+        return ParsedLine {
+            class: RenderClass::MarkdownHeading,
+            body: trimmed.to_string(),
+        };
+    }
+    if let Some(body) = trimmed.strip_prefix("- ") {
+        return ParsedLine {
+            class: RenderClass::MarkdownBullet,
+            body: body.to_string(),
+        };
+    }
+
+    ParsedLine {
+        class: RenderClass::Plain,
+        body: trimmed.to_string(),
+    }
+}
+
+fn render_parsed_line(parsed: &ParsedLine, max_width: usize) -> Vec<Line<'static>> {
+    match parsed.class {
+        RenderClass::Plain => wrap_plain_line(&parsed.body, max_width, Style::default()),
+        RenderClass::MarkdownFence => {
+            wrap_plain_line(&parsed.body, max_width, Style::default().fg(Color::Cyan))
+        }
+        RenderClass::MarkdownHeading => wrap_plain_line(
+            &parsed.body,
+            max_width,
             Style::default().add_modifier(Modifier::BOLD),
-        ));
+        ),
+        RenderClass::MarkdownBullet => render_bullet_line(&parsed.body, max_width),
+        class => render_class_line(class, &parsed.body, max_width),
     }
+}
 
-    if trimmed.starts_with("- ") {
-        let body = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-        return Line::from(vec![
-            Span::styled("• ", Style::default().fg(Color::Yellow)),
-            Span::raw(body.to_string()),
-        ]);
+fn render_class_line(class: RenderClass, body: &str, max_width: usize) -> Vec<Line<'static>> {
+    let spec = render_spec(class, body);
+    let icon_width = spec.icon.chars().count();
+    let label_width = spec.label.chars().count();
+
+    let chunks = split_widths(icon_width, label_width, max_width);
+    let body_width = chunks.2.max(1);
+    let wrapped_body = wrap_text(body, body_width);
+
+    let mut out = Vec::new();
+    for (idx, chunk) in wrapped_body.iter().enumerate() {
+        if idx == 0 {
+            out.push(Line::from(vec![
+                Span::styled(spec.icon.to_string(), spec.icon_style),
+                Span::styled(spec.label.to_string(), spec.label_style),
+                Span::styled(chunk.to_string(), spec.body_style),
+            ]));
+        } else {
+            let indent = " ".repeat(icon_width + label_width);
+            out.push(Line::from(vec![
+                Span::raw(indent),
+                Span::styled(chunk.to_string(), spec.body_style),
+            ]));
+        }
     }
+    if out.is_empty() {
+        out.push(Line::from(vec![
+            Span::styled(spec.icon.to_string(), spec.icon_style),
+            Span::styled(spec.label.to_string(), spec.label_style),
+        ]));
+    }
+    out
+}
 
-    Line::from(Span::raw(trimmed.to_string()))
+fn render_bullet_line(body: &str, max_width: usize) -> Vec<Line<'static>> {
+    let icon = "• ";
+    let icon_width = icon.chars().count();
+    let body_width = max_width.saturating_sub(icon_width).max(1);
+    let wrapped = wrap_text(body, body_width);
+    let mut out = Vec::new();
+    for (idx, chunk) in wrapped.iter().enumerate() {
+        if idx == 0 {
+            out.push(Line::from(vec![
+                Span::styled(icon.to_string(), Style::default().fg(Color::Yellow)),
+                Span::raw(chunk.to_string()),
+            ]));
+        } else {
+            out.push(Line::from(vec![
+                Span::raw(" ".repeat(icon_width)),
+                Span::raw(chunk.to_string()),
+            ]));
+        }
+    }
+    if out.is_empty() {
+        out.push(Line::from(vec![
+            Span::styled(icon.to_string(), Style::default().fg(Color::Yellow)),
+            Span::raw(String::new()),
+        ]));
+    }
+    out
+}
+
+fn render_spec(class: RenderClass, body: &str) -> RenderSpec {
+    match class {
+        RenderClass::TurnStarted => RenderSpec {
+            icon: "▶ ",
+            icon_style: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            label: "Turn started ",
+            label_style: Style::default().add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::TurnCompleted => {
+            let color = if body.contains("status=failed") {
+                Color::Red
+            } else if body.contains("status=interrupted") {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            RenderSpec {
+                icon: "✓ ",
+                icon_style: Style::default().fg(color).add_modifier(Modifier::BOLD),
+                label: "Turn completed ",
+                label_style: Style::default().add_modifier(Modifier::BOLD),
+                body_style: Style::default(),
+            }
+        }
+        RenderClass::TurnIdle => RenderSpec {
+            icon: "• ",
+            icon_style: Style::default().fg(Color::Blue),
+            label: "Turn idle ",
+            label_style: Style::default().fg(Color::Blue),
+            body_style: Style::default(),
+        },
+        RenderClass::TurnInterrupted => RenderSpec {
+            icon: "⏹ ",
+            icon_style: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            label: "Turn interrupted ",
+            label_style: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::ApprovalRequested => RenderSpec {
+            icon: "? ",
+            icon_style: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            label: "Approval requested ",
+            label_style: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::ApprovalRejected => RenderSpec {
+            icon: "✗ ",
+            icon_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            label: "Approval rejected ",
+            label_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::ApprovalResolved => RenderSpec {
+            icon: "✓ ",
+            icon_style: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            label: "Approval resolved ",
+            label_style: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::StreamError => RenderSpec {
+            icon: "! ",
+            icon_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            label: "Stream error ",
+            label_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::InputClient => RenderSpec {
+            icon: "→ ",
+            icon_style: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            label: "Client input ",
+            label_style: Style::default().fg(Color::Cyan),
+            body_style: Style::default(),
+        },
+        RenderClass::InputUserSteer => RenderSpec {
+            icon: "↪ ",
+            icon_style: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            label: "Steer input ",
+            label_style: Style::default().fg(Color::Yellow),
+            body_style: Style::default(),
+        },
+        RenderClass::InputAtmMail => RenderSpec {
+            icon: "✉ ",
+            icon_style: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            label: "ATM mail ",
+            label_style: Style::default().fg(Color::Magenta),
+            body_style: Style::default(),
+        },
+        RenderClass::ElicitationRequest => RenderSpec {
+            icon: "? ",
+            icon_style: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            label: "Input requested ",
+            label_style: Style::default().fg(Color::Magenta),
+            body_style: Style::default(),
+        },
+        RenderClass::StreamCounters => RenderSpec {
+            icon: "≈ ",
+            icon_style: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            label: "Counters ",
+            label_style: Style::default().fg(Color::Yellow),
+            body_style: Style::default(),
+        },
+        RenderClass::MarkdownFence
+        | RenderClass::MarkdownHeading
+        | RenderClass::MarkdownBullet
+        | RenderClass::Plain => RenderSpec {
+            icon: "",
+            icon_style: Style::default(),
+            label: "",
+            label_style: Style::default(),
+            body_style: Style::default(),
+        },
+    }
+}
+
+fn split_widths(
+    icon_width: usize,
+    label_width: usize,
+    total_width: usize,
+) -> (usize, usize, usize) {
+    let rect = Rect {
+        x: 0,
+        y: 0,
+        width: total_width.min(u16::MAX as usize) as u16,
+        height: 1,
+    };
+    let chunks = Layout::horizontal([
+        Constraint::Length(icon_width.min(u16::MAX as usize) as u16),
+        Constraint::Length(label_width.min(u16::MAX as usize) as u16),
+        Constraint::Min(0),
+    ])
+    .split(rect);
+    (
+        chunks[0].width as usize,
+        chunks[1].width as usize,
+        chunks[2].width as usize,
+    )
+}
+
+fn wrap_plain_line(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    let wrapped = wrap_text(text, width.max(1));
+    if wrapped.is_empty() {
+        return vec![Line::from(Span::styled(String::new(), style))];
+    }
+    wrapped
+        .into_iter()
+        .map(|chunk| Line::from(Span::styled(chunk, style)))
+        .collect()
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            if current.is_empty() {
+                push_word_chunks(word, width, &mut current, &mut out);
+                continue;
+            }
+            if current.chars().count() + 1 + word.chars().count() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                out.push(std::mem::take(&mut current));
+                push_word_chunks(word, width, &mut current, &mut out);
+            }
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+fn push_word_chunks(word: &str, width: usize, current: &mut String, out: &mut Vec<String>) {
+    if word.chars().count() <= width {
+        current.push_str(word);
+        return;
+    }
+    let mut buf = String::new();
+    for ch in word.chars() {
+        if buf.chars().count() >= width {
+            out.push(std::mem::take(&mut buf));
+        }
+        buf.push(ch);
+    }
+    if !buf.is_empty() {
+        if current.is_empty() {
+            current.push_str(&buf);
+        } else {
+            out.push(std::mem::take(current));
+            current.push_str(&buf);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -268,6 +515,23 @@ mod tests {
         let line = render_stream_line("approval.request allow command");
         let rendered = rendered_text(line);
         assert!(rendered.contains("Approval requested"));
+    }
+
+    #[test]
+    fn wraps_structured_line_by_width() {
+        let lines =
+            render_stream_lines_with_width("approval.request allow command with many words", 24);
+        assert!(lines.len() >= 2, "expected wrapped lines");
+        let first = rendered_text(lines[0].clone());
+        assert!(first.contains("Approval requested"));
+        let second = rendered_text(lines[1].clone());
+        assert!(second.starts_with(" ".repeat("".len() + "Approval requested ".len()).as_str()));
+    }
+
+    #[test]
+    fn wraps_plain_text_by_width() {
+        let lines = render_stream_lines_with_width("a b c d e f g", 5);
+        assert!(lines.len() >= 2, "plain lines should wrap");
     }
 
     #[test]
