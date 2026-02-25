@@ -15,7 +15,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::time::interval;
@@ -23,6 +22,7 @@ use tokio::time::interval;
 const WATCH_ATTACH_REPLAY_MAX_FRAMES: usize = 50;
 const WATCH_ATTACH_REPLAY_SCAN_BYTES: u64 = 512 * 1024;
 const ATTACH_CHECKPOINT_VERSION: u8 = 1;
+const UNSUPPORTED_WARN_THRESHOLD: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlVerb {
@@ -69,7 +69,10 @@ struct AttachReplayCheckpoint {
     updated_at: String,
 }
 
-static UNSUPPORTED_EVENT_COUNTS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+#[derive(Debug, Default, Clone)]
+struct AttachTelemetry {
+    unsupported_event_counts: HashMap<String, u64>,
+}
 
 pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     let team = resolved_team(args.team.as_deref());
@@ -94,6 +97,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     let mut ticker = interval(Duration::from_millis(poll_ms));
     let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
     let mut pending_elicitation_id: Option<String> = None;
+    let mut telemetry = AttachTelemetry::default();
 
     // Initial attach replay (bounded).
     match tail_watch_stream_file(&watch_path, stream_pos, &args.agent_id).await {
@@ -105,7 +109,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
             for frame in replay {
                 pending_elicitation_id =
                     update_pending_elicitation_id(pending_elicitation_id, &frame);
-                print_frame(&args.agent_id, frame, args.json)?;
+                print_frame(&args.agent_id, frame, args.json, &mut telemetry)?;
             }
             let _ = save_attach_checkpoint_pos(&team, &args.agent_id, stream_pos);
         }
@@ -121,7 +125,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                         for frame in frames {
                             pending_elicitation_id =
                                 update_pending_elicitation_id(pending_elicitation_id, &frame);
-                            print_frame(&args.agent_id, frame, args.json)?;
+                            print_frame(&args.agent_id, frame, args.json, &mut telemetry)?;
                         }
                         let _ = save_attach_checkpoint_pos(&team, &args.agent_id, stream_pos);
                     }
@@ -199,6 +203,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     }
 
     let _ = save_attach_checkpoint_pos(&team, &args.agent_id, stream_pos);
+    print_unsupported_summary_on_detach(&args.agent_id, args.json, &mut telemetry)?;
     println!("detached from {}", args.agent_id);
     Ok(())
 }
@@ -638,8 +643,13 @@ fn extract_frame(line: &str) -> Option<Value> {
     Some(parsed)
 }
 
-fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()> {
-    let env = to_attached_envelope(agent_id, &frame);
+fn print_frame(
+    agent_id: &str,
+    frame: Value,
+    as_json: bool,
+    telemetry: &mut AttachTelemetry,
+) -> anyhow::Result<()> {
+    let env = to_attached_envelope(agent_id, &frame, telemetry);
     if as_json {
         println!("{}", serde_json::to_string(&env)?);
         return Ok(());
@@ -771,7 +781,11 @@ fn print_file_edit_lines(payload: &str) {
     }
 }
 
-fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope {
+fn to_attached_envelope(
+    agent_id: &str,
+    frame: &Value,
+    telemetry: &mut AttachTelemetry,
+) -> AttachedRenderEnvelope {
     let source_kind = frame
         .pointer("/source/kind")
         .and_then(|v| v.as_str())
@@ -804,7 +818,7 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         .to_string();
 
     let (class, unsupported_count, applicability) =
-        classify_event_class(&event_type, &source_kind, event, &text);
+        classify_event_class(&event_type, &source_kind, event, &text, telemetry);
     let is_turn_boundary = matches!(
         event_type.as_str(),
         "turn_started"
@@ -851,6 +865,7 @@ fn classify_event_class(
     source_kind: &str,
     event: &Value,
     text: &str,
+    telemetry: &mut AttachTelemetry,
 ) -> (String, Option<u64>, &'static str) {
     if source_kind == "atm_mail" || source_kind == "atm_mcp" {
         return ("input.atm_mail".to_string(), None, "required");
@@ -911,7 +926,7 @@ fn classify_event_class(
         }
         _ => {
             let ty = sanitize_event_type(event_type);
-            let count = record_unsupported_event(&ty);
+            let count = telemetry.record_unsupported_event(&ty);
             return (format!("unsupported.{ty}"), Some(count), "out_of_scope");
         }
     };
@@ -968,19 +983,89 @@ fn is_fatal_stream_error(event: &Value, text: &str) -> bool {
     text.to_ascii_lowercase().contains("fatal")
 }
 
-fn record_unsupported_event(event_type: &str) -> u64 {
-    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("unsupported event counter mutex");
-    let entry = guard.entry(event_type.to_string()).or_insert(0);
-    *entry += 1;
-    *entry
+impl AttachTelemetry {
+    fn record_unsupported_event(&mut self, event_type: &str) -> u64 {
+        let entry = self
+            .unsupported_event_counts
+            .entry(event_type.to_string())
+            .or_insert(0);
+        *entry += 1;
+        *entry
+    }
+
+    fn unsupported_summary_lines(&self, warn_threshold: u64) -> Vec<String> {
+        let mut keys: Vec<&String> = self.unsupported_event_counts.keys().collect();
+        keys.sort();
+        let mut out = Vec::new();
+        for key in keys {
+            let count = self.unsupported_event_counts.get(key).copied().unwrap_or(0);
+            out.push(format!("unsupported.summary {key}={count}"));
+            if count >= warn_threshold {
+                out.push(format!(
+                    "stream.warning unsupported event '{key}' seen {count} times"
+                ));
+            }
+        }
+        out
+    }
+
+    fn clear_unsupported_event_counts(&mut self) {
+        self.unsupported_event_counts.clear();
+    }
+}
+
+fn unsupported_summary_output_lines(
+    agent_id: &str,
+    as_json: bool,
+    lines: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut out = Vec::new();
+    for line in lines {
+        if as_json {
+            let class = if line.starts_with("stream.warning ") {
+                "stream.warning"
+            } else {
+                "session.meta"
+            };
+            let payload = serde_json::json!({
+                "v": 1,
+                "mode": "attached",
+                "agent_id": agent_id,
+                "class": class,
+                "event_type": "unsupported_summary",
+                "text": line
+            });
+            out.push(serde_json::to_string(&payload)?);
+        } else {
+            out.push(line.clone());
+        }
+    }
+    Ok(out)
+}
+
+fn print_unsupported_summary_on_detach(
+    agent_id: &str,
+    as_json: bool,
+    telemetry: &mut AttachTelemetry,
+) -> anyhow::Result<()> {
+    let lines = telemetry.unsupported_summary_lines(UNSUPPORTED_WARN_THRESHOLD);
+    if lines.is_empty() {
+        return Ok(());
+    }
+    for line in unsupported_summary_output_lines(agent_id, as_json, &lines)? {
+        println!("{line}");
+    }
+    telemetry.clear_unsupported_event_counts();
+    Ok(())
 }
 
 #[cfg(test)]
-fn unsupported_event_count(event_type: &str) -> u64 {
-    let map = UNSUPPORTED_EVENT_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
-    let guard = map.lock().expect("unsupported event counter mutex");
-    guard.get(event_type).copied().unwrap_or(0)
+fn unsupported_event_count(telemetry: &AttachTelemetry, event_type: &str) -> u64 {
+    telemetry
+        .unsupported_event_counts
+        .get(event_type)
+        .copied()
+        .unwrap_or(0)
 }
 
 fn print_stream_error(context: &str, err: &anyhow::Error, as_json: bool) -> anyhow::Result<()> {
@@ -1127,12 +1212,14 @@ mod tests {
 
     #[test]
     fn classify_atm_mail_has_priority() {
+        let mut telemetry = AttachTelemetry::default();
         assert_eq!(
             classify_event_class(
                 "agent_message_delta",
                 "atm_mail",
                 &serde_json::json!({}),
-                ""
+                "",
+                &mut telemetry
             )
             .0,
             "input.atm_mail"
@@ -1141,12 +1228,13 @@ mod tests {
 
     #[test]
     fn attached_envelope_maps_event_fields() {
+        let mut telemetry = AttachTelemetry::default();
         let frame = serde_json::json!({
             "agent_id":"codex:abc",
             "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
             "event":{"params":{"type":"agent_message_delta","delta":"hello"}}
         });
-        let env = to_attached_envelope("codex:abc", &frame);
+        let env = to_attached_envelope("codex:abc", &frame, &mut telemetry);
         assert_eq!(env.mode, "attached");
         assert_eq!(env.class, "assistant.output");
         assert_eq!(env.applicability, "required");
@@ -1157,20 +1245,93 @@ mod tests {
 
     #[test]
     fn classify_unknown_event_emits_supported_prefix_and_counter() {
-        let (class, count1, applicability1) =
-            classify_event_class("future/event", "client_prompt", &serde_json::json!({}), "");
-        let (_, count2, applicability2) =
-            classify_event_class("future/event", "client_prompt", &serde_json::json!({}), "");
+        let mut telemetry = AttachTelemetry::default();
+        let (class, count1, applicability1) = classify_event_class(
+            "future/event",
+            "client_prompt",
+            &serde_json::json!({}),
+            "",
+            &mut telemetry,
+        );
+        let (_, count2, applicability2) = classify_event_class(
+            "future/event",
+            "client_prompt",
+            &serde_json::json!({}),
+            "",
+            &mut telemetry,
+        );
         assert_eq!(class, "unsupported.future_event");
         assert_eq!(applicability1, "out_of_scope");
         assert_eq!(applicability2, "out_of_scope");
-        assert_eq!(count1, Some(1));
-        assert_eq!(count2, Some(2));
-        assert_eq!(unsupported_event_count("future_event"), 2);
+        let c1 = count1.expect("first unsupported count present");
+        let c2 = count2.expect("second unsupported count present");
+        assert!(c1 >= 1);
+        assert!(c2 >= c1);
+        assert!(unsupported_event_count(&telemetry, "future_event") >= c2);
+    }
+
+    #[test]
+    fn unsupported_summary_below_threshold_has_no_warning_line() {
+        let mut telemetry = AttachTelemetry::default();
+        for _ in 0..(UNSUPPORTED_WARN_THRESHOLD - 1) {
+            let _ = telemetry.record_unsupported_event("future_event");
+        }
+        let lines = telemetry.unsupported_summary_lines(UNSUPPORTED_WARN_THRESHOLD);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "unsupported.summary future_event=4")
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("stream.warning ")),
+            "below-threshold counters must not emit stream.warning summary"
+        );
+    }
+
+    #[test]
+    fn unsupported_summary_output_plain_text_lines() {
+        let lines = vec![
+            "unsupported.summary future_event=5".to_string(),
+            "stream.warning unsupported event 'future_event' seen 5 times".to_string(),
+        ];
+        let rendered =
+            unsupported_summary_output_lines("codex:test", false, &lines).expect("render lines");
+        assert_eq!(rendered, lines);
+    }
+
+    #[test]
+    fn unsupported_summary_output_json_lines() {
+        let lines = vec![
+            "unsupported.summary future_event=5".to_string(),
+            "stream.warning unsupported event 'future_event' seen 5 times".to_string(),
+        ];
+        let rendered =
+            unsupported_summary_output_lines("codex:test", true, &lines).expect("render lines");
+        assert_eq!(rendered.len(), 2);
+        let first: Value = serde_json::from_str(&rendered[0]).expect("json line");
+        let second: Value = serde_json::from_str(&rendered[1]).expect("json line");
+        assert_eq!(
+            first.get("class").and_then(|v| v.as_str()),
+            Some("session.meta")
+        );
+        assert_eq!(
+            second.get("class").and_then(|v| v.as_str()),
+            Some("stream.warning")
+        );
+    }
+
+    #[test]
+    fn unsupported_summary_zero_counts_suppressed_on_detach() {
+        let mut telemetry = AttachTelemetry::default();
+        let lines = telemetry.unsupported_summary_lines(UNSUPPORTED_WARN_THRESHOLD);
+        assert!(lines.is_empty());
+        assert!(print_unsupported_summary_on_detach("codex:test", false, &mut telemetry).is_ok());
+        assert!(telemetry.unsupported_event_counts.is_empty());
     }
 
     #[test]
     fn classify_stream_error_source_and_fatal_variants() {
+        let mut telemetry = AttachTelemetry::default();
         let child = serde_json::json!({"params":{"error_source":"child","message":"oops"}});
         let upstream =
             serde_json::json!({"params":{"errorSource":"upstream_mcp","message":"oops"}});
@@ -1178,27 +1339,50 @@ mod tests {
             serde_json::json!({"params":{"fatal":true,"error_source":"proxy","message":"boom"}});
 
         assert_eq!(
-            classify_event_class("stream_error", "client_prompt", &child, "oops").0,
+            classify_event_class(
+                "stream_error",
+                "client_prompt",
+                &child,
+                "oops",
+                &mut telemetry
+            )
+            .0,
             "stream.error.child"
         );
         assert_eq!(
-            classify_event_class("stream_error", "client_prompt", &upstream, "oops").0,
+            classify_event_class(
+                "stream_error",
+                "client_prompt",
+                &upstream,
+                "oops",
+                &mut telemetry
+            )
+            .0,
             "stream.error.upstream"
         );
         assert_eq!(
-            classify_event_class("stream_error", "client_prompt", &fatal, "boom").0,
+            classify_event_class(
+                "stream_error",
+                "client_prompt",
+                &fatal,
+                "boom",
+                &mut telemetry
+            )
+            .0,
             "stream.error.fatal"
         );
     }
 
     #[test]
     fn classify_splits_request_user_input_and_elicitation_request() {
+        let mut telemetry = AttachTelemetry::default();
         assert_eq!(
             classify_event_class(
                 "request_user_input",
                 "client_prompt",
                 &serde_json::json!({}),
-                "choose"
+                "choose",
+                &mut telemetry
             )
             .0,
             "elicitation.request_user_input"
@@ -1208,7 +1392,8 @@ mod tests {
                 "elicitation_request",
                 "client_prompt",
                 &serde_json::json!({}),
-                "approve?"
+                "approve?",
+                &mut telemetry
             )
             .0,
             "elicitation.request"
@@ -1252,10 +1437,11 @@ mod tests {
         for (idx, (frame_line, expected_line)) in
             input_rows.iter().zip(expected_rows.iter()).enumerate()
         {
+            let mut telemetry = AttachTelemetry::default();
             let frame: Value = serde_json::from_str(frame_line).expect("valid frame fixture line");
             let expected_json: Value =
                 serde_json::from_str(expected_line).expect("valid expected fixture line");
-            let env = to_attached_envelope("codex:test", &frame);
+            let env = to_attached_envelope("codex:test", &frame, &mut telemetry);
             let expected_class = expected_json
                 .get("class")
                 .and_then(|v| v.as_str())
