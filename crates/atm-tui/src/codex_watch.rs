@@ -40,6 +40,7 @@ enum RenderClass {
     SessionTokenCount,
     PlanUpdate,
     PlanDelta,
+    Unsupported,
     StreamError,
     InputClient,
     InputUserSteer,
@@ -247,6 +248,18 @@ fn parse_stream_line(raw_line: &str) -> ParsedLine {
     if let Some(rest) = trimmed.strip_prefix("plan.delta ") {
         return ParsedLine {
             class: RenderClass::PlanDelta,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("unsupported.") {
+        return ParsedLine {
+            class: RenderClass::Unsupported,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("unknown.") {
+        return ParsedLine {
+            class: RenderClass::Unsupported,
             body: rest.to_string(),
         };
     }
@@ -634,6 +647,17 @@ fn render_spec(class: RenderClass, body: &str) -> RenderSpec {
             label_style: Style::default().fg(Color::Yellow),
             body_style: Style::default(),
         },
+        RenderClass::Unsupported => RenderSpec {
+            icon: "? ",
+            icon_style: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            label: "Unsupported ",
+            label_style: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
         RenderClass::StreamError => RenderSpec {
             icon: "! ",
             icon_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -859,8 +883,14 @@ mod tests {
             ("cmd.begin run", "Command begin"),
             ("cmd.output out", "Command output"),
             ("tool.mcp.begin read_file", "MCP tool begin"),
+            ("tool.mcp.end read_file", "MCP tool end"),
+            ("tool.web_search.begin q", "Search begin"),
+            ("tool.web_search.end q", "Search end"),
             ("session.configured s1", "Session configured"),
+            ("session.token_count 321", "Token count"),
             ("plan.update added-step", "Plan update"),
+            ("plan.delta +item", "Plan delta"),
+            ("unsupported.future_event", "Unsupported"),
         ];
         for (raw, expected) in samples {
             let rendered = rendered_text(render_stream_line(raw));
@@ -889,6 +919,7 @@ mod tests {
             "session-attach",
             "detach-reattach",
             "cross-transport",
+            "degraded-events",
         ];
 
         for scenario_name in scenarios {
