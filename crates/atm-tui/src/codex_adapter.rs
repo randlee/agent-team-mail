@@ -119,6 +119,12 @@ impl CodexAdapter {
                     is_turn_boundary: false,
                 }
             }
+            "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => {
+                AdaptedWatchLine {
+                    line: format!("{source_badge} file.edit {text}"),
+                    is_turn_boundary: false,
+                }
+            }
             "approval_prompt"
             | "approval_request"
             | "entered_review_mode"
@@ -289,6 +295,18 @@ mod tests {
         });
         let line = adapter.adapt_frame(&interrupted).line;
         assert!(line.contains("turn.interrupted"));
+        assert_eq!(adapter.unknown_events(), 0);
+    }
+
+    #[test]
+    fn maps_file_edit_events() {
+        let mut adapter = CodexAdapter::new();
+        let frame = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"patch_apply_begin","message":"patch starts"}}
+        });
+        let out = adapter.adapt_frame(&frame);
+        assert!(out.line.contains("file.edit"));
         assert_eq!(adapter.unknown_events(), 0);
     }
 

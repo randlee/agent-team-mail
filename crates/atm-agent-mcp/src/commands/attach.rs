@@ -48,6 +48,7 @@ struct AttachedRenderEnvelope {
     mode: &'static str,
     agent_id: String,
     class: String,
+    applicability: String,
     source_kind: String,
     source_actor: String,
     source_channel: String,
@@ -407,21 +408,20 @@ fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()
         return Ok(());
     }
 
-    if env.class == "input.atm_mail" {
-        println!("{} <{}>", env.source_actor, clamp_three_lines(&env.text));
-        return Ok(());
+    let payload = if env.text.is_empty() {
+        env.event_type.clone()
+    } else {
+        env.text.clone()
+    };
+    match env.class.as_str() {
+        "input.atm_mail" => println!("{} <{}>", env.source_actor, clamp_three_lines(&env.text)),
+        "assistant.output" => println!("assistant: {payload}"),
+        "assistant.reasoning" => println!("reasoning: {payload}"),
+        "turn.lifecycle" => println!("turn: {payload}"),
+        "approval" => println!("approval: {payload}"),
+        "elicitation.request" => println!("input-request: {payload}"),
+        _ => println!("[{}][{}] {}", env.class, env.source_kind, payload),
     }
-
-    println!(
-        "[{}][{}] {}",
-        env.class,
-        env.source_kind,
-        if env.text.is_empty() {
-            env.event_type
-        } else {
-            env.text
-        }
-    );
     Ok(())
 }
 
@@ -457,7 +457,7 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         .unwrap_or("")
         .to_string();
 
-    let (class, unsupported_count) = classify_event_class(&event_type, &source_kind);
+    let (class, unsupported_count, applicability) = classify_event_class(&event_type, &source_kind);
     let is_turn_boundary = matches!(
         event_type.as_str(),
         "turn_started"
@@ -487,6 +487,7 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         mode: "attached",
         agent_id: agent_id.to_string(),
         class,
+        applicability: applicability.to_string(),
         source_kind,
         source_actor,
         source_channel,
@@ -498,12 +499,15 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
     }
 }
 
-fn classify_event_class(event_type: &str, source_kind: &str) -> (String, Option<u64>) {
+fn classify_event_class(
+    event_type: &str,
+    source_kind: &str,
+) -> (String, Option<u64>, &'static str) {
     if source_kind == "atm_mail" || source_kind == "atm_mcp" {
-        return ("input.atm_mail".to_string(), None);
+        return ("input.atm_mail".to_string(), None, "required");
     }
     if source_kind == "user_steer" || source_kind == "tui_user" {
-        return ("input.user_steer".to_string(), None);
+        return ("input.user_steer".to_string(), None, "required");
     }
 
     let class = match event_type {
@@ -528,16 +532,16 @@ fn classify_event_class(event_type: &str, source_kind: &str) -> (String, Option<
         | "exec_command_error" => "tool.exec",
         "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => "file.edit",
         "request_user_input" | "elicitation_request" => "elicitation.request",
-        "turn_started" | "turn_completed" | "task_started" | "task_complete" | "turn_idle"
-        | "idle" | "done" | "item_started" | "item_completed" => "turn.lifecycle",
+        "turn_started" | "turn_completed" | "turn_aborted" | "task_started" | "task_complete"
+        | "turn_idle" | "idle" | "done" | "item_started" | "item_completed" => "turn.lifecycle",
         "stream_error" | "error" => "stream.error",
         _ => {
             let ty = sanitize_event_type(event_type);
             let count = record_unsupported_event(&ty);
-            return (format!("unsupported.{ty}"), Some(count));
+            return (format!("unsupported.{ty}"), Some(count), "out_of_scope");
         }
     };
-    (class.to_string(), None)
+    (class.to_string(), None, "required")
 }
 
 fn sanitize_event_type(event_type: &str) -> String {
@@ -727,6 +731,7 @@ mod tests {
         let env = to_attached_envelope("codex:abc", &frame);
         assert_eq!(env.mode, "attached");
         assert_eq!(env.class, "assistant.output");
+        assert_eq!(env.applicability, "required");
         assert_eq!(env.text, "hello");
         assert_eq!(env.source_actor, "arch-atm");
         assert_eq!(env.unsupported_count, None);
@@ -734,18 +739,70 @@ mod tests {
 
     #[test]
     fn classify_unknown_event_emits_supported_prefix_and_counter() {
-        let (class, count1) = classify_event_class("future/event", "client_prompt");
-        let (_, count2) = classify_event_class("future/event", "client_prompt");
+        let (class, count1, applicability1) = classify_event_class("future/event", "client_prompt");
+        let (_, count2, applicability2) = classify_event_class("future/event", "client_prompt");
         assert_eq!(class, "unsupported.future_event");
+        assert_eq!(applicability1, "out_of_scope");
+        assert_eq!(applicability2, "out_of_scope");
         assert_eq!(count1, Some(1));
         assert_eq!(count2, Some(2));
         assert_eq!(unsupported_event_count("future_event"), 2);
     }
 
     #[test]
+    fn class_map_fixture_matches_expected_class_and_applicability() {
+        let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/parity/attach/class-map.input.jsonl");
+        let expected_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/parity/attach/class-map.expected.jsonl");
+
+        let input = fs::read_to_string(input_path).expect("input fixture");
+        let expected = fs::read_to_string(expected_path).expect("expected fixture");
+        let input_rows: Vec<&str> = input.lines().filter(|l| !l.trim().is_empty()).collect();
+        let expected_rows: Vec<&str> = expected.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            input_rows.len(),
+            expected_rows.len(),
+            "fixture row count must match"
+        );
+
+        for (idx, (frame_line, expected_line)) in
+            input_rows.iter().zip(expected_rows.iter()).enumerate()
+        {
+            let frame: Value = serde_json::from_str(frame_line).expect("valid frame fixture line");
+            let expected_json: Value =
+                serde_json::from_str(expected_line).expect("valid expected fixture line");
+            let env = to_attached_envelope("codex:test", &frame);
+            let expected_class = expected_json
+                .get("class")
+                .and_then(|v| v.as_str())
+                .expect("expected class");
+            let expected_applicability = expected_json
+                .get("applicability")
+                .and_then(|v| v.as_str())
+                .expect("expected applicability");
+            assert_eq!(
+                env.class,
+                expected_class,
+                "class mismatch at row {}",
+                idx + 1
+            );
+            assert_eq!(
+                env.applicability,
+                expected_applicability,
+                "applicability mismatch at row {}",
+                idx + 1
+            );
+        }
+    }
+
+    #[test]
     fn classify_control_error_uses_io_kind() {
         let err = anyhow::Error::new(std::io::Error::new(ErrorKind::ConnectionRefused, "refused"));
-        assert_eq!(classify_control_send_error(&err), "control.connection_refused");
+        assert_eq!(
+            classify_control_send_error(&err),
+            "control.connection_refused"
+        );
     }
 
     #[tokio::test]
@@ -762,11 +819,15 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert!(pos > 0);
         assert_eq!(
-            frames[0].pointer("/event/params/type").and_then(|v| v.as_str()),
+            frames[0]
+                .pointer("/event/params/type")
+                .and_then(|v| v.as_str()),
             Some("turn_started")
         );
         assert_eq!(
-            frames[1].pointer("/event/params/type").and_then(|v| v.as_str()),
+            frames[1]
+                .pointer("/event/params/type")
+                .and_then(|v| v.as_str()),
             Some("item_delta")
         );
     }
