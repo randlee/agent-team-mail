@@ -1,0 +1,10 @@
+{"event_type":"reasoning_content_delta","class":"assistant.reasoning","applicability":"required"}
+{"event_type":"approval_request","class":"approval","applicability":"required"}
+{"event_type":"exec_command_started","class":"tool.exec","applicability":"required"}
+{"event_type":"request_user_input","class":"elicitation.request","applicability":"required"}
+{"event_type":"user_message","class":"input.user_steer","applicability":"required"}
+{"event_type":"user_message","class":"input.client","applicability":"required"}
+{"event_type":"patch_apply_begin","class":"file.edit","applicability":"required"}
+{"event_type":"turn_started","class":"turn.lifecycle","applicability":"required"}
+{"event_type":"turn_aborted","class":"turn.lifecycle","applicability":"required"}
+{"event_type":"future_event_kind","class":"unsupported.future_event_kind","applicability":"out_of_scope"}

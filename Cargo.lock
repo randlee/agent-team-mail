@@ -85,6 +85,7 @@ dependencies = [
  "agent-team-mail-core",
  "anyhow",
  "async-trait",
+ "chrono",
  "clap",
  "dirs",
  "libc",
