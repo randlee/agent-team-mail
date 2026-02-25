@@ -103,12 +103,12 @@ Owner: `arch-ctm`
 - approved_date: 2026-02-25
 - rationale: Ctrl-C follows default process signal behavior (DEV-O3-002); explicit documentation deferred to help-text hardening pass.
 
-## Phase P Planning Note (2026-02-25)
+## Phase P Progress Note (2026-02-25)
 
-All O-R.5 approved deviations remain open by design and are planned for closure in Phase P:
+O-R.5 approved deviations are being closed in Phase P by sprint:
 
-- P.1: DEV-OR5-001, DEV-OR5-002
-- P.2: DEV-OR5-003, DEV-OR5-004
-- P.3: DEV-OR5-005
-- P.4: DEV-OR5-006
-- P.5: DEV-OR5-007
+- P.1: DEV-OR5-001, DEV-OR5-002 (planned)
+- P.2: DEV-OR5-003, DEV-OR5-004 (closed)
+- P.3: DEV-OR5-005 (planned)
+- P.4: DEV-OR5-006 (planned)
+- P.5: DEV-OR5-007 (planned)
