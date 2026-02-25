@@ -1,0 +1,5 @@
+name = "degraded-events"
+transport = "mcp"
+codex_version = "0.15.0"
+schema_version = "v1"
+notes = "degraded-class renderer coverage for O-R.2"

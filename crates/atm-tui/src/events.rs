@@ -70,6 +70,11 @@ pub fn handle_event(event: &Event, app: &mut App) -> bool {
         code, modifiers, ..
     }) = event
     {
+        // ── Approval/Elicitation modal (highest priority) ─────────────────────
+        if app.approval_prompt.is_some() {
+            return handle_approval_modal(code, modifiers, app);
+        }
+
         // ── Interrupt confirmation dialog (higher priority) ────────────────────
         // When a confirmation is pending, only accept y/Y/Enter (confirm) or
         // n/N/Esc (cancel). All other keys are silently discarded so the user
@@ -138,6 +143,55 @@ pub fn handle_event(event: &Event, app: &mut App) -> bool {
             // Log viewer panel uses navigation keys only (handled globally above).
             FocusPanel::LogViewer => handle_log_viewer_key(code, app),
         };
+    }
+    false
+}
+
+fn handle_approval_modal(code: &KeyCode, modifiers: &KeyModifiers, app: &mut App) -> bool {
+    if let Some(prompt) = app.approval_prompt.clone() {
+        match code {
+            KeyCode::Esc => {
+                app.approval_prompt = None;
+                app.approval_input.clear();
+            }
+            KeyCode::Backspace => {
+                app.approval_input.pop();
+            }
+            KeyCode::Enter => {
+                let text = app.approval_input.trim().to_string();
+                app.pending_control = Some(PendingControl::ElicitationResponse {
+                    elicitation_id: prompt.id,
+                    decision: "approve".to_string(),
+                    text: if text.is_empty() { None } else { Some(text) },
+                });
+                app.approval_prompt = None;
+                app.approval_input.clear();
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let text = app.approval_input.trim().to_string();
+                app.pending_control = Some(PendingControl::ElicitationResponse {
+                    elicitation_id: prompt.id,
+                    decision: "approve".to_string(),
+                    text: if text.is_empty() { None } else { Some(text) },
+                });
+                app.approval_prompt = None;
+                app.approval_input.clear();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                let text = app.approval_input.trim().to_string();
+                app.pending_control = Some(PendingControl::ElicitationResponse {
+                    elicitation_id: prompt.id,
+                    decision: "reject".to_string(),
+                    text: if text.is_empty() { None } else { Some(text) },
+                });
+                app.approval_prompt = None;
+                app.approval_input.clear();
+            }
+            KeyCode::Char(c) if modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT => {
+                app.approval_input.push(*c);
+            }
+            _ => {}
+        }
     }
     false
 }
@@ -804,5 +858,45 @@ mod tests {
         let quit = handle_event(&key_event(KeyCode::Char('q'), KeyModifiers::NONE), &mut app);
         assert!(!quit, "q should not quit when control_input is non-empty");
         assert_eq!(app.control_input, "helq");
+    }
+
+    #[test]
+    fn test_approval_modal_enter_dispatches_correlated_approve() {
+        let mut app = app_with_members();
+        app.approval_prompt = Some(crate::app::ApprovalPrompt {
+            id: "req-101".to_string(),
+            kind: crate::app::ApprovalPromptKind::Exec,
+            prompt: "allow".to_string(),
+        });
+        app.approval_input = "looks good".to_string();
+        handle_event(&key_event(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert!(matches!(
+            app.pending_control,
+            Some(PendingControl::ElicitationResponse {
+                ref elicitation_id,
+                ref decision,
+                ref text,
+            }) if elicitation_id == "req-101" && decision == "approve" && text.as_deref() == Some("looks good")
+        ));
+        assert!(app.approval_prompt.is_none());
+    }
+
+    #[test]
+    fn test_approval_modal_n_dispatches_correlated_reject() {
+        let mut app = app_with_members();
+        app.approval_prompt = Some(crate::app::ApprovalPrompt {
+            id: "req-202".to_string(),
+            kind: crate::app::ApprovalPromptKind::Patch,
+            prompt: "patch".to_string(),
+        });
+        handle_event(&key_event(KeyCode::Char('n'), KeyModifiers::NONE), &mut app);
+        assert!(matches!(
+            app.pending_control,
+            Some(PendingControl::ElicitationResponse {
+                ref elicitation_id,
+                ref decision,
+                ref text,
+            }) if elicitation_id == "req-202" && decision == "reject" && text.is_none()
+        ));
     }
 }

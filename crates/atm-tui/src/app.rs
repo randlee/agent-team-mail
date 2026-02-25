@@ -41,6 +41,27 @@ pub enum PendingControl {
     Stdin(String),
     /// Send an interrupt signal to the selected agent.
     Interrupt,
+    /// Send an elicitation/approval decision via correlated proxy routing.
+    ElicitationResponse {
+        elicitation_id: String,
+        decision: String,
+        text: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalPromptKind {
+    Exec,
+    Patch,
+    UserInput,
+    Review,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovalPrompt {
+    pub id: String,
+    pub kind: ApprovalPromptKind,
+    pub prompt: String,
 }
 
 /// Top-level application state.
@@ -156,6 +177,10 @@ pub struct App {
     pub watch_dropped: u64,
     /// Latest unknown-event counter value from stream telemetry.
     pub watch_unknown: u64,
+    /// Active approval/elicitation prompt detected from stream events.
+    pub approval_prompt: Option<ApprovalPrompt>,
+    /// Optional user-entered text for approval/elicitation response.
+    pub approval_input: String,
 }
 
 impl App {
@@ -199,6 +224,8 @@ impl App {
             watch_turn_failed: 0,
             watch_dropped: 0,
             watch_unknown: 0,
+            approval_prompt: None,
+            approval_input: String::new(),
             log_viewer_visible: false,
             log_events: Vec::new(),
             log_scroll_offset: 0,
@@ -296,6 +323,7 @@ impl App {
             .pointer("/params/type")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
+        self.maybe_track_approval_prompt(event, kind);
         if let Some(transport) = first_string(event, &["/params/transport"]) {
             self.watch_transport = Some(transport);
         }
@@ -458,6 +486,76 @@ impl App {
                 .as_ref()
                 .and_then(|s| s.thread_id.as_deref())
         })
+    }
+
+    fn maybe_track_approval_prompt(&mut self, event: &serde_json::Value, kind: &str) {
+        let id = first_string(
+            event,
+            &[
+                "/params/request_id",
+                "/params/requestId",
+                "/params/item_id",
+                "/params/itemId",
+                "/params/id",
+            ],
+        );
+        let text = first_string(
+            event,
+            &[
+                "/params/prompt",
+                "/params/message",
+                "/params/text",
+                "/params/output",
+                "/params/delta",
+            ],
+        )
+        .unwrap_or_default();
+        match kind {
+            "exec_approval_request" | "approval_request" | "approval_prompt" => {
+                if let Some(id) = id {
+                    self.approval_prompt = Some(ApprovalPrompt {
+                        id,
+                        kind: ApprovalPromptKind::Exec,
+                        prompt: text,
+                    });
+                }
+            }
+            "apply_patch_approval_request" => {
+                if let Some(id) = id {
+                    self.approval_prompt = Some(ApprovalPrompt {
+                        id,
+                        kind: ApprovalPromptKind::Patch,
+                        prompt: text,
+                    });
+                }
+            }
+            "request_user_input" | "elicitation_request" => {
+                if let Some(id) = id {
+                    self.approval_prompt = Some(ApprovalPrompt {
+                        id,
+                        kind: ApprovalPromptKind::UserInput,
+                        prompt: text,
+                    });
+                }
+            }
+            "entered_review_mode" | "item/enteredReviewMode" => {
+                if let Some(id) = id {
+                    self.approval_prompt = Some(ApprovalPrompt {
+                        id,
+                        kind: ApprovalPromptKind::Review,
+                        prompt: text,
+                    });
+                }
+            }
+            "approval_rejected"
+            | "approval_approved"
+            | "exited_review_mode"
+            | "item/exitedReviewMode" => {
+                self.approval_prompt = None;
+                self.approval_input.clear();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1075,5 +1173,43 @@ mod tests {
             FocusPanel::Dashboard,
             "must wrap back to Dashboard"
         );
+    }
+
+    #[test]
+    fn test_apply_watch_frame_tracks_exec_approval_prompt() {
+        let mut app = new_app("atm-dev");
+        let frame = serde_json::json!({
+            "event": {
+                "params": {
+                    "type": "exec_approval_request",
+                    "request_id": "req-42",
+                    "message": "allow command?"
+                }
+            }
+        });
+        app.apply_watch_frame(&frame);
+        let prompt = app.approval_prompt.expect("prompt should be captured");
+        assert_eq!(prompt.id, "req-42");
+        assert_eq!(prompt.kind, ApprovalPromptKind::Exec);
+        assert_eq!(prompt.prompt, "allow command?");
+    }
+
+    #[test]
+    fn test_apply_watch_frame_clears_prompt_on_resolution() {
+        let mut app = new_app("atm-dev");
+        app.approval_prompt = Some(ApprovalPrompt {
+            id: "req-9".to_string(),
+            kind: ApprovalPromptKind::Review,
+            prompt: "review".to_string(),
+        });
+        app.approval_input = "notes".to_string();
+        let frame = serde_json::json!({
+            "event": {
+                "params": { "type": "approval_approved" }
+            }
+        });
+        app.apply_watch_frame(&frame);
+        assert!(app.approval_prompt.is_none());
+        assert!(app.approval_input.is_empty());
     }
 }

@@ -52,15 +52,28 @@ git push -u origin integrate/phase-{P}
 
 Spawn once per phase. The quality-mgr persists across all sprints.
 
+Use the Task tool with `name` parameter to spawn as a tmux teammate:
+
 ```json
 {
-  "subagent_type": "quality-mgr",
+  "subagent_type": "general-purpose",
   "name": "quality-mgr",
   "team_name": "atm-dev",
   "model": "sonnet",
   "prompt": "You are quality-mgr for Phase {P}. You will receive QA assignments from team-lead for each sprint as they complete. Stand by for first assignment. Integration branch: integrate/phase-{P}. Phase docs: docs/project-plan.md, docs/atm-agent-mcp/requirements.md."
 }
 ```
+
+**Tmux teammate launch troubleshooting**: If the pane opens but the Claude process doesn't start, manually launch in the pane with all three required flags:
+
+```bash
+CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 /Users/randlee/.local/share/claude/versions/<VERSION> \
+  --agent-id quality-mgr@atm-dev \
+  --agent-name quality-mgr \
+  --team-name atm-dev
+```
+
+All three flags (`--agent-id`, `--agent-name`, `--team-name`) are required together — omitting any one causes an error.
 
 ### 4. Send O.1 Assignment to arch-ctm
 

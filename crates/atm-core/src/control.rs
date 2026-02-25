@@ -49,6 +49,16 @@ pub struct ControlRequest {
     /// Optional file reference for oversized stdin payloads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_ref: Option<ContentRef>,
+    /// Correlation key for approval/elicitation responses.
+    ///
+    /// Required when `action == ControlAction::ElicitationResponse`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elicitation_id: Option<String>,
+    /// Decision value for approval/elicitation responses (`"approve"` / `"reject"`).
+    ///
+    /// Required when `action == ControlAction::ElicitationResponse`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
 }
 
 /// Control action kind.
@@ -57,6 +67,7 @@ pub struct ControlRequest {
 pub enum ControlAction {
     Stdin,
     Interrupt,
+    ElicitationResponse,
 }
 
 /// Acknowledgement payload returned by the daemon for a control request.
@@ -113,6 +124,8 @@ mod tests {
             action: ControlAction::Stdin,
             payload: Some("hello".to_string()),
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         };
         let json = serde_json::to_string(&req).expect("serialize request");
         // Verify the wire-format key is "content", not "payload" (protocol spec §3.1).

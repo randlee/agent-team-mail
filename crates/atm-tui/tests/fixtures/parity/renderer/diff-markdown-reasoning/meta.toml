@@ -1,0 +1,5 @@
+name = "diff-markdown-reasoning"
+transport = "mcp"
+codex_version = "0.15.0"
+schema_version = "v1"
+notes = "O-R.4 diff + reasoning section break + markdown rendering coverage"

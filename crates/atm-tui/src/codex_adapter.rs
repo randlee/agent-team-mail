@@ -4,6 +4,7 @@
 //! preserving stream order and incremental updates.
 
 use crate::codex_vendor::text_formatting::format_json_compact;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct AdaptedWatchLine {
@@ -14,6 +15,7 @@ pub struct AdaptedWatchLine {
 #[derive(Debug, Default)]
 pub struct CodexAdapter {
     unknown_events: u64,
+    unknown_by_type: BTreeMap<String, u64>,
 }
 
 impl CodexAdapter {
@@ -23,6 +25,19 @@ impl CodexAdapter {
 
     pub fn unknown_events(&self) -> u64 {
         self.unknown_events
+    }
+
+    pub fn unknown_summary(&self, warn_threshold: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        for (event_type, count) in &self.unknown_by_type {
+            out.push(format!("unsupported.summary {event_type}={count}"));
+            if *count >= warn_threshold {
+                out.push(format!(
+                    "stream.warning unsupported event '{event_type}' seen {count} times"
+                ));
+            }
+        }
+        out
     }
 
     pub fn adapt_frame(&mut self, frame: &serde_json::Value) -> AdaptedWatchLine {
@@ -113,36 +128,96 @@ impl CodexAdapter {
                 line: format!("{source_badge} turn.idle"),
                 is_turn_boundary: true,
             },
-            "exec_command_output_delta" | "exec_command_completed" | "exec_command_error" => {
+            "exec_command_begin" | "exec_command_started" => AdaptedWatchLine {
+                line: format!("{source_badge} cmd.begin {text}"),
+                is_turn_boundary: false,
+            },
+            "exec_command_output_delta" => AdaptedWatchLine {
+                line: format!("{source_badge} cmd.output {text}"),
+                is_turn_boundary: false,
+            },
+            "exec_command_completed" => AdaptedWatchLine {
+                line: format!("{source_badge} cmd.completed {text}"),
+                is_turn_boundary: false,
+            },
+            "exec_command_error" => AdaptedWatchLine {
+                line: format!("{source_badge} cmd.error {text}"),
+                is_turn_boundary: false,
+            },
+            "exec_approval_request" | "approval_prompt" | "approval_request" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.exec.request {text}"),
+                is_turn_boundary: true,
+            },
+            "apply_patch_approval_request" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.patch.request {text}"),
+                is_turn_boundary: true,
+            },
+            "entered_review_mode" | "item/enteredReviewMode" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.review.entered {text}"),
+                is_turn_boundary: true,
+            },
+            "exited_review_mode" | "item/exitedReviewMode" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.review.exited {text}"),
+                is_turn_boundary: true,
+            },
+            "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => {
                 AdaptedWatchLine {
-                    line: format!("{source_badge} cmd {text}"),
+                    line: format!("{source_badge} file.edit {kind} {text}"),
                     is_turn_boundary: false,
                 }
             }
-            "approval_prompt"
-            | "approval_request"
-            | "entered_review_mode"
-            | "item/enteredReviewMode" => AdaptedWatchLine {
-                line: format!("{source_badge} approval.request {text}"),
-                is_turn_boundary: true,
-            },
             "approval_rejected" | "reject" | "rejected" => AdaptedWatchLine {
-                line: format!("{source_badge} approval.rejected {text}"),
+                line: format!("{source_badge} approval.review.rejected {text}"),
                 is_turn_boundary: true,
             },
-            "approval_approved" | "approved" | "item/exitedReviewMode" | "exited_review_mode" => {
-                AdaptedWatchLine {
-                    line: format!("{source_badge} approval.resolved {text}"),
-                    is_turn_boundary: true,
-                }
-            }
+            "approval_approved" | "approved" => AdaptedWatchLine {
+                line: format!("{source_badge} approval.review.resolved {text}"),
+                is_turn_boundary: true,
+            },
             "request_user_input" | "elicitation_request" => AdaptedWatchLine {
                 line: format!("{source_badge} elicitation.request {text}"),
                 is_turn_boundary: true,
             },
+            "mcp_tool_call_begin" => AdaptedWatchLine {
+                line: format!("{source_badge} tool.mcp.begin {text}"),
+                is_turn_boundary: false,
+            },
+            "mcp_tool_call_end" => AdaptedWatchLine {
+                line: format!("{source_badge} tool.mcp.end {text}"),
+                is_turn_boundary: false,
+            },
+            "web_search_begin" => AdaptedWatchLine {
+                line: format!("{source_badge} tool.web_search.begin {text}"),
+                is_turn_boundary: false,
+            },
+            "web_search_end" => AdaptedWatchLine {
+                line: format!("{source_badge} tool.web_search.end {text}"),
+                is_turn_boundary: false,
+            },
+            "plan_update" => AdaptedWatchLine {
+                line: format!("{source_badge} plan.update {text}"),
+                is_turn_boundary: false,
+            },
+            "plan_delta" => AdaptedWatchLine {
+                line: format!("{source_badge} plan.delta {text}"),
+                is_turn_boundary: false,
+            },
+            "session_configured" => AdaptedWatchLine {
+                line: format!("{source_badge} session.configured {text}"),
+                is_turn_boundary: true,
+            },
+            "token_count" => AdaptedWatchLine {
+                line: format!("{source_badge} session.token_count {text}"),
+                is_turn_boundary: false,
+            },
             "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
+                let normalized = if is_reasoning_section_break(event) {
+                    "reasoning.section_break"
+                } else {
+                    "reasoning"
+                };
                 AdaptedWatchLine {
-                    line: format!("{source_badge} reasoning {text}"),
+                    line: format!("{source_badge} {normalized} {text}"),
                     is_turn_boundary: false,
                 }
             }
@@ -150,14 +225,33 @@ impl CodexAdapter {
                 line: format!("{source_badge} turn.interrupted {text}"),
                 is_turn_boundary: true,
             },
-            "stream_error" | "error" => AdaptedWatchLine {
-                line: format!("{source_badge} stream.error {text}"),
-                is_turn_boundary: true,
+            "stream_error" | "error" => {
+                let fatal = is_fatal_error(event, &text);
+                let rendered = if fatal {
+                    format!("{text} [detach/reconnect recommended]")
+                } else {
+                    text.clone()
+                };
+                AdaptedWatchLine {
+                    line: format!(
+                        "{source_badge} stream.error.{}{} {rendered}",
+                        error_source(event),
+                        if fatal { ".fatal" } else { "" }
+                    ),
+                    is_turn_boundary: true,
+                }
+            }
+            "stream_warning" => AdaptedWatchLine {
+                line: format!("{source_badge} stream.warning {text}"),
+                is_turn_boundary: false,
             },
             other => {
                 self.unknown_events = self.unknown_events.saturating_add(1);
+                let key = sanitize_event_type(other);
+                let entry = self.unknown_by_type.entry(key.clone()).or_insert(0);
+                *entry = entry.saturating_add(1);
                 AdaptedWatchLine {
-                    line: format!("{source_badge} unknown.{other}"),
+                    line: format!("{source_badge} unknown.{key}"),
                     is_turn_boundary: false,
                 }
             }
@@ -199,6 +293,72 @@ fn format_mail_actor(actor: &str) -> String {
     }
     let team = std::env::var("ATM_TEAM").unwrap_or_else(|_| "atm-dev".to_string());
     format!("{actor}@{}", team.trim())
+}
+
+fn sanitize_event_type(event_type: &str) -> String {
+    if event_type.trim().is_empty() {
+        return "unknown".to_string();
+    }
+    event_type
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn error_source(event: &serde_json::Value) -> &'static str {
+    let src = event
+        .pointer("/params/error_source")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/params/errorSource").and_then(|v| v.as_str()))
+        .or_else(|| event.pointer("/params/source").and_then(|v| v.as_str()))
+        .unwrap_or("proxy");
+    match src {
+        "child" => "child",
+        "upstream" | "upstream_mcp" => "upstream",
+        _ => "proxy",
+    }
+}
+
+fn is_fatal_error(event: &serde_json::Value, text: &str) -> bool {
+    event
+        .pointer("/params/fatal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || text.to_ascii_lowercase().contains("fatal")
+}
+
+fn is_reasoning_section_break(event: &serde_json::Value) -> bool {
+    if event
+        .pointer("/params/section_break")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if event
+        .pointer("/params/is_section_break")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    event
+        .pointer("/params/delta_type")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            event
+                .pointer("/params/reasoning_delta/type")
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| event.pointer("/params/content/type").and_then(|v| v.as_str()))
+        .is_some_and(|t| t.eq_ignore_ascii_case("section_break"))
 }
 
 #[cfg(test)]
@@ -263,20 +423,54 @@ mod tests {
             adapter
                 .adapt_frame(&approval)
                 .line
-                .contains("approval.request")
+                .contains("approval.exec.request")
         );
         assert!(
             adapter
                 .adapt_frame(&rejected)
                 .line
-                .contains("approval.rejected")
+                .contains("approval.review.rejected")
         );
         assert!(
             adapter
                 .adapt_frame(&resolved)
                 .line
-                .contains("approval.resolved")
+                .contains("approval.review.resolved")
         );
+        assert_eq!(adapter.unknown_events(), 0);
+    }
+
+    #[test]
+    fn maps_new_required_and_degraded_event_families() {
+        let mut adapter = CodexAdapter::new();
+        let cases = [
+            ("exec_command_begin", "cmd.begin"),
+            ("mcp_tool_call_begin", "tool.mcp.begin"),
+            ("mcp_tool_call_end", "tool.mcp.end"),
+            ("web_search_begin", "tool.web_search.begin"),
+            ("web_search_end", "tool.web_search.end"),
+            ("plan_update", "plan.update"),
+            ("plan_delta", "plan.delta"),
+            ("session_configured", "session.configured"),
+            ("token_count", "session.token_count"),
+            ("request_user_input", "elicitation.request"),
+            ("exec_approval_request", "approval.exec.request"),
+            ("apply_patch_approval_request", "approval.patch.request"),
+            ("entered_review_mode", "approval.review.entered"),
+            ("exited_review_mode", "approval.review.exited"),
+        ];
+
+        for (event_type, expected) in cases {
+            let frame = serde_json::json!({
+                "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+                "event":{"params":{"type":event_type,"message":"m"}}
+            });
+            let line = adapter.adapt_frame(&frame).line;
+            assert!(
+                line.contains(expected),
+                "event {event_type} expected mapping {expected}, got {line}"
+            );
+        }
         assert_eq!(adapter.unknown_events(), 0);
     }
 
@@ -289,6 +483,42 @@ mod tests {
         });
         let line = adapter.adapt_frame(&interrupted).line;
         assert!(line.contains("turn.interrupted"));
+        assert_eq!(adapter.unknown_events(), 0);
+    }
+
+    #[test]
+    fn maps_stream_error_source_and_fatal() {
+        let mut adapter = CodexAdapter::new();
+        let frame = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"stream_error","error_source":"child","fatal":true,"message":"boom"}}
+        });
+        let out = adapter.adapt_frame(&frame);
+        assert!(out.line.contains("stream.error.child.fatal"));
+        assert!(out.line.contains("detach/reconnect recommended"));
+    }
+
+    #[test]
+    fn maps_file_edit_events() {
+        let mut adapter = CodexAdapter::new();
+        let frame = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"patch_apply_begin","message":"patch starts"}}
+        });
+        let out = adapter.adapt_frame(&frame);
+        assert!(out.line.contains("file.edit patch_apply_begin"));
+        assert_eq!(adapter.unknown_events(), 0);
+    }
+
+    #[test]
+    fn maps_reasoning_section_break() {
+        let mut adapter = CodexAdapter::new();
+        let frame = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"reasoning_content_delta","delta_type":"section_break","delta":"analysis"}}
+        });
+        let out = adapter.adapt_frame(&frame);
+        assert!(out.line.contains("reasoning.section_break"));
         assert_eq!(adapter.unknown_events(), 0);
     }
 
@@ -326,6 +556,21 @@ mod tests {
                 .line
                 .contains("<line1 / line2 / line3 ...>")
         );
+    }
+
+    #[test]
+    fn unknown_summary_contains_threshold_warning() {
+        let mut adapter = CodexAdapter::new();
+        let frame = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"future/event"}}
+        });
+        for _ in 0..5 {
+            let _ = adapter.adapt_frame(&frame);
+        }
+        let summary = adapter.unknown_summary(5);
+        assert!(summary.iter().any(|l| l.contains("unsupported.summary")));
+        assert!(summary.iter().any(|l| l.contains("stream.warning")));
     }
 
     #[test]
