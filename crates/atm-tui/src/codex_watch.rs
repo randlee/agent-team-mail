@@ -17,9 +17,27 @@ enum RenderClass {
     TurnCompleted,
     TurnIdle,
     TurnInterrupted,
-    ApprovalRequested,
-    ApprovalRejected,
-    ApprovalResolved,
+    ApprovalExecRequest,
+    ApprovalPatchRequest,
+    ApprovalReviewEntered,
+    ApprovalReviewExited,
+    ApprovalReviewRejected,
+    ApprovalReviewResolved,
+    ApprovalRequestedLegacy,
+    ApprovalRejectedLegacy,
+    ApprovalResolvedLegacy,
+    CmdBegin,
+    CmdOutput,
+    CmdCompleted,
+    CmdError,
+    ToolMcpBegin,
+    ToolMcpEnd,
+    ToolWebSearchBegin,
+    ToolWebSearchEnd,
+    SessionConfigured,
+    SessionTokenCount,
+    PlanUpdate,
+    PlanDelta,
     StreamError,
     InputClient,
     InputUserSteer,
@@ -91,21 +109,137 @@ fn parse_stream_line(raw_line: &str) -> ParsedLine {
             body: rest.to_string(),
         };
     }
+    if let Some(rest) = trimmed.strip_prefix("approval.exec.request ") {
+        return ParsedLine {
+            class: RenderClass::ApprovalExecRequest,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("approval.patch.request ") {
+        return ParsedLine {
+            class: RenderClass::ApprovalPatchRequest,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("approval.review.entered ") {
+        return ParsedLine {
+            class: RenderClass::ApprovalReviewEntered,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("approval.review.exited ") {
+        return ParsedLine {
+            class: RenderClass::ApprovalReviewExited,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("approval.review.rejected ") {
+        return ParsedLine {
+            class: RenderClass::ApprovalReviewRejected,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("approval.review.resolved ") {
+        return ParsedLine {
+            class: RenderClass::ApprovalReviewResolved,
+            body: rest.to_string(),
+        };
+    }
+    // Legacy tokens retained for older fixtures/transcripts.
     if let Some(rest) = trimmed.strip_prefix("approval.request ") {
         return ParsedLine {
-            class: RenderClass::ApprovalRequested,
+            class: RenderClass::ApprovalRequestedLegacy,
             body: rest.to_string(),
         };
     }
     if let Some(rest) = trimmed.strip_prefix("approval.rejected ") {
         return ParsedLine {
-            class: RenderClass::ApprovalRejected,
+            class: RenderClass::ApprovalRejectedLegacy,
             body: rest.to_string(),
         };
     }
     if let Some(rest) = trimmed.strip_prefix("approval.resolved ") {
         return ParsedLine {
-            class: RenderClass::ApprovalResolved,
+            class: RenderClass::ApprovalResolvedLegacy,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("cmd.begin ") {
+        return ParsedLine {
+            class: RenderClass::CmdBegin,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("cmd.output ") {
+        return ParsedLine {
+            class: RenderClass::CmdOutput,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("cmd.completed ") {
+        return ParsedLine {
+            class: RenderClass::CmdCompleted,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("cmd.error ") {
+        return ParsedLine {
+            class: RenderClass::CmdError,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("tool.mcp.begin ") {
+        return ParsedLine {
+            class: RenderClass::ToolMcpBegin,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("tool.mcp.end ") {
+        return ParsedLine {
+            class: RenderClass::ToolMcpEnd,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("tool.web_search.begin ") {
+        return ParsedLine {
+            class: RenderClass::ToolWebSearchBegin,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("tool.web_search.end ") {
+        return ParsedLine {
+            class: RenderClass::ToolWebSearchEnd,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("session.configured ") {
+        return ParsedLine {
+            class: RenderClass::SessionConfigured,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("session.token_count ") {
+        return ParsedLine {
+            class: RenderClass::SessionTokenCount,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("plan.update ") {
+        return ParsedLine {
+            class: RenderClass::PlanUpdate,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("plan.delta ") {
+        return ParsedLine {
+            class: RenderClass::PlanDelta,
+            body: rest.to_string(),
+        };
+    }
+    // Legacy cmd token retained for older fixtures/transcripts.
+    if let Some(rest) = trimmed.strip_prefix("cmd ") {
+        return ParsedLine {
+            class: RenderClass::CmdOutput,
             body: rest.to_string(),
         };
     }
@@ -293,7 +427,69 @@ fn render_spec(class: RenderClass, body: &str) -> RenderSpec {
                 .add_modifier(Modifier::BOLD),
             body_style: Style::default(),
         },
-        RenderClass::ApprovalRequested => RenderSpec {
+        RenderClass::ApprovalExecRequest => RenderSpec {
+            icon: "? ",
+            icon_style: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            label: "Exec approval ",
+            label_style: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::ApprovalPatchRequest => RenderSpec {
+            icon: "? ",
+            icon_style: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            label: "Patch approval ",
+            label_style: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::ApprovalReviewEntered => RenderSpec {
+            icon: "⎔ ",
+            icon_style: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            label: "Review entered ",
+            label_style: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::ApprovalReviewExited => RenderSpec {
+            icon: "⎔ ",
+            icon_style: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            label: "Review exited ",
+            label_style: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::ApprovalReviewRejected => RenderSpec {
+            icon: "✗ ",
+            icon_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            label: "Review rejected ",
+            label_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::ApprovalReviewResolved => RenderSpec {
+            icon: "✓ ",
+            icon_style: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            label: "Review resolved ",
+            label_style: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::ApprovalRequestedLegacy => RenderSpec {
             icon: "? ",
             icon_style: Style::default()
                 .fg(Color::Magenta)
@@ -304,14 +500,14 @@ fn render_spec(class: RenderClass, body: &str) -> RenderSpec {
                 .add_modifier(Modifier::BOLD),
             body_style: Style::default(),
         },
-        RenderClass::ApprovalRejected => RenderSpec {
+        RenderClass::ApprovalRejectedLegacy => RenderSpec {
             icon: "✗ ",
             icon_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             label: "Approval rejected ",
             label_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             body_style: Style::default(),
         },
-        RenderClass::ApprovalResolved => RenderSpec {
+        RenderClass::ApprovalResolvedLegacy => RenderSpec {
             icon: "✓ ",
             icon_style: Style::default()
                 .fg(Color::Green)
@@ -320,6 +516,94 @@ fn render_spec(class: RenderClass, body: &str) -> RenderSpec {
             label_style: Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::CmdBegin => RenderSpec {
+            icon: "» ",
+            icon_style: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            label: "Command begin ",
+            label_style: Style::default().fg(Color::Cyan),
+            body_style: Style::default(),
+        },
+        RenderClass::CmdOutput => RenderSpec {
+            icon: "› ",
+            icon_style: Style::default().fg(Color::Cyan),
+            label: "Command output ",
+            label_style: Style::default().fg(Color::Cyan),
+            body_style: Style::default(),
+        },
+        RenderClass::CmdCompleted => RenderSpec {
+            icon: "✓ ",
+            icon_style: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            label: "Command done ",
+            label_style: Style::default().fg(Color::Green),
+            body_style: Style::default(),
+        },
+        RenderClass::CmdError => RenderSpec {
+            icon: "✗ ",
+            icon_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            label: "Command error ",
+            label_style: Style::default().fg(Color::Red),
+            body_style: Style::default(),
+        },
+        RenderClass::ToolMcpBegin => RenderSpec {
+            icon: "⋯ ",
+            icon_style: Style::default().fg(Color::Yellow),
+            label: "MCP tool begin ",
+            label_style: Style::default().fg(Color::Yellow),
+            body_style: Style::default(),
+        },
+        RenderClass::ToolMcpEnd => RenderSpec {
+            icon: "⋯ ",
+            icon_style: Style::default().fg(Color::Yellow),
+            label: "MCP tool end ",
+            label_style: Style::default().fg(Color::Yellow),
+            body_style: Style::default(),
+        },
+        RenderClass::ToolWebSearchBegin => RenderSpec {
+            icon: "⋯ ",
+            icon_style: Style::default().fg(Color::Yellow),
+            label: "Search begin ",
+            label_style: Style::default().fg(Color::Yellow),
+            body_style: Style::default(),
+        },
+        RenderClass::ToolWebSearchEnd => RenderSpec {
+            icon: "⋯ ",
+            icon_style: Style::default().fg(Color::Yellow),
+            label: "Search end ",
+            label_style: Style::default().fg(Color::Yellow),
+            body_style: Style::default(),
+        },
+        RenderClass::SessionConfigured => RenderSpec {
+            icon: "◉ ",
+            icon_style: Style::default().fg(Color::Blue),
+            label: "Session configured ",
+            label_style: Style::default().fg(Color::Blue),
+            body_style: Style::default(),
+        },
+        RenderClass::SessionTokenCount => RenderSpec {
+            icon: "◉ ",
+            icon_style: Style::default().fg(Color::Blue),
+            label: "Token count ",
+            label_style: Style::default().fg(Color::Blue),
+            body_style: Style::default(),
+        },
+        RenderClass::PlanUpdate => RenderSpec {
+            icon: "☰ ",
+            icon_style: Style::default().fg(Color::Yellow),
+            label: "Plan update ",
+            label_style: Style::default().fg(Color::Yellow),
+            body_style: Style::default(),
+        },
+        RenderClass::PlanDelta => RenderSpec {
+            icon: "☰ ",
+            icon_style: Style::default().fg(Color::Yellow),
+            label: "Plan delta ",
+            label_style: Style::default().fg(Color::Yellow),
             body_style: Style::default(),
         },
         RenderClass::StreamError => RenderSpec {
@@ -512,20 +796,43 @@ mod tests {
 
     #[test]
     fn renders_approval_prefix() {
-        let line = render_stream_line("approval.request allow command");
+        let line = render_stream_line("approval.exec.request allow command");
         let rendered = rendered_text(line);
-        assert!(rendered.contains("Approval requested"));
+        assert!(rendered.contains("Exec approval"));
     }
 
     #[test]
     fn wraps_structured_line_by_width() {
-        let lines =
-            render_stream_lines_with_width("approval.request allow command with many words", 24);
+        let lines = render_stream_lines_with_width(
+            "approval.exec.request allow command with many words",
+            24,
+        );
         assert!(lines.len() >= 2, "expected wrapped lines");
         let first = rendered_text(lines[0].clone());
-        assert!(first.contains("Approval requested"));
+        assert!(first.contains("Exec approval"));
         let second = rendered_text(lines[1].clone());
-        assert!(second.starts_with(" ".repeat("".len() + "Approval requested ".len()).as_str()));
+        assert!(second.starts_with(" ".repeat("".len() + "Exec approval ".len()).as_str()));
+    }
+
+    #[test]
+    fn renders_new_event_family_prefixes() {
+        let samples = [
+            ("approval.exec.request allow", "Exec approval"),
+            ("approval.patch.request allow", "Patch approval"),
+            ("approval.review.entered waiting", "Review entered"),
+            ("cmd.begin run", "Command begin"),
+            ("cmd.output out", "Command output"),
+            ("tool.mcp.begin read_file", "MCP tool begin"),
+            ("session.configured s1", "Session configured"),
+            ("plan.update added-step", "Plan update"),
+        ];
+        for (raw, expected) in samples {
+            let rendered = rendered_text(render_stream_line(raw));
+            assert!(
+                rendered.contains(expected),
+                "expected '{expected}' in rendered line for '{raw}', got '{rendered}'"
+            );
+        }
     }
 
     #[test]
