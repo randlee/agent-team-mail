@@ -40,6 +40,7 @@ enum AttachInput {
         verb: ControlVerb,
         arg: Option<String>,
     },
+    Invalid(String),
     Ignore,
 }
 
@@ -139,6 +140,9 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                 };
                 match parse_attach_input(&line) {
                     AttachInput::Ignore => {}
+                    AttachInput::Invalid(reason) => {
+                        print_stream_warning(&args.agent_id, &reason, args.json)?;
+                    }
                     AttachInput::AgentText(text) => {
                         // Default route is agent input; control verbs must be prefixed with ':'.
                         match send_stdin_control(&team, &args.agent_id, &text) {
@@ -245,7 +249,11 @@ fn parse_attach_input(line: &str) -> AttachInput {
     }
 
     if !trimmed.starts_with(':') {
-        return AttachInput::AgentText(trimmed.to_string());
+        return match sanitize_stdin_payload(trimmed) {
+            Ok(payload) if payload.is_empty() => AttachInput::Ignore,
+            Ok(payload) => AttachInput::AgentText(payload),
+            Err(reason) => AttachInput::Invalid(reason),
+        };
     }
 
     let command = trimmed.trim_start_matches(':').trim();
@@ -287,6 +295,16 @@ fn parse_attach_input(line: &str) -> AttachInput {
             arg: None,
         },
     }
+}
+
+fn sanitize_stdin_payload(payload: &str) -> Result<String, String> {
+    if payload.contains('\u{1b}') {
+        return Err("stdin payload rejected: ANSI escape sequences are not allowed".to_string());
+    }
+
+    let stripped_nul = payload.replace('\0', "");
+    let filtered: String = stripped_nul.chars().filter(|ch| !ch.is_control()).collect();
+    Ok(filtered.trim().to_string())
 }
 
 fn send_stdin_control(team: &str, agent_id: &str, text: &str) -> anyhow::Result<ControlAck> {
@@ -680,16 +698,26 @@ fn print_frame(
         "elicitation.request_user_input" => println!("user-input-request: {payload}"),
         "elicitation.request" => println!("input-request: {payload}"),
         "stream.warning" => println!("stream-warning: {payload}"),
-        "stream.error.proxy" => println!("stream-error(proxy): {payload}"),
-        "stream.error.child" => println!("stream-error(child): {payload}"),
-        "stream.error.upstream" => println!("stream-error(upstream): {payload}"),
-        "stream.error.fatal" => {
-            println!("stream-error(fatal): {payload} [detach/reconnect recommended]")
+        "stream.error.proxy" | "stream.error.child" | "stream.error.upstream"
+        | "stream.error.fatal" => {
+            println!("{}", render_stream_error_variant(env.class.as_str(), &payload))
         }
         "file.edit" => print_file_edit_lines(&payload),
         _ => println!("[{}][{}] {}", env.class, env.source_kind, payload),
     }
     Ok(())
+}
+
+fn render_stream_error_variant(class: &str, payload: &str) -> String {
+    match class {
+        "stream.error.proxy" => format!("stream-error(proxy): {payload}"),
+        "stream.error.child" => format!("stream-error(child): {payload}"),
+        "stream.error.upstream" => format!("stream-error(upstream): {payload}"),
+        "stream.error.fatal" => {
+            format!("stream-error(fatal): {payload} [detach/reconnect recommended]")
+        }
+        _ => format!("stream-error: {payload}"),
+    }
 }
 
 fn is_reasoning_section_break(raw: &Value) -> bool {
@@ -1115,6 +1143,23 @@ fn classify_stream_error_context(context: &str) -> (&str, Option<&'static str>) 
     (class, error_source)
 }
 
+fn print_stream_warning(agent_id: &str, warning: &str, as_json: bool) -> anyhow::Result<()> {
+    if as_json {
+        let payload = serde_json::json!({
+            "v": 1,
+            "mode": "attached",
+            "agent_id": agent_id,
+            "class": "stream.warning",
+            "event_type": "stdin_sanitization",
+            "text": warning
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(());
+    }
+    println!("stream-warning: {warning}");
+    Ok(())
+}
+
 fn classify_control_send_error(err: &anyhow::Error) -> &'static str {
     let kind = err
         .chain()
@@ -1199,6 +1244,31 @@ mod tests {
                 arg: Some("ship it".to_string())
             }
         );
+    }
+
+    #[test]
+    fn parse_plain_text_sanitizes_control_bytes() {
+        assert_eq!(
+            parse_attach_input("hel\0lo\u{0007}"),
+            AttachInput::AgentText("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_plain_text_rejects_ansi_sequences() {
+        assert_eq!(
+            parse_attach_input("hello \u{1b}[31mred"),
+            AttachInput::Invalid(
+                "stdin payload rejected: ANSI escape sequences are not allowed".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_plain_text_edge_cases_ignore_after_sanitization() {
+        assert_eq!(parse_attach_input(""), AttachInput::Ignore);
+        assert_eq!(parse_attach_input("\0\0"), AttachInput::Ignore);
+        assert_eq!(parse_attach_input("\u{0007}\u{0008}"), AttachInput::Ignore);
     }
 
     #[test]
@@ -1288,6 +1358,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn classify_unknown_event_emits_supported_prefix_and_counter() {
         let mut telemetry = AttachTelemetry::default();
         let (class, count1, applicability1) = classify_event_class(
@@ -1315,6 +1386,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn unsupported_summary_below_threshold_has_no_warning_line() {
         let mut telemetry = AttachTelemetry::default();
         for _ in 0..(UNSUPPORTED_WARN_THRESHOLD - 1) {
@@ -1456,6 +1528,25 @@ mod tests {
         let (control_class, control_source) = classify_stream_error_context("control.timeout");
         assert_eq!(control_class, "control.timeout");
         assert_eq!(control_source, None);
+    }
+
+    fn render_stream_error_variants() {
+        assert_eq!(
+            render_stream_error_variant("stream.error.proxy", "oops"),
+            "stream-error(proxy): oops"
+        );
+        assert_eq!(
+            render_stream_error_variant("stream.error.child", "oops"),
+            "stream-error(child): oops"
+        );
+        assert_eq!(
+            render_stream_error_variant("stream.error.upstream", "oops"),
+            "stream-error(upstream): oops"
+        );
+        assert_eq!(
+            render_stream_error_variant("stream.error.fatal", "boom"),
+            "stream-error(fatal): boom [detach/reconnect recommended]"
+        );
     }
 
     #[test]
@@ -1637,7 +1728,7 @@ mod tests {
     #[serial_test::serial]
     fn checkpoint_round_trip_uses_atm_home() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let old_home = std::env::var("ATM_HOME").ok();
+        let original_atm_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation under serial test execution.
         unsafe {
             std::env::set_var("ATM_HOME", temp_dir.path());
@@ -1645,15 +1736,11 @@ mod tests {
         save_attach_checkpoint_pos("atm-dev", "codex:test", 42).expect("save checkpoint");
         let loaded = load_attach_checkpoint_pos("atm-dev", "codex:test");
         assert_eq!(loaded, Some(42));
-        if let Some(home) = old_home {
-            // SAFETY: test-scoped env mutation under serial test execution.
-            unsafe {
-                std::env::set_var("ATM_HOME", home);
-            }
-        } else {
-            // SAFETY: test-scoped env mutation under serial test execution.
-            unsafe {
-                std::env::remove_var("ATM_HOME");
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            match original_atm_home {
+                Some(val) => std::env::set_var("ATM_HOME", val),
+                None => std::env::remove_var("ATM_HOME"),
             }
         }
     }
@@ -1666,7 +1753,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let old_home = std::env::var("ATM_HOME").ok();
+        let original_atm_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation under serial test execution.
         unsafe {
             std::env::set_var("ATM_HOME", temp_dir.path());
@@ -1715,15 +1802,11 @@ mod tests {
         assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
 
         server.join().expect("server join");
-        if let Some(home) = old_home {
-            // SAFETY: test-scoped env mutation under serial test execution.
-            unsafe {
-                std::env::set_var("ATM_HOME", home);
-            }
-        } else {
-            // SAFETY: test-scoped env mutation under serial test execution.
-            unsafe {
-                std::env::remove_var("ATM_HOME");
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            match original_atm_home {
+                Some(val) => std::env::set_var("ATM_HOME", val),
+                None => std::env::remove_var("ATM_HOME"),
             }
         }
     }
@@ -1736,7 +1819,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let old_home = std::env::var("ATM_HOME").ok();
+        let original_atm_home = std::env::var("ATM_HOME").ok();
         // SAFETY: test-scoped env mutation under serial test execution.
         unsafe {
             std::env::set_var("ATM_HOME", temp_dir.path());
@@ -1805,15 +1888,11 @@ mod tests {
         assert_eq!(ack.detail.as_deref(), Some("mock-daemon-ack"));
 
         server.join().expect("server join");
-        if let Some(home) = old_home {
-            // SAFETY: test-scoped env mutation under serial test execution.
-            unsafe {
-                std::env::set_var("ATM_HOME", home);
-            }
-        } else {
-            // SAFETY: test-scoped env mutation under serial test execution.
-            unsafe {
-                std::env::remove_var("ATM_HOME");
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            match original_atm_home {
+                Some(val) => std::env::set_var("ATM_HOME", val),
+                None => std::env::remove_var("ATM_HOME"),
             }
         }
     }

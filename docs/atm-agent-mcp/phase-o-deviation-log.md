@@ -107,6 +107,10 @@ Owner: `arch-ctm`
 - approved_by: team-lead
 - approved_date: 2026-02-25
 - rationale: TUI-first scope for O-R.5; attach stdin sanitization deferred to input-hardening phase.
+- closed_date: 2026-02-25
+- closed_by: arch-ctm
+- implementation_ref: https://github.com/randlee/agent-team-mail/pull/245
+- validation_status: implemented + validated
 
 ### DEV-OR5-007: attach help text missing Ctrl-C/SIGINT documentation
 - Requirement context: FR-23.25, GAP-014 help text completeness.
@@ -122,5 +126,5 @@ O-R.5 approved deviations are being closed in Phase P by sprint:
 - P.1: DEV-OR5-001, DEV-OR5-002 (closed)
 - P.2: DEV-OR5-003, DEV-OR5-004 (closed)
 - P.3: DEV-OR5-005 (planned)
-- P.4: DEV-OR5-006 (planned)
+- P.4: DEV-OR5-006 (closed)
 - P.5: DEV-OR5-007 (planned)
