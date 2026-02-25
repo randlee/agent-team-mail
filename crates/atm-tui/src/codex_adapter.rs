@@ -147,7 +147,7 @@ impl CodexAdapter {
             },
             "patch_apply_begin" | "patch_apply_end" | "turn_diff" | "file_change" => {
                 AdaptedWatchLine {
-                    line: format!("{source_badge} file.edit {text}"),
+                    line: format!("{source_badge} file.edit {kind} {text}"),
                     is_turn_boundary: false,
                 }
             }
@@ -196,8 +196,13 @@ impl CodexAdapter {
                 is_turn_boundary: false,
             },
             "reasoning_content_delta" | "agent_reasoning_delta" | "reasoning_content" => {
+                let normalized = if is_reasoning_section_break(event) {
+                    "reasoning.section_break"
+                } else {
+                    "reasoning"
+                };
                 AdaptedWatchLine {
-                    line: format!("{source_badge} reasoning {text}"),
+                    line: format!("{source_badge} {normalized} {text}"),
                     is_turn_boundary: false,
                 }
             }
@@ -254,6 +259,33 @@ fn format_mail_actor(actor: &str) -> String {
     }
     let team = std::env::var("ATM_TEAM").unwrap_or_else(|_| "atm-dev".to_string());
     format!("{actor}@{}", team.trim())
+}
+
+fn is_reasoning_section_break(event: &serde_json::Value) -> bool {
+    if event
+        .pointer("/params/section_break")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if event
+        .pointer("/params/is_section_break")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    event
+        .pointer("/params/delta_type")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            event
+                .pointer("/params/reasoning_delta/type")
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| event.pointer("/params/content/type").and_then(|v| v.as_str()))
+        .is_some_and(|t| t.eq_ignore_ascii_case("section_break"))
 }
 
 #[cfg(test)]
@@ -389,7 +421,19 @@ mod tests {
             "event":{"params":{"type":"patch_apply_begin","message":"patch starts"}}
         });
         let out = adapter.adapt_frame(&frame);
-        assert!(out.line.contains("file.edit"));
+        assert!(out.line.contains("file.edit patch_apply_begin"));
+        assert_eq!(adapter.unknown_events(), 0);
+    }
+
+    #[test]
+    fn maps_reasoning_section_break() {
+        let mut adapter = CodexAdapter::new();
+        let frame = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"reasoning_content_delta","delta_type":"section_break","delta":"analysis"}}
+        });
+        let out = adapter.adapt_frame(&frame);
+        assert!(out.line.contains("reasoning.section_break"));
         assert_eq!(adapter.unknown_events(), 0);
     }
 
