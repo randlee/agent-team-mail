@@ -1,7 +1,7 @@
 {"event_type":"reasoning_content_delta","class":"assistant.reasoning","applicability":"required"}
 {"event_type":"approval_request","class":"approval.exec","applicability":"required"}
 {"event_type":"exec_command_started","class":"tool.exec","applicability":"required"}
-{"event_type":"request_user_input","class":"elicitation.request","applicability":"required"}
+{"event_type":"request_user_input","class":"elicitation.request_user_input","applicability":"required"}
 {"event_type":"mcp_tool_call_begin","class":"tool.lifecycle","applicability":"degraded"}
 {"event_type":"session_configured","class":"session.meta","applicability":"degraded"}
 {"event_type":"plan_update","class":"plan.update","applicability":"degraded"}
