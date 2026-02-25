@@ -408,21 +408,20 @@ fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()
         return Ok(());
     }
 
-    if env.class == "input.atm_mail" {
-        println!("{} <{}>", env.source_actor, clamp_three_lines(&env.text));
-        return Ok(());
+    let payload = if env.text.is_empty() {
+        env.event_type.clone()
+    } else {
+        env.text.clone()
+    };
+    match env.class.as_str() {
+        "input.atm_mail" => println!("{} <{}>", env.source_actor, clamp_three_lines(&env.text)),
+        "assistant.output" => println!("assistant: {payload}"),
+        "assistant.reasoning" => println!("reasoning: {payload}"),
+        "turn.lifecycle" => println!("turn: {payload}"),
+        "approval" => println!("approval: {payload}"),
+        "elicitation.request" => println!("input-request: {payload}"),
+        _ => println!("[{}][{}] {}", env.class, env.source_kind, payload),
     }
-
-    println!(
-        "[{}][{}] {}",
-        env.class,
-        env.source_kind,
-        if env.text.is_empty() {
-            env.event_type
-        } else {
-            env.text
-        }
-    );
     Ok(())
 }
 

@@ -17,6 +17,8 @@ enum RenderClass {
     TurnCompleted,
     TurnIdle,
     TurnInterrupted,
+    ToolExec,
+    FileEdit,
     ApprovalRequested,
     ApprovalRejected,
     ApprovalResolved,
@@ -47,10 +49,10 @@ struct ParsedLine {
     body: String,
 }
 
-/// Render one watch-stream line with simple semantic highlighting.
+/// Test helper for rendering one normalized stream line as a single line.
 ///
-/// Kept for compatibility with existing call sites/tests. For viewport-aware
-/// rendering in the TUI, use `render_stream_lines_with_width`.
+/// Runtime rendering should use `render_stream_lines_with_width`.
+#[cfg(test)]
 pub fn render_stream_line(raw_line: &str) -> Line<'static> {
     render_stream_lines_with_width(raw_line, usize::MAX)
         .into_iter()
@@ -88,6 +90,18 @@ fn parse_stream_line(raw_line: &str) -> ParsedLine {
     if let Some(rest) = trimmed.strip_prefix("turn.interrupted ") {
         return ParsedLine {
             class: RenderClass::TurnInterrupted,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("cmd ") {
+        return ParsedLine {
+            class: RenderClass::ToolExec,
+            body: rest.to_string(),
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("file.edit ") {
+        return ParsedLine {
+            class: RenderClass::FileEdit,
             body: rest.to_string(),
         };
     }
@@ -291,6 +305,20 @@ fn render_spec(class: RenderClass, body: &str) -> RenderSpec {
             label_style: Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        RenderClass::ToolExec => RenderSpec {
+            icon: "› ",
+            icon_style: Style::default().fg(Color::Cyan),
+            label: "Command ",
+            label_style: Style::default().fg(Color::Cyan),
+            body_style: Style::default(),
+        },
+        RenderClass::FileEdit => RenderSpec {
+            icon: "Δ ",
+            icon_style: Style::default().fg(Color::Yellow),
+            label: "File edit ",
+            label_style: Style::default().fg(Color::Yellow),
             body_style: Style::default(),
         },
         RenderClass::ApprovalRequested => RenderSpec {
@@ -515,6 +543,14 @@ mod tests {
         let line = render_stream_line("approval.request allow command");
         let rendered = rendered_text(line);
         assert!(rendered.contains("Approval requested"));
+    }
+
+    #[test]
+    fn renders_tool_exec_and_file_edit_prefixes() {
+        let cmd = rendered_text(render_stream_line("cmd ls -la"));
+        assert!(cmd.contains("Command"));
+        let file_edit = rendered_text(render_stream_line("file.edit patch begin"));
+        assert!(file_edit.contains("File edit"));
     }
 
     #[test]
