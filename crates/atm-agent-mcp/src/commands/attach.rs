@@ -12,7 +12,7 @@ use agent_team_mail_core::daemon_client::{query_agent_state, send_control};
 use serde::Serialize;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -22,6 +22,7 @@ use tokio::time::interval;
 
 const WATCH_ATTACH_REPLAY_MAX_FRAMES: usize = 50;
 const WATCH_ATTACH_REPLAY_SCAN_BYTES: u64 = 512 * 1024;
+const ATTACH_CHECKPOINT_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlVerb {
@@ -59,6 +60,15 @@ struct AttachedRenderEnvelope {
     raw: Value,
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct AttachReplayCheckpoint {
+    v: u8,
+    team: String,
+    agent_id: String,
+    pos: u64,
+    updated_at: String,
+}
+
 static UNSUPPORTED_EVENT_COUNTS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
 pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
@@ -80,20 +90,24 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     print_attach_banner(&args.agent_id, &team, &watch_path);
     print_input_contract();
 
-    let mut stream_pos: u64 = 0;
+    let mut stream_pos: u64 = load_attach_checkpoint_pos(&team, &args.agent_id).unwrap_or(0);
     let mut ticker = interval(Duration::from_millis(poll_ms));
     let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
     let mut pending_elicitation_id: Option<String> = None;
 
     // Initial attach replay (bounded).
-    match tail_watch_stream_file(&watch_path, 0, &args.agent_id).await {
-        Ok((replay, new_pos)) => {
+    match tail_watch_stream_file(&watch_path, stream_pos, &args.agent_id).await {
+        Ok((replay, new_pos, replay_truncated)) => {
             stream_pos = new_pos;
+            if replay_truncated {
+                print_replay_truncation_notice(&args.agent_id, args.json)?;
+            }
             for frame in replay {
                 pending_elicitation_id =
                     update_pending_elicitation_id(pending_elicitation_id, &frame);
                 print_frame(&args.agent_id, frame, args.json)?;
             }
+            let _ = save_attach_checkpoint_pos(&team, &args.agent_id, stream_pos);
         }
         Err(err) => print_stream_error("watch.tail.initial", &err, args.json)?,
     }
@@ -102,13 +116,14 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
         tokio::select! {
             _ = ticker.tick() => {
                 match tail_watch_stream_file(&watch_path, stream_pos, &args.agent_id).await {
-                    Ok((frames, new_pos)) => {
+                    Ok((frames, new_pos, _)) => {
                         stream_pos = new_pos;
                         for frame in frames {
                             pending_elicitation_id =
                                 update_pending_elicitation_id(pending_elicitation_id, &frame);
                             print_frame(&args.agent_id, frame, args.json)?;
                         }
+                        let _ = save_attach_checkpoint_pos(&team, &args.agent_id, stream_pos);
                     }
                     Err(err) => print_stream_error("watch.tail", &err, args.json)?,
                 }
@@ -183,6 +198,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
         }
     }
 
+    let _ = save_attach_checkpoint_pos(&team, &args.agent_id, stream_pos);
     println!("detached from {}", args.agent_id);
     Ok(())
 }
@@ -369,11 +385,7 @@ fn extract_elicitation_id(event: &Value) -> Option<String> {
 }
 
 fn watch_feed_path(agent_id: &str) -> Option<PathBuf> {
-    let safe_id: Cow<str> = if agent_id.contains('/') || agent_id.contains('\\') {
-        Cow::Owned(agent_id.replace(['/', '\\'], "_"))
-    } else {
-        Cow::Borrowed(agent_id)
-    };
+    let safe_id = safe_agent_id(agent_id);
     if let Ok(atm_home) = std::env::var("ATM_HOME") {
         let trimmed = atm_home.trim();
         if !trimmed.is_empty() {
@@ -391,15 +403,91 @@ fn watch_feed_path(agent_id: &str) -> Option<PathBuf> {
     )
 }
 
+fn safe_agent_id(agent_id: &str) -> Cow<'_, str> {
+    if agent_id.contains('/') || agent_id.contains('\\') {
+        Cow::Owned(agent_id.replace(['/', '\\'], "_"))
+    } else {
+        Cow::Borrowed(agent_id)
+    }
+}
+
+fn attach_checkpoint_path(team: &str, agent_id: &str) -> Option<PathBuf> {
+    let safe_id = safe_agent_id(agent_id);
+    if let Ok(atm_home) = std::env::var("ATM_HOME") {
+        let trimmed = atm_home.trim();
+        if !trimmed.is_empty() {
+            return Some(
+                PathBuf::from(trimmed)
+                    .join(".config/atm/agent-sessions")
+                    .join(team)
+                    .join(safe_id.as_ref())
+                    .join("attach-checkpoint.json"),
+            );
+        }
+    }
+    let home = agent_team_mail_core::home::get_home_dir().ok()?;
+    Some(
+        home.join(".config/atm/agent-sessions")
+            .join(team)
+            .join(safe_id.as_ref())
+            .join("attach-checkpoint.json"),
+    )
+}
+
+fn load_attach_checkpoint_pos(team: &str, agent_id: &str) -> Option<u64> {
+    let path = attach_checkpoint_path(team, agent_id)?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let checkpoint: AttachReplayCheckpoint = serde_json::from_str(&raw).ok()?;
+    if checkpoint.team != team || checkpoint.agent_id != agent_id {
+        return None;
+    }
+    Some(checkpoint.pos)
+}
+
+fn save_attach_checkpoint_pos(team: &str, agent_id: &str, pos: u64) -> anyhow::Result<()> {
+    let path = attach_checkpoint_path(team, agent_id).ok_or_else(|| {
+        anyhow::anyhow!("failed to resolve attach checkpoint path for team={team} agent={agent_id}")
+    })?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let checkpoint = AttachReplayCheckpoint {
+        v: ATTACH_CHECKPOINT_VERSION,
+        team: team.to_string(),
+        agent_id: agent_id.to_string(),
+        pos,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    std::fs::write(path, serde_json::to_string_pretty(&checkpoint)?)?;
+    Ok(())
+}
+
+fn print_replay_truncation_notice(agent_id: &str, as_json: bool) -> anyhow::Result<()> {
+    if as_json {
+        let payload = serde_json::json!({
+            "v": 1,
+            "mode": "attached",
+            "agent_id": agent_id,
+            "class": "session.meta",
+            "event_type": "replay_truncated",
+            "text": "replay clipped to the most recent turn boundary; older events omitted"
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(());
+    }
+    println!("note: replay clipped to the most recent turn boundary; older events omitted");
+    Ok(())
+}
+
 async fn tail_watch_stream_file(
     path: &Path,
     pos: u64,
     agent_id: &str,
-) -> anyhow::Result<(Vec<Value>, u64)> {
+) -> anyhow::Result<(Vec<Value>, u64, bool)> {
     use tokio::fs::File;
 
     if !path.exists() {
-        return Ok((Vec::new(), pos));
+        return Ok((Vec::new(), pos, false));
     }
 
     let mut file = File::open(path).await?;
@@ -408,7 +496,7 @@ async fn tail_watch_stream_file(
         return read_watch_replay_for_attach(path, &mut file, file_len, agent_id).await;
     }
     if file_len == pos {
-        return Ok((Vec::new(), pos));
+        return Ok((Vec::new(), pos, false));
     }
 
     file.seek(std::io::SeekFrom::Start(pos)).await?;
@@ -431,7 +519,7 @@ async fn tail_watch_stream_file(
             out.push(frame);
         }
     }
-    Ok((out, pos + n as u64))
+    Ok((out, pos + n as u64, false))
 }
 
 async fn read_watch_replay_for_attach(
@@ -439,9 +527,9 @@ async fn read_watch_replay_for_attach(
     file: &mut tokio::fs::File,
     file_len: u64,
     agent_id: &str,
-) -> anyhow::Result<(Vec<Value>, u64)> {
+) -> anyhow::Result<(Vec<Value>, u64, bool)> {
     if !path.exists() || file_len == 0 {
-        return Ok((Vec::new(), 0));
+        return Ok((Vec::new(), 0, false));
     }
 
     let start = file_len.saturating_sub(WATCH_ATTACH_REPLAY_SCAN_BYTES);
@@ -456,7 +544,7 @@ async fn read_watch_replay_for_attach(
         let _ = lines.next();
     }
 
-    let mut replay: VecDeque<Value> = VecDeque::with_capacity(WATCH_ATTACH_REPLAY_MAX_FRAMES);
+    let mut replay: Vec<Value> = Vec::new();
     for line in lines.filter(|l| !l.trim().is_empty()) {
         if let Some(frame) = extract_frame(line)
             && frame
@@ -464,13 +552,49 @@ async fn read_watch_replay_for_attach(
                 .and_then(|v| v.as_str())
                 .is_some_and(|id| id == agent_id)
         {
-            if replay.len() >= WATCH_ATTACH_REPLAY_MAX_FRAMES {
-                let _ = replay.pop_front();
-            }
-            replay.push_back(frame);
+            replay.push(frame);
         }
     }
-    Ok((replay.into_iter().collect(), file_len))
+    let (replay, truncated) = trim_replay_to_recent_turn_boundary(replay, WATCH_ATTACH_REPLAY_MAX_FRAMES);
+    Ok((replay, file_len, truncated))
+}
+
+fn trim_replay_to_recent_turn_boundary(replay: Vec<Value>, max_frames: usize) -> (Vec<Value>, bool) {
+    if replay.len() <= max_frames {
+        return (replay, false);
+    }
+    let len = replay.len();
+    let floor = len.saturating_sub(max_frames);
+    let mut start = floor;
+    while start < len && !is_turn_boundary_frame(&replay[start]) {
+        start += 1;
+    }
+    if start >= len {
+        start = floor;
+    }
+    (replay[start..].to_vec(), true)
+}
+
+fn is_turn_boundary_frame(frame: &Value) -> bool {
+    let event = frame.get("event").unwrap_or(frame);
+    let ty = event
+        .pointer("/params/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    matches!(
+        ty,
+        "turn_started"
+            | "turn_completed"
+            | "task_complete"
+            | "done"
+            | "turn_aborted"
+            | "turn_idle"
+            | "idle"
+            | "turn_interrupted"
+            | "interrupt"
+            | "turn_cancelled"
+            | "cancelled"
+    )
 }
 
 fn extract_frame(line: &str) -> Option<Value> {
@@ -1127,11 +1251,12 @@ mod tests {
         let feed_path = temp_dir.path().join("feed.jsonl");
         fs::write(&feed_path, raw).expect("write feed");
 
-        let (frames, pos) = tail_watch_stream_file(&feed_path, 0, "codex:test")
+        let (frames, pos, truncated) = tail_watch_stream_file(&feed_path, 0, "codex:test")
             .await
             .expect("tail succeeds");
         assert_eq!(frames.len(), 2);
         assert!(pos > 0);
+        assert!(!truncated);
         assert_eq!(
             frames[0]
                 .pointer("/event/params/type")
@@ -1144,6 +1269,47 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("item_delta")
         );
+    }
+
+    #[test]
+    fn trim_replay_prefers_recent_turn_boundary_when_clipped() {
+        let make = |t: &str| serde_json::json!({"event":{"params":{"type": t}}});
+        let replay = vec![
+            make("item_delta"),
+            make("item_delta"),
+            make("turn_started"),
+            make("item_delta"),
+            make("item_delta"),
+            make("turn_completed"),
+            make("item_delta"),
+        ];
+        let (trimmed, truncated) = trim_replay_to_recent_turn_boundary(replay, 4);
+        assert!(truncated);
+        assert_eq!(trimmed.len(), 2);
+        assert_eq!(
+            trimmed[0].pointer("/event/params/type").and_then(|v| v.as_str()),
+            Some("turn_completed")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn checkpoint_round_trip_uses_atm_home() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let old_home = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-scoped env mutation under serial test execution.
+        unsafe {
+            std::env::set_var("ATM_HOME", temp_dir.path());
+        }
+        save_attach_checkpoint_pos("atm-dev", "codex:test", 42).expect("save checkpoint");
+        let loaded = load_attach_checkpoint_pos("atm-dev", "codex:test");
+        assert_eq!(loaded, Some(42));
+        if let Some(home) = old_home {
+            // SAFETY: test-scoped env mutation under serial test execution.
+            unsafe {
+                std::env::set_var("ATM_HOME", home);
+            }
+        }
     }
 
     #[cfg(unix)]
