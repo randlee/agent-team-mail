@@ -815,10 +815,15 @@ fn unsupported_event_count(event_type: &str) -> u64 {
 
 fn print_stream_error(context: &str, err: &anyhow::Error, as_json: bool) -> anyhow::Result<()> {
     if as_json {
+        let class = if context.starts_with("stream.error.") || context.starts_with("control.") {
+            context
+        } else {
+            "stream.error"
+        };
         let payload = serde_json::json!({
             "v": 1,
             "mode": "attached",
-            "class": "stream.error",
+            "class": class,
             "context": context,
             "message": err.to_string()
         });
@@ -993,6 +998,7 @@ mod tests {
         let child = serde_json::json!({"params":{"error_source":"child","message":"oops"}});
         let upstream = serde_json::json!({"params":{"errorSource":"upstream_mcp","message":"oops"}});
         let fatal = serde_json::json!({"params":{"fatal":true,"error_source":"proxy","message":"boom"}});
+        let proxy_default = serde_json::json!({"params":{"message":"oops"}});
 
         assert_eq!(
             classify_event_class("stream_error", "client_prompt", &child, "oops").0,
@@ -1005,6 +1011,19 @@ mod tests {
         assert_eq!(
             classify_event_class("stream_error", "client_prompt", &fatal, "boom").0,
             "stream.error.fatal"
+        );
+        assert_eq!(
+            classify_event_class("stream_error", "client_prompt", &proxy_default, "oops").0,
+            "stream.error.proxy"
+        );
+    }
+
+    #[test]
+    fn classify_stream_warning_maps_to_warning_class() {
+        let warning = serde_json::json!({"params":{"message":"heads up"}});
+        assert_eq!(
+            classify_event_class("stream_warning", "client_prompt", &warning, "heads up").0,
+            "stream.warning"
         );
     }
 
