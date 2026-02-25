@@ -504,7 +504,9 @@ fn print_frame(agent_id: &str, frame: Value, as_json: bool) -> anyhow::Result<()
             }
         }
         "turn.lifecycle" => println!("turn: {payload}"),
-        "approval" => println!("approval: {payload}"),
+        "approval.exec" | "approval.patch" | "approval.review" => {
+            println!("approval: {payload}")
+        }
         "elicitation.request" => println!("input-request: {payload}"),
         "file.edit" => print_file_edit_lines(&payload),
         _ => println!("[{}][{}] {}", env.class, env.source_kind, payload),
