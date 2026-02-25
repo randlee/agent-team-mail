@@ -54,6 +54,7 @@ struct AttachedRenderEnvelope {
     source_channel: String,
     event_type: String,
     text: String,
+    error_source: Option<String>,
     is_turn_boundary: bool,
     unsupported_count: Option<u64>,
     raw: Value,
@@ -654,6 +655,11 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
 
     let (class, unsupported_count, applicability) =
         classify_event_class(&event_type, &source_kind, event, &text);
+    let error_source = if event_type == "stream_error" || event_type == "error" {
+        Some(stream_error_source(event).to_string())
+    } else {
+        None
+    };
     let is_turn_boundary = matches!(
         event_type.as_str(),
         "turn_started"
@@ -689,6 +695,7 @@ fn to_attached_envelope(agent_id: &str, frame: &Value) -> AttachedRenderEnvelope
         source_channel,
         event_type,
         text,
+        error_source,
         is_turn_boundary,
         unsupported_count,
         raw: frame.clone(),
@@ -1019,8 +1026,20 @@ mod tests {
         assert_eq!(env.class, "assistant.output");
         assert_eq!(env.applicability, "required");
         assert_eq!(env.text, "hello");
+        assert_eq!(env.error_source, None);
         assert_eq!(env.source_actor, "arch-atm");
         assert_eq!(env.unsupported_count, None);
+    }
+
+    #[test]
+    fn attached_envelope_sets_error_source_for_stream_error() {
+        let frame = serde_json::json!({
+            "source":{"kind":"client_prompt","actor":"arch-atm","channel":"mcp_primary"},
+            "event":{"params":{"type":"stream_error","error_source":"child","message":"oops"}}
+        });
+        let env = to_attached_envelope("codex:abc", &frame);
+        assert_eq!(env.class, "stream.error.child");
+        assert_eq!(env.error_source.as_deref(), Some("child"));
     }
 
     #[test]
