@@ -34,7 +34,7 @@ jobs:
           key: ubuntu-clippy-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   parity-contract:
     name: parity-contract (${{ matrix.os }})
