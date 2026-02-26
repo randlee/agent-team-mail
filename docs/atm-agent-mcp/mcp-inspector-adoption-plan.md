@@ -37,7 +37,11 @@ Exit criteria:
   - `tools/list`
   - selected `tools/call` cases (happy path + bad args)
 - Save command snippets and expected response patterns.
-- Integrate into manual release checklist (and optional CI job later).
+- Integrate into manual release checklist and CI.
+- CI profile constraints:
+  - Do not run Codex child processes in this gate.
+  - Test only MCP contract behavior exposed by `atm-agent-mcp serve`.
+  - Focus on low-risk calls (`tools/list` + basic `tools/call` with bounded inputs).
 
 Exit criteria:
 - One-command smoke sequence that catches obvious MCP contract regressions.
@@ -62,6 +66,7 @@ Exit criteria:
 ## Deliverables
 - `docs/atm-agent-mcp/mcp-inspector-adoption-plan.md` (this file)
 - `docs/atm-agent-mcp/mcp-inspector-runbook.md` (setup + commands)
+- CI-safe Inspector CLI smoke profile (documented in runbook)
 
 ## Recommendation
 Adopt Inspector as the standard preflight MCP contract harness, then run Codex/TUI full-flow tests as a second gate.

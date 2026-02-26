@@ -30,6 +30,8 @@ npx @modelcontextprotocol/inspector
 - targeted `tools/call` cases
 
 ## CLI Mode (Deterministic Smoke)
+This mode is suitable for CI when restricted to MCP contract checks only.
+
 Example pattern:
 
 ```bash
@@ -51,6 +53,30 @@ npx @modelcontextprotocol/inspector --cli cargo run -p agent-team-mail-mcp -- se
 - Valid `atm_send` call path succeeds.
 - Valid `atm_read` call path succeeds.
 - Large input and timeout edges return bounded failures.
+
+## CI Profile (No Codex Execution)
+- Goal: validate MCP wiring and tool contracts without launching Codex execution flows.
+- Allowed:
+  - `tools/list`
+  - basic `tools/call` cases for ATM tool surfaces with bounded payloads
+- Disallowed in this gate:
+  - any test that depends on running `codex exec`, `codex mcp-server`, or app-server sessions
+  - long-running interactive approval/review flows
+- Suggested CI sequence:
+
+```bash
+export ATM_IDENTITY=arch-ctm
+export ATM_TEAM=atm-dev
+
+# Example: list tools
+npx @modelcontextprotocol/inspector --cli cargo run -p agent-team-mail-mcp -- serve --method tools/list
+
+# Example: basic tool call
+npx @modelcontextprotocol/inspector --cli cargo run -p agent-team-mail-mcp -- serve \
+  --method tools/call \
+  --tool-name atm_pending_count \
+  --tool-arg team=atm-dev
+```
 
 ## Security Defaults
 - Keep Inspector auth enabled.
