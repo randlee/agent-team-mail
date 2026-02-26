@@ -1,7 +1,7 @@
 # agent-team-mail (`atm`) — Requirements Document
 
-**Version**: 0.2
-**Date**: 2026-02-11
+**Version**: 0.3
+**Date**: 2026-02-25
 **Status**: Draft
 
 ---
@@ -848,12 +848,15 @@ itself is part of the `atm` CLI binary, not the proxy crate.
 | Codex CLI | `~/.codex/config.toml` | N/A (global only) | TOML (`[mcp_servers.*]` section) | [Codex CLI docs](https://github.com/openai/codex) |
 | Gemini CLI | `~/.gemini/settings.json` | `.gemini/settings.json` | JSON (`mcpServers` key) | [Gemini CLI docs](https://github.com/google-gemini/gemini-cli) |
 
-**Claude Code scope mapping**: Claude Code has three MCP scopes — "user" (cross-project,
-stored in `~/.claude.json`), "local" (per-project private, stored in `~/.claude.json`
-under the project path), and "project" (shared, stored in `.mcp.json`). Our `global`
-maps to Claude Code "user" scope; our `local` maps to Claude Code "project" scope
-(`.mcp.json`). We do not target the Claude Code "local" scope as it is private to
-the user's `~/.claude.json` project entries and harder to manage externally.
+**Claude Code scope mapping**: Claude Code has three MCP scopes:
+1. **"user"** (cross-project): top-level `mcpServers` object in `~/.claude.json`
+2. **"local"** (per-project, private): per-project entries inside `~/.claude.json` keyed by project path — NOT the same as the top-level `mcpServers`
+3. **"project"** (shared, committed): `.mcp.json` at the project root
+
+ATM's `global` scope = Claude Code "user" scope (`~/.claude.json` top-level `mcpServers`).
+ATM's `local` scope = Claude Code "project" scope (`.mcp.json`).
+ATM deliberately does **not** target Claude Code's "local" scope (the per-project entries
+inside `~/.claude.json`) because those are private to the user and harder to manage externally.
 
 #### 4.8.2 `atm mcp install`
 
@@ -868,14 +871,16 @@ atm mcp install <client> [scope] [--binary <path>]
 
 **Behavior**:
 - Auto-detects `atm-agent-mcp` binary via `std::env::split_paths` + PATH lookup
-  in-process (no shell-specific `which`/`where` dependency; those commands may be
-  used as optional fallback diagnostics only)
+  in-process (no shell subprocess dependency). Shell commands like `which`/`where`
+  must never be used for resolution; they may only appear in user-facing diagnostic
+  messages suggesting what the user can run manually.
 - Reads existing config file, preserving all existing content (read-modify-write)
 - Adds or updates the `atm` MCP server entry with `command` and `args: ["serve"]`
 - Creates parent directories if needed
 - For Claude Code global: reads `~/.claude.json`, adds/updates `mcpServers.atm`
   entry with `"type": "stdio"`, `"command"`, and `"args": ["serve"]`
 - For Claude Code local: writes `.mcp.json` with `mcpServers.atm` entry
+  including `"type": "stdio"`, `"command"`, and `"args": ["serve"]` (same fields as global)
 - For Codex: parse-and-merge semantics — parse the existing TOML, update/add the
   `[mcp_servers.atm]` table, and re-serialize. If an existing `[mcp_servers.atm]`
   entry exists, update it in place (idempotent). If not, add the new table.
@@ -903,7 +908,8 @@ parse and check `mcp_servers.atm.command` and `mcp_servers.atm.args`.
 
 **Install outcome states**:
 - `installed` — new configuration written
-- `updated` — existing configuration changed (different binary path)
+- `updated` — existing `mcpServers.atm` entry found with different `command` path;
+  overwritten with new path and reported as "Updating" with both old and new paths shown
 - `already-configured` — identical configuration exists, no changes
 - `skipped` — cross-scope deduplication (global already configured)
 - `error` — binary not found, invalid config, unsupported scope
@@ -911,6 +917,11 @@ parse and check `mcp_servers.atm.command` and `mcp_servers.atm.args`.
 **Exit codes**:
 - `0` — success (installed, updated, already-configured, or skipped)
 - `1` — error (binary not found, invalid config file, unsupported scope)
+
+> **Note**: Unlike the general exit code policy in section 8.2 (where exit code 2 = partial
+> failure), `atm mcp install` uses only 0/1. The `skipped` and `already-configured`
+> outcomes are not errors — they indicate the system is in the desired state — so they
+> return exit code 0. There is no partial-failure scenario for single-client install.
 
 **Error conditions**:
 - Binary not found in PATH and no `--binary` override → error with install instructions
@@ -944,6 +955,9 @@ atm mcp uninstall <client> [scope]
 - `0` — success (removed or not-present)
 - `1` — error (invalid config file, unsupported scope)
 
+> **Note**: Same as install — `not-present` returns exit code 0 (desired state achieved).
+> See install exit code note for rationale on deviation from section 8.2.
+
 #### 4.8.3 `atm mcp status`
 
 ```
@@ -959,6 +973,9 @@ atm mcp status
 - Reports whether `atm` is configured as an MCP server in each location
 - System-level config paths (e.g., Gemini `/Library/Application Support/`) are
   intentionally not checked; status covers user and project scopes only.
+- **Status labels**: Claude Code and Gemini use "User"/"Project" to match their
+  scope terminology. Codex uses "Global" because it supports only a single
+  global scope and does not use "user"/"project" terminology.
 
 **Output format** (text only, no `--json` in initial version):
 
@@ -1003,20 +1020,21 @@ Gemini CLI:
 
 Install atm-agent-mcp with:
   brew install randlee/tap/agent-team-mail
-  cargo install agent-team-mail-mcp
+  cargo install agent-team-mail  (includes atm-agent-mcp binary)
 ```
 
 #### 4.8.4 Cross-Platform Requirements
 
 - Binary detection uses in-process PATH resolution (`std::env::split_paths` +
-  existence check), not shell commands. The `which` crate or equivalent Rust
-  implementation is preferred over spawning `which`/`where` subprocesses.
+  existence check) exclusively. Shell `which`/`where` subprocess calls must never
+  be used for resolution — they may only appear in user-facing diagnostic text.
 - Config file paths use `home_dir()` with `ATM_HOME` override for testing
 - File writes preserve existing content (read-modify-write for JSON; parse-and-merge for TOML)
-- Windows config paths: Claude Code uses `~/.claude.json` on all platforms.
-  Codex and Gemini Windows-specific config paths are best-effort; if the
-  respective CLI clients document different Windows paths, follow their
-  documentation. ATM_HOME override enables test isolation on all platforms.
+- Windows config paths: all clients use standard home-dir conventions
+  (`%USERPROFILE%`). Claude Code: `%USERPROFILE%\.claude.json`. Codex:
+  `%USERPROFILE%\.codex\config.toml`. Gemini: `%USERPROFILE%\.gemini\settings.json`.
+  If a client documents different Windows paths in the future, follow their docs.
+  `ATM_HOME` override enables test isolation on all platforms.
 
 #### 4.8.5 Future Extensions (Not in Initial Scope)
 
@@ -1460,6 +1478,6 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 ---
 
-**Document Version**: 0.2
-**Last Updated**: 2026-02-11
+**Document Version**: 0.3
+**Last Updated**: 2026-02-25
 **Maintained By**: Claude

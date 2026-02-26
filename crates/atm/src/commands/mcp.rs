@@ -109,7 +109,7 @@ fn find_mcp_binary(override_path: Option<PathBuf>) -> Result<String> {
         "atm-agent-mcp not found in PATH.\n\
          Install it with:\n  \
          brew install randlee/tap/agent-team-mail\n  \
-         cargo install agent-team-mail-mcp"
+         cargo install agent-team-mail  (includes atm-agent-mcp binary)"
     );
 }
 
@@ -194,7 +194,10 @@ fn install_claude(binary: &str, scope: &Scope) -> Result<()> {
             return Ok(());
         }
         // Different config exists — will be updated
+        let old_cmd = existing.get("command").and_then(|v| v.as_str()).unwrap_or("(unknown)");
         println!("Updating existing atm MCP server entry for Claude Code ({}).", scope_label(scope));
+        println!("  Old binary: {old_cmd}");
+        println!("  New binary: {binary}");
     }
 
     let servers = config
@@ -317,7 +320,10 @@ fn install_codex(binary: &str, scope: &Scope) -> Result<()> {
                         println!("  No changes made.");
                         return Ok(());
                     }
+                    let old = existing_cmd.unwrap_or("(unknown)");
                     println!("Updating existing atm MCP server entry for Codex (global).");
+                    println!("  Old binary: {old}");
+                    println!("  New binary: {binary}");
                 }
             }
         }
@@ -453,10 +459,13 @@ fn install_gemini(binary: &str, scope: &Scope) -> Result<()> {
             println!("  No changes made.");
             return Ok(());
         }
+        let old_cmd = existing.get("command").and_then(|v| v.as_str()).unwrap_or("(unknown)");
         println!(
             "Updating existing atm MCP server entry for Gemini CLI ({}).",
             scope_label(scope)
         );
+        println!("  Old binary: {old_cmd}");
+        println!("  New binary: {binary}");
     }
 
     let servers = config
@@ -553,7 +562,7 @@ fn execute_status() -> Result<()> {
         println!();
         println!("Install atm-agent-mcp with:");
         println!("  brew install randlee/tap/agent-team-mail");
-        println!("  cargo install agent-team-mail-mcp");
+        println!("  cargo install agent-team-mail  (includes atm-agent-mcp binary)");
     }
 
     Ok(())
