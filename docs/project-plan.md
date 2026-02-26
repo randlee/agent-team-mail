@@ -647,14 +647,16 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.6 Phase Q: MCP Server Setup CLI — PLANNED
+## 17.6 Phase Q: MCP Server Setup CLI — IN PROGRESS
 
 **Goal**: Add `atm mcp install/status` commands so users can configure `atm-agent-mcp` as an MCP server for Claude Code, Codex CLI, and Gemini CLI with a single command. See requirements section 4.8.
 
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
-| Q.1 | `atm mcp install` + `atm mcp status` commands | — | M | PLANNED |
-| Q.2 | Integration tests + cross-platform validation | Q.1 | S | PLANNED |
+| Q.1 | `atm mcp install` + `atm mcp status` commands | — | M | COMPLETE |
+| Q.2 | Integration tests + cross-platform validation | Q.1 | S | COMPLETE |
+| Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | Q.2 | S | IN PROGRESS |
+| Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | Q.3 | M | PLANNED |
 
 **Q.1 deliverables**:
 - New `crates/atm/src/commands/mcp.rs` module
@@ -674,6 +676,22 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - Integration tests using `ATM_HOME` isolation
 - Windows CI validation for PATH-based binary detection
 - Edge cases: missing config files, malformed JSON/TOML, already-configured (idempotency)
+
+**Q.3 deliverables**:
+- Extend `scripts/ci/mcp_inspector_smoke.sh` to keep reference-server baseline and add `atm-agent-mcp` smoke coverage
+- Verify `tools/list` includes all 10 ATM tools:
+  - `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count`
+  - `agent_sessions`, `agent_status`, `agent_close`
+  - `agent_watch_attach`, `agent_watch_poll`, `agent_watch_detach`
+- Verify `tools/call` contract and response schema for 7 standalone tools in an `ATM_HOME`-isolated environment:
+  - `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count`
+  - `agent_sessions`, `agent_status`, `agent_close`
+- Keep CI-safe scope: no live Codex execution in this gate
+
+**Q.4 deliverables**:
+- Run manual MCP Inspector sessions against live Codex-backed `atm-agent-mcp`
+- Validate watch tools end-to-end (`agent_watch_attach`/`poll`/`detach`) and collaborative ATM mail flows
+- Capture runbook evidence, known limitations, and parity notes for Phase Q closeout
 
 ---
 
@@ -809,12 +827,14 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **P** | P.3 | Attach unsupported-event summary flush parity | COMPLETE | [#244](https://github.com/randlee/agent-team-mail/pull/244) |
 | **P** | P.4 | Attach stdin sanitization hardening | COMPLETE | [#245](https://github.com/randlee/agent-team-mail/pull/245) |
 | **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | COMPLETE | [#246](https://github.com/randlee/agent-team-mail/pull/246) |
-| **Q** | Q.1 | `atm mcp install/uninstall/status` commands | PLANNED | — |
-| **Q** | Q.2 | Integration tests + cross-platform validation | PLANNED | — |
+| **Q** | Q.1 | `atm mcp install/uninstall/status` commands | COMPLETE | [#252](https://github.com/randlee/agent-team-mail/pull/252) |
+| **Q** | Q.2 | Integration tests + cross-platform validation | COMPLETE | [#253](https://github.com/randlee/agent-team-mail/pull/253) |
+| **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | IN PROGRESS | — |
+| **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
 
 **Completed**: 99+ sprints across 22 phases (CI green)
 **Current version**: v0.22.0
-**Next**: Phase Q (MCP Server Setup CLI) — awaiting approval to begin
+**Next**: Phase Q.3 (MCP Inspector CI smoke tests for `atm-agent-mcp`)
 
 ---
 

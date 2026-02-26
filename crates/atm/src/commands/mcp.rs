@@ -70,6 +70,11 @@ struct UninstallArgs {
 }
 
 /// Dispatch to the appropriate MCP subcommand.
+///
+/// # Errors
+///
+/// Returns an error when the selected subcommand fails due to invalid input,
+/// config parse/write failures, or binary resolution issues.
 pub fn execute(args: McpArgs) -> Result<()> {
     match args.command {
         McpCommands::Install(install_args) => execute_install(install_args),
@@ -122,6 +127,11 @@ fn find_in_path(binary_name: &str) -> Option<PathBuf> {
 }
 
 /// Resolve the `atm-agent-mcp` binary path from `--binary` override or PATH.
+///
+/// # Errors
+///
+/// Returns an error when the override path is invalid/non-executable (Unix),
+/// or when `atm-agent-mcp` cannot be found on `PATH`.
 fn find_mcp_binary(override_path: Option<PathBuf>) -> Result<String> {
     if let Some(path) = override_path {
         if !path.is_file() {
@@ -244,6 +254,11 @@ fn check_cross_scope_skip(client: &Client, scope: &Scope, global_path: Option<&P
 /// Write JSON with trailing newline (important for git-tracked files like .mcp.json).
 /// Note: serde_json::to_string_pretty reformats the entire file. Format-preserving
 /// JSON merge is deferred to a future version if UX complaints arise.
+///
+/// # Errors
+///
+/// Returns an error when parent-directory creation, JSON serialization, or
+/// file write fails.
 fn write_json(path: &Path, config: &serde_json::Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -254,6 +269,31 @@ fn write_json(path: &Path, config: &serde_json::Value) -> Result<()> {
     formatted.push('\n');
     std::fs::write(path, formatted.as_bytes())
         .with_context(|| format!("Failed to write {}", path.display()))
+}
+
+/// Compare an existing JSON MCP server entry against the expected binary/args.
+///
+/// `require_stdio_type` is true for Claude Code (requires `"type":"stdio"`),
+/// and false for Gemini CLI (extra keys like `"type"` are tolerated).
+fn json_server_entry_matches(
+    existing: &serde_json::Value,
+    binary: &str,
+    require_stdio_type: bool,
+) -> bool {
+    let command_matches = existing.get("command").and_then(|v| v.as_str()) == Some(binary);
+    let args_match = existing
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() == 1 && a.first().and_then(|v| v.as_str()) == Some("serve"))
+        .unwrap_or(false);
+    if !command_matches || !args_match {
+        return false;
+    }
+    if require_stdio_type {
+        existing.get("type").and_then(|v| v.as_str()) == Some("stdio")
+    } else {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +326,7 @@ fn install_claude(binary: &str, scope: &Scope) -> Result<()> {
 
     // Idempotency check
     if let Some(existing) = config.get("mcpServers").and_then(|s| s.get("atm")) {
-        if existing == &server_entry {
+        if json_server_entry_matches(existing, binary, true) {
             println!("atm MCP server already configured for Claude Code ({}).", scope_label(scope));
             println!("  Config: {}", path.display());
             println!("  No changes made.");
@@ -438,7 +478,7 @@ fn install_gemini(binary: &str, scope: &Scope) -> Result<()> {
 
     // Idempotency check
     if let Some(existing) = config.get("mcpServers").and_then(|s| s.get("atm")) {
-        if existing == &server_entry {
+        if json_server_entry_matches(existing, binary, false) {
             println!(
                 "atm MCP server already configured for Gemini CLI ({}).",
                 scope_label(scope)
@@ -495,6 +535,10 @@ fn uninstall_gemini(scope: &Scope) -> Result<()> {
 }
 
 /// Generic JSON uninstall for Claude Code and Gemini.
+///
+/// # Errors
+///
+/// Returns an error when JSON read/parse/write fails.
 fn uninstall_json_client(client_name: &str, path: &Path, scope: &Scope) -> Result<()> {
     if !path.exists() {
         println!("atm MCP server not present for {} ({}).", client_name, scope_label(scope));
@@ -667,5 +711,268 @@ fn scope_label(scope: &Scope) -> &'static str {
     match scope {
         Scope::Global => "global",
         Scope::Local => "local",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::env;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_json_server_entry_matches_claude_requires_stdio_type() {
+        let v = serde_json::json!({
+            "type": "stdio",
+            "command": "/bin/atm-agent-mcp",
+            "args": ["serve"]
+        });
+        assert!(json_server_entry_matches(&v, "/bin/atm-agent-mcp", true));
+    }
+
+    #[test]
+    fn test_json_server_entry_matches_gemini_allows_extra_type_field() {
+        let v = serde_json::json!({
+            "type": "stdio",
+            "command": "/bin/atm-agent-mcp",
+            "args": ["serve"]
+        });
+        assert!(json_server_entry_matches(&v, "/bin/atm-agent-mcp", false));
+    }
+
+    #[test]
+    fn test_json_server_entry_matches_requires_serve_arg() {
+        let v = serde_json::json!({
+            "command": "/bin/atm-agent-mcp",
+            "args": ["other"]
+        });
+        assert!(!json_server_entry_matches(&v, "/bin/atm-agent-mcp", false));
+    }
+
+    #[test]
+    fn test_is_json_atm_configured_true_and_false() {
+        let temp = TempDir::new().expect("tempdir");
+        let good = temp.path().join("good.json");
+        let bad = temp.path().join("bad.json");
+
+        std::fs::write(
+            &good,
+            r#"{"mcpServers":{"atm":{"command":"atm-agent-mcp","args":["serve"]}}}"#,
+        )
+        .expect("write good");
+        std::fs::write(&bad, r#"{"mcpServers":{"other":{"command":"x"}}}"#).expect("write bad");
+
+        assert!(is_json_atm_configured(&good));
+        assert!(!is_json_atm_configured(&bad));
+    }
+
+    #[test]
+    fn test_is_codex_atm_configured_true_and_false() {
+        let temp = TempDir::new().expect("tempdir");
+        let good = temp.path().join("good.toml");
+        let bad = temp.path().join("bad.toml");
+
+        std::fs::write(
+            &good,
+            r#"[mcp_servers.atm]
+command = "atm-agent-mcp"
+args = ["serve"]
+"#,
+        )
+        .expect("write good");
+        std::fs::write(
+            &bad,
+            r#"[mcp_servers.other]
+command = "x"
+"#,
+        )
+        .expect("write bad");
+
+        assert!(is_codex_atm_configured(&good));
+        assert!(!is_codex_atm_configured(&bad));
+    }
+
+    #[test]
+    fn test_scope_label_values() {
+        assert_eq!(scope_label(&Scope::Global), "global");
+        assert_eq!(scope_label(&Scope::Local), "local");
+    }
+
+    #[test]
+    fn test_write_json_creates_parent_and_trailing_newline() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("nested/config.json");
+        let value = serde_json::json!({"mcpServers":{"atm":{"command":"x","args":["serve"]}}});
+
+        write_json(&path, &value).expect("write_json");
+        let content = std::fs::read_to_string(&path).expect("read");
+        assert!(content.ends_with('\n'));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_find_mcp_binary_override_missing_file_errors() {
+        let missing = PathBuf::from("/definitely/not/present/atm-agent-mcp");
+        let err = find_mcp_binary(Some(missing)).expect_err("expected error");
+        assert!(err.to_string().contains("not a file"));
+    }
+
+    #[test]
+    fn test_check_cross_scope_skip_true_when_global_configured() {
+        let temp = TempDir::new().expect("tempdir");
+        let global = temp.path().join("global.json");
+        std::fs::write(
+            &global,
+            r#"{"mcpServers":{"atm":{"command":"atm-agent-mcp","args":["serve"]}}}"#,
+        )
+        .expect("write global");
+
+        assert!(check_cross_scope_skip(
+            &Client::Claude,
+            &Scope::Local,
+            Some(global.as_path())
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_and_uninstall_claude_global_round_trip() {
+        let temp = TempDir::new().expect("tempdir");
+        let old_home = env::var("ATM_HOME").ok();
+        unsafe { env::set_var("ATM_HOME", temp.path()) };
+
+        install_claude("/bin/atm-agent-mcp", &Scope::Global).expect("install");
+        let path = claude_config_path(&Scope::Global).expect("path");
+        assert!(is_json_atm_configured(&path));
+        uninstall_claude(&Scope::Global).expect("uninstall");
+        assert!(!is_json_atm_configured(&path));
+
+        unsafe {
+            match old_home {
+                Some(v) => env::set_var("ATM_HOME", v),
+                None => env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_install_codex_local_scope_errors() {
+        let err = install_codex("/bin/atm-agent-mcp", &Scope::Local).expect_err("expected error");
+        assert!(err.to_string().contains("only supports global"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_and_uninstall_codex_global_round_trip() {
+        let temp = TempDir::new().expect("tempdir");
+        let old_home = env::var("ATM_HOME").ok();
+        unsafe { env::set_var("ATM_HOME", temp.path()) };
+
+        install_codex("/bin/atm-agent-mcp", &Scope::Global).expect("install");
+        let path = codex_config_path().expect("path");
+        assert!(is_codex_atm_configured(&path));
+        uninstall_codex(&Scope::Global).expect("uninstall");
+        assert!(!is_codex_atm_configured(&path));
+
+        unsafe {
+            match old_home {
+                Some(v) => env::set_var("ATM_HOME", v),
+                None => env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_and_uninstall_gemini_local_round_trip() {
+        let temp = TempDir::new().expect("tempdir");
+        let old_cwd = env::current_dir().expect("cwd");
+        env::set_current_dir(temp.path()).expect("set cwd");
+
+        install_gemini("/bin/atm-agent-mcp", &Scope::Local).expect("install");
+        let path = gemini_config_path(&Scope::Local).expect("path");
+        assert!(is_json_atm_configured(&path));
+        uninstall_gemini(&Scope::Local).expect("uninstall");
+        assert!(!is_json_atm_configured(&path));
+
+        env::set_current_dir(old_cwd).expect("restore cwd");
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_gemini_idempotent_with_extra_type_field() {
+        let temp = TempDir::new().expect("tempdir");
+        let original_atm_home = env::var("ATM_HOME").ok();
+        let original_cwd = env::current_dir().expect("cwd");
+        unsafe {
+            env::set_var("ATM_HOME", temp.path());
+        }
+        env::set_current_dir(temp.path()).expect("set cwd");
+
+        let path = temp.path().join(".gemini/settings.json");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        let initial = serde_json::json!({
+            "mcpServers": {
+                "atm": {
+                    "type": "stdio",
+                    "command": "/bin/atm-agent-mcp",
+                    "args": ["serve"]
+                }
+            }
+        });
+        let mut formatted = serde_json::to_string_pretty(&initial).expect("serialize");
+        formatted.push('\n');
+        std::fs::write(&path, formatted.as_bytes()).expect("write");
+
+        install_gemini("/bin/atm-agent-mcp", &Scope::Global).expect("install");
+
+        let after = std::fs::read_to_string(&path).expect("read after");
+        let parsed: serde_json::Value = serde_json::from_str(&after).expect("parse after");
+        assert_eq!(
+            parsed
+                .get("mcpServers")
+                .and_then(|s| s.get("atm"))
+                .and_then(|atm| atm.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("stdio")
+        );
+
+        env::set_current_dir(original_cwd).expect("restore cwd");
+        unsafe {
+            match original_atm_home {
+                Some(v) => env::set_var("ATM_HOME", v),
+                None => env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_find_in_path_prefers_executable_file() {
+        let temp = TempDir::new().expect("tempdir");
+        let old_path = env::var_os("PATH");
+        unsafe {
+            env::set_var("PATH", temp.path());
+        }
+        let bin = temp.path().join("atm-agent-mcp");
+        std::fs::write(&bin, b"#!/bin/sh\nexit 0\n").expect("write bin");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bin).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).expect("chmod");
+        }
+
+        let found = find_in_path("atm-agent-mcp");
+        assert_eq!(found.as_deref(), Some(bin.as_path()));
+
+        unsafe {
+            match old_path {
+                Some(v) => env::set_var("PATH", v),
+                None => env::remove_var("PATH"),
+            }
+        }
     }
 }
