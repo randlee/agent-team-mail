@@ -6,12 +6,14 @@
 
 ## Repo Clone Location (local reference)
 Inspector source cloned at:
-- `/Users/randlee/Documents/github/github/modelcontextprotocol/inspector`
+- `../github/modelcontextprotocol/inspector` (relative to `agent-team-mail` repo root)
 
 ## Quick Start (Web UI)
 1. Start ATM MCP server in one terminal:
 
 ```bash
+export ATM_IDENTITY=arch-ctm
+export ATM_TEAM=atm-dev
 cargo run -p agent-team-mail-mcp -- serve
 ```
 
@@ -31,13 +33,13 @@ npx @modelcontextprotocol/inspector
 Example pattern:
 
 ```bash
-npx @modelcontextprotocol/inspector --cli <server command> --method tools/list
+npx @modelcontextprotocol/inspector --cli cargo run -p agent-team-mail-mcp -- serve --method tools/list
 ```
 
 For tool calls:
 
 ```bash
-npx @modelcontextprotocol/inspector --cli <server command> \
+npx @modelcontextprotocol/inspector --cli cargo run -p agent-team-mail-mcp -- serve \
   --method tools/call \
   --tool-name <tool_name> \
   --tool-arg key=value
