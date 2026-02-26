@@ -642,6 +642,31 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
+## 17.6 Phase Q: MCP Server Setup CLI — PLANNED
+
+**Goal**: Add `atm mcp install/status` commands so users can configure `atm-agent-mcp` as an MCP server for Claude Code, Codex CLI, and Gemini CLI with a single command. See requirements section 4.8.
+
+| Sprint | Name | Depends On | Size | Status |
+|--------|------|------------|------|--------|
+| Q.1 | `atm mcp install` + `atm mcp status` commands | — | M | PLANNED |
+| Q.2 | Integration tests + cross-platform validation | Q.1 | S | PLANNED |
+
+**Q.1 deliverables**:
+- New `crates/atm/src/commands/mcp.rs` module
+- `atm mcp install <client> [scope]` — configure MCP server for Claude/Codex/Gemini
+- `atm mcp status` — show current MCP configuration across all clients
+- Auto-detection of `atm-agent-mcp` binary from PATH
+- Preserves existing config file content (read-modify-write)
+- Cross-platform binary detection (`which`/`where`)
+
+**Q.2 deliverables**:
+- Unit tests for config read/modify/write per client format
+- Integration tests using `ATM_HOME` isolation
+- Windows CI validation for `where` binary detection
+- Edge cases: missing config files, malformed JSON/TOML, already-configured
+
+---
+
 ## 18. Future Plugins
 
 | Plugin | Priority | Notes |

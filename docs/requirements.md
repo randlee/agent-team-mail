@@ -335,6 +335,7 @@ Commands:
   status      Show team status overview
   config      Show/set configuration
   cleanup     Apply retention policies
+  mcp         MCP server setup and management
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
@@ -342,6 +343,10 @@ Teams subcommands:
   teams cleanup <team> [agent] [--force]
   teams backup <team> [--json]
   teams restore <team> [--from <path>] [--dry-run] [--skip-tasks] [--json]
+
+MCP subcommands:
+  mcp install <client> [scope] [--binary <path>]
+  mcp status
 ```
 
 ### 4.2 Messaging Commands
@@ -822,6 +827,90 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 - Use `std::process::Command`/Tokio process APIs only; no shell-specific assumptions.
 - Path handling must use `Path`/`PathBuf`; avoid hardcoded separators.
 - Readiness timeout/backoff defaults must be shared across platforms.
+
+### 4.8 MCP Server Setup (`atm mcp`)
+
+The `atm mcp` command group provides setup and status tooling for configuring
+`atm-agent-mcp` as an MCP server across supported AI coding clients.
+
+#### 4.8.1 Supported Clients
+
+| Client | Global Config | Local Config | Format |
+|--------|--------------|-------------|--------|
+| Claude Code | `~/.config/claude/mcp.json` | `.mcp.json` | JSON (`mcpServers` key) |
+| Codex CLI | `~/.codex/config.toml` | N/A (global only) | TOML (`[mcp_servers.*]` section) |
+| Gemini CLI | `~/.gemini/settings.json` | `.gemini/settings.json` | JSON (`mcpServers` key) |
+
+#### 4.8.2 `atm mcp install`
+
+```
+atm mcp install <client> [scope] [--binary <path>]
+```
+
+**Arguments**:
+- `<client>` — target client: `claude`, `codex`, or `gemini`
+- `[scope]` — `global` (user-level, default) or `local` (project-level)
+- `--binary` — override auto-detected `atm-agent-mcp` path
+
+**Behavior**:
+- Auto-detects `atm-agent-mcp` binary from `PATH` (cross-platform: `which`/`where`)
+- Reads existing config file, preserving all existing content
+- Adds or updates the `atm` MCP server entry with `command` and `args: ["serve"]`
+- Creates parent directories if needed
+- Claude Code entries include `"type": "stdio"` per its convention
+- Codex local scope is rejected with an error (not supported by Codex)
+- If already configured, reports existing configuration without modifying
+
+**Error conditions**:
+- Binary not found in PATH and no `--binary` override → error with install instructions
+- Config file exists but is not valid JSON/TOML → error
+- Codex + local scope → error (unsupported)
+
+#### 4.8.3 `atm mcp status`
+
+```
+atm mcp status
+```
+
+**Behavior**:
+- Reports `atm-agent-mcp` binary availability and path
+- For each supported client, checks both global and local config files
+- Reports whether `atm` is configured as an MCP server in each location
+- If binary not found, displays install instructions
+
+**Output format** (text only, no `--json` in initial version):
+```
+ATM MCP Server Status
+=====================
+
+Binary: /opt/homebrew/bin/atm-agent-mcp
+Available: yes
+
+Claude Code:
+  Global configured       ~/.config/claude/mcp.json
+  Local  not configured   .mcp.json
+
+Codex:
+  Global configured       ~/.codex/config.toml
+
+Gemini CLI:
+  Global not configured   ~/.gemini/settings.json
+  Local  not configured   .gemini/settings.json
+```
+
+#### 4.8.4 Cross-Platform Requirements
+
+- Binary detection uses `which` (Unix) / `where` (Windows)
+- Config file paths use `home_dir()` with `ATM_HOME` override for testing
+- File writes preserve existing content (read-modify-write)
+- TOML writes append to existing file (no full re-serialization to preserve comments)
+
+#### 4.8.5 Future Extensions (Not in Initial Scope)
+
+- `atm mcp uninstall <client> [scope]` — remove configuration
+- `--json` output mode for `atm mcp status`
+- Validation that `atm-agent-mcp serve` actually starts successfully
+- `atm mcp test` — run a quick connectivity check against configured servers
 
 ---
 
