@@ -11,6 +11,7 @@ mod daemon;
 mod inbox;
 pub mod launch;
 mod logs;
+mod mcp;
 mod members;
 mod read;
 mod register;
@@ -90,6 +91,9 @@ enum Commands {
 
     /// Register this agent session with a team
     Register(register::RegisterArgs),
+
+    /// MCP server setup and management (install for Claude Code, Codex, Gemini)
+    Mcp(mcp::McpArgs),
 }
 
 impl Cli {
@@ -114,6 +118,7 @@ impl Cli {
             Commands::Launch(args) => launch::execute(args),
             Commands::Logs(args) => logs::execute(args),
             Commands::Register(args) => register::execute(args),
+            Commands::Mcp(args) => mcp::execute(args),
         }
     }
 }
