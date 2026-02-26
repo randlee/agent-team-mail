@@ -88,7 +88,8 @@ fn lock_path_for_root(sessions_root: &Path, team: &str, identity: &str) -> PathB
 
 /// Acquire a lock file for `identity` in `team`.
 ///
-/// Creates the lock file atomically (write-and-rename) with the current
+/// Creates the lock file atomically via exclusive create (`create_new(true)`)
+/// with the current
 /// process PID and `agent_id`. Returns an error if another live process
 /// already holds the lock, or if this process already holds the lock for
 /// this identity (detected via the in-process lock set).
