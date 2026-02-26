@@ -43,6 +43,15 @@ Suggested prompt layering order:
    - `team_name`
    - `team_lead_alias`
 
+### System Prompt Mode Controls
+- `connect` SHOULD support `system_prompt_mode` with values:
+  - `default`
+  - `override`
+  - `skip`
+- If `system_prompt_mode` is omitted, `default` MUST be applied implicitly.
+- `override` SHOULD accept exactly one prompt source (`system_prompt` inline text or `system_prompt_file` full path).
+- `skip` SHOULD require explicit opt-in (for example `allow_prompt_skip=true`) to prevent accidental unsafe runs.
+
 ## ATM Message Injection
 - Auto-injected ATM read notifications SHOULD use a stable envelope prefix:
   - `[ATM MESSAGE FROM <sender> <priority>]`
