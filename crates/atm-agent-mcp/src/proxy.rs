@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Child;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
@@ -763,11 +763,10 @@ impl ProxyServer {
                 // Drain upstream write channel
                 Some(msg) = upstream_rx.recv() => {
                     let serialized = serde_json::to_string(&msg).unwrap_or_default();
-                    let frame = crate::framing::encode_content_length(&serialized);
-                    if upstream_out.write_all(&frame).await.is_err() {
-                        break;
-                    }
-                    if upstream_out.flush().await.is_err() {
+                    if write_newline_delimited(&mut upstream_out, &serialized)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }

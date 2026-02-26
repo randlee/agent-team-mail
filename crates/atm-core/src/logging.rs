@@ -65,6 +65,7 @@ fn _init_stderr() {
     }
     let level = parse_level();
     let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_max_level(level)
         .with_target(false)
         .try_init();

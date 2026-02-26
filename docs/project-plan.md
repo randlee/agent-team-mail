@@ -154,7 +154,12 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | F | Team Installer | `atm team init` package installer | PLANNED |
 | G | Codex Multi-Transport Hardening | App-server, unified turns, mail injection parity | COMPLETE |
 | L | Logging Overhaul | Daemon fan-in architecture, unified JSONL writer | COMPLETE |
+| M | Codex CLI Parity | Log/stream cleanup, Codex adapter, golden parity harness | COMPLETE |
+| N | Hook Infrastructure | PID identity correlation, hook test harness | COMPLETE |
+| O | Attached CLI Parity | Attach wiring, renderer parity, control-path + fixtures | COMPLETE |
+| O-R | Attach Renderer Parity | RenderClass, event coverage, diff/markdown/reasoning rendering | COMPLETE |
 | P | Attach Path Hardening Closure | Close O-R carry-forward attach deviations and parity hardening | COMPLETE |
+| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | PLANNED |
 
 ---
 
@@ -642,6 +647,54 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
+## 17.6 Phase Q: MCP Server Setup CLI — IN PROGRESS
+
+**Goal**: Add `atm mcp install/status` commands so users can configure `atm-agent-mcp` as an MCP server for Claude Code, Codex CLI, and Gemini CLI with a single command. See requirements section 4.8.
+
+| Sprint | Name | Depends On | Size | Status |
+|--------|------|------------|------|--------|
+| Q.1 | `atm mcp install` + `atm mcp status` commands | — | M | COMPLETE |
+| Q.2 | Integration tests + cross-platform validation | Q.1 | S | COMPLETE |
+| Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | Q.2 | S | IN PROGRESS |
+| Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | Q.3 | M | PLANNED |
+
+**Q.1 deliverables**:
+- New `crates/atm/src/commands/mcp.rs` module
+- `atm mcp install <client> [scope]` — configure MCP server for Claude/Codex/Gemini
+- `atm mcp uninstall <client> [scope]` — remove MCP server configuration
+- `atm mcp status` — show current MCP configuration across all clients
+- In-process PATH resolution for `atm-agent-mcp` binary (no shell dependency)
+- Claude Code: read-modify-write `~/.claude.json` (global) and `.mcp.json` (local)
+- Codex: parse-and-merge TOML for `~/.codex/config.toml` (idempotent)
+- Gemini: read-modify-write JSON for `~/.gemini/settings.json` and `.gemini/settings.json`
+- Cross-scope deduplication: skip local install when global already configured
+- Install outcome states: installed/updated/already-configured/skipped/error (per section 4.8.2)
+- Uninstall outcome states: removed/not-present/error (per section 4.8.2a)
+
+**Q.2 deliverables**:
+- Unit tests for config read/modify/write per client format
+- Integration tests using `ATM_HOME` isolation
+- Windows CI validation for PATH-based binary detection
+- Edge cases: missing config files, malformed JSON/TOML, already-configured (idempotency)
+
+**Q.3 deliverables**:
+- Extend `scripts/ci/mcp_inspector_smoke.sh` to keep reference-server baseline and add `atm-agent-mcp` smoke coverage
+- Verify `tools/list` includes all 10 ATM tools:
+  - `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count`
+  - `agent_sessions`, `agent_status`, `agent_close`
+  - `agent_watch_attach`, `agent_watch_poll`, `agent_watch_detach`
+- Verify `tools/call` contract and response schema for 7 standalone tools in an `ATM_HOME`-isolated environment:
+  - `atm_send`, `atm_read`, `atm_broadcast`, `atm_pending_count`
+  - `agent_sessions`, `agent_status`, `agent_close`
+- Keep CI-safe scope: no live Codex execution in this gate
+
+**Q.4 deliverables**:
+- Run manual MCP Inspector sessions against live Codex-backed `atm-agent-mcp`
+- Validate watch tools end-to-end (`agent_watch_attach`/`poll`/`detach`) and collaborative ATM mail flows
+- Capture runbook evidence, known limitations, and parity notes for Phase Q closeout
+
+---
+
 ## 18. Future Plugins
 
 | Plugin | Priority | Notes |
@@ -774,10 +827,14 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **P** | P.3 | Attach unsupported-event summary flush parity | COMPLETE | [#244](https://github.com/randlee/agent-team-mail/pull/244) |
 | **P** | P.4 | Attach stdin sanitization hardening | COMPLETE | [#245](https://github.com/randlee/agent-team-mail/pull/245) |
 | **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | COMPLETE | [#246](https://github.com/randlee/agent-team-mail/pull/246) |
+| **Q** | Q.1 | `atm mcp install/uninstall/status` commands | COMPLETE | [#252](https://github.com/randlee/agent-team-mail/pull/252) |
+| **Q** | Q.2 | Integration tests + cross-platform validation | COMPLETE | [#253](https://github.com/randlee/agent-team-mail/pull/253) |
+| **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | IN PROGRESS | — |
+| **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
 
-**Completed**: 99+ sprints across 21 phases (CI green)
-**Current version**: v0.21.0
-**Next**: Phase P completion PR to `develop` (pending merge)
+**Completed**: 99+ sprints across 22 phases (CI green)
+**Current version**: v0.22.0
+**Next**: Phase Q.4 (Manual MCP Inspector testing with live Codex)
 
 ---
 
@@ -802,6 +859,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Phase M | [#214](https://github.com/randlee/agent-team-mail/pull/214) | Merged |
 | Phase N | [#221](https://github.com/randlee/agent-team-mail/pull/221) | Merged |
 | Phase O-R | [#238](https://github.com/randlee/agent-team-mail/pull/238) | Merged |
+| Phase P | Sprint PRs targeted develop directly (no integration branch) | Merged |
 
 ---
 
