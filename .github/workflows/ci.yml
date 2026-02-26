@@ -151,7 +151,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22.7.5"
+          node-version: "22"
 
       - name: Run MCP Inspector smoke script
         run: ./scripts/ci/mcp_inspector_smoke.sh
