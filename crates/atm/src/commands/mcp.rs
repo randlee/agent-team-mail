@@ -1,8 +1,12 @@
-//! MCP server setup and management commands
+//! MCP server setup and management commands.
+//!
+//! Configures `atm-agent-mcp` as an MCP server for Claude Code, Codex CLI, and
+//! Gemini CLI. Supports install, uninstall, and status across global (user) and
+//! local (project) scopes. See `docs/requirements.md` section 4.8.
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// MCP server setup and management
 #[derive(Args, Debug)]
@@ -65,6 +69,7 @@ struct UninstallArgs {
     scope: Scope,
 }
 
+/// Dispatch to the appropriate MCP subcommand.
 pub fn execute(args: McpArgs) -> Result<()> {
     match args.command {
         McpCommands::Install(install_args) => execute_install(install_args),
@@ -73,19 +78,42 @@ pub fn execute(args: McpArgs) -> Result<()> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Binary detection
+// ---------------------------------------------------------------------------
+
+/// Check if a file is executable (platform-appropriate).
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows, file existence + known extension is sufficient
+        let _ = path;
+        true
+    }
+}
+
 /// Find a binary in PATH using in-process resolution (no shell dependency).
 fn find_in_path(binary_name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(binary_name);
-        if candidate.is_file() {
+        if candidate.is_file() && is_executable(&candidate) {
             return Some(candidate);
         }
-        // On Windows, also check common extensions
+        // On Windows, also check common extensions. is_executable() currently
+        // returns true on Windows, but we call it for forward-compatibility if
+        // real Windows executable checks are added later.
         #[cfg(windows)]
         for ext in &["exe", "cmd", "bat"] {
             let with_ext = dir.join(format!("{binary_name}.{ext}"));
-            if with_ext.is_file() {
+            if with_ext.is_file() && is_executable(&with_ext) {
                 return Some(with_ext);
             }
         }
@@ -93,10 +121,21 @@ fn find_in_path(binary_name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Resolve the `atm-agent-mcp` binary path from `--binary` override or PATH.
 fn find_mcp_binary(override_path: Option<PathBuf>) -> Result<String> {
     if let Some(path) = override_path {
-        if !path.exists() {
-            bail!("Specified binary not found: {}", path.display());
+        if !path.is_file() {
+            bail!("Specified binary is not a file: {}", path.display());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(&path)
+                .with_context(|| format!("Cannot read metadata for {}", path.display()))?
+                .permissions();
+            if perms.mode() & 0o111 == 0 {
+                bail!("Specified binary is not executable: {}", path.display());
+            }
         }
         return Ok(path.to_string_lossy().to_string());
     }
@@ -113,14 +152,17 @@ fn find_mcp_binary(override_path: Option<PathBuf>) -> Result<String> {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Config path helpers
+// ---------------------------------------------------------------------------
+
 fn home_dir() -> Result<PathBuf> {
     crate::util::settings::get_home_dir()
 }
 
-// --- Claude Code ---
-// User/Global: ~/.claude.json  (mcpServers field, user scope)
-// Project/Local: .mcp.json     (project scope, committed to repo)
-
+// Claude Code:
+//   User/Global: ~/.claude.json  (mcpServers field, user scope)
+//   Project/Local: .mcp.json     (project scope, committed to repo)
 fn claude_config_path(scope: &Scope) -> Result<PathBuf> {
     match scope {
         Scope::Global => Ok(home_dir()?.join(".claude.json")),
@@ -128,8 +170,27 @@ fn claude_config_path(scope: &Scope) -> Result<PathBuf> {
     }
 }
 
+// Codex CLI: ~/.codex/config.toml (global only)
+fn codex_config_path() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".codex/config.toml"))
+}
+
+// Gemini CLI:
+//   User/Global: ~/.gemini/settings.json
+//   Project/Local: .gemini/settings.json
+fn gemini_config_path(scope: &Scope) -> Result<PathBuf> {
+    match scope {
+        Scope::Global => Ok(home_dir()?.join(".gemini/settings.json")),
+        Scope::Local => Ok(PathBuf::from(".gemini/settings.json")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config detection (used by status + cross-scope dedup)
+// ---------------------------------------------------------------------------
+
 /// Check if atm is configured in a JSON config file (Claude or Gemini).
-fn is_json_atm_configured(path: &PathBuf) -> bool {
+fn is_json_atm_configured(path: &Path) -> bool {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return false,
@@ -140,21 +201,35 @@ fn is_json_atm_configured(path: &PathBuf) -> bool {
         .is_some()
 }
 
-/// Check cross-scope: if local requested, check if global already has it.
-fn check_cross_scope_skip(client_name: &str, scope: &Scope, global_path: &Result<PathBuf>) -> bool {
+/// Check if atm is configured in Codex TOML config.
+fn is_codex_atm_configured(path: &Path) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    content
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|t| t.get("mcp_servers")?.as_table()?.get("atm").cloned())
+        .is_some()
+}
+
+/// Check if atm is configured for a given client at the specified path.
+fn is_atm_configured(client: &Client, path: &Path) -> bool {
+    match client {
+        Client::Codex => is_codex_atm_configured(path),
+        Client::Claude | Client::Gemini => is_json_atm_configured(path),
+    }
+}
+
+/// Cross-scope check: if local scope requested, check if global already has it.
+fn check_cross_scope_skip(client: &Client, scope: &Scope, global_path: Option<&Path>) -> bool {
     if !matches!(scope, Scope::Local) {
         return false;
     }
-    if let Ok(gpath) = global_path {
-        let configured = if client_name == "Codex" {
-            is_codex_atm_configured(gpath)
-        } else {
-            is_json_atm_configured(gpath)
-        };
-        if configured {
-            println!(
-                "Project scope install skipped. atm MCP already installed globally."
-            );
+    if let Some(gpath) = global_path {
+        if is_atm_configured(client, gpath) {
+            println!("Project scope install skipped. atm MCP already installed globally.");
             println!("  Global config: {}", gpath.display());
             return true;
         }
@@ -162,9 +237,32 @@ fn check_cross_scope_skip(client_name: &str, scope: &Scope, global_path: &Result
     false
 }
 
+// ---------------------------------------------------------------------------
+// JSON write helper
+// ---------------------------------------------------------------------------
+
+/// Write JSON with trailing newline (important for git-tracked files like .mcp.json).
+/// Note: serde_json::to_string_pretty reformats the entire file. Format-preserving
+/// JSON merge is deferred to a future version if UX complaints arise.
+fn write_json(path: &Path, config: &serde_json::Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let mut formatted = serde_json::to_string_pretty(config)?;
+    formatted.push('\n');
+    std::fs::write(path, formatted.as_bytes())
+        .with_context(|| format!("Failed to write {}", path.display()))
+}
+
+// ---------------------------------------------------------------------------
+// Install: Claude Code
+// ---------------------------------------------------------------------------
+
 fn install_claude(binary: &str, scope: &Scope) -> Result<()> {
-    // Cross-scope deduplication
-    if check_cross_scope_skip("Claude", scope, &claude_config_path(&Scope::Global)) {
+    let global_path = claude_config_path(&Scope::Global).ok();
+    if check_cross_scope_skip(&Client::Claude, scope, global_path.as_deref()) {
         return Ok(());
     }
 
@@ -179,13 +277,14 @@ fn install_claude(binary: &str, scope: &Scope) -> Result<()> {
         serde_json::json!({})
     };
 
+    // Claude Code requires "type": "stdio" per spec 4.8.1
     let server_entry = serde_json::json!({
         "type": "stdio",
         "command": binary,
         "args": ["serve"]
     });
 
-    // Check idempotency — if already configured with same settings, no-op
+    // Idempotency check
     if let Some(existing) = config.get("mcpServers").and_then(|s| s.get("atm")) {
         if existing == &server_entry {
             println!("atm MCP server already configured for Claude Code ({}).", scope_label(scope));
@@ -193,7 +292,6 @@ fn install_claude(binary: &str, scope: &Scope) -> Result<()> {
             println!("  No changes made.");
             return Ok(());
         }
-        // Different config exists — will be updated
         let old_cmd = existing.get("command").and_then(|v| v.as_str()).unwrap_or("(unknown)");
         println!("Updating existing atm MCP server entry for Claude Code ({}).", scope_label(scope));
         println!("  Old binary: {old_cmd}");
@@ -211,13 +309,7 @@ fn install_claude(binary: &str, scope: &Scope) -> Result<()> {
         .context("mcpServers is not an object")?
         .insert("atm".to_string(), server_entry);
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let formatted = serde_json::to_string_pretty(&config)?;
-    std::fs::write(&path, formatted.as_bytes())
-        .with_context(|| format!("Failed to write {}", path.display()))?;
+    write_json(&path, &config)?;
 
     println!("Installed atm MCP server for Claude Code ({})", scope_label(scope));
     println!("  Config: {}", path.display());
@@ -227,64 +319,9 @@ fn install_claude(binary: &str, scope: &Scope) -> Result<()> {
     Ok(())
 }
 
-fn uninstall_claude(scope: &Scope) -> Result<()> {
-    let path = claude_config_path(scope)?;
-    uninstall_json_client("Claude Code", &path, scope)
-}
-
-/// Generic JSON uninstall for Claude Code and Gemini.
-fn uninstall_json_client(client_name: &str, path: &PathBuf, scope: &Scope) -> Result<()> {
-    if !path.exists() {
-        println!("atm MCP server not present for {} ({}).", client_name, scope_label(scope));
-        println!("  Config: {} (file does not exist)", path.display());
-        return Ok(());
-    }
-
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
-
-    let removed = config
-        .get_mut("mcpServers")
-        .and_then(|s| s.as_object_mut())
-        .map(|servers| servers.remove("atm").is_some())
-        .unwrap_or(false);
-
-    if !removed {
-        println!("atm MCP server not present for {} ({}).", client_name, scope_label(scope));
-        println!("  Config: {}", path.display());
-        return Ok(());
-    }
-
-    let formatted = serde_json::to_string_pretty(&config)?;
-    std::fs::write(path, formatted.as_bytes())
-        .with_context(|| format!("Failed to write {}", path.display()))?;
-
-    println!("Removed atm MCP server from {} ({}).", client_name, scope_label(scope));
-    println!("  Config: {}", path.display());
-    println!("\nRestart {} to pick up the change.", client_name);
-
-    Ok(())
-}
-
-// --- Codex ---
-
-fn codex_config_path() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".codex/config.toml"))
-}
-
-fn is_codex_atm_configured(path: &PathBuf) -> bool {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    content
-        .parse::<toml::Table>()
-        .ok()
-        .and_then(|t| t.get("mcp_servers")?.as_table()?.get("atm").cloned())
-        .is_some()
-}
+// ---------------------------------------------------------------------------
+// Install: Codex
+// ---------------------------------------------------------------------------
 
 fn install_codex(binary: &str, scope: &Scope) -> Result<()> {
     if matches!(scope, Scope::Local) {
@@ -300,36 +337,7 @@ fn install_codex(binary: &str, scope: &Scope) -> Result<()> {
         String::new()
     };
 
-    // Parse existing TOML to check for idempotency
-    if !content.is_empty() {
-        if let Ok(table) = content.parse::<toml::Table>() {
-            if let Some(mcp_servers) = table.get("mcp_servers").and_then(|v| v.as_table()) {
-                if let Some(atm_entry) = mcp_servers.get("atm").and_then(|v| v.as_table()) {
-                    let existing_cmd = atm_entry.get("command").and_then(|v| v.as_str());
-                    let existing_args = atm_entry.get("args").and_then(|v| v.as_array());
-                    let args_match = existing_args
-                        .map(|a| {
-                            a.len() == 1
-                                && (a.first().and_then(|v| v.as_str()) == Some("serve"))
-                        })
-                        .unwrap_or(false);
-
-                    if existing_cmd == Some(binary) && args_match {
-                        println!("atm MCP server already configured for Codex (global).");
-                        println!("  Config: {}", path.display());
-                        println!("  No changes made.");
-                        return Ok(());
-                    }
-                    let old = existing_cmd.unwrap_or("(unknown)");
-                    println!("Updating existing atm MCP server entry for Codex (global).");
-                    println!("  Old binary: {old}");
-                    println!("  New binary: {binary}");
-                }
-            }
-        }
-    }
-
-    // Parse-and-merge: parse existing TOML, update/add [mcp_servers.atm], re-serialize
+    // Single parse for both idempotency check and merge
     let mut table: toml::Table = if content.is_empty() {
         toml::Table::new()
     } else {
@@ -338,6 +346,31 @@ fn install_codex(binary: &str, scope: &Scope) -> Result<()> {
             .with_context(|| format!("Failed to parse {} as TOML", path.display()))?
     };
 
+    // Idempotency check on the parsed table
+    if let Some(mcp_servers) = table.get("mcp_servers").and_then(|v| v.as_table()) {
+        if let Some(atm_entry) = mcp_servers.get("atm").and_then(|v| v.as_table()) {
+            let existing_cmd = atm_entry.get("command").and_then(|v| v.as_str());
+            let existing_args = atm_entry.get("args").and_then(|v| v.as_array());
+            let args_match = existing_args
+                .map(|a| {
+                    a.len() == 1 && a.first().and_then(|v| v.as_str()) == Some("serve")
+                })
+                .unwrap_or(false);
+
+            if existing_cmd == Some(binary) && args_match {
+                println!("atm MCP server already configured for Codex (global).");
+                println!("  Config: {}", path.display());
+                println!("  No changes made.");
+                return Ok(());
+            }
+            let old = existing_cmd.unwrap_or("(unknown)");
+            println!("Updating existing atm MCP server entry for Codex (global).");
+            println!("  Old binary: {old}");
+            println!("  New binary: {binary}");
+        }
+    }
+
+    // Merge: update/add [mcp_servers.atm]
     let mcp_servers = table
         .entry("mcp_servers")
         .or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -370,6 +403,127 @@ fn install_codex(binary: &str, scope: &Scope) -> Result<()> {
     println!("  Config: {}", path.display());
     println!("  Binary: {binary}");
     println!("\nRestart Codex to pick up the new configuration.");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Install: Gemini
+// ---------------------------------------------------------------------------
+
+fn install_gemini(binary: &str, scope: &Scope) -> Result<()> {
+    let global_path = gemini_config_path(&Scope::Global).ok();
+    if check_cross_scope_skip(&Client::Gemini, scope, global_path.as_deref()) {
+        return Ok(());
+    }
+
+    let path = gemini_config_path(scope)?;
+
+    let mut config: serde_json::Value = if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+
+    // Gemini CLI does not use a "type" field in its mcpServers entries,
+    // unlike Claude Code which requires "type": "stdio". This matches the
+    // Gemini CLI docs and the spec table in section 4.8.1.
+    let server_entry = serde_json::json!({
+        "command": binary,
+        "args": ["serve"]
+    });
+
+    // Idempotency check
+    if let Some(existing) = config.get("mcpServers").and_then(|s| s.get("atm")) {
+        if existing == &server_entry {
+            println!(
+                "atm MCP server already configured for Gemini CLI ({}).",
+                scope_label(scope)
+            );
+            println!("  Config: {}", path.display());
+            println!("  No changes made.");
+            return Ok(());
+        }
+        let old_cmd = existing.get("command").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+        println!(
+            "Updating existing atm MCP server entry for Gemini CLI ({}).",
+            scope_label(scope)
+        );
+        println!("  Old binary: {old_cmd}");
+        println!("  New binary: {binary}");
+    }
+
+    let servers = config
+        .as_object_mut()
+        .context("Config is not a JSON object")?
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+
+    servers
+        .as_object_mut()
+        .context("mcpServers is not an object")?
+        .insert("atm".to_string(), server_entry);
+
+    write_json(&path, &config)?;
+
+    println!(
+        "Installed atm MCP server for Gemini CLI ({})",
+        scope_label(scope)
+    );
+    println!("  Config: {}", path.display());
+    println!("  Binary: {binary}");
+    println!("\nRestart Gemini CLI to pick up the new configuration.");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall
+// ---------------------------------------------------------------------------
+
+fn uninstall_claude(scope: &Scope) -> Result<()> {
+    let path = claude_config_path(scope)?;
+    uninstall_json_client("Claude Code", &path, scope)
+}
+
+fn uninstall_gemini(scope: &Scope) -> Result<()> {
+    let path = gemini_config_path(scope)?;
+    uninstall_json_client("Gemini CLI", &path, scope)
+}
+
+/// Generic JSON uninstall for Claude Code and Gemini.
+fn uninstall_json_client(client_name: &str, path: &Path, scope: &Scope) -> Result<()> {
+    if !path.exists() {
+        println!("atm MCP server not present for {} ({}).", client_name, scope_label(scope));
+        println!("  Config: {} (file does not exist)", path.display());
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+
+    let removed = config
+        .get_mut("mcpServers")
+        .and_then(|s| s.as_object_mut())
+        .map(|servers| servers.remove("atm").is_some())
+        .unwrap_or(false);
+
+    if !removed {
+        println!("atm MCP server not present for {} ({}).", client_name, scope_label(scope));
+        println!("  Config: {}", path.display());
+        return Ok(());
+    }
+
+    write_json(path, &config)?;
+
+    println!("Removed atm MCP server from {} ({}).", client_name, scope_label(scope));
+    println!("  Config: {}", path.display());
+    println!("\nRestart {} to pick up the change.", client_name);
 
     Ok(())
 }
@@ -417,93 +571,9 @@ fn uninstall_codex(scope: &Scope) -> Result<()> {
     Ok(())
 }
 
-// --- Gemini ---
-
-fn gemini_config_path(scope: &Scope) -> Result<PathBuf> {
-    match scope {
-        Scope::Global => Ok(home_dir()?.join(".gemini/settings.json")),
-        Scope::Local => Ok(PathBuf::from(".gemini/settings.json")),
-    }
-}
-
-fn install_gemini(binary: &str, scope: &Scope) -> Result<()> {
-    // Cross-scope deduplication
-    if check_cross_scope_skip("Gemini", scope, &gemini_config_path(&Scope::Global)) {
-        return Ok(());
-    }
-
-    let path = gemini_config_path(scope)?;
-
-    let mut config: serde_json::Value = if path.exists() {
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse {}", path.display()))?
-    } else {
-        serde_json::json!({})
-    };
-
-    let server_entry = serde_json::json!({
-        "command": binary,
-        "args": ["serve"]
-    });
-
-    // Check idempotency
-    if let Some(existing) = config.get("mcpServers").and_then(|s| s.get("atm")) {
-        if existing == &server_entry {
-            println!(
-                "atm MCP server already configured for Gemini CLI ({}).",
-                scope_label(scope)
-            );
-            println!("  Config: {}", path.display());
-            println!("  No changes made.");
-            return Ok(());
-        }
-        let old_cmd = existing.get("command").and_then(|v| v.as_str()).unwrap_or("(unknown)");
-        println!(
-            "Updating existing atm MCP server entry for Gemini CLI ({}).",
-            scope_label(scope)
-        );
-        println!("  Old binary: {old_cmd}");
-        println!("  New binary: {binary}");
-    }
-
-    let servers = config
-        .as_object_mut()
-        .context("Config is not a JSON object")?
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::json!({}));
-
-    servers
-        .as_object_mut()
-        .context("mcpServers is not an object")?
-        .insert("atm".to_string(), server_entry);
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let formatted = serde_json::to_string_pretty(&config)?;
-    std::fs::write(&path, formatted.as_bytes())
-        .with_context(|| format!("Failed to write {}", path.display()))?;
-
-    println!(
-        "Installed atm MCP server for Gemini CLI ({})",
-        scope_label(scope)
-    );
-    println!("  Config: {}", path.display());
-    println!("  Binary: {binary}");
-    println!("\nRestart Gemini CLI to pick up the new configuration.");
-
-    Ok(())
-}
-
-fn uninstall_gemini(scope: &Scope) -> Result<()> {
-    let path = gemini_config_path(scope)?;
-    uninstall_json_client("Gemini CLI", &path, scope)
-}
-
-// --- Install dispatch ---
+// ---------------------------------------------------------------------------
+// Install / Uninstall dispatch
+// ---------------------------------------------------------------------------
 
 fn execute_install(args: InstallArgs) -> Result<()> {
     let binary = find_mcp_binary(args.binary)?;
@@ -515,8 +585,6 @@ fn execute_install(args: InstallArgs) -> Result<()> {
     }
 }
 
-// --- Uninstall dispatch ---
-
 fn execute_uninstall(args: UninstallArgs) -> Result<()> {
     match args.client {
         Client::Claude => uninstall_claude(&args.scope),
@@ -525,11 +593,22 @@ fn execute_uninstall(args: UninstallArgs) -> Result<()> {
     }
 }
 
-// --- Status ---
+// ---------------------------------------------------------------------------
+// Status
+// ---------------------------------------------------------------------------
+
+/// Enum variant used for status dispatch (avoids stringly-typed comparison).
+enum StatusClient {
+    Claude,
+    Codex,
+    Gemini,
+}
 
 fn execute_status() -> Result<()> {
-    let binary_available = find_mcp_binary(None).is_ok();
-    let binary_path = find_mcp_binary(None).unwrap_or_else(|_| "(not found)".to_string());
+    // Single PATH scan (QA-002: avoid double scan race window)
+    let binary_result = find_mcp_binary(None);
+    let binary_available = binary_result.is_ok();
+    let binary_path = binary_result.unwrap_or_else(|_| "(not found)".to_string());
 
     println!("ATM MCP Server Status");
     println!("=====================");
@@ -541,19 +620,16 @@ fn execute_status() -> Result<()> {
     );
     println!();
 
-    // Check Claude Code
-    print_client_status("Claude Code", &[
+    print_client_status("Claude Code", StatusClient::Claude, &[
         ("User   ", claude_config_path(&Scope::Global).ok()),
         ("Project", claude_config_path(&Scope::Local).ok()),
     ]);
 
-    // Check Codex
-    print_client_status("Codex", &[
+    print_client_status("Codex", StatusClient::Codex, &[
         ("Global ", codex_config_path().ok()),
     ]);
 
-    // Check Gemini
-    print_client_status("Gemini CLI", &[
+    print_client_status("Gemini CLI", StatusClient::Gemini, &[
         ("User   ", gemini_config_path(&Scope::Global).ok()),
         ("Project", gemini_config_path(&Scope::Local).ok()),
     ]);
@@ -568,11 +644,14 @@ fn execute_status() -> Result<()> {
     Ok(())
 }
 
-fn print_client_status(name: &str, configs: &[(&str, Option<PathBuf>)]) {
+fn print_client_status(name: &str, client: StatusClient, configs: &[(&str, Option<PathBuf>)]) {
     println!("{name}:");
     for (scope, path) in configs {
         if let Some(p) = path {
-            let installed = check_atm_configured(p, name);
+            let installed = match client {
+                StatusClient::Codex => is_codex_atm_configured(p),
+                StatusClient::Claude | StatusClient::Gemini => is_json_atm_configured(p),
+            };
             let status = if installed {
                 "configured"
             } else {
@@ -582,14 +661,6 @@ fn print_client_status(name: &str, configs: &[(&str, Option<PathBuf>)]) {
         }
     }
     println!();
-}
-
-fn check_atm_configured(path: &PathBuf, client_name: &str) -> bool {
-    if client_name == "Codex" {
-        is_codex_atm_configured(path)
-    } else {
-        is_json_atm_configured(path)
-    }
 }
 
 fn scope_label(scope: &Scope) -> &'static str {

@@ -867,7 +867,8 @@ atm mcp install <client> [scope] [--binary <path>]
 **Arguments**:
 - `<client>` — target client: `claude`, `codex`, or `gemini`
 - `[scope]` — `global` (user-level, default) or `local` (project-level)
-- `--binary` — override auto-detected `atm-agent-mcp` path
+- `--binary` — override auto-detected `atm-agent-mcp` path (must be a regular
+  file with executable permission; directories and non-executable files are rejected)
 
 **Behavior**:
 - Auto-detects `atm-agent-mcp` binary via `std::env::split_paths` + PATH lookup
@@ -1026,8 +1027,10 @@ Install atm-agent-mcp with:
 #### 4.8.4 Cross-Platform Requirements
 
 - Binary detection uses in-process PATH resolution (`std::env::split_paths` +
-  existence check) exclusively. Shell `which`/`where` subprocess calls must never
-  be used for resolution — they may only appear in user-facing diagnostic text.
+  file existence + executable permission check) exclusively. Shell `which`/`where`
+  subprocess calls must never be used for resolution — they may only appear in
+  user-facing diagnostic text. On Unix, verify the executable bit (`mode & 0o111`);
+  on Windows, file existence with known extension is sufficient.
 - Config file paths use `home_dir()` with `ATM_HOME` override for testing
 - File writes preserve existing content (read-modify-write for JSON; parse-and-merge for TOML)
 - Windows config paths: all clients use standard home-dir conventions
