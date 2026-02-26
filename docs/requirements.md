@@ -346,6 +346,7 @@ Teams subcommands:
 
 MCP subcommands:
   mcp install <client> [scope] [--binary <path>]
+  mcp uninstall <client> [scope]
   mcp status
 ```
 
@@ -882,7 +883,14 @@ atm mcp install <client> [scope] [--binary <path>]
 - If already configured with identical settings, reports existing configuration
   without modifying (exit code 0)
 
-**Codex TOML entry format** (appended or merged into `~/.codex/config.toml`):
+**Cross-scope deduplication**: When `local` scope is requested, check if `atm`
+is already configured at `global` scope for the same client first. If global is
+already configured, skip the local install and report:
+`"Project scope install skipped. atm MCP already installed globally."`
+This prevents redundant configuration. The reverse (global install when local
+exists) proceeds normally since global takes broader precedence.
+
+**Codex TOML entry format** (merged into `~/.codex/config.toml`):
 ```toml
 [mcp_servers.atm]
 command = "/opt/homebrew/bin/atm-agent-mcp"
@@ -893,14 +901,48 @@ args = ["serve"]
 `mcpServers.atm` exists with matching `command` and `args`. For Codex TOML,
 parse and check `mcp_servers.atm.command` and `mcp_servers.atm.args`.
 
+**Install outcome states**:
+- `installed` — new configuration written
+- `updated` — existing configuration changed (different binary path)
+- `already-configured` — identical configuration exists, no changes
+- `skipped` — cross-scope deduplication (global already configured)
+- `error` — binary not found, invalid config, unsupported scope
+
 **Exit codes**:
-- `0` — success (including "already configured, no changes made")
+- `0` — success (installed, updated, already-configured, or skipped)
 - `1` — error (binary not found, invalid config file, unsupported scope)
 
 **Error conditions**:
 - Binary not found in PATH and no `--binary` override → error with install instructions
 - Config file exists but is not valid JSON/TOML → error
 - Codex + local scope → error (unsupported)
+
+#### 4.8.2a `atm mcp uninstall`
+
+```
+atm mcp uninstall <client> [scope]
+```
+
+**Arguments**:
+- `<client>` — target client: `claude`, `codex`, or `gemini`
+- `[scope]` — `global` (default) or `local`
+
+**Behavior**:
+- Removes the `atm` MCP server entry from the specified client configuration
+- For JSON clients (Claude, Gemini): removes `mcpServers.atm` key from config,
+  preserving all other content (read-modify-write)
+- For Codex TOML: parse, remove `[mcp_servers.atm]` table, re-serialize
+- If `atm` is not configured, reports "not present" without error (exit code 0)
+- Codex local scope is rejected with an error (not supported)
+
+**Uninstall outcome states**:
+- `removed` — configuration entry deleted
+- `not-present` — no `atm` entry found, nothing to remove
+- `error` — invalid config file, unsupported scope
+
+**Exit codes**:
+- `0` — success (removed or not-present)
+- `1` — error (invalid config file, unsupported scope)
 
 #### 4.8.3 `atm mcp status`
 
@@ -978,7 +1020,6 @@ Install atm-agent-mcp with:
 
 #### 4.8.5 Future Extensions (Not in Initial Scope)
 
-- `atm mcp uninstall <client> [scope]` — remove configuration
 - `--json` output mode for `atm mcp status`
 - Validation that `atm-agent-mcp serve` actually starts successfully
 - `atm mcp test` — run a quick connectivity check against configured servers

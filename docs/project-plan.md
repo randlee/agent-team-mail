@@ -655,11 +655,14 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 **Q.1 deliverables**:
 - New `crates/atm/src/commands/mcp.rs` module
 - `atm mcp install <client> [scope]` — configure MCP server for Claude/Codex/Gemini
+- `atm mcp uninstall <client> [scope]` — remove MCP server configuration
 - `atm mcp status` — show current MCP configuration across all clients
 - In-process PATH resolution for `atm-agent-mcp` binary (no shell dependency)
 - Claude Code: read-modify-write `~/.claude.json` (global) and `.mcp.json` (local)
 - Codex: parse-and-merge TOML for `~/.codex/config.toml` (idempotent)
 - Gemini: read-modify-write JSON for `~/.gemini/settings.json` and `.gemini/settings.json`
+- Cross-scope deduplication: skip local install when global already configured
+- Explicit outcome states: installed/updated/already-configured/skipped/removed/not-present/error
 
 **Q.2 deliverables**:
 - Unit tests for config read/modify/write per client format
