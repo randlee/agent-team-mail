@@ -155,6 +155,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | G | Codex Multi-Transport Hardening | App-server, unified turns, mail injection parity | COMPLETE |
 | L | Logging Overhaul | Daemon fan-in architecture, unified JSONL writer | COMPLETE |
 | P | Attach Path Hardening Closure | Close O-R carry-forward attach deviations and parity hardening | COMPLETE |
+| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | PLANNED |
 
 ---
 
@@ -655,15 +656,16 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - New `crates/atm/src/commands/mcp.rs` module
 - `atm mcp install <client> [scope]` — configure MCP server for Claude/Codex/Gemini
 - `atm mcp status` — show current MCP configuration across all clients
-- Auto-detection of `atm-agent-mcp` binary from PATH
-- Preserves existing config file content (read-modify-write)
-- Cross-platform binary detection (`which`/`where`)
+- In-process PATH resolution for `atm-agent-mcp` binary (no shell dependency)
+- Claude Code: read-modify-write `~/.claude.json` (global) and `.mcp.json` (local)
+- Codex: parse-and-merge TOML for `~/.codex/config.toml` (idempotent)
+- Gemini: read-modify-write JSON for `~/.gemini/settings.json` and `.gemini/settings.json`
 
 **Q.2 deliverables**:
 - Unit tests for config read/modify/write per client format
 - Integration tests using `ATM_HOME` isolation
-- Windows CI validation for `where` binary detection
-- Edge cases: missing config files, malformed JSON/TOML, already-configured
+- Windows CI validation for PATH-based binary detection
+- Edge cases: missing config files, malformed JSON/TOML, already-configured (idempotency)
 
 ---
 
@@ -801,8 +803,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | COMPLETE | [#246](https://github.com/randlee/agent-team-mail/pull/246) |
 
 **Completed**: 99+ sprints across 21 phases (CI green)
-**Current version**: v0.21.0
-**Next**: Phase P completion PR to `develop` (pending merge)
+**Current version**: v0.22.0
+**Next**: Phase Q (MCP Server Setup CLI) — awaiting approval to begin
 
 ---
 
@@ -827,6 +829,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Phase M | [#214](https://github.com/randlee/agent-team-mail/pull/214) | Merged |
 | Phase N | [#221](https://github.com/randlee/agent-team-mail/pull/221) | Merged |
 | Phase O-R | [#238](https://github.com/randlee/agent-team-mail/pull/238) | Merged |
+| Phase P | Sprint PRs targeted develop directly (no integration branch) | Merged |
 
 ---
 

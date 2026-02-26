@@ -830,16 +830,29 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 
 ### 4.8 MCP Server Setup (`atm mcp`)
 
-The `atm mcp` command group provides setup and status tooling for configuring
-`atm-agent-mcp` as an MCP server across supported AI coding clients.
+The `atm mcp` command group provides user-facing setup and status tooling for
+configuring `atm-agent-mcp` as an MCP server across supported AI coding clients.
+It is distinct from the `atm-agent-mcp` crate (section 6.6, `docs/atm-agent-mcp/requirements.md`)
+— `atm mcp install` configures `atm-agent-mcp` as an MCP server, but `atm mcp`
+itself is part of the `atm` CLI binary, not the proxy crate.
+
+> **Note**: The `atm-agent-mcp serve` subcommand referenced by install entries is
+> defined in `docs/atm-agent-mcp/requirements.md` FR-1 (MCP stdio proxy mode).
 
 #### 4.8.1 Supported Clients
 
-| Client | Global Config | Local Config | Format |
-|--------|--------------|-------------|--------|
-| Claude Code | `~/.config/claude/mcp.json` | `.mcp.json` | JSON (`mcpServers` key) |
-| Codex CLI | `~/.codex/config.toml` | N/A (global only) | TOML (`[mcp_servers.*]` section) |
-| Gemini CLI | `~/.gemini/settings.json` | `.gemini/settings.json` | JSON (`mcpServers` key) |
+| Client | User/Global Config | Project/Local Config | Format | Source |
+|--------|-------------------|---------------------|--------|--------|
+| Claude Code | `~/.claude.json` (`mcpServers` field, user scope) | `.mcp.json` (project scope, committed) | JSON (`mcpServers` key, `"type": "stdio"`) | [Claude Code MCP docs](https://code.claude.com/docs/en/mcp) |
+| Codex CLI | `~/.codex/config.toml` | N/A (global only) | TOML (`[mcp_servers.*]` section) | [Codex CLI docs](https://github.com/openai/codex) |
+| Gemini CLI | `~/.gemini/settings.json` | `.gemini/settings.json` | JSON (`mcpServers` key) | [Gemini CLI docs](https://github.com/google-gemini/gemini-cli) |
+
+**Claude Code scope mapping**: Claude Code has three MCP scopes — "user" (cross-project,
+stored in `~/.claude.json`), "local" (per-project private, stored in `~/.claude.json`
+under the project path), and "project" (shared, stored in `.mcp.json`). Our `global`
+maps to Claude Code "user" scope; our `local` maps to Claude Code "project" scope
+(`.mcp.json`). We do not target the Claude Code "local" scope as it is private to
+the user's `~/.claude.json` project entries and harder to manage externally.
 
 #### 4.8.2 `atm mcp install`
 
@@ -853,13 +866,36 @@ atm mcp install <client> [scope] [--binary <path>]
 - `--binary` — override auto-detected `atm-agent-mcp` path
 
 **Behavior**:
-- Auto-detects `atm-agent-mcp` binary from `PATH` (cross-platform: `which`/`where`)
-- Reads existing config file, preserving all existing content
+- Auto-detects `atm-agent-mcp` binary via `std::env::split_paths` + PATH lookup
+  in-process (no shell-specific `which`/`where` dependency; those commands may be
+  used as optional fallback diagnostics only)
+- Reads existing config file, preserving all existing content (read-modify-write)
 - Adds or updates the `atm` MCP server entry with `command` and `args: ["serve"]`
 - Creates parent directories if needed
-- Claude Code entries include `"type": "stdio"` per its convention
+- For Claude Code global: reads `~/.claude.json`, adds/updates `mcpServers.atm`
+  entry with `"type": "stdio"`, `"command"`, and `"args": ["serve"]`
+- For Claude Code local: writes `.mcp.json` with `mcpServers.atm` entry
+- For Codex: parse-and-merge semantics — parse the existing TOML, update/add the
+  `[mcp_servers.atm]` table, and re-serialize. If an existing `[mcp_servers.atm]`
+  entry exists, update it in place (idempotent). If not, add the new table.
 - Codex local scope is rejected with an error (not supported by Codex)
-- If already configured, reports existing configuration without modifying
+- If already configured with identical settings, reports existing configuration
+  without modifying (exit code 0)
+
+**Codex TOML entry format** (appended or merged into `~/.codex/config.toml`):
+```toml
+[mcp_servers.atm]
+command = "/opt/homebrew/bin/atm-agent-mcp"
+args = ["serve"]
+```
+
+**Idempotency detection**: For JSON clients (Claude, Gemini), check if
+`mcpServers.atm` exists with matching `command` and `args`. For Codex TOML,
+parse and check `mcp_servers.atm.command` and `mcp_servers.atm.args`.
+
+**Exit codes**:
+- `0` — success (including "already configured, no changes made")
+- `1` — error (binary not found, invalid config file, unsupported scope)
 
 **Error conditions**:
 - Binary not found in PATH and no `--binary` override → error with install instructions
@@ -874,11 +910,17 @@ atm mcp status
 
 **Behavior**:
 - Reports `atm-agent-mcp` binary availability and path
-- For each supported client, checks both global and local config files
+- For each supported client, checks applicable config files per the scope matrix:
+  - Claude Code: user scope (`~/.claude.json`) + project scope (`.mcp.json`)
+  - Codex: global only (`~/.codex/config.toml`)
+  - Gemini: user scope (`~/.gemini/settings.json`) + project scope (`.gemini/settings.json`)
 - Reports whether `atm` is configured as an MCP server in each location
-- If binary not found, displays install instructions
+- System-level config paths (e.g., Gemini `/Library/Application Support/`) are
+  intentionally not checked; status covers user and project scopes only.
 
 **Output format** (text only, no `--json` in initial version):
+
+When binary is found:
 ```
 ATM MCP Server Status
 =====================
@@ -887,23 +929,52 @@ Binary: /opt/homebrew/bin/atm-agent-mcp
 Available: yes
 
 Claude Code:
-  Global configured       ~/.config/claude/mcp.json
-  Local  not configured   .mcp.json
+  User    configured       ~/.claude.json
+  Project not configured   .mcp.json
 
 Codex:
-  Global configured       ~/.codex/config.toml
+  Global  configured       ~/.codex/config.toml
 
 Gemini CLI:
-  Global not configured   ~/.gemini/settings.json
-  Local  not configured   .gemini/settings.json
+  User    not configured   ~/.gemini/settings.json
+  Project not configured   .gemini/settings.json
+```
+
+When binary is NOT found:
+```
+ATM MCP Server Status
+=====================
+
+Binary: (not found)
+Available: no
+
+Claude Code:
+  User    not configured   ~/.claude.json
+  Project not configured   .mcp.json
+
+Codex:
+  Global  not configured   ~/.codex/config.toml
+
+Gemini CLI:
+  User    not configured   ~/.gemini/settings.json
+  Project not configured   .gemini/settings.json
+
+Install atm-agent-mcp with:
+  brew install randlee/tap/agent-team-mail
+  cargo install agent-team-mail-mcp
 ```
 
 #### 4.8.4 Cross-Platform Requirements
 
-- Binary detection uses `which` (Unix) / `where` (Windows)
+- Binary detection uses in-process PATH resolution (`std::env::split_paths` +
+  existence check), not shell commands. The `which` crate or equivalent Rust
+  implementation is preferred over spawning `which`/`where` subprocesses.
 - Config file paths use `home_dir()` with `ATM_HOME` override for testing
-- File writes preserve existing content (read-modify-write)
-- TOML writes append to existing file (no full re-serialization to preserve comments)
+- File writes preserve existing content (read-modify-write for JSON; parse-and-merge for TOML)
+- Windows config paths: Claude Code uses `~/.claude.json` on all platforms.
+  Codex and Gemini Windows-specific config paths are best-effort; if the
+  respective CLI clients document different Windows paths, follow their
+  documentation. ATM_HOME override enables test isolation on all platforms.
 
 #### 4.8.5 Future Extensions (Not in Initial Scope)
 
@@ -1330,6 +1401,7 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 - [ ] Human chat interface plugin
 - [ ] Dynamic plugin loading (`.so` / `.dylib`)
 - [ ] Task management commands
+- [ ] `atm mcp` command group (MCP server setup — Phase Q, section 4.8)
 
 ---
 
