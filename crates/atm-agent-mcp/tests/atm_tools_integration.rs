@@ -28,10 +28,11 @@ fn make_proxy(identity: Option<&str>, team: &str) -> ProxyServer {
 }
 
 /// Send a `tools/call` JSON-RPC message to the proxy via duplex I/O and return
-/// the first Content-Length-framed response.
+/// the first JSON-RPC response.
 ///
-/// Strategy: send the message, wait for the first complete Content-Length response
-/// from the proxy, then drop the client writer to allow the proxy to shut down.
+/// Strategy: send the message, wait for the first complete response (JSONL or
+/// legacy Content-Length) from the proxy, then drop the client writer to allow
+/// the proxy to shut down.
 async fn roundtrip_tools_call(proxy: &mut ProxyServer, msg: Value) -> Value {
     use atm_agent_mcp::framing::encode_content_length;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
@@ -63,14 +64,14 @@ async fn roundtrip_tools_call(proxy: &mut ProxyServer, msg: Value) -> Value {
                 Ok(n) => {
                     buf.extend_from_slice(&tmp[..n]);
                     // Try to parse a complete response
-                    let candidate = parse_first_content_length_response(&buf);
+                    let candidate = parse_first_response(&buf);
                     if candidate != json!(null) {
                         return candidate;
                     }
                 }
             }
         }
-        parse_first_content_length_response(&buf)
+        parse_first_response(&buf)
     })
     .await
     .unwrap_or(json!(null));
@@ -82,12 +83,20 @@ async fn roundtrip_tools_call(proxy: &mut ProxyServer, msg: Value) -> Value {
     response
 }
 
-/// Extract the first JSON body from a Content-Length framed byte stream.
-fn parse_first_content_length_response(data: &[u8]) -> Value {
+/// Extract the first JSON response from a byte stream.
+///
+/// Supports newline-delimited JSON and legacy Content-Length framing.
+fn parse_first_response(data: &[u8]) -> Value {
     let text = match std::str::from_utf8(data) {
         Ok(s) => s,
         Err(_) => return json!(null),
     };
+    if let Some(first_line) = text.lines().next() {
+        let trimmed = first_line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with("Content-Length:") {
+            return serde_json::from_str(trimmed).unwrap_or(json!(null));
+        }
+    }
     let header_end = match text.find("\r\n\r\n") {
         Some(i) => i,
         None => return json!(null),

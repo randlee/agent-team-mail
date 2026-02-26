@@ -59,41 +59,23 @@ async fn send_newline(writer: &mut DuplexStream, msg: &Value) {
     writer.flush().await.unwrap();
 }
 
-/// Read a Content-Length framed response from the proxy.
+/// Read a response from the proxy (JSONL preferred; Content-Length tolerated).
 async fn read_response(reader: &mut BufReader<DuplexStream>) -> Option<Value> {
-    let mut header_line = String::new();
-
-    // Try to read the Content-Length header with a timeout
-    match tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            header_line.clear();
-            let n = reader.read_line(&mut header_line).await.ok()?;
-            if n == 0 {
-                return None;
-            }
-            let trimmed = header_line.trim();
-            if trimmed.starts_with("Content-Length:") {
-                break;
-            }
-            // skip blank lines or other headers
-        }
-        Some(())
-    })
-    .await
-    {
-        Ok(Some(())) => {}
-        Ok(None) | Err(_) => return None,
+    let mut first_line = String::new();
+    let n = tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut first_line))
+        .await
+        .ok()?
+        .ok()?;
+    if n == 0 {
+        return None;
+    }
+    let trimmed = first_line.trim();
+    if !trimmed.is_empty() && !trimmed.starts_with("Content-Length:") {
+        return serde_json::from_str(trimmed).ok();
     }
 
-    let len: usize = header_line
-        .trim()
-        .strip_prefix("Content-Length:")
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-
-    // Read until blank line
+    // Legacy Content-Length path (retained for backward compatibility).
+    let len: usize = trimmed.strip_prefix("Content-Length:")?.trim().parse().ok()?;
     loop {
         let mut line = String::new();
         reader.read_line(&mut line).await.ok()?;
@@ -101,13 +83,9 @@ async fn read_response(reader: &mut BufReader<DuplexStream>) -> Option<Value> {
             break;
         }
     }
-
     let mut body = vec![0u8; len];
-    tokio::io::AsyncReadExt::read_exact(reader, &mut body)
-        .await
-        .ok()?;
-    let s = String::from_utf8(body).ok()?;
-    serde_json::from_str(&s).ok()
+    tokio::io::AsyncReadExt::read_exact(reader, &mut body).await.ok()?;
+    serde_json::from_slice(&body).ok()
 }
 
 /// Read all responses available within a timeout.
