@@ -987,3 +987,13 @@ sequenceDiagram
     P->>R: release identity binding
     P-->>C: agent_close success
 ```
+
+---
+
+## C. Design Addendum (Draft)
+
+### C.1 Multi-provider connect and prompt policy
+
+For proposed provider-scoped tool exposure (`codex.connect`, `gemini.connect`), prompt layering, and urgent message interruption rules, see:
+
+- `docs/atm-agent-mcp/multi-provider-connect-prompt-policy.md`
