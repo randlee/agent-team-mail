@@ -17,7 +17,7 @@
 //!
 //! 1. `ATM_HOME` env var (used in tests for isolation)
 //! 2. `dirs::config_dir()` / `atm` / `agent-sessions`
-//! 3. `/tmp/atm/agent-sessions` (fallback)
+//! 3. `std::env::temp_dir()` / `.config` / `atm` / `agent-sessions` (fallback)
 //!
 //! # Cross-platform PID liveness
 //!
