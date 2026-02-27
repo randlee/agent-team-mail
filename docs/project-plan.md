@@ -422,6 +422,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 **Goal**: Install orchestration packages (hooks, agents, skills) into `~/.claude/` with `atm team init`.
 
+**Status note (2026-02-27)**: Phase F is a historical planning bucket. Current execution for session handoff and hook installer work proceeds under **Phase R** (see section 17.7). Do not add new F.* sprints.
+
 **Two install scopes**:
 1. **Global** (machine-level): Hook scripts (`session-start.py`, `session-end.py`) + `~/.claude/settings.json` entries. Installed once per machine.
 2. **Project** (per repo/workflow): Gate hooks, agent prompts, skills → `.claude/` directory. Multiple named packages composable.
@@ -692,6 +694,42 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - Run manual MCP Inspector sessions against live Codex-backed `atm-agent-mcp`
 - Validate watch tools end-to-end (`agent_watch_attach`/`poll`/`detach`) and collaborative ATM mail flows
 - Capture runbook evidence, known limitations, and parity notes for Phase Q closeout
+
+---
+
+## 17.7 Phase R: Session Handoff + Hook Installer — PLANNED
+
+**Goal**: Robust session startup for team-lead, hook installation via `atm init`, embedded hook scripts in binary.
+
+### R.1 — `atm teams resume` session handoff
+
+**New `atm teams resume <team>` behavior**:
+
+1. Daemon checks: is `team-lead` already active for this team (tracked by PID)?
+2. **If YES** (team-lead running in another process): refuse — do not steal team-lead identity. Caller may join as regular member or fly solo.
+3. **If NO** (no active team-lead):
+   - Delete `<team>.bak` if it exists
+   - Rename `<team>/` → `<team>.bak/`
+   - Output: `"Call TeamCreate(<team>) to re-establish as team-lead"`
+4. Team-lead calls `TeamCreate(<team>)` — succeeds because directory is gone
+5. Daemon watches for `<team>/config.json` to appear
+6. Daemon restores non-Claude members from `.bak` (pane IDs, agent types, inbox history)
+7. Daemon injects message into team-lead's session: `"<team> re-established. Active members: <name> (<type>, pane <id>), ..."`
+
+### R.2 — `atm init` hook installer
+
+Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (no external files needed).
+
+- `atm init <team>` — local install (project `.claude/settings.json`)
+- `atm init <team> --global` — global install (`~/.claude/settings.json`)
+- Global hooks are passive in non-ATM repos (`.atm.toml` guard as first operation)
+- Idempotent: safe to run multiple times; merges hook entries, never overwrites
+- `atm init --check` — report what's missing without making changes
+
+| Sprint | Name | Depends On | Status |
+|--------|------|------------|--------|
+| R.1 | `atm teams resume` session handoff + daemon member restore | Phase Q | PLANNED |
+| R.2 | `atm init` hook installer + embedded scripts | R.1 | PLANNED |
 
 ---
 
