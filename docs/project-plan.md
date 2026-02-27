@@ -2,7 +2,7 @@
 
 **Version**: 0.5
 **Date**: 2026-02-25
-**Status**: Phase P complete (v0.21.0).
+**Status**: Phase Q.3 complete (v0.23.0); Q.4 planned.
 
 ---
 
@@ -159,7 +159,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | O | Attached CLI Parity | Attach wiring, renderer parity, control-path + fixtures | COMPLETE |
 | O-R | Attach Renderer Parity | RenderClass, event coverage, diff/markdown/reasoning rendering | COMPLETE |
 | P | Attach Path Hardening Closure | Close O-R carry-forward attach deviations and parity hardening | COMPLETE |
-| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | PLANNED |
+| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | IN PROGRESS |
 
 ---
 
@@ -359,13 +359,13 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 13. Phase B: Team-Lead Session Management — COMPLETE
+## 13. Phase B: Team-Lead Session Management — COMPLETE (B.1 deferred to Phase E)
 
 **Integration PR**: [#121](https://github.com/randlee/agent-team-mail/pull/121)
 
 | Sprint | Name | PR |
 |--------|------|----|
-| B.1 | Daemon session tracking + `atm teams resume` + `atm teams cleanup` | [#119](https://github.com/randlee/agent-team-mail/pull/119) |
+| B.1 | Daemon session tracking + `atm teams resume` + `atm teams cleanup` (deferred to Phase E as E.1) | — |
 | B.2 | Unicode-safe message truncation + input validation | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
 | B.3 | Cleanup safety hardening + documentation alignment | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
 
@@ -398,7 +398,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 16. Phase E: ATM Core Bug Fixes — COMPLETE (v0.15.0)
+## 16. Phase E: ATM Core Bug Fixes — COMPLETE (v0.15.0; E.6/E.7 deferred)
 
 **Integration PR**: [#166](https://github.com/randlee/agent-team-mail/pull/166)
 
@@ -409,8 +409,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | E.3 | Hook-to-daemon state bridge | [#152](https://github.com/randlee/agent-team-mail/pull/152) |
 | E.4 | TUI reliability hardening (restart, reconnect, failure injection) | [#158](https://github.com/randlee/agent-team-mail/pull/158) |
 | E.5 | TUI performance, UX polish, operational validation | [#161](https://github.com/randlee/agent-team-mail/pull/161) |
-| E.6 | External agent member management + model registry | [#164](https://github.com/randlee/agent-team-mail/pull/164) |
-| E.7 | Unified lifecycle source model + MCP lifecycle emission | [#165](https://github.com/randlee/agent-team-mail/pull/165) |
+| E.6 | External agent member management + model registry (deferred) | — |
+| E.7 | Unified lifecycle source model + MCP lifecycle emission (deferred) | — |
 | E.8 | ATM Identity Role Mapping + Team Backup/Restore | [#162](https://github.com/randlee/agent-team-mail/pull/162) |
 | — | Daemon hook-event auth validation | [#163](https://github.com/randlee/agent-team-mail/pull/163) |
 
@@ -655,7 +655,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 |--------|------|------------|------|--------|
 | Q.1 | `atm mcp install` + `atm mcp status` commands | — | M | COMPLETE |
 | Q.2 | Integration tests + cross-platform validation | Q.1 | S | COMPLETE |
-| Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | Q.2 | S | IN PROGRESS |
+| Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | Q.2 | S | COMPLETE |
 | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | Q.3 | M | PLANNED |
 
 **Q.1 deliverables**:
@@ -692,6 +692,26 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - Run manual MCP Inspector sessions against live Codex-backed `atm-agent-mcp`
 - Validate watch tools end-to-end (`agent_watch_attach`/`poll`/`detach`) and collaborative ATM mail flows
 - Capture runbook evidence, known limitations, and parity notes for Phase Q closeout
+
+---
+
+## 17.7 Upcoming Work: `atm init` Command — PLANNED
+
+**Goal**: Add a streamlined `atm init` onboarding flow to install ATM hooks in a predictable, low-friction way.
+
+**Command shape**:
+- `atm init --global`: Install global hook wiring and shared defaults.
+- `atm init --local`: Install repo-local ATM files for the current project.
+
+**Design constraints**:
+- Hook scripts are embedded in the ATM binary and written out during `init` (single source of truth, no external script drift).
+- Global install remains passive in non-ATM repositories (no active behavior unless an ATM project marker/config is present).
+- Local install is explicit and repo-scoped, with idempotent updates and atomic writes.
+
+**Planned validation**:
+- Cross-platform install/update idempotency tests for both scopes.
+- Non-ATM repo no-op/passive behavior verification for global hook installs.
+- Upgrade-path tests to ensure existing hook/config customizations are preserved.
 
 ---
 
@@ -769,7 +789,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **A** | A.6 | Thread lifecycle state machine | COMPLETE | [#108](https://github.com/randlee/agent-team-mail/pull/108) |
 | **A** | A.7 | Auto mail injection + polling | COMPLETE | [#109](https://github.com/randlee/agent-team-mail/pull/109) |
 | **A** | A.8 | Shutdown + resume + arch review | COMPLETE | [#110](https://github.com/randlee/agent-team-mail/pull/110), [#111](https://github.com/randlee/agent-team-mail/pull/111) |
-| **B** | B.1 | Teams daemon session tracking + resume | COMPLETE | [#119](https://github.com/randlee/agent-team-mail/pull/119) |
+| **B** | B.1 | Teams daemon session tracking + resume | DEFERRED (moved to E.1) | — |
 | **B** | B.2 | Unicode-safe message truncation | COMPLETE | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
 | **B** | B.3 | Teams session stabilization | COMPLETE | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
 | **C** | C.1 | Unified structured JSONL logging | COMPLETE | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
@@ -784,8 +804,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **E** | E.3 | Hook-to-daemon state bridge | COMPLETE | [#152](https://github.com/randlee/agent-team-mail/pull/152) |
 | **E** | E.4 | TUI reliability hardening | COMPLETE | [#158](https://github.com/randlee/agent-team-mail/pull/158) |
 | **E** | E.5 | TUI performance + UX polish | COMPLETE | [#161](https://github.com/randlee/agent-team-mail/pull/161) |
-| **E** | E.6 | External agent member mgmt + model registry | COMPLETE | [#164](https://github.com/randlee/agent-team-mail/pull/164) |
-| **E** | E.7 | Unified lifecycle source + MCP emission | COMPLETE | [#165](https://github.com/randlee/agent-team-mail/pull/165) |
+| **E** | E.6 | External agent member mgmt + model registry | DEFERRED | — |
+| **E** | E.7 | Unified lifecycle source + MCP emission | DEFERRED | — |
 | **E** | E.8 | Identity Role Mapping + Backup/Restore | COMPLETE | [#162](https://github.com/randlee/agent-team-mail/pull/162) |
 | **E** | — | Daemon hook-event auth validation | COMPLETE | [#163](https://github.com/randlee/agent-team-mail/pull/163) |
 | **G** | G.1 | Mode baseline docs + naming cleanup | COMPLETE | [#168](https://github.com/randlee/agent-team-mail/pull/168) |
@@ -829,7 +849,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | COMPLETE | [#246](https://github.com/randlee/agent-team-mail/pull/246) |
 | **Q** | Q.1 | `atm mcp install/uninstall/status` commands | COMPLETE | [#252](https://github.com/randlee/agent-team-mail/pull/252) |
 | **Q** | Q.2 | Integration tests + cross-platform validation | COMPLETE | [#253](https://github.com/randlee/agent-team-mail/pull/253) |
-| **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | IN PROGRESS | — |
+| **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | COMPLETE | — |
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
 
 **Completed**: 99+ sprints across 22 phases (CI green)
