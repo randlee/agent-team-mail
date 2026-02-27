@@ -737,12 +737,11 @@ Validation rules:
 #### Sink Paths and Files
 
 Canonical log file (daemon-writer mode):
-- `${ATM_HOME}/atm.log.jsonl` if `ATM_HOME` is set
-- else `${config_dir}/atm/atm.log.jsonl` (`~/.config/atm` on Linux/macOS, `%APPDATA%\\atm` on Windows)
+- `${home_dir}/.config/atm/atm.log.jsonl` where `home_dir` is resolved via `get_home_dir()`
+  (`ATM_HOME` when set, otherwise platform home directory)
 
 Producer fallback spool directory:
-- `${ATM_HOME}/log-spool` if `ATM_HOME` is set
-- else `${config_dir}/atm/log-spool`
+- `${home_dir}/.config/atm/log-spool` where `home_dir` is resolved via `get_home_dir()`
 
 Spool filename convention:
 - `{source_binary}-{pid}-{unix_millis}.jsonl`
