@@ -699,7 +699,23 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ## 17.7 Phase R: Session Handoff + Hook Installer — PLANNED
 
-**Goal**: Robust session startup for team-lead, hook installation via `atm init`, embedded hook scripts in binary.
+**Goal**: Harden daemon foundations (singleton lock, canonical log sink), then build robust session startup for team-lead, hook installation via `atm init`, and embedded hook scripts in binary.
+
+### R.0 — Daemon singleton lock + canonical log sink alignment *(prerequisite)*
+
+Harden daemon foundations required by R.1 session handoff:
+
+1. **Singleton daemon lock**: Daemon acquires an exclusive process lock at `${config_dir}/atm/daemon.lock` on startup. Prevents multiple daemon instances from corrupting shared state (socket, PID file, session registry).
+2. **Canonical log sink**: Resolve the path ambiguity between `ATM_HOME` override and XDG `config_dir`. Establish a single canonical scheme used consistently by daemon lock, `atm.log.jsonl`, and `log-spool` across all code paths and requirements docs.
+3. **Structural lock enforcement in socket module**: The socket module must not remove the stale socket file unless the daemon lock is already held — enforce structurally (lock guard or marker type), not just by call-site ordering.
+4. **Update requirements.md** sections 4.6 and 4.7 to reflect the canonical path scheme (removing the two-root ambiguity between ATM_HOME and config_dir).
+5. **Tests**: Unit tests for lock acquisition, single-instance rejection, and log path resolution under both ATM_HOME-set and ATM_HOME-unset scenarios.
+
+**Acceptance criteria**:
+- `cargo clippy -- -D warnings` clean.
+- `atm logs --limit 10` returns entries (not "Log file not found") in both default and `ATM_HOME`-override configurations.
+- Two concurrent daemon starts: second instance exits with clear "daemon already running" error.
+- requirements.md 4.6 and 4.7 path specs are internally consistent with implementation.
 
 ### R.1 — `atm teams resume` session handoff
 
@@ -751,7 +767,8 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
-| R.1 | `atm teams resume` session handoff + daemon member restore | Phase Q | M | PLANNED |
+| R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
+| R.1 | `atm teams resume` session handoff + daemon member restore | R.0 | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
 | R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
 
