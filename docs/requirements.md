@@ -763,6 +763,9 @@ Spool filename convention:
 - Daemon startup merges spool files via claim/rename then append; delete source file
   only after successful merge.
 - Merge ordering: timestamp then file order, append-only.
+- Daemon startup spool merge and daemon runtime writer MUST target the same canonical
+  path resolved from `ATM_LOG_FILE`/`ATM_LOG_PATH` (or default `atm.log.jsonl`).
+  Divergent startup/runtime sink paths are forbidden.
 
 #### Migration Bridge (Legacy `events.jsonl`) — REMOVED (Phase M.1b)
 
@@ -806,6 +809,18 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
   - Unix/macOS: `${ATM_HOME:-$HOME/.claude}/daemon/atm-daemon.sock` (existing convention)
   - Windows: named-pipe equivalent (canonical path documented in daemon crate)
 - CLI must never spawn a second daemon when lock/socket indicate an existing healthy instance.
+- Daemon startup MUST acquire `daemon.lock` before mutating socket or PID files.
+- Daemon MUST NOT remove an existing socket file unless lock ownership has already
+  been acquired by the current process.
+
+#### Required Acceptance Checks
+
+- Starting a second daemon while one is healthy must fail immediately with an
+  actionable single-instance error.
+- Existing healthy daemon must retain lock ownership; socket/PID files must not
+  be overwritten by a second process.
+- `atm logs` default view and daemon startup spool merge must observe the same
+  canonical `atm.log.jsonl` sink path.
 
 #### Daemon Session Registry Contract
 
