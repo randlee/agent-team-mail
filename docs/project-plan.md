@@ -714,7 +714,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 2. **If YES** (team-lead running in another process): refuse; do not steal team-lead identity.
 3. **If NO** (no active team-lead):
    - Ensure backup destination exists at `.backups/<team>/<timestamp>/` (agent-team-api backup convention).
-   - Move `<team>/` into `.backups/<team>/<timestamp>/team/` (or create equivalent snapshot, then remove active team dir).
+   - Create a flat backup snapshot compatible with `atm teams restore`: `config.json`, `inboxes/`, and `tasks/` directly under `.backups/<team>/<timestamp>/`.
+   - Remove the active `<team>/` directory only after successful snapshot write.
    - Output: `"Call TeamCreate(<team>) to re-establish as team-lead"`.
 4. Team-lead calls `TeamCreate(<team>)`; this succeeds because the active team directory is absent.
 5. Daemon watches for `<team>/config.json` to appear.

@@ -807,6 +807,33 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
   - Windows: named-pipe equivalent (canonical path documented in daemon crate)
 - CLI must never spawn a second daemon when lock/socket indicate an existing healthy instance.
 
+#### Daemon Session Registry Contract
+
+R.1 handoff logic depends on daemon truth for active lead session identity and liveness.
+
+- **Storage path**: `${ATM_HOME:-$HOME}/.claude/daemon/session-registry.json`
+- **Ownership**: daemon is sole writer; CLI reads via daemon socket API only.
+- **Update sources**:
+  - `hook-event` `session_start`: upsert record (`session_id`, `process_id`, `state=active`, `updated_at`)
+  - `hook-event` `session_end`: mark record dead (`state=dead`, `updated_at`)
+  - daemon liveness sweeps may mark stale PIDs dead when process no longer exists
+- **Lookup semantics**:
+  - Team-scoped lead check for R.1 must resolve by `(team, agent=team-lead)`
+  - CLI `teams resume` refusal logic must use this team-scoped daemon result, not bare-name process lookup
+
+Minimum record shape:
+
+```json
+{
+  "team": "atm-dev",
+  "agent": "team-lead",
+  "session_id": "uuid",
+  "process_id": 12345,
+  "state": "active",
+  "updated_at": "2026-02-27T00:00:00Z"
+}
+```
+
 #### CLI Spawn/Readiness Flow
 
 1. Probe daemon socket/pipe.

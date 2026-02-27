@@ -1019,13 +1019,15 @@ Approve or reject agent's implementation plan.
 
 ### Claude Code Settings (`settings.json`)
 
-Claude Code uses a layered settings system. The `settings.json` file is the official mechanism for configuration across user, project, and local scopes, with managed policies and CLI overrides taking precedence. citeturn1view0
+Claude Code uses a layered settings system. The `settings.json` file is the official mechanism for configuration across user, project, and local scopes, with managed policies and CLI overrides taking precedence.
+
+Reference: https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
 
 **Settings file locations (by scope)**:
-- User: `~/.claude/settings.json` citeturn1view0
-- Project (shared): `.claude/settings.json` citeturn1view0
-- Local (personal, gitignored): `.claude/settings.local.json` citeturn1view0
-- Managed (enterprise policy): `managed-settings.json` in system locations (macOS `/Library/Application Support/ClaudeCode/`, Linux/WSL `/etc/claude-code/`, Windows `C:\Program Files\ClaudeCode\`) citeturn1view0
+- User: `~/.claude/settings.json` 
+- Project (shared): `.claude/settings.json` 
+- Local (personal, gitignored): `.claude/settings.local.json` 
+- Managed (enterprise policy): `managed-settings.json` in system locations (macOS `/Library/Application Support/ClaudeCode/`, Linux/WSL `/etc/claude-code/`, Windows `C:\Program Files\ClaudeCode\`) 
 
 **Settings precedence (highest → lowest)**:
 1. Managed (cannot be overridden)
@@ -1033,7 +1035,7 @@ Claude Code uses a layered settings system. The `settings.json` file is the offi
 3. Local (`.claude/settings.local.json`)
 4. Project (`.claude/settings.json`)
 5. User (`~/.claude/settings.json`)
-citeturn1view0
+
 
 **Schema reference**:
 ```json
@@ -1041,7 +1043,7 @@ Claude Code uses a layered settings system. The `settings.json` file is the offi
   "$schema": "https://json.schemastore.org/claude-code-settings.json"
 }
 ```
-citeturn1view0
+
 
 **Example settings.json**:
 ```json
@@ -1056,18 +1058,18 @@ Claude Code uses a layered settings system. The `settings.json` file is the offi
   }
 }
 ```
-citeturn1view0
+
 
 **Core settings fields (non-exhaustive)**:
 - `permissions`: rule lists (e.g., `allow`, `deny`, `ask`) controlling tool access and file reads.
 - `env`: environment variables applied to sessions.
 - Additional keys exist (hooks, model, status line, plugin settings, etc.) and are defined by the official JSON schema.
-citeturn1view0
+
 
 **Implementation guidance**:
 - Consumers must accept and preserve unknown settings fields.
 - The official JSON schema is the source of truth for the full settings surface.
-citeturn1view0
+
 
 ## Error Handling
 
