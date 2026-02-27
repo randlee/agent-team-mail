@@ -558,6 +558,41 @@ atm status <team>                # specific team
 
 **Output**: Team info, member list with activity, unread message counts, pending tasks.
 
+### 4.3.1 Lifecycle Teardown and Cleanup Semantics
+
+Daemon-managed teammate shutdown and cleanup MUST follow one canonical flow so that
+team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
+
+**Primary shutdown protocol**:
+- Daemon sends a structured `session_terminated` control message to the target agent.
+- Daemon waits for graceful exit up to `--timeout` while monitoring PID/session liveness.
+- If the process exits within timeout, daemon proceeds to teardown cleanup.
+- If still alive after timeout, daemon force-kills PID using backend/platform-appropriate
+  termination, then proceeds to teardown cleanup after death is confirmed.
+
+**Teardown cleanup invariant (REQUIRED)**:
+- Roster removal and mailbox deletion are coupled operations and MUST converge together.
+- For an agent in terminal state (`already terminated` or `killed after timeout`), daemon
+  MUST:
+  1. remove the member entry from team `config.json`, and
+  2. delete `inboxes/<agent>.json`.
+- A partial result (only roster removed or only mailbox deleted) is a failure state and
+  MUST be retried/reconciled by daemon until converged.
+
+**Already-terminated case**:
+- If daemon verifies PID/session is already dead at operation start, daemon skips control
+  delivery and runs teardown cleanup directly using the same coupled invariant above.
+
+**Active-agent safety guard**:
+- Daemon cleanup commands MUST NOT delete mailbox or remove roster entry for a
+  PID/session-verified active agent unless the caller explicitly requested kill semantics.
+
+**Command expectations**:
+- `atm clean --agent <name>`: non-destructive for active agents; applies teardown cleanup
+  only when daemon verifies dead state (or explicit kill mode is requested).
+- `atm daemon --kill <agent> [--timeout <seconds>]`: executes shutdown protocol above,
+  then teardown cleanup invariant.
+
 ### 4.4 Configuration
 
 #### Resolution Order (highest priority first)
@@ -1499,6 +1534,11 @@ The core has no awareness of whether a team member is local or remote.
 - Default behavior for non-Claude-managed members: archive or delete old messages automatically.
 - If Claude does not perform cleanup for its own agents, `atm` should optionally apply retention there as well.
 - Retention policies must be configurable by max message count and/or max age.
+- For daemon-managed teammate teardown, inbox deletion and roster removal from
+  `config.json` MUST occur together for terminal agents (already-dead or killed after
+  timeout). Partial cleanup states are invalid and must be reconciled.
+- For active agents, retention/cleanup MUST NOT remove mailbox or roster entry unless
+  explicit kill semantics are invoked.
 
 ### 8.7 Large Payloads and File References
 
