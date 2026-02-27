@@ -802,7 +802,9 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 
 #### Single-Instance Contract
 
-- Daemon startup acquires an exclusive process lock in `${config_dir}/atm/daemon.lock`.
+- Daemon startup acquires an exclusive process lock in
+  `${home_dir}/.config/atm/daemon.lock`, where `home_dir` is resolved via
+  `get_home_dir()` (`ATM_HOME` when set, otherwise platform home directory).
 - If lock acquisition fails, new daemon process exits immediately (existing daemon is authoritative).
 - Socket path is fixed per user scope:
   - Unix/macOS: `${ATM_HOME:-$HOME/.claude}/daemon/atm-daemon.sock` (existing convention)

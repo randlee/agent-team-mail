@@ -68,6 +68,7 @@ use tracing::{debug, error, info, warn};
 pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
+    daemon_lock: agent_team_mail_core::io::lock::FileLock,
     cancel: CancellationToken,
     status_writer: Arc<StatusWriter>,
     state_store: SharedStateStore,
@@ -148,6 +149,7 @@ pub async fn run(
         stream_state_store,
         stream_event_sender,
         log_event_queue,
+        &daemon_lock,
         socket_cancel,
     )
     .await

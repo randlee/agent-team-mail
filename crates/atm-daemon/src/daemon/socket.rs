@@ -102,6 +102,7 @@ pub async fn start_socket_server(
     stream_state_store: SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
     log_event_queue: LogEventQueue,
+    _daemon_lock: &agent_team_mail_core::io::lock::FileLock,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
@@ -116,6 +117,7 @@ pub async fn start_socket_server(
             stream_state_store,
             stream_event_sender,
             log_event_queue,
+            _daemon_lock,
             cancel,
         )
         .await
@@ -281,6 +283,7 @@ async fn start_unix_socket_server(
     stream_state_store: SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
     log_event_queue: LogEventQueue,
+    _daemon_lock: &agent_team_mail_core::io::lock::FileLock,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -2966,6 +2969,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         // Set up state store with one agent
         let state_store = make_store();
@@ -2988,6 +2996,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3037,6 +3046,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         {
@@ -3058,6 +3072,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3106,6 +3121,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let launch_tx = new_launch_sender();
         let (dd, _dd_dir) = make_dd();
@@ -3119,6 +3139,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3176,6 +3197,11 @@ mod tests {
         // SAFETY: serialized test; env var scoped by process.
         unsafe { std::env::set_var("ATM_HOME", &home_dir) };
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         {
@@ -3202,6 +3228,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3256,6 +3283,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
         let state_store = make_store();
 
         let launch_tx = new_launch_sender();
@@ -3270,6 +3302,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3542,6 +3575,11 @@ mod tests {
         let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
         write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         let session_registry = make_sr();
@@ -3558,6 +3596,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3661,6 +3700,11 @@ mod tests {
         let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
         write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         let session_registry = make_sr();
@@ -3688,6 +3732,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3802,6 +3847,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
         let state_store = make_store();
 
         let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
@@ -3819,6 +3869,7 @@ mod tests {
                 new_stream_state_store(),
                 new_stream_event_sender(),
                 crate::daemon::new_log_event_queue(),
+                &daemon_lock,
                 cancel.clone(),
             )
             .await

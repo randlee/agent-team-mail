@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
             daemon_lock_path.display()
         )
     })?;
-    let _daemon_lock = agent_team_mail_core::io::lock::acquire_lock(&daemon_lock_path, 0)
+    let daemon_lock = agent_team_mail_core::io::lock::acquire_lock(&daemon_lock_path, 0)
         .map_err(|e| match e {
             agent_team_mail_core::io::InboxError::LockTimeout { .. } => anyhow::anyhow!(
                 "atm-daemon already running (lock held at {}). Refusing second instance.",
@@ -351,6 +351,7 @@ async fn main() -> Result<()> {
     let run_result = daemon::run(
         &mut registry,
         &plugin_ctx,
+        daemon_lock,
         cancel_token,
         status_writer,
         state_store,

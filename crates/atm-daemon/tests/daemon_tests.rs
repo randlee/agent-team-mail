@@ -133,6 +133,12 @@ fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
     ))
 }
 
+fn create_test_daemon_lock(temp_dir: &TempDir) -> agent_team_mail_core::io::lock::FileLock {
+    let lock_path = temp_dir.path().join(".config/atm/daemon.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).unwrap()
+}
+
 #[tokio::test]
 #[serial]
 async fn test_daemon_starts_and_loads_mock_plugin() {
@@ -146,12 +152,14 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     // Run daemon in background, cancel after a short delay
     let daemon_task = tokio::spawn(async move {
         daemon::run(
             &mut registry,
             &ctx,
+            daemon_lock,
             cancel_clone,
             status_writer,
             new_state_store(),
@@ -210,11 +218,13 @@ async fn test_signal_triggers_graceful_shutdown() {
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
         daemon::run(
             &mut registry,
             &ctx,
+            daemon_lock,
             cancel_clone,
             status_writer.clone(),
             new_state_store(),
@@ -256,11 +266,13 @@ async fn test_plugin_lifecycle_order() {
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
         daemon::run(
             &mut registry,
             &ctx,
+            daemon_lock,
             cancel_clone,
             status_writer.clone(),
             new_state_store(),
@@ -304,11 +316,13 @@ async fn test_spool_drain_runs_on_interval() {
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
         daemon::run(
             &mut registry,
             &ctx,
+            daemon_lock,
             cancel_clone,
             status_writer.clone(),
             new_state_store(),
@@ -353,11 +367,13 @@ async fn test_graceful_shutdown_with_timeout() {
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
         daemon::run(
             &mut registry,
             &ctx,
+            daemon_lock,
             cancel_clone,
             status_writer.clone(),
             new_state_store(),
@@ -409,11 +425,13 @@ async fn test_empty_registry_runs_successfully() {
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
         daemon::run(
             &mut registry,
             &ctx,
+            daemon_lock,
             cancel_clone,
             status_writer.clone(),
             new_state_store(),
@@ -450,11 +468,13 @@ async fn test_multiple_plugins_run_concurrently() {
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
         daemon::run(
             &mut registry,
             &ctx,
+            daemon_lock,
             cancel_clone,
             status_writer.clone(),
             new_state_store(),
@@ -485,4 +505,44 @@ async fn test_multiple_plugins_run_concurrently() {
     assert!(recorded_events.contains(&"plugin1:shutdown".to_string()));
     assert!(recorded_events.contains(&"plugin2:shutdown".to_string()));
     assert!(recorded_events.contains(&"plugin3:shutdown".to_string()));
+}
+
+#[test]
+#[serial]
+fn test_second_daemon_start_rejected_when_first_is_running() {
+    let temp_dir = TempDir::new().unwrap();
+    let bin = env!("CARGO_BIN_EXE_atm-daemon");
+
+    let mut first = std::process::Command::new(&bin)
+        .env("ATM_HOME", temp_dir.path())
+        .spawn()
+        .expect("failed to spawn first daemon");
+
+    // Give the first daemon a brief moment to acquire lock and bind socket.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        first
+            .try_wait()
+            .expect("failed to poll first daemon")
+            .is_none(),
+        "first daemon should still be running"
+    );
+
+    let second = std::process::Command::new(&bin)
+        .env("ATM_HOME", temp_dir.path())
+        .output()
+        .expect("failed to spawn second daemon");
+
+    assert!(
+        !second.status.success(),
+        "second daemon start must fail while first holds lock"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("already running") || stderr.contains("Refusing second instance"),
+        "second daemon error should indicate lock contention, got: {stderr}"
+    );
+
+    let _ = first.kill();
+    let _ = first.wait();
 }
