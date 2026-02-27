@@ -564,11 +564,12 @@ Daemon-managed teammate shutdown and cleanup MUST follow one canonical flow so t
 team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 
 **Primary shutdown protocol**:
-- Daemon sends a structured `session_terminated` control message to the target agent.
+- Daemon sends a structured `shutdown_request` control message to the target agent mailbox.
 - Daemon waits for graceful exit up to `--timeout` while monitoring PID/session liveness.
 - If the process exits within timeout, daemon proceeds to teardown cleanup.
 - If still alive after timeout, daemon force-kills PID using backend/platform-appropriate
   termination, then proceeds to teardown cleanup after death is confirmed.
+- Mailbox deletion MUST NOT be used as a primary shutdown signal.
 
 **Teardown cleanup invariant (REQUIRED)**:
 - Roster removal and mailbox deletion are coupled operations and MUST converge together.
@@ -589,7 +590,8 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 
 **Command expectations**:
 - `atm clean --agent <name>`: non-destructive for active agents; applies teardown cleanup
-  only when daemon verifies dead state (or explicit kill mode is requested).
+  only when daemon verifies dead state (or explicit kill mode is requested). In kill mode,
+  it MUST deliver `shutdown_request` first, then enforce timeout/kill fallback.
 - `atm daemon --kill <agent> [--timeout <seconds>]`: executes shutdown protocol above,
   then teardown cleanup invariant.
 
@@ -1539,6 +1541,8 @@ The core has no awareness of whether a team member is local or remote.
   timeout). Partial cleanup states are invalid and must be reconciled.
 - For active agents, retention/cleanup MUST NOT remove mailbox or roster entry unless
   explicit kill semantics are invoked.
+- For active-agent termination intent, cleanup tooling MUST send `shutdown_request` and
+  wait for termination/timeout before performing mailbox deletion and roster removal.
 
 ### 8.7 Large Payloads and File References
 
