@@ -1055,6 +1055,10 @@ The `atm init` command installs and validates Claude Code hook wiring for ATM
 session coordination. Hook script bodies are embedded in the ATM binary and
 materialized at install time.
 
+**Claude hook path reference**:
+- Canonical docs: https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
+- Follow "Reference scripts by path": use `"$CLAUDE_PROJECT_DIR"/...` for project scripts and `"${CLAUDE_PLUGIN_ROOT}"/...` for plugin-bundled scripts.
+
 #### 4.9.1 Command Forms
 
 ```bash
@@ -1083,6 +1087,7 @@ atm init <team> --check
 - Preserve unknown fields and non-ATM hook entries.
 - Use atomic writes (temp + rename) and create parent directories as needed.
 - Report exact file path(s) modified in command output.
+- Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` (project scope) or `"${CLAUDE_PLUGIN_ROOT}"` (plugin scope), not repo-absolute paths.
 
 #### 4.9.4 Exit and Result Semantics
 

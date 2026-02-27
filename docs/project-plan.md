@@ -733,6 +733,11 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (no external files needed).
 
+**Hook path reference (Claude docs)**:
+- https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
+- Use `"$CLAUDE_PROJECT_DIR"/.claude/scripts/...` for project scripts.
+- Use `"${CLAUDE_PLUGIN_ROOT}"/...` for plugin-bundled scripts.
+
 - `atm init <team>` — local install (project `.claude/settings.json`)
 - `atm init <team> --global` — global install (`~/.claude/settings.json`)
 - Global hooks are passive in non-ATM repos (`.atm.toml` guard as first operation)
