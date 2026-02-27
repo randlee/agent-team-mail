@@ -159,7 +159,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | O | Attached CLI Parity | Attach wiring, renderer parity, control-path + fixtures | COMPLETE |
 | O-R | Attach Renderer Parity | RenderClass, event coverage, diff/markdown/reasoning rendering | COMPLETE |
 | P | Attach Path Hardening Closure | Close O-R carry-forward attach deviations and parity hardening | COMPLETE |
-| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | PLANNED |
+| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | IN PROGRESS |
 
 ---
 
@@ -359,13 +359,13 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 13. Phase B: Team-Lead Session Management — COMPLETE
+## 13. Phase B: Team-Lead Session Management — COMPLETE (B.1 deferred to Phase E)
 
 **Integration PR**: [#121](https://github.com/randlee/agent-team-mail/pull/121)
 
 | Sprint | Name | PR |
 |--------|------|----|
-| B.1 | Daemon session tracking + `atm teams resume` + `atm teams cleanup` | [#119](https://github.com/randlee/agent-team-mail/pull/119) |
+| B.1 | Daemon session tracking + `atm teams resume` + `atm teams cleanup` (deferred to Phase E as E.1) | — |
 | B.2 | Unicode-safe message truncation + input validation | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
 | B.3 | Cleanup safety hardening + documentation alignment | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
 
@@ -398,7 +398,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 16. Phase E: ATM Core Bug Fixes — COMPLETE (v0.15.0)
+## 16. Phase E: ATM Core Bug Fixes — COMPLETE (v0.15.0; E.6/E.7 deferred)
 
 **Integration PR**: [#166](https://github.com/randlee/agent-team-mail/pull/166)
 
@@ -409,8 +409,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | E.3 | Hook-to-daemon state bridge | [#152](https://github.com/randlee/agent-team-mail/pull/152) |
 | E.4 | TUI reliability hardening (restart, reconnect, failure injection) | [#158](https://github.com/randlee/agent-team-mail/pull/158) |
 | E.5 | TUI performance, UX polish, operational validation | [#161](https://github.com/randlee/agent-team-mail/pull/161) |
-| E.6 | External agent member management + model registry | [#164](https://github.com/randlee/agent-team-mail/pull/164) |
-| E.7 | Unified lifecycle source model + MCP lifecycle emission | [#165](https://github.com/randlee/agent-team-mail/pull/165) |
+| E.6 | External agent member management + model registry (deferred) | — |
+| E.7 | Unified lifecycle source model + MCP lifecycle emission (deferred) | — |
 | E.8 | ATM Identity Role Mapping + Team Backup/Restore | [#162](https://github.com/randlee/agent-team-mail/pull/162) |
 | — | Daemon hook-event auth validation | [#163](https://github.com/randlee/agent-team-mail/pull/163) |
 
@@ -847,7 +847,7 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 | **A** | A.6 | Thread lifecycle state machine | COMPLETE | [#108](https://github.com/randlee/agent-team-mail/pull/108) |
 | **A** | A.7 | Auto mail injection + polling | COMPLETE | [#109](https://github.com/randlee/agent-team-mail/pull/109) |
 | **A** | A.8 | Shutdown + resume + arch review | COMPLETE | [#110](https://github.com/randlee/agent-team-mail/pull/110), [#111](https://github.com/randlee/agent-team-mail/pull/111) |
-| **B** | B.1 | Teams daemon session tracking + resume | COMPLETE | [#119](https://github.com/randlee/agent-team-mail/pull/119) |
+| **B** | B.1 | Teams daemon session tracking + resume | DEFERRED (moved to E.1) | — |
 | **B** | B.2 | Unicode-safe message truncation | COMPLETE | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
 | **B** | B.3 | Teams session stabilization | COMPLETE | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
 | **C** | C.1 | Unified structured JSONL logging | COMPLETE | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
@@ -862,8 +862,8 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 | **E** | E.3 | Hook-to-daemon state bridge | COMPLETE | [#152](https://github.com/randlee/agent-team-mail/pull/152) |
 | **E** | E.4 | TUI reliability hardening | COMPLETE | [#158](https://github.com/randlee/agent-team-mail/pull/158) |
 | **E** | E.5 | TUI performance + UX polish | COMPLETE | [#161](https://github.com/randlee/agent-team-mail/pull/161) |
-| **E** | E.6 | External agent member mgmt + model registry | COMPLETE | [#164](https://github.com/randlee/agent-team-mail/pull/164) |
-| **E** | E.7 | Unified lifecycle source + MCP emission | COMPLETE | [#165](https://github.com/randlee/agent-team-mail/pull/165) |
+| **E** | E.6 | External agent member mgmt + model registry | DEFERRED | — |
+| **E** | E.7 | Unified lifecycle source + MCP emission | DEFERRED | — |
 | **E** | E.8 | Identity Role Mapping + Backup/Restore | COMPLETE | [#162](https://github.com/randlee/agent-team-mail/pull/162) |
 | **E** | — | Daemon hook-event auth validation | COMPLETE | [#163](https://github.com/randlee/agent-team-mail/pull/163) |
 | **G** | G.1 | Mode baseline docs + naming cleanup | COMPLETE | [#168](https://github.com/randlee/agent-team-mail/pull/168) |
