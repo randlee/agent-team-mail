@@ -336,6 +336,7 @@ Commands:
   config      Show/set configuration
   cleanup     Apply retention policies
   mcp         MCP server setup and management
+  init        Install/check ATM hook wiring for Claude Code
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
@@ -348,6 +349,9 @@ MCP subcommands:
   mcp install <client> [scope] [--binary <path>]
   mcp uninstall <client> [scope]
   mcp status
+
+Init command:
+  init <team> [--global] [--check]
 ```
 
 ### 4.2 Messaging Commands
@@ -803,6 +807,33 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
   - Windows: named-pipe equivalent (canonical path documented in daemon crate)
 - CLI must never spawn a second daemon when lock/socket indicate an existing healthy instance.
 
+#### Daemon Session Registry Contract
+
+R.1 handoff logic depends on daemon truth for active lead session identity and liveness.
+
+- **Storage path**: `${ATM_HOME:-$HOME}/.claude/daemon/session-registry.json`
+- **Ownership**: daemon is sole writer; CLI reads via daemon socket API only.
+- **Update sources**:
+  - `hook-event` `session_start`: upsert record (`session_id`, `process_id`, `state=active`, `updated_at`)
+  - `hook-event` `session_end`: mark record dead (`state=dead`, `updated_at`)
+  - daemon liveness sweeps may mark stale PIDs dead when process no longer exists
+- **Lookup semantics**:
+  - Team-scoped lead check for R.1 must resolve by `(team, agent=team-lead)`
+  - CLI `teams resume` refusal logic must use this team-scoped daemon result, not bare-name process lookup
+
+Minimum record shape:
+
+```json
+{
+  "team": "atm-dev",
+  "agent": "team-lead",
+  "session_id": "uuid",
+  "process_id": 12345,
+  "state": "active",
+  "updated_at": "2026-02-27T00:00:00Z"
+}
+```
+
 #### CLI Spawn/Readiness Flow
 
 1. Probe daemon socket/pipe.
@@ -1044,6 +1075,52 @@ Install atm-agent-mcp with:
 - `--json` output mode for `atm mcp status`
 - Validation that `atm-agent-mcp serve` actually starts successfully
 - `atm mcp test` — run a quick connectivity check against configured servers
+
+### 4.9 Team Hook Setup (`atm init`)
+
+The `atm init` command installs and validates Claude Code hook wiring for ATM
+session coordination. Hook script bodies are embedded in the ATM binary and
+materialized at install time.
+
+**Claude hook path reference**:
+- Canonical docs: https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
+- Follow "Reference scripts by path": use `"$CLAUDE_PROJECT_DIR"/...` for project scripts and `"${CLAUDE_PLUGIN_ROOT}"/...` for plugin-bundled scripts.
+
+#### 4.9.1 Command Forms
+
+```bash
+atm init <team>
+atm init <team> --global
+atm init --check
+atm init <team> --check
+```
+
+**Arguments and flags**:
+- `<team>`: team name to bind for project/local installs.
+- `--global`: install in user scope (`~/.claude/settings.json`) instead of project scope.
+- `--check`: read-only validation; report missing/misaligned wiring without modifying files.
+
+#### 4.9.2 Behavior
+
+- Local install writes/merges hook entries in project `.claude/settings.json`.
+- Global install writes/merges hook entries in `~/.claude/settings.json`.
+- Installs are idempotent: reruns preserve unrelated settings and avoid duplicate entries.
+- Global-installed hooks must remain passive in non-ATM repositories; `.atm.toml` guard is the first hook operation.
+- Embedded hook scripts are the runtime source of truth.
+
+#### 4.9.3 File and Write Requirements
+
+- Use read-modify-write semantics; never wholesale rewrite settings files.
+- Preserve unknown fields and non-ATM hook entries.
+- Use atomic writes (temp + rename) and create parent directories as needed.
+- Report exact file path(s) modified in command output.
+- Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` (project scope) or `"${CLAUDE_PLUGIN_ROOT}"` (plugin scope), not repo-absolute paths.
+
+#### 4.9.4 Exit and Result Semantics
+
+- Exit `0` for `installed`, `updated`, `already-configured`, and `check-ok`.
+- Exit `1` for malformed config, unsupported environment, or write/permission failures.
+- `--check` output must include actionable guidance for each missing/misaligned hook entry.
 
 ---
 

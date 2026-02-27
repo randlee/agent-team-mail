@@ -422,6 +422,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 **Goal**: Install orchestration packages (hooks, agents, skills) into `~/.claude/` with `atm team init`.
 
+**Status note (2026-02-27)**: Phase F is a historical planning bucket. Current execution for session handoff and hook installer work proceeds under **Phase R** (see section 17.7). Do not add new F.* sprints.
+
 **Two install scopes**:
 1. **Global** (machine-level): Hook scripts (`session-start.py`, `session-end.py`) + `~/.claude/settings.json` entries. Installed once per machine.
 2. **Project** (per repo/workflow): Gate hooks, agent prompts, skills → `.claude/` directory. Multiple named packages composable.
@@ -695,26 +697,82 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.7 Upcoming Work: `atm init` Command — PLANNED
+## 17.7 Phase R: Session Handoff + Hook Installer — PLANNED
 
-**Goal**: Add a streamlined `atm init` onboarding flow to install ATM hooks in a predictable, low-friction way.
+**Goal**: Harden daemon foundations (singleton lock, canonical log sink), then build robust session startup for team-lead, hook installation via `atm init`, and embedded hook scripts in binary.
 
-**Command shape**:
-- `atm init --global`: Install global hook wiring and shared defaults.
-- `atm init --local`: Install repo-local ATM files for the current project.
+### R.0 — Daemon singleton lock + canonical log sink alignment *(prerequisite)*
 
-**Design constraints**:
-- Hook scripts are embedded in the ATM binary and written out during `init` (single source of truth, no external script drift).
-- Global install remains passive in non-ATM repositories (no active behavior unless an ATM project marker/config is present).
-- Local install is explicit and repo-scoped, with idempotent updates and atomic writes.
+Harden daemon foundations required by R.1 session handoff:
 
-**Planned validation**:
-- Cross-platform install/update idempotency tests for both scopes.
-- Non-ATM repo no-op/passive behavior verification for global hook installs.
-- Upgrade-path tests to ensure existing hook/config customizations are preserved.
+1. **Singleton daemon lock**: Daemon acquires an exclusive process lock at `${config_dir}/atm/daemon.lock` on startup. Prevents multiple daemon instances from corrupting shared state (socket, PID file, session registry).
+2. **Canonical log sink**: Resolve the path ambiguity between `ATM_HOME` override and XDG `config_dir`. Establish a single canonical scheme used consistently by daemon lock, `atm.log.jsonl`, and `log-spool` across all code paths and requirements docs.
+3. **Structural lock enforcement in socket module**: The socket module must not remove the stale socket file unless the daemon lock is already held — enforce structurally (lock guard or marker type), not just by call-site ordering.
+4. **Update requirements.md** sections 4.6 and 4.7 to reflect the canonical path scheme (removing the two-root ambiguity between ATM_HOME and config_dir).
+5. **Tests**: Unit tests for lock acquisition, single-instance rejection, and log path resolution under both ATM_HOME-set and ATM_HOME-unset scenarios.
+
+**Acceptance criteria**:
+- `cargo clippy -- -D warnings` clean.
+- `atm logs --limit 10` returns entries (not "Log file not found") in both default and `ATM_HOME`-override configurations.
+- Two concurrent daemon starts: second instance exits with clear "daemon already running" error.
+- requirements.md 4.6 and 4.7 path specs are internally consistent with implementation.
+
+### R.1 — `atm teams resume` session handoff
+
+**CLI flag semantics in handoff mode**:
+- `message`: optional status text shown with refusal/re-establish guidance.
+- `--session-id <id>`: target only the specified lead session. If it does not match the daemon's active lead session, refuse.
+- `--force`: bypass soft refusal checks only when no active lead session is confirmed; never steals an active lead identity.
+- `--kill`: explicitly terminate stale daemon-tracked lead process before handoff.
+
+**Handoff flow**:
+1. Daemon checks whether `team-lead` is active for the team (PID + session ID).
+2. **If YES** (team-lead running in another process): refuse; do not steal team-lead identity.
+3. **If NO** (no active team-lead):
+   - Ensure backup destination exists at `.backups/<team>/<timestamp>/` (agent-team-api backup convention).
+   - Create a flat backup snapshot compatible with `atm teams restore`: `config.json`, `inboxes/`, and `tasks/` directly under `.backups/<team>/<timestamp>/`.
+   - Remove the active `<team>/` directory only after successful snapshot write.
+   - Output: `"Call TeamCreate(<team>) to re-establish as team-lead"`.
+4. Team-lead calls `TeamCreate(<team>)`; this succeeds because the active team directory is absent.
+5. Daemon watches for `<team>/config.json` to appear.
+6. Daemon restores non-Claude members from backup (pane IDs, agent types, inbox history).
+7. Preserve the new `leadSessionId` from TeamCreate; restore never overwrites it. `team-lead` member is never restored from backup.
+8. Daemon injects status into team-lead session: `"<team> re-established. Active members: <name> (<type>, pane <id>), ..."`.
+
+**Failure-mode acceptance criteria**:
+- Stale PID/session mismatch is detected and does not cause identity theft.
+- Backup/move failure is surfaced with actionable error and no partial destructive delete.
+- Daemon restart during restore resumes idempotently without duplicate members.
+- Missing/corrupt backup is handled with explicit degraded-mode warning.
+- Duplicate member IDs in backup are deduped deterministically.
+
+### R.2a — `atm init` hook installer core
+
+Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (no external files needed).
+
+**Hook path reference (Claude docs)**:
+- https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
+- Use `"$CLAUDE_PROJECT_DIR"/.claude/scripts/...` for project scripts.
+- Use `"${CLAUDE_PLUGIN_ROOT}"/...` for plugin-bundled scripts.
+
+- `atm init <team>` — local install (project `.claude/settings.json`)
+- `atm init <team> --global` — global install (`~/.claude/settings.json`)
+- Global hooks are passive in non-ATM repos (`.atm.toml` guard as first operation)
+- Idempotent: safe to run multiple times; merges hook entries, never overwrites
+
+### R.2b — `atm init --check` + upgrade validation
+
+- `atm init --check` — report what's missing without making changes
+- Validate upgrade path for existing installs while preserving user customizations
+
+| Sprint | Name | Depends On | Size | Status |
+|--------|------|------------|------|--------|
+| R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
+| R.1 | `atm teams resume` session handoff + daemon member restore | R.0 | M | PLANNED |
+| R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
+| R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
 
 ---
-
 ## 18. Future Plugins
 
 | Plugin | Priority | Notes |
