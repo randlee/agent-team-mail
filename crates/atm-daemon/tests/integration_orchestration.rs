@@ -19,6 +19,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
+#[cfg(unix)]
+fn acquire_test_daemon_lock(home_dir: &std::path::Path) -> agent_team_mail_core::io::lock::FileLock {
+    let lock_path = home_dir.join(".config/atm/daemon.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).unwrap()
+}
+
 // ── Test 1: AgentStateTracker lifecycle ───────────────────────────────────────
 
 #[test]
@@ -100,6 +107,7 @@ async fn test_socket_query_agent_state() {
     let temp_dir = TempDir::new().unwrap();
     let home_dir = temp_dir.path().to_path_buf();
     let cancel = CancellationToken::new();
+    let daemon_lock = acquire_test_daemon_lock(&home_dir);
 
     // Register agent in the shared state store
     let state_store = new_state_store();
@@ -120,6 +128,7 @@ async fn test_socket_query_agent_state() {
         new_stream_state_store(),
         new_stream_event_sender(),
         new_log_event_queue(),
+        &daemon_lock,
         cancel.clone(),
     )
     .await
@@ -168,6 +177,7 @@ async fn test_socket_query_agent_not_found() {
     let temp_dir = TempDir::new().unwrap();
     let home_dir = temp_dir.path().to_path_buf();
     let cancel = CancellationToken::new();
+    let daemon_lock = acquire_test_daemon_lock(&home_dir);
 
     let _handle = start_socket_server(
         home_dir.clone(),
@@ -179,6 +189,7 @@ async fn test_socket_query_agent_not_found() {
         new_stream_state_store(),
         new_stream_event_sender(),
         new_log_event_queue(),
+        &daemon_lock,
         cancel.clone(),
     )
     .await
@@ -227,6 +238,7 @@ async fn test_pubsub_subscription_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let home_dir = temp_dir.path().to_path_buf();
     let cancel = CancellationToken::new();
+    let daemon_lock = acquire_test_daemon_lock(&home_dir);
 
     let pubsub_store = new_pubsub_store();
 
@@ -240,6 +252,7 @@ async fn test_pubsub_subscription_roundtrip() {
         new_stream_state_store(),
         new_stream_event_sender(),
         new_log_event_queue(),
+        &daemon_lock,
         cancel.clone(),
     )
     .await

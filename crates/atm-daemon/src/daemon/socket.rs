@@ -102,6 +102,7 @@ pub async fn start_socket_server(
     stream_state_store: SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
     log_event_queue: LogEventQueue,
+    _daemon_lock: &agent_team_mail_core::io::lock::FileLock,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
@@ -116,6 +117,7 @@ pub async fn start_socket_server(
             stream_state_store,
             stream_event_sender,
             log_event_queue,
+            _daemon_lock,
             cancel,
         )
         .await
@@ -281,6 +283,7 @@ async fn start_unix_socket_server(
     stream_state_store: SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
     log_event_queue: LogEventQueue,
+    _daemon_lock: &agent_team_mail_core::io::lock::FileLock,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -1730,6 +1733,7 @@ fn parse_and_dispatch(
         "subscribe" => handle_subscribe(&request, pubsub_store),
         "unsubscribe" => handle_unsubscribe(&request, pubsub_store),
         "session-query" => handle_session_query(&request, session_registry),
+        "session-query-team" => handle_session_query_team(&request, session_registry),
         "agent-stream-state" => handle_agent_stream_state(&request, stream_state_store),
         // "launch" is handled asynchronously before parse_and_dispatch is called.
         // If it somehow reaches here, return a clear internal error.
@@ -1839,6 +1843,100 @@ fn handle_session_query(
             &format!("No session record for agent '{name}'"),
         ),
     }
+}
+
+/// Handle the `session-query-team` command.
+///
+/// Payload: `{"team": "<team-name>", "name": "<agent-name>"}`
+/// Response (found, alive):   `{"session_id": "...", "process_id": 12345, "alive": true}`
+/// Response (found, dead):    `{"session_id": "...", "process_id": 12345, "alive": false}`
+/// Response (not found/mismatch): error with code `AGENT_NOT_FOUND`
+fn handle_session_query_team(
+    request: &agent_team_mail_core::daemon_client::SocketRequest,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    let team = match request.payload.get("team").and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'team'",
+            );
+        }
+    };
+    let name = match request.payload.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'name'",
+            );
+        }
+    };
+
+    let registry = session_registry.lock().unwrap();
+    let Some(record) = registry.query(&name) else {
+        return make_error_response(
+            &request.request_id,
+            "AGENT_NOT_FOUND",
+            &format!("No session record for agent '{name}'"),
+        );
+    };
+
+    // Team-scoped verification: the queried record must match the team's current leadSessionId
+    // for team-lead lookups. This avoids cross-team collisions when names overlap.
+    if name == "team-lead" {
+        let home = match agent_team_mail_core::home::get_home_dir() {
+            Ok(h) => h,
+            Err(_) => {
+                return make_error_response(
+                    &request.request_id,
+                    "INTERNAL_ERROR",
+                    "Failed to resolve home directory",
+                );
+            }
+        };
+        let config_path = home.join(".claude/teams").join(&team).join("config.json");
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(_) => {
+                return make_error_response(
+                    &request.request_id,
+                    "TEAM_NOT_FOUND",
+                    &format!("Team config not found for '{team}'"),
+                );
+            }
+        };
+        let cfg: agent_team_mail_core::schema::TeamConfig = match serde_json::from_str(&content) {
+            Ok(c) => c,
+            Err(_) => {
+                return make_error_response(
+                    &request.request_id,
+                    "INVALID_TEAM_CONFIG",
+                    &format!("Failed to parse team config for '{team}'"),
+                );
+            }
+        };
+        if cfg.lead_session_id != record.session_id {
+            return make_error_response(
+                &request.request_id,
+                "AGENT_NOT_FOUND",
+                &format!("No team-scoped session record for agent '{name}' in team '{team}'"),
+            );
+        }
+    }
+
+    let alive = record.is_process_alive();
+    make_ok_response(
+        &request.request_id,
+        serde_json::json!({
+            "session_id": record.session_id,
+            "process_id": record.process_id,
+            "alive": alive,
+        }),
+    )
 }
 
 /// Handle the `agent-state` command.
@@ -2871,6 +2969,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         // Set up state store with one agent
         let state_store = make_store();
@@ -2893,6 +2996,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -2942,6 +3046,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         {
@@ -2963,6 +3072,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3011,6 +3121,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let launch_tx = new_launch_sender();
         let (dd, _dd_dir) = make_dd();
@@ -3024,6 +3139,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3081,6 +3197,11 @@ mod tests {
         // SAFETY: serialized test; env var scoped by process.
         unsafe { std::env::set_var("ATM_HOME", &home_dir) };
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         {
@@ -3107,6 +3228,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3161,6 +3283,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
         let state_store = make_store();
 
         let launch_tx = new_launch_sender();
@@ -3175,6 +3302,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3447,6 +3575,11 @@ mod tests {
         let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
         write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         let session_registry = make_sr();
@@ -3463,6 +3596,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3566,6 +3700,11 @@ mod tests {
         let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
         write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         let session_registry = make_sr();
@@ -3593,6 +3732,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3707,6 +3847,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
         let state_store = make_store();
 
         let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
@@ -3724,6 +3869,7 @@ mod tests {
                 new_stream_state_store(),
                 new_stream_event_sender(),
                 crate::daemon::new_log_event_queue(),
+                &daemon_lock,
                 cancel.clone(),
             )
             .await
