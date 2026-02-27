@@ -336,6 +336,7 @@ Commands:
   config      Show/set configuration
   cleanup     Apply retention policies
   mcp         MCP server setup and management
+  init        Install/check ATM hook wiring for Claude Code
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
@@ -348,6 +349,9 @@ MCP subcommands:
   mcp install <client> [scope] [--binary <path>]
   mcp uninstall <client> [scope]
   mcp status
+
+Init command:
+  init <team> [--global] [--check]
 ```
 
 ### 4.2 Messaging Commands
@@ -1044,6 +1048,47 @@ Install atm-agent-mcp with:
 - `--json` output mode for `atm mcp status`
 - Validation that `atm-agent-mcp serve` actually starts successfully
 - `atm mcp test` — run a quick connectivity check against configured servers
+
+### 4.9 Team Hook Setup (`atm init`)
+
+The `atm init` command installs and validates Claude Code hook wiring for ATM
+session coordination. Hook script bodies are embedded in the ATM binary and
+materialized at install time.
+
+#### 4.9.1 Command Forms
+
+```bash
+atm init <team>
+atm init <team> --global
+atm init --check
+atm init <team> --check
+```
+
+**Arguments and flags**:
+- `<team>`: team name to bind for project/local installs.
+- `--global`: install in user scope (`~/.claude/settings.json`) instead of project scope.
+- `--check`: read-only validation; report missing/misaligned wiring without modifying files.
+
+#### 4.9.2 Behavior
+
+- Local install writes/merges hook entries in project `.claude/settings.json`.
+- Global install writes/merges hook entries in `~/.claude/settings.json`.
+- Installs are idempotent: reruns preserve unrelated settings and avoid duplicate entries.
+- Global-installed hooks must remain passive in non-ATM repositories; `.atm.toml` guard is the first hook operation.
+- Embedded hook scripts are the runtime source of truth.
+
+#### 4.9.3 File and Write Requirements
+
+- Use read-modify-write semantics; never wholesale rewrite settings files.
+- Preserve unknown fields and non-ATM hook entries.
+- Use atomic writes (temp + rename) and create parent directories as needed.
+- Report exact file path(s) modified in command output.
+
+#### 4.9.4 Exit and Result Semantics
+
+- Exit `0` for `installed`, `updated`, `already-configured`, and `check-ok`.
+- Exit `1` for malformed config, unsupported environment, or write/permission failures.
+- `--check` output must include actionable guidance for each missing/misaligned hook entry.
 
 ---
 

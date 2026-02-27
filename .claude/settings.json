@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/randlee/Documents/github/agent-team-mail/.claude/scripts/gate-agent-spawns.py"
+            "command": "python3 .claude/scripts/gate-agent-spawns.py"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/randlee/Documents/github/agent-team-mail/.claude/scripts/atm-identity-write.py"
+            "command": "python3 .claude/scripts/atm-identity-write.py"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/randlee/Documents/github/agent-team-mail/.claude/scripts/atm-identity-cleanup.py"
+            "command": "python3 .claude/scripts/atm-identity-cleanup.py"
           }
         ]
       }
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/randlee/Documents/github/agent-team-mail/.claude/scripts/teammate-idle-relay.py"
+            "command": "python3 .claude/scripts/teammate-idle-relay.py"
           }
         ]
       }

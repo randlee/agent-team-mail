@@ -2,7 +2,7 @@
 
 **Version**: 0.5
 **Date**: 2026-02-25
-**Status**: Phase P complete (v0.21.0).
+**Status**: Phase Q.3 complete (v0.23.0); Q.4 planned.
 
 ---
 
@@ -657,7 +657,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 |--------|------|------------|------|--------|
 | Q.1 | `atm mcp install` + `atm mcp status` commands | — | M | COMPLETE |
 | Q.2 | Integration tests + cross-platform validation | Q.1 | S | COMPLETE |
-| Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | Q.2 | S | IN PROGRESS |
+| Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | Q.2 | S | COMPLETE |
 | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | Q.3 | M | PLANNED |
 
 **Q.1 deliverables**:
@@ -703,20 +703,33 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ### R.1 — `atm teams resume` session handoff
 
-**New `atm teams resume <team>` behavior**:
+**CLI flag semantics in handoff mode**:
+- `message`: optional status text shown with refusal/re-establish guidance.
+- `--session-id <id>`: target only the specified lead session. If it does not match the daemon's active lead session, refuse.
+- `--force`: bypass soft refusal checks only when no active lead session is confirmed; never steals an active lead identity.
+- `--kill`: explicitly terminate stale daemon-tracked lead process before handoff.
 
-1. Daemon checks: is `team-lead` already active for this team (tracked by PID)?
-2. **If YES** (team-lead running in another process): refuse — do not steal team-lead identity. Caller may join as regular member or fly solo.
+**Handoff flow**:
+1. Daemon checks whether `team-lead` is active for the team (PID + session ID).
+2. **If YES** (team-lead running in another process): refuse; do not steal team-lead identity.
 3. **If NO** (no active team-lead):
-   - Delete `<team>.bak` if it exists
-   - Rename `<team>/` → `<team>.bak/`
-   - Output: `"Call TeamCreate(<team>) to re-establish as team-lead"`
-4. Team-lead calls `TeamCreate(<team>)` — succeeds because directory is gone
-5. Daemon watches for `<team>/config.json` to appear
-6. Daemon restores non-Claude members from `.bak` (pane IDs, agent types, inbox history)
-7. Daemon injects message into team-lead's session: `"<team> re-established. Active members: <name> (<type>, pane <id>), ..."`
+   - Ensure backup destination exists at `.backups/<team>/<timestamp>/` (agent-team-api backup convention).
+   - Move `<team>/` into `.backups/<team>/<timestamp>/team/` (or create equivalent snapshot, then remove active team dir).
+   - Output: `"Call TeamCreate(<team>) to re-establish as team-lead"`.
+4. Team-lead calls `TeamCreate(<team>)`; this succeeds because the active team directory is absent.
+5. Daemon watches for `<team>/config.json` to appear.
+6. Daemon restores non-Claude members from backup (pane IDs, agent types, inbox history).
+7. Preserve the new `leadSessionId` from TeamCreate; restore never overwrites it. `team-lead` member is never restored from backup.
+8. Daemon injects status into team-lead session: `"<team> re-established. Active members: <name> (<type>, pane <id>), ..."`.
 
-### R.2 — `atm init` hook installer
+**Failure-mode acceptance criteria**:
+- Stale PID/session mismatch is detected and does not cause identity theft.
+- Backup/move failure is surfaced with actionable error and no partial destructive delete.
+- Daemon restart during restore resumes idempotently without duplicate members.
+- Missing/corrupt backup is handled with explicit degraded-mode warning.
+- Duplicate member IDs in backup are deduped deterministically.
+
+### R.2a — `atm init` hook installer core
 
 Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (no external files needed).
 
@@ -724,15 +737,19 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 - `atm init <team> --global` — global install (`~/.claude/settings.json`)
 - Global hooks are passive in non-ATM repos (`.atm.toml` guard as first operation)
 - Idempotent: safe to run multiple times; merges hook entries, never overwrites
-- `atm init --check` — report what's missing without making changes
 
-| Sprint | Name | Depends On | Status |
-|--------|------|------------|--------|
-| R.1 | `atm teams resume` session handoff + daemon member restore | Phase Q | PLANNED |
-| R.2 | `atm init` hook installer + embedded scripts | R.1 | PLANNED |
+### R.2b — `atm init --check` + upgrade validation
+
+- `atm init --check` — report what's missing without making changes
+- Validate upgrade path for existing installs while preserving user customizations
+
+| Sprint | Name | Depends On | Size | Status |
+|--------|------|------------|------|--------|
+| R.1 | `atm teams resume` session handoff + daemon member restore | Phase Q | M | PLANNED |
+| R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
+| R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
 
 ---
-
 ## 18. Future Plugins
 
 | Plugin | Priority | Notes |
@@ -867,7 +884,7 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 | **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | COMPLETE | [#246](https://github.com/randlee/agent-team-mail/pull/246) |
 | **Q** | Q.1 | `atm mcp install/uninstall/status` commands | COMPLETE | [#252](https://github.com/randlee/agent-team-mail/pull/252) |
 | **Q** | Q.2 | Integration tests + cross-platform validation | COMPLETE | [#253](https://github.com/randlee/agent-team-mail/pull/253) |
-| **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | IN PROGRESS | — |
+| **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | COMPLETE | — |
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
 
 **Completed**: 99+ sprints across 22 phases (CI green)
