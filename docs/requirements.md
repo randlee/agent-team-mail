@@ -737,12 +737,11 @@ Validation rules:
 #### Sink Paths and Files
 
 Canonical log file (daemon-writer mode):
-- `${ATM_HOME}/atm.log.jsonl` if `ATM_HOME` is set
-- else `${config_dir}/atm/atm.log.jsonl` (`~/.config/atm` on Linux/macOS, `%APPDATA%\\atm` on Windows)
+- `${home_dir}/.config/atm/atm.log.jsonl` where `home_dir` is resolved via `get_home_dir()`
+  (`ATM_HOME` when set, otherwise platform home directory)
 
 Producer fallback spool directory:
-- `${ATM_HOME}/log-spool` if `ATM_HOME` is set
-- else `${config_dir}/atm/log-spool`
+- `${home_dir}/.config/atm/log-spool` where `home_dir` is resolved via `get_home_dir()`
 
 Spool filename convention:
 - `{source_binary}-{pid}-{unix_millis}.jsonl`
@@ -763,6 +762,9 @@ Spool filename convention:
 - Daemon startup merges spool files via claim/rename then append; delete source file
   only after successful merge.
 - Merge ordering: timestamp then file order, append-only.
+- Daemon startup spool merge and daemon runtime writer MUST target the same canonical
+  path resolved from `ATM_LOG_FILE`/`ATM_LOG_PATH` (or default `atm.log.jsonl`).
+  Divergent startup/runtime sink paths are forbidden.
 
 #### Migration Bridge (Legacy `events.jsonl`) — REMOVED (Phase M.1b)
 
@@ -800,12 +802,26 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 
 #### Single-Instance Contract
 
-- Daemon startup acquires an exclusive process lock in `${config_dir}/atm/daemon.lock`.
+- Daemon startup acquires an exclusive process lock in
+  `${home_dir}/.config/atm/daemon.lock`, where `home_dir` is resolved via
+  `get_home_dir()` (`ATM_HOME` when set, otherwise platform home directory).
 - If lock acquisition fails, new daemon process exits immediately (existing daemon is authoritative).
 - Socket path is fixed per user scope:
   - Unix/macOS: `${ATM_HOME:-$HOME/.claude}/daemon/atm-daemon.sock` (existing convention)
   - Windows: named-pipe equivalent (canonical path documented in daemon crate)
 - CLI must never spawn a second daemon when lock/socket indicate an existing healthy instance.
+- Daemon startup MUST acquire `daemon.lock` before mutating socket or PID files.
+- Daemon MUST NOT remove an existing socket file unless lock ownership has already
+  been acquired by the current process.
+
+#### Required Acceptance Checks
+
+- Starting a second daemon while one is healthy must fail immediately with an
+  actionable single-instance error.
+- Existing healthy daemon must retain lock ownership; socket/PID files must not
+  be overwritten by a second process.
+- `atm logs` default view and daemon startup spool merge must observe the same
+  canonical `atm.log.jsonl` sink path.
 
 #### Daemon Session Registry Contract
 
