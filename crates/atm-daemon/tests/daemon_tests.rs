@@ -513,7 +513,7 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
     let temp_dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_atm-daemon");
 
-    let mut first = std::process::Command::new(&bin)
+    let mut first = std::process::Command::new(bin)
         .env("ATM_HOME", temp_dir.path())
         .spawn()
         .expect("failed to spawn first daemon");
@@ -528,7 +528,7 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         "first daemon should still be running"
     );
 
-    let second = std::process::Command::new(&bin)
+    let second = std::process::Command::new(bin)
         .env("ATM_HOME", temp_dir.path())
         .output()
         .expect("failed to spawn second daemon");
