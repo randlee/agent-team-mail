@@ -717,6 +717,24 @@ Harden daemon foundations required by R.1 session handoff:
 - Two concurrent daemon starts: second instance exits with clear "daemon already running" error.
 - requirements.md 4.6 and 4.7 path specs are internally consistent with implementation.
 
+### R.0b — Persistent session registry + agent lifecycle management
+
+Closes gaps identified during R.0 execution and dogfooding:
+
+1. **Persistent session registry via hooks**: `session_start` hook writes `{agent_name, pid, session_id, team}` to daemon registry persistently. `session_end` hook removes entry. Daemon uses this for kill signals and liveness queries.
+2. **`isActive` reconciliation**: Daemon reconciles `isActive` in `config.json` against PID liveness — prevents live agents showing as Offline when Claude Code sets `isActive=False` on idle.
+3. **Automatic inbox cleanup on agent exit**: When daemon detects a registered agent's PID is gone, it archives/clears that agent's inbox. Enables re-spawning a fresh agent with the same name and empty mailbox. Prevents stale messages polluting context on next read.
+4. **Stale inbox message filtering**: New teammate instances skip messages from previous sessions (filter by session ID or age predicate) — prevents stale `shutdown_request` messages killing freshly-spawned agents.
+5. **`atm cleanup --agent <name>`**: CLI command to explicitly clear or archive a specific agent's inbox.
+6. **Daemon `--kill <agent>`**: Kill a Claude session by agent name using persistent PID registry.
+
+**Acceptance criteria**:
+- Spawning a fresh teammate does not auto-approve stale `shutdown_request` from a previous session.
+- `atm status` shows correct Online/Offline for idle-but-alive teammates.
+- `atm cleanup --agent quality-mgr` clears inbox without touching other agents.
+- Agent exit (PID gone) automatically clears that agent's inbox within one daemon cycle.
+- `atm daemon --kill <agent>` terminates the Claude process for the named agent.
+
 ### R.1 — `atm teams resume` session handoff
 
 **CLI flag semantics in handoff mode**:
@@ -768,7 +786,8 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
-| R.1 | `atm teams resume` session handoff + daemon member restore | R.0 | M | PLANNED |
+| R.0b | Persistent session registry + agent lifecycle management | R.0 | M | PLANNED |
+| R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
 | R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
 
