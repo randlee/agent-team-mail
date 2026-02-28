@@ -32,12 +32,18 @@ pub enum SessionState {
 /// A single agent session record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
+    /// Team name this session belongs to.
+    pub team: String,
+    /// Agent/member name in the team.
+    pub agent_name: String,
     /// Claude Code session UUID (from `CLAUDE_SESSION_ID`).
     pub session_id: String,
     /// OS process ID of the agent process.
     pub process_id: u32,
     /// Current lifecycle state.
     pub state: SessionState,
+    /// Last state update timestamp (RFC3339 UTC).
+    pub updated_at: String,
 }
 
 impl SessionRecord {
@@ -49,15 +55,9 @@ impl SessionRecord {
     }
 }
 
-/// Registry mapping agent names to their session records.
+/// Registry mapping team-scoped keys to their session records.
 ///
 /// Wrap in `Arc<Mutex<SessionRegistry>>` for concurrent access.
-///
-/// NOTE: Keys are currently bare agent names, not `(team, name)`.
-/// This is sufficient for current single-team deployments but can collide when
-/// multiple teams on one daemon have the same member name.
-/// TODO(atm-daemon): migrate to a team-scoped key once multi-team registry
-/// semantics are implemented.
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
     sessions: HashMap<String, SessionRecord>,
@@ -100,12 +100,22 @@ impl SessionRegistry {
     /// are replaced. The state is reset to [`SessionState::Active`] on every
     /// upsert.
     pub fn upsert(&mut self, name: &str, session_id: &str, process_id: u32) {
+        self.upsert_for_team("", name, session_id, process_id);
+    }
+
+    /// Insert or update the session record for `team/name`.
+    pub fn upsert_for_team(&mut self, team: &str, name: &str, session_id: &str, process_id: u32) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let key = make_key(team, name);
         self.sessions.insert(
-            name.to_string(),
+            key,
             SessionRecord {
+                team: team.to_string(),
+                agent_name: name.to_string(),
                 session_id: session_id.to_string(),
                 process_id,
                 state: SessionState::Active,
+                updated_at: now,
             },
         );
         self.persist_best_effort();
@@ -114,7 +124,24 @@ impl SessionRegistry {
     /// Return an immutable reference to the session record for `name`, or
     /// `None` if the agent is not registered.
     pub fn query(&self, name: &str) -> Option<&SessionRecord> {
-        self.sessions.get(name)
+        if let Some(r) = self.sessions.get(name) {
+            return Some(r);
+        }
+        // Backward-compatible lookup by agent name if unique across teams.
+        let mut iter = self
+            .sessions
+            .values()
+            .filter(|r| r.agent_name == name || make_key(&r.team, &r.agent_name) == name);
+        let first = iter.next()?;
+        if iter.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    /// Query a team-scoped session record.
+    pub fn query_for_team(&self, team: &str, name: &str) -> Option<&SessionRecord> {
+        self.sessions.get(&make_key(team, name))
     }
 
     /// Mark the session for `name` as [`SessionState::Dead`].
@@ -123,6 +150,30 @@ impl SessionRegistry {
     pub fn mark_dead(&mut self, name: &str) {
         if let Some(record) = self.sessions.get_mut(name) {
             record.state = SessionState::Dead;
+            self.persist_best_effort();
+            return;
+        }
+
+        // Backward-compatible mark by unique agent name.
+        let matches: Vec<String> = self
+            .sessions
+            .iter()
+            .filter_map(|(k, r)| (r.agent_name == name).then_some(k.clone()))
+            .collect();
+
+        if matches.len() == 1
+            && let Some(record) = self.sessions.get_mut(&matches[0])
+        {
+            record.state = SessionState::Dead;
+            self.persist_best_effort();
+        }
+    }
+
+    /// Mark a team-scoped session as dead.
+    pub fn mark_dead_for_team(&mut self, team: &str, name: &str) {
+        if let Some(record) = self.sessions.get_mut(&make_key(team, name)) {
+            record.state = SessionState::Dead;
+            record.updated_at = chrono::Utc::now().to_rfc3339();
             self.persist_best_effort();
         }
     }
@@ -200,7 +251,24 @@ fn pid_alive_unix(pid: u32) -> bool {
 fn load_sessions_from_file(path: &Path) -> Option<HashMap<String, SessionRecord>> {
     let content = std::fs::read_to_string(path).ok()?;
     let persisted: PersistedRegistry = serde_json::from_str(&content).ok()?;
-    Some(persisted.sessions)
+    Some(
+        persisted
+            .sessions
+            .into_iter()
+            .map(|(k, mut v)| {
+                if v.team.is_empty() || v.agent_name.is_empty() {
+                    let (team, agent_name) = parse_key(&k);
+                    if v.team.is_empty() {
+                        v.team = team;
+                    }
+                    if v.agent_name.is_empty() {
+                        v.agent_name = agent_name;
+                    }
+                }
+                (make_key(&v.team, &v.agent_name), v)
+            })
+            .collect(),
+    )
 }
 
 fn write_sessions_to_file(path: &Path, sessions: &HashMap<String, SessionRecord>) -> std::io::Result<()> {
@@ -220,6 +288,17 @@ fn write_sessions_to_file(path: &Path, sessions: &HashMap<String, SessionRecord>
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedRegistry {
     sessions: HashMap<String, SessionRecord>,
+}
+
+fn make_key(team: &str, name: &str) -> String {
+    format!("{team}::{name}")
+}
+
+fn parse_key(key: &str) -> (String, String) {
+    match key.split_once("::") {
+        Some((team, name)) => (team.to_string(), name.to_string()),
+        None => ("".to_string(), key.to_string()),
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -354,9 +433,12 @@ mod tests {
     #[test]
     fn test_record_is_process_alive_current() {
         let record = SessionRecord {
+            team: "atm-dev".to_string(),
+            agent_name: "team-lead".to_string(),
             session_id: "test".to_string(),
             process_id: std::process::id(),
             state: SessionState::Active,
+            updated_at: chrono::Utc::now().to_rfc3339(),
         };
         assert!(record.is_process_alive());
     }

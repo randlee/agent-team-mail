@@ -712,7 +712,6 @@ atm doctor --full
 - `0`: no critical findings.
 - `2`: critical findings detected (operator action required).
 - `1`: doctor execution failed (I/O/parsing/runtime error).
-
 ### 4.4 Configuration
 
 #### Resolution Order (highest priority first)

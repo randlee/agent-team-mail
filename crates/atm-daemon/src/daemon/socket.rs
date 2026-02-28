@@ -1019,14 +1019,10 @@ async fn handle_hook_event_command(
                 );
             }
             let pid = process_id.unwrap_or(0);
-            // SessionRegistry is currently keyed by bare agent name, not team.
-            // This matches existing daemon behavior but can collide across teams
-            // that reuse member names.
-            // TODO(atm-daemon): switch registry operations to team-scoped keys.
             session_registry
                 .lock()
                 .unwrap()
-                .upsert(&agent, &session_id, pid);
+                .upsert_for_team(&team, &agent, &session_id, pid);
             {
                 let mut tracker = state_store.lock().unwrap();
                 if tracker.get_state(&agent).is_none() {
@@ -1055,7 +1051,7 @@ async fn handle_hook_event_command(
                 );
             }
             {
-                session_registry.lock().unwrap().mark_dead(&agent);
+                session_registry.lock().unwrap().mark_dead_for_team(&team, &agent);
             }
             {
                 let mut tracker = state_store.lock().unwrap();
@@ -1866,7 +1862,7 @@ fn handle_session_query_team(
     };
 
     let registry = session_registry.lock().unwrap();
-    let Some(record) = registry.query(&name) else {
+    let Some(record) = registry.query_for_team(&team, &name) else {
         return make_error_response(
             &request.request_id,
             "AGENT_NOT_FOUND",
@@ -3448,7 +3444,9 @@ mod tests {
             tracker.set_state("team-lead", AgentState::Idle);
         }
         {
-            sr.lock().unwrap().upsert("team-lead", "sess-end", 1111);
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "team-lead", "sess-end", 1111);
         }
         let req_json = r#"{"version":1,"request_id":"r5","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-end","team":"atm-dev"}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
@@ -3700,7 +3698,12 @@ mod tests {
         }
         {
             let mut reg = session_registry.lock().unwrap();
-            reg.upsert("team-lead", "sess-end-roundtrip", std::process::id());
+            reg.upsert_for_team(
+                "atm-dev",
+                "team-lead",
+                "sess-end-roundtrip",
+                std::process::id(),
+            );
         }
 
         let launch_tx = new_launch_sender();
@@ -4305,9 +4308,12 @@ mod tests {
         let store = make_store();
         let sr = make_sr();
         // Pre-populate registry so mark_dead has something to work with.
-        sr.lock()
-            .unwrap()
-            .upsert("arch-ctm", "codex:sess-end-test", 0);
+        sr.lock().unwrap().upsert_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "codex:sess-end-test",
+            0,
+        );
 
         let req = SocketRequest {
             version: PROTOCOL_VERSION,

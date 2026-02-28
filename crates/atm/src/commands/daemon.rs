@@ -81,13 +81,23 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
     };
 
     if !info.alive {
-        println!("Agent {agent}@{team_name} already not alive");
+        crate::commands::teams::cleanup_single_agent(
+            team_name.to_string(),
+            agent.to_string(),
+            true,
+        )?;
+        println!("Agent {agent}@{team_name} already not alive; teardown cleanup completed");
         return Ok(());
     }
 
     send_shutdown_request(&home_dir, team_name, agent)?;
     if wait_for_session_dead(team_name, agent, timeout_secs) {
-        println!("Graceful shutdown complete for {agent}@{team_name}");
+        crate::commands::teams::cleanup_single_agent(
+            team_name.to_string(),
+            agent.to_string(),
+            true,
+        )?;
+        println!("Graceful shutdown + teardown cleanup complete for {agent}@{team_name}");
         return Ok(());
     }
 
@@ -102,7 +112,12 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
     }
 
     if wait_for_session_dead(team_name, agent, 3) {
-        println!("Forced termination complete for {agent}@{team_name}");
+        crate::commands::teams::cleanup_single_agent(
+            team_name.to_string(),
+            agent.to_string(),
+            true,
+        )?;
+        println!("Forced termination + teardown cleanup complete for {agent}@{team_name}");
         Ok(())
     } else {
         anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")

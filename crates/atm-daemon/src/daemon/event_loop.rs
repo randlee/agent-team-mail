@@ -462,11 +462,12 @@ fn reconcile_team_member_activity(
             .unwrap_or_default()
             .as_millis() as u64;
 
+        let team_name = config.name.clone();
         let mut changed = false;
         for member in &mut config.members {
             let record = {
                 let reg = session_registry.lock().unwrap();
-                reg.query(&member.name).cloned()
+                reg.query_for_team(&team_name, &member.name).cloned()
             };
 
             let Some(record) = record else {
@@ -479,7 +480,10 @@ fn reconcile_team_member_activity(
             if !alive
                 && record.state == crate::daemon::session_registry::SessionState::Active
             {
-                session_registry.lock().unwrap().mark_dead(&member.name);
+                session_registry
+                    .lock()
+                    .unwrap()
+                    .mark_dead_for_team(&team_name, &member.name);
             }
 
             if member.is_active != Some(alive) {

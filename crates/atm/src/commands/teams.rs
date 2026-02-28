@@ -695,10 +695,6 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     };
 
     // Check daemon reachability once before iterating members.
-    // NOTE: query_session uses bare agent names without team qualification because
-    // the current daemon session registry is process/name scoped, not team scoped.
-    // If two teams have a member with the same name, liveness queries may collide.
-    // This is an accepted limitation; team-scoped queries require a daemon API change.
     let daemon_running = agent_team_mail_core::daemon_client::daemon_is_running();
     let mut skipped_names: Vec<String> = Vec::new();
 
@@ -767,7 +763,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             }
         } else {
             // Standard Claude Code member: existing liveness logic unchanged.
-            match agent_team_mail_core::daemon_client::query_session(&member.name) {
+            match agent_team_mail_core::daemon_client::query_session_for_team(&args.team, &member.name) {
                 Ok(Some(ref info)) => {
                     // Daemon responded with an explicit record — trust it.
                     !info.alive

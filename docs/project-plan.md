@@ -753,7 +753,6 @@ Builds operational triage tooling on top of R.0b lifecycle truth.
 - `atm doctor` detects and reports partial teardown drift (roster removed xor mailbox present).
 - Default repeated runs are incremental for warning/error log output.
 - JSON output mode is stable for automation.
-
 ### R.1 — `atm teams resume` session handoff
 
 **CLI flag semantics in handoff mode**:
@@ -805,7 +804,7 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
-| R.0b | Persistent session registry + agent lifecycle management | R.0 | M | IN PROGRESS |
+| R.0b | Persistent session registry + agent lifecycle management | R.0 | M | COMPLETE |
 | R.0c | `atm doctor` diagnostics and cleanup guidance | R.0b | S | PLANNED |
 | R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
