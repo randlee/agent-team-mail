@@ -1,6 +1,7 @@
 //! Teams command implementation
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::daemon_client::{LaunchConfig, launch_agent, query_session_for_team};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::lock::acquire_lock;
@@ -17,6 +18,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::warn;
 
+use crate::commands::runtime_adapter::{RuntimeKind, SpawnSpec, adapter_for_runtime};
 use crate::util::settings::get_home_dir;
 
 /// Number of backups to retain per team. Older snapshots are pruned after
@@ -38,7 +40,7 @@ pub struct TeamsArgs {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum TeamsCommand {
-    /// Spawn an agent via daemon-backed launcher
+    /// Spawn a team member via daemon with runtime-specific adapter behavior
     Spawn(SpawnArgs),
     /// Add a member to a team without launching an agent
     AddMember(AddMemberArgs),
@@ -54,44 +56,59 @@ pub enum TeamsCommand {
     Restore(RestoreArgs),
 }
 
-/// Spawn an agent via daemon-backed launcher.
+/// Spawn a team member (runtime-aware daemon launch)
 #[derive(Args, Debug)]
 pub struct SpawnArgs {
-    /// Agent identity name (positional form)
-    #[arg(value_name = "AGENT")]
-    agent: Option<String>,
+    /// Agent name
+    agent: String,
 
-    /// Agent identity name (flag form)
-    #[arg(long, value_name = "AGENT", conflicts_with = "agent")]
-    agent_name: Option<String>,
-
-    /// Runtime selector (claude|codex|gemini|opencode)
-    #[arg(long, default_value = "claude")]
-    runtime: String,
-
-    /// Command override for pane launch
-    #[arg(long)]
-    command: Option<String>,
-
-    /// Initial prompt to send after the agent becomes ready
-    #[arg(long)]
-    prompt: Option<String>,
-
-    /// Override the team name (default: from config)
+    /// Team name (defaults to configured default team)
     #[arg(long)]
     team: Option<String>,
+
+    /// Runtime selector
+    #[arg(long, value_enum, default_value_t = RuntimeKind::Codex)]
+    runtime: RuntimeKind,
+
+    /// Optional model override
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Optional sandbox mode override (`true` or `false`)
+    #[arg(long)]
+    sandbox: Option<bool>,
+
+    /// Optional approval mode override
+    #[arg(long)]
+    approval_mode: Option<String>,
+
+    /// Optional system prompt path (used by Gemini as `GEMINI_SYSTEM_MD`)
+    #[arg(long)]
+    system_prompt: Option<PathBuf>,
+
+    /// Resume previous runtime session for this agent
+    #[arg(long)]
+    resume: bool,
+
+    /// Explicit runtime session ID for resume (otherwise resolved from daemon registry)
+    #[arg(long)]
+    resume_session_id: Option<String>,
 
     /// Readiness timeout in seconds
     #[arg(long, default_value_t = 30)]
     timeout: u32,
 
-    /// Output result as JSON
-    #[arg(long)]
-    json: bool,
-
-    /// Extra environment variables for the pane (KEY=VALUE, repeatable)
+    /// Additional environment variables (KEY=VALUE, repeatable)
     #[arg(long = "env", value_name = "KEY=VALUE")]
     env: Vec<String>,
+
+    /// Optional prompt to send after startup
+    #[arg(long)]
+    prompt: Option<String>,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 /// Add a member to a team (no agent spawn)
@@ -252,7 +269,7 @@ struct TeamSummary {
 pub fn execute(args: TeamsArgs) -> Result<()> {
     if let Some(command) = args.command {
         return match command {
-            TeamsCommand::Spawn(spawn_args) => spawn(spawn_args),
+            TeamsCommand::Spawn(spawn_args) => spawn_member(spawn_args),
             TeamsCommand::AddMember(add_args) => add_member(add_args),
             TeamsCommand::UpdateMember(update_args) => update_member(update_args),
             TeamsCommand::Resume(resume_args) => resume(resume_args),
@@ -336,35 +353,135 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
     Ok(())
 }
 
-fn spawn(args: SpawnArgs) -> Result<()> {
-    let agent_name = args.agent_name.or(args.agent).ok_or_else(|| {
-        anyhow::anyhow!("Missing agent name. Use `atm teams spawn --agent <name>`")
-    })?;
+fn spawn_member(args: SpawnArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let current_dir = std::env::current_dir()?;
+    let config = resolve_config(
+        &ConfigOverrides {
+            team: args.team.clone(),
+            ..Default::default()
+        },
+        &current_dir,
+        &home_dir,
+    )?;
+    let team_name = args
+        .team
+        .clone()
+        .unwrap_or_else(|| config.core.default_team.clone());
 
-    let runtime = args.runtime.to_ascii_lowercase();
-    let default_command = match runtime.as_str() {
-        "claude" => "claude".to_string(),
-        "codex" => "codex --yolo".to_string(),
-        "gemini" => "gemini".to_string(),
-        "opencode" => "opencode".to_string(),
-        _ => {
-            anyhow::bail!(
-                "Unsupported runtime '{}'. Expected one of: claude, codex, gemini, opencode",
-                args.runtime
-            );
+    let parsed_env = parse_env_vars(&args.env)?;
+
+    let resolved_resume_session_id = if args.resume_session_id.is_some() {
+        args.resume_session_id.clone()
+    } else if args.resume {
+        query_session_for_team(&team_name, &args.agent)
+            .ok()
+            .flatten()
+            .map(|info| info.runtime_session_id.unwrap_or(info.session_id))
+    } else {
+        None
+    };
+
+    let spec = SpawnSpec {
+        team: team_name.clone(),
+        agent: args.agent.clone(),
+        model: args.model.clone(),
+        sandbox: args.sandbox,
+        approval_mode: args.approval_mode.clone(),
+        resume: args.resume,
+        resume_session_id: resolved_resume_session_id,
+        system_prompt: args.system_prompt.clone(),
+    };
+
+    let adapter = adapter_for_runtime(&args.runtime);
+    let command = adapter.build_command(&spec)?;
+    let mut env_vars = adapter.build_env(&spec, &home_dir)?;
+    for (k, v) in parsed_env {
+        env_vars.insert(k, v);
+    }
+
+    let launch_config = LaunchConfig {
+        agent: args.agent.clone(),
+        team: team_name.clone(),
+        command,
+        prompt: args.prompt.clone(),
+        timeout_secs: args.timeout,
+        env_vars,
+        runtime: Some(runtime_name(&args.runtime).to_string()),
+        resume_session_id: spec.resume_session_id.clone(),
+    };
+
+    let result = match launch_agent(&launch_config) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            if args.json {
+                println!("{{\"error\": \"Daemon is not running. Start it with: atm-daemon\"}}");
+            } else {
+                eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
+            }
+            std::process::exit(1);
+        }
+        Err(e) => {
+            if args.json {
+                println!("{{\"error\": \"{}\"}}", e.to_string().replace('"', "\\\""));
+            } else {
+                eprintln!("Error: {e}");
+            }
+            std::process::exit(1);
         }
     };
 
-    let launch_args = crate::commands::launch::LaunchArgs {
-        agent_name,
-        command: args.command.unwrap_or(default_command),
-        prompt: args.prompt,
-        team: args.team,
-        timeout: args.timeout,
-        json: args.json,
-        env: args.env,
-    };
-    crate::commands::launch::execute(launch_args)
+    if args.json {
+        let output = json!({
+            "agent": result.agent,
+            "team": team_name,
+            "runtime": runtime_name(&args.runtime),
+            "pane_id": result.pane_id,
+            "state": result.state,
+            "warning": result.warning,
+            "resume_session_id": spec.resume_session_id,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Launched agent: {}", result.agent);
+        println!("  team:    {}", team_name);
+        println!("  runtime: {}", runtime_name(&args.runtime));
+        println!("  pane:    {}", result.pane_id);
+        println!("  state:   {}", result.state);
+        if let Some(session_id) = spec.resume_session_id {
+            println!("  resume:  {session_id}");
+        }
+        if let Some(warning) = result.warning {
+            eprintln!("Warning: {warning}");
+        }
+    }
+
+    Ok(())
+}
+
+fn runtime_name(runtime: &RuntimeKind) -> &'static str {
+    match runtime {
+        RuntimeKind::Claude => "claude",
+        RuntimeKind::Codex => "codex",
+        RuntimeKind::Gemini => "gemini",
+        RuntimeKind::Opencode => "opencode",
+    }
+}
+
+fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
+    let mut map = std::collections::HashMap::new();
+    for pair in pairs {
+        let eq_pos = pair.find('=').ok_or_else(|| {
+            anyhow::anyhow!("Invalid --env value '{pair}': expected KEY=VALUE format")
+        })?;
+        let key = &pair[..eq_pos];
+        let value = &pair[eq_pos + 1..];
+        if key.is_empty() {
+            anyhow::bail!("Invalid --env value '{pair}': key must not be empty");
+        }
+        map.insert(key.to_string(), value.to_string());
+    }
+    Ok(map)
 }
 
 fn add_member(args: AddMemberArgs) -> Result<()> {
@@ -1433,56 +1550,6 @@ mod tests {
 
         let age = format_age(timestamp);
         assert!(age.contains("day"));
-    }
-
-    #[test]
-    fn test_spawn_requires_agent_name() {
-        let args = SpawnArgs {
-            agent: None,
-            agent_name: None,
-            runtime: "claude".to_string(),
-            command: None,
-            prompt: None,
-            team: None,
-            timeout: 30,
-            json: false,
-            env: Vec::new(),
-        };
-
-        let result = spawn(args);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Missing agent name"),
-            "missing-agent error should be explicit"
-        );
-    }
-
-    #[test]
-    fn test_spawn_rejects_unsupported_runtime() {
-        let args = SpawnArgs {
-            agent: Some("arch-ctm".to_string()),
-            agent_name: None,
-            runtime: "invalid-runtime".to_string(),
-            command: None,
-            prompt: None,
-            team: None,
-            timeout: 30,
-            json: false,
-            env: Vec::new(),
-        };
-
-        let result = spawn(args);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Unsupported runtime"),
-            "runtime validation should fail before daemon interaction"
-        );
     }
 
     #[test]
@@ -2849,5 +2916,41 @@ mod tests {
             result.is_ok(),
             "prune on nonexistent dir should be Ok: {result:?}"
         );
+    }
+
+    #[test]
+    fn test_parse_env_vars_valid_pair() {
+        let parsed = parse_env_vars(&["FOO=bar".to_string()]).expect("valid env should parse");
+        assert_eq!(parsed.get("FOO").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn test_parse_env_vars_value_with_equals() {
+        let parsed = parse_env_vars(&["URL=https://x.test?a=1&b=2".to_string()])
+            .expect("value with equals should parse");
+        assert_eq!(
+            parsed.get("URL").map(String::as_str),
+            Some("https://x.test?a=1&b=2")
+        );
+    }
+
+    #[test]
+    fn test_parse_env_vars_missing_delimiter_errors() {
+        let err = parse_env_vars(&["NO_DELIM".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_parse_env_vars_empty_key_errors() {
+        let err = parse_env_vars(&["=value".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_runtime_name_all_variants() {
+        assert_eq!(runtime_name(&RuntimeKind::Claude), "claude");
+        assert_eq!(runtime_name(&RuntimeKind::Codex), "codex");
+        assert_eq!(runtime_name(&RuntimeKind::Gemini), "gemini");
+        assert_eq!(runtime_name(&RuntimeKind::Opencode), "opencode");
     }
 }

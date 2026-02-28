@@ -144,6 +144,14 @@ fn execute_agent_cleanup(
         let session = query_session_for_team(team_name, agent_name);
         match session {
             Ok(Some(info)) if info.alive => {
+                let pid = validated_signal_pid(info.process_id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "refusing to signal invalid pid {} for {}@{}",
+                        info.process_id,
+                        agent_name,
+                        team_name
+                    )
+                })?;
                 if !kill_mode {
                     anyhow::bail!(
                         "agent '{}' is active; refusing destructive cleanup without --kill",
@@ -155,19 +163,8 @@ fn execute_agent_cleanup(
                 if !wait_for_session_dead(team_name, agent_name, timeout_secs) {
                     #[cfg(unix)]
                     {
-                        let pid = validated_signal_pid(info.process_id).ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "invalid process id {} for '{}'",
-                                info.process_id,
-                                agent_name
-                            )
-                        })?;
-                        // SAFETY: `pid` validated to avoid special/invalid values.
+                        // SAFETY: SIGINT requests graceful interrupt of the target process.
                         let _ = unsafe { libc::kill(pid, libc::SIGINT) };
-                        if !wait_for_session_dead(team_name, agent_name, 3) {
-                            // SAFETY: escalation to SIGKILL after graceful-first attempt.
-                            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
-                        }
                     }
                     #[cfg(not(unix))]
                     {
@@ -175,11 +172,18 @@ fn execute_agent_cleanup(
                             "forced process termination is not supported on this platform"
                         );
                     }
-                    if !wait_for_session_dead(team_name, agent_name, 3) {
-                        anyhow::bail!(
-                            "failed to terminate '{}' within timeout; cleanup aborted",
-                            agent_name
-                        );
+                    if !wait_for_session_dead(team_name, agent_name, 10) {
+                        #[cfg(unix)]
+                        {
+                            // SAFETY: SIGKILL force-terminates process after graceful attempts.
+                            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+                        }
+                        if !wait_for_session_dead(team_name, agent_name, 3) {
+                            anyhow::bail!(
+                                "failed to terminate '{}' within timeout; cleanup aborted",
+                                agent_name
+                            );
+                        }
                     }
                 }
             }
@@ -312,7 +316,6 @@ mod test_daemon_state {
         slot().lock().unwrap().clone()
     }
 }
-
 /// Clean up a single team's inboxes
 fn cleanup_team(
     home_dir: &Path,
@@ -510,6 +513,10 @@ mod tests {
                 session_id: "sess-1".to_string(),
                 process_id: 4242,
                 alive: true,
+                runtime: Some("codex".to_string()),
+                runtime_session_id: None,
+                pane_id: None,
+                runtime_home: None,
             }),
             query_error: None,
         });

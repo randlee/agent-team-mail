@@ -18,6 +18,7 @@ mod members;
 mod read;
 mod register;
 mod request;
+mod runtime_adapter;
 mod send;
 mod status;
 mod subscribe;

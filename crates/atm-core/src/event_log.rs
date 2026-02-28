@@ -19,6 +19,10 @@ pub struct EventFields {
     pub error: Option<String>,
     pub count: Option<u64>,
     pub message_text: Option<String>,
+    pub runtime: Option<String>,
+    pub runtime_session_id: Option<String>,
+    pub teardown_stage: Option<String>,
+    pub spawn_mode: Option<String>,
 }
 
 /// Forward `event` to the unified producer channel if a sender is registered.
@@ -67,6 +71,30 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
             }
             if let Some(cnt) = fields.count {
                 map.insert("count".to_string(), serde_json::Value::Number(cnt.into()));
+            }
+            if let Some(runtime) = &fields.runtime {
+                map.insert(
+                    "runtime".to_string(),
+                    serde_json::Value::String(runtime.clone()),
+                );
+            }
+            if let Some(runtime_session_id) = &fields.runtime_session_id {
+                map.insert(
+                    "runtime_session_id".to_string(),
+                    serde_json::Value::String(runtime_session_id.clone()),
+                );
+            }
+            if let Some(teardown_stage) = &fields.teardown_stage {
+                map.insert(
+                    "teardown_stage".to_string(),
+                    serde_json::Value::String(teardown_stage.clone()),
+                );
+            }
+            if let Some(spawn_mode) = &fields.spawn_mode {
+                map.insert(
+                    "spawn_mode".to_string(),
+                    serde_json::Value::String(spawn_mode.clone()),
+                );
             }
             map
         },

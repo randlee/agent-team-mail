@@ -91,6 +91,15 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
         return Ok(());
     }
 
+    let pid = validated_signal_pid(info.process_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "refusing to signal invalid pid {} for {}@{}",
+            info.process_id,
+            agent,
+            team_name
+        )
+    })?;
+
     send_shutdown_request(&home_dir, team_name, agent)?;
     if wait_for_session_dead(team_name, agent, timeout_secs) {
         crate::commands::teams::cleanup_single_agent(
@@ -104,30 +113,47 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
 
     #[cfg(unix)]
     {
-        let pid = validated_signal_pid(info.process_id)
-            .ok_or_else(|| anyhow::anyhow!("invalid process id {}", info.process_id))?;
-        // SAFETY: validated PID, graceful-first interruption signal.
+        // SAFETY: SIGINT requests graceful interrupt of the target process.
         let _ = unsafe { libc::kill(pid, libc::SIGINT) };
-        if !wait_for_session_dead(team_name, agent, 3) {
-            // SAFETY: escalation after graceful attempt timed out.
-            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
     }
     #[cfg(not(unix))]
     {
         anyhow::bail!("forced termination not supported on this platform");
     }
 
-    if wait_for_session_dead(team_name, agent, 3) {
+    if wait_for_session_dead(team_name, agent, 10) {
         crate::commands::teams::cleanup_single_agent(
             team_name.to_string(),
             agent.to_string(),
             true,
         )?;
-        println!("Forced termination + teardown cleanup complete for {agent}@{team_name}");
+        println!("SIGINT termination + teardown cleanup complete for {agent}@{team_name}");
         Ok(())
     } else {
-        anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+        #[cfg(unix)]
+        {
+            // SAFETY: SIGKILL force-terminates process that ignored prior shutdown attempts.
+            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        if wait_for_session_dead(team_name, agent, 3) {
+            crate::commands::teams::cleanup_single_agent(
+                team_name.to_string(),
+                agent.to_string(),
+                true,
+            )?;
+            println!("SIGKILL termination + teardown cleanup complete for {agent}@{team_name}");
+            Ok(())
+        } else {
+            anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+        }
+    }
+}
+
+fn validated_signal_pid(pid: u32) -> Option<i32> {
+    if pid > 1 && pid <= i32::MAX as u32 {
+        Some(pid as i32)
+    } else {
+        None
     }
 }
 
@@ -173,14 +199,6 @@ fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -
         std::thread::sleep(Duration::from_millis(500));
     }
     false
-}
-
-fn validated_signal_pid(pid: u32) -> Option<i32> {
-    if pid > 1 && pid <= i32::MAX as u32 {
-        Some(pid as i32)
-    } else {
-        None
-    }
 }
 
 /// Execute daemon status command

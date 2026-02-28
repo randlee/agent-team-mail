@@ -22,9 +22,20 @@ pub struct MockPayload {
 /// Call record for mock backend operations
 #[derive(Debug, Clone)]
 pub enum MockCall {
-    Spawn { agent_id: String },
-    SendMessage { agent_id: String, message: String },
-    Shutdown { agent_id: String },
+    Spawn {
+        agent_id: String,
+    },
+    SpawnWithEnv {
+        agent_id: String,
+        env_vars: HashMap<String, String>,
+    },
+    SendMessage {
+        agent_id: String,
+        message: String,
+    },
+    Shutdown {
+        agent_id: String,
+    },
 }
 
 /// Shared state for mock backend
@@ -232,11 +243,28 @@ impl WorkerAdapter for MockTmuxBackend {
         debug!("Mock backend shut down worker {}", handle.agent_id);
         Ok(())
     }
+
+    async fn spawn_with_env(
+        &mut self,
+        agent_id: &str,
+        command: &str,
+        env_vars: &HashMap<String, String>,
+    ) -> Result<WorkerHandle, PluginError> {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(MockCall::SpawnWithEnv {
+                agent_id: agent_id.to_string(),
+                env_vars: env_vars.clone(),
+            });
+        }
+        self.spawn(agent_id, command).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::worker_adapter::codex_tmux::TmuxPayload;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -278,6 +306,33 @@ mod tests {
         } else {
             panic!("Expected SendMessage call");
         }
+    }
+
+    #[tokio::test]
+    async fn test_send_message_with_gemini_payload_routes_through_send_message_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut backend = MockTmuxBackend::new(temp_dir.path().to_path_buf());
+        let handle = WorkerHandle {
+            agent_id: "gem-agent".to_string(),
+            backend_id: "mock-pane-gem-agent".to_string(),
+            log_file_path: temp_dir.path().join("gem.log"),
+            payload: Some(Arc::new(TmuxPayload {
+                session: "s".to_string(),
+                pane_id: "%1".to_string(),
+                window_name: "gem-agent".to_string(),
+                runtime: "gemini".to_string(),
+                runtime_session_id: Some("sess-gem".to_string()),
+                runtime_home: None,
+            })),
+        };
+
+        backend
+            .send_message(&handle, "hello")
+            .await
+            .expect("send_message should succeed");
+
+        let calls = backend.get_calls();
+        assert!(calls.iter().any(|c| matches!(c, MockCall::SendMessage { agent_id, message } if agent_id == "gem-agent" && message == "hello")));
     }
 
     #[tokio::test]

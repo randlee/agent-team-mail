@@ -29,16 +29,13 @@ use std::path::{Path, PathBuf};
 // Embedded hook script bodies (compile-time)
 // ---------------------------------------------------------------------------
 
-const SESSION_START_PY: &str =
-    include_str!("../../../../.claude/scripts/session-start.py");
+const SESSION_START_PY: &str = include_str!("../../../../.claude/scripts/session-start.py");
 const ATM_IDENTITY_WRITE_PY: &str =
     include_str!("../../../../.claude/scripts/atm-identity-write.py");
 const ATM_IDENTITY_CLEANUP_PY: &str =
     include_str!("../../../../.claude/scripts/atm-identity-cleanup.py");
-const GATE_AGENT_SPAWNS_PY: &str =
-    include_str!("../../../../.claude/scripts/gate-agent-spawns.py");
-const ATM_HOOK_LIB_PY: &str =
-    include_str!("../../../../.claude/scripts/atm_hook_lib.py");
+const GATE_AGENT_SPAWNS_PY: &str = include_str!("../../../../.claude/scripts/gate-agent-spawns.py");
+const ATM_HOOK_LIB_PY: &str = include_str!("../../../../.claude/scripts/atm_hook_lib.py");
 
 // ---------------------------------------------------------------------------
 // Hook command templates
@@ -141,7 +138,9 @@ pub fn execute(args: InitArgs) -> Result<()> {
 
     // Materialize hook scripts to disk before writing settings
     let scripts_dir = if args.global {
-        crate::util::settings::get_home_dir()?.join(".claude").join("scripts")
+        crate::util::settings::get_home_dir()?
+            .join(".claude")
+            .join("scripts")
     } else {
         std::env::current_dir()?.join(".claude").join("scripts")
     };
@@ -173,8 +172,12 @@ pub fn execute(args: InitArgs) -> Result<()> {
 /// written.
 fn materialize_scripts(scripts_dir: &Path) -> Result<()> {
     use std::fs;
-    fs::create_dir_all(scripts_dir)
-        .with_context(|| format!("Failed to create scripts directory {}", scripts_dir.display()))?;
+    fs::create_dir_all(scripts_dir).with_context(|| {
+        format!(
+            "Failed to create scripts directory {}",
+            scripts_dir.display()
+        )
+    })?;
 
     let files = [
         ("session-start.py", SESSION_START_PY),
@@ -342,9 +345,7 @@ fn merge_hooks(settings: &mut serde_json::Value, global: bool) -> Result<MergeRe
         let obj = settings
             .as_object_mut()
             .context("settings.json root is not a JSON object")?;
-        let hooks_entry = obj
-            .entry("hooks")
-            .or_insert_with(|| serde_json::json!({}));
+        let hooks_entry = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
         if !hooks_entry.is_object() {
             anyhow::bail!(
                 "settings.json `hooks` field exists but is not a JSON object; refusing to overwrite"
@@ -375,10 +376,7 @@ fn merge_hooks(settings: &mut serde_json::Value, global: bool) -> Result<MergeRe
 /// The `SessionStart` array contains plain command objects (no `matcher`
 /// wrapper). An entry is considered present when its `command` field matches
 /// `command` exactly.
-fn merge_session_start_hook(
-    settings: &mut serde_json::Value,
-    command: &str,
-) -> Result<HookStatus> {
+fn merge_session_start_hook(settings: &mut serde_json::Value, command: &str) -> Result<HookStatus> {
     let new_entry = serde_json::json!({
         "type": "command",
         "command": command
@@ -604,14 +602,20 @@ mod tests {
             .find(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("Bash"))
             .expect("Bash matcher");
         let bash_hooks = bash_matcher["hooks"].as_array().expect("hooks array");
-        assert!(hook_command_present(bash_hooks, &pre_tool_use_bash_cmd(false)));
+        assert!(hook_command_present(
+            bash_hooks,
+            &pre_tool_use_bash_cmd(false)
+        ));
 
         let task_matcher = pre_tool_use
             .iter()
             .find(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("Task"))
             .expect("Task matcher");
         let task_hooks = task_matcher["hooks"].as_array().expect("hooks array");
-        assert!(hook_command_present(task_hooks, &pre_tool_use_task_cmd(false)));
+        assert!(hook_command_present(
+            task_hooks,
+            &pre_tool_use_task_cmd(false)
+        ));
 
         let post_tool_use = parsed["hooks"]["PostToolUse"]
             .as_array()
@@ -621,7 +625,10 @@ mod tests {
             .find(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("Bash"))
             .expect("PostToolUse Bash matcher");
         let post_hooks = post_bash["hooks"].as_array().expect("hooks array");
-        assert!(hook_command_present(post_hooks, &post_tool_use_bash_cmd(false)));
+        assert!(hook_command_present(
+            post_hooks,
+            &post_tool_use_bash_cmd(false)
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -769,6 +776,7 @@ mod tests {
 
     /// Local path resolution should yield `{cwd}/.claude/settings.json`.
     #[test]
+    #[serial]
     fn test_resolve_settings_path_local() {
         let path = resolve_settings_path(false).expect("resolve local");
         let cwd = env::current_dir().expect("cwd");

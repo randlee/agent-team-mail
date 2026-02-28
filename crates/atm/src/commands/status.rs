@@ -74,7 +74,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 json!({
                     "name": m.name,
                     "type": m.agent_type,
-                    "isActive": resolve_member_active(team_name, m, &daemon_liveness),
+                    "isActive": resolve_member_active(m, &daemon_liveness),
                     "unreadCount": unread,
                 })
             }).collect::<Vec<_>>(),
@@ -96,7 +96,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         let member_count = team_config.members.len();
         println!("Members ({member_count}):");
         for member in &team_config.members {
-            let active_str = if resolve_member_active(team_name, member, &daemon_liveness) {
+            let active_str = if resolve_member_active(member, &daemon_liveness) {
                 "Online "
             } else {
                 "Offline"
@@ -129,7 +129,6 @@ fn load_daemon_liveness(team_name: &str, team_config: &TeamConfig) -> HashMap<St
 }
 
 fn resolve_member_active(
-    _team_name: &str,
     member: &agent_team_mail_core::schema::AgentMember,
     daemon_liveness: &HashMap<String, bool>,
 ) -> bool {

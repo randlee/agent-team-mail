@@ -44,6 +44,18 @@ pub struct SessionRecord {
     pub state: SessionState,
     /// Last state update timestamp (RFC3339 UTC).
     pub updated_at: String,
+    /// Runtime kind (e.g., `codex`, `gemini`) when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Runtime-native session/thread identifier when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_session_id: Option<String>,
+    /// Runtime backend pane identifier when applicable (e.g., tmux `%42`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// Runtime home/state directory when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_home: Option<String>,
 }
 
 impl SessionRecord {
@@ -105,10 +117,40 @@ impl SessionRegistry {
 
     /// Insert or update the session record for `team/name`.
     pub fn upsert_for_team(&mut self, team: &str, name: &str, session_id: &str, process_id: u32) {
-        let now = chrono::Utc::now().to_rfc3339();
         let key = make_key(team, name);
+        let existing = self.sessions.get(&key).cloned();
+        let runtime = existing.as_ref().and_then(|r| r.runtime.clone());
+        let runtime_session_id = existing.as_ref().and_then(|r| r.runtime_session_id.clone());
+        let pane_id = existing.as_ref().and_then(|r| r.pane_id.clone());
+        let runtime_home = existing.as_ref().and_then(|r| r.runtime_home.clone());
+        self.upsert_runtime_for_team(
+            team,
+            name,
+            session_id,
+            process_id,
+            runtime,
+            runtime_session_id,
+            pane_id,
+            runtime_home,
+        );
+    }
+
+    /// Insert or update the session record for `team/name` with runtime metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_runtime_for_team(
+        &mut self,
+        team: &str,
+        name: &str,
+        session_id: &str,
+        process_id: u32,
+        runtime: Option<String>,
+        runtime_session_id: Option<String>,
+        pane_id: Option<String>,
+        runtime_home: Option<String>,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
         self.sessions.insert(
-            key,
+            make_key(team, name),
             SessionRecord {
                 team: team.to_string(),
                 agent_name: name.to_string(),
@@ -116,6 +158,10 @@ impl SessionRegistry {
                 process_id,
                 state: SessionState::Active,
                 updated_at: now,
+                runtime,
+                runtime_session_id,
+                pane_id,
+                runtime_home,
             },
         );
         self.persist_best_effort();
@@ -225,27 +271,13 @@ pub fn new_session_registry() -> SharedSessionRegistry {
 
 /// Check whether an OS process with the given PID is alive.
 ///
-/// On Unix this uses `kill(pid, 0)` — a read-only existence probe that sends
-/// no signal. On non-Unix platforms this always returns `false`.
+/// Delegates to `atm_core::pid::is_pid_alive` which provides cross-platform
+/// support (Unix via `kill(pid, 0)`, Windows via `OpenProcess`).
 pub fn is_pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        pid_alive_unix(pid)
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return false;
     }
-
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
-#[cfg(unix)]
-fn pid_alive_unix(pid: u32) -> bool {
-    let pid_t = pid as libc::pid_t;
-    // SAFETY: kill with sig=0 never sends a signal; it only checks PID existence.
-    let result = unsafe { libc::kill(pid_t, 0) };
-    result == 0
+    agent_team_mail_core::pid::is_pid_alive(pid)
 }
 
 fn load_sessions_from_file(path: &Path) -> Option<HashMap<String, SessionRecord>> {
@@ -271,7 +303,10 @@ fn load_sessions_from_file(path: &Path) -> Option<HashMap<String, SessionRecord>
     )
 }
 
-fn write_sessions_to_file(path: &Path, sessions: &HashMap<String, SessionRecord>) -> std::io::Result<()> {
+fn write_sessions_to_file(
+    path: &Path,
+    sessions: &HashMap<String, SessionRecord>,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -412,7 +447,6 @@ mod tests {
     }
 
     /// Liveness check: the current process must be alive.
-    #[cfg(unix)]
     #[test]
     fn test_is_pid_alive_current_process() {
         let pid = std::process::id();
@@ -420,15 +454,12 @@ mod tests {
     }
 
     /// Liveness check: an impossible PID should be dead.
-    #[cfg(unix)]
     #[test]
     fn test_is_pid_alive_nonexistent_pid() {
-        // i32::MAX exceeds kernel PID range on Linux/macOS; kill() returns ESRCH.
         assert!(!is_pid_alive(i32::MAX as u32));
     }
 
     /// SessionRecord::is_process_alive uses the current process (always alive).
-    #[cfg(unix)]
     #[test]
     fn test_record_is_process_alive_current() {
         let record = SessionRecord {
@@ -438,6 +469,10 @@ mod tests {
             process_id: std::process::id(),
             state: SessionState::Active,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
         };
         assert!(record.is_process_alive());
     }
