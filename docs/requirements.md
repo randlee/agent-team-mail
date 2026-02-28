@@ -558,6 +558,83 @@ atm status <team>                # specific team
 
 **Output**: Team info, member list with activity, unread message counts, pending tasks.
 
+### 4.3.1 Runtime-Agnostic Teammate Spawn Contract
+
+`atm` must support runtime-aware teammate spawn semantics that keep ATM identity
+stable across runtimes (Claude/Codex/Gemini/OpenCode) while allowing runtime-
+specific session handles.
+
+Required baseline:
+- `atm teams spawn` accepts an explicit runtime selector (initially `claude`,
+  `codex`, `gemini` where supported).
+- Spawn supports two modes:
+  - **fresh**: start a new runtime session with a system prompt/bootstrap prompt.
+  - **resume**: continue an existing runtime session bound to the ATM agent.
+- User-facing control remains agent-centric (`team`, `agent`) rather than runtime
+  session-centric for normal usage.
+
+### 4.3.2 Runtime Session and Identity Mapping
+
+Daemon/session registry must store both ATM identity and runtime identity:
+- canonical ATM identity: `team`, `agent`
+- runtime metadata:
+  - `runtime` (e.g., `gemini`)
+  - `runtime_session_id` (runtime-native session/thread identifier)
+  - `process_id`
+  - `pane_id` (for tmux-based workers)
+  - `runtime_home` (runtime state root when isolated per agent)
+  - `state`, `updated_at`
+
+Invariants:
+- ATM identity (`team`, `agent`) is stable and is the authoritative routing key
+  for ATM mail semantics.
+- Runtime session identifiers are adapter-specific and may change between fresh
+  and resumed launches.
+- Resume-by-agent is the default UX. Runtime session IDs are resolved from ATM
+  registry/state in normal flow.
+
+### 4.3.3 Teardown and Liveness Escalation Contract
+
+Teammate teardown must follow request-first semantics:
+1. Send polite shutdown request to the target agent.
+2. Wait a bounded grace window.
+3. If unresponsive, escalate with runtime/process signals.
+
+For process-backed runtimes (including Gemini tmux workers), minimum escalation:
+- `SIGINT` -> `SIGTERM` -> `SIGKILL` (bounded timeout between stages).
+
+Safety requirements:
+- Teardown escalation must never target agents outside the current team scope.
+- Every escalation stage must emit a structured event to unified logging (section 4.6).
+
+### 4.3.4 Steering Contract (Interactive and Headless)
+
+Steering must support both:
+- interactive tmux-pane workers (stdin prompt/control injection), and
+- headless/structured transports for MCP-style orchestration.
+
+For runtimes without in-turn prompt injection APIs, ATM must enforce and
+document `cancel-then-steer` semantics (no silent assumptions of live turn
+mutation).
+
+### 4.3.5 Gemini Baseline Adapter Requirements
+
+Gemini is the first non-Claude runtime baseline for this contract.
+
+Required Gemini behavior:
+- Launch options must support:
+  - `--model`
+  - `--sandbox` / approval mode where configured
+  - fresh prompt mode and resume mode (`--resume`)
+- Structured headless output must use `--output-format stream-json` for event
+  transport where applicable.
+- System prompt override support must be available through Gemini-supported
+  mechanism (`GEMINI_SYSTEM_MD`).
+- Per-agent state isolation must be supported via `GEMINI_CLI_HOME`.
+- Lifecycle mapping should use one ATM envelope (`hook-event`) with
+  `source.kind = "agent_hook"` for Gemini-origin events (`session_start`,
+  `teammate_idle`, `session_end`).
+
 ### 4.4 Configuration
 
 #### Resolution Order (highest priority first)
