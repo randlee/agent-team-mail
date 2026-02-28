@@ -20,6 +20,7 @@ pub mod log_reader;
 pub mod logging;
 pub mod logging_event;
 pub mod model_registry;
+pub mod pid;
 pub mod retention;
 pub mod schema;
 pub mod text;

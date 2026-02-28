@@ -198,8 +198,9 @@ mod tests {
         let system_md = std::env::temp_dir().join("system.md");
         spec.system_prompt = Some(system_md.clone());
 
+        let home_dir = std::env::temp_dir().join("tester");
         let env = adapter
-            .build_env(&spec, Path::new("/home/tester"))
+            .build_env(&spec, &home_dir)
             .expect("env build should succeed");
         let runtime_home = env
             .get("GEMINI_CLI_HOME")

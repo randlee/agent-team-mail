@@ -250,21 +250,10 @@ async fn check_lock_at(sessions_root: &Path, team: &str, identity: &str) -> Opti
 /// Check whether process `pid` is currently alive.
 ///
 /// On Unix sends signal 0 (`kill(pid, 0)`), which tests existence without
-/// delivering a signal. On Windows always returns `false` (MVP behaviour:
-/// treat all stale locks as dead).
+/// Check whether the process that holds a lock is still alive.
+/// Delegates to `atm_core::pid::is_pid_alive` for cross-platform support.
 fn is_pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // SAFETY: kill(pid, 0) does not deliver a signal; it only checks
-        // whether the calling process has permission to signal `pid`. A
-        // return value of 0 means the process exists.
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
+    agent_team_mail_core::pid::is_pid_alive(pid)
 }
 
 #[cfg(test)]
@@ -394,12 +383,9 @@ mod tests {
 
     #[test]
     fn is_pid_alive_self() {
-        // The current process is definitely alive
-        let alive = is_pid_alive(std::process::id());
-        // On Unix this must be true; on Windows we always return false (MVP)
-        #[cfg(unix)]
-        assert!(alive, "current process should be alive");
-        #[cfg(not(unix))]
-        let _ = alive;
+        assert!(
+            is_pid_alive(std::process::id()),
+            "current process should be alive"
+        );
     }
 }

@@ -425,17 +425,7 @@ fn is_pid_alive(pid: u32) -> bool {
     if !is_valid_signal_pid(pid) {
         return false;
     }
-    #[cfg(unix)]
-    {
-        // SAFETY: `kill(pid, 0)` is an existence check and sends no signal.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
+    agent_team_mail_core::pid::is_pid_alive(pid)
 }
 
 fn send_sigkill(pid: u32) {
