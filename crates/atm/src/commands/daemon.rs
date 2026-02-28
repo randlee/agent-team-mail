@@ -4,8 +4,8 @@ use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use anyhow::{Context, Result};
-use clap::{Args, Subcommand};
 use chrono::Utc;
+use clap::{Args, Subcommand};
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
@@ -51,9 +51,10 @@ pub fn execute(args: DaemonArgs) -> Result<()> {
         return execute_kill(agent, args.team.as_deref(), args.timeout.max(1));
     }
 
-    match args.command.unwrap_or(DaemonCommands::Status(StatusArgs {
-        json: false,
-    })) {
+    match args
+        .command
+        .unwrap_or(DaemonCommands::Status(StatusArgs { json: false }))
+    {
         DaemonCommands::Status(status_args) => execute_status(status_args),
     }
 }
@@ -90,6 +91,15 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
         return Ok(());
     }
 
+    let pid = validated_signal_pid(info.process_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "refusing to signal invalid pid {} for {}@{}",
+            info.process_id,
+            agent,
+            team_name
+        )
+    })?;
+
     send_shutdown_request(&home_dir, team_name, agent)?;
     if wait_for_session_dead(team_name, agent, timeout_secs) {
         crate::commands::teams::cleanup_single_agent(
@@ -103,28 +113,55 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
 
     #[cfg(unix)]
     {
-        // SAFETY: SIGTERM requests process termination by PID.
-        let _ = unsafe { libc::kill(info.process_id as libc::pid_t, libc::SIGTERM) };
+        // SAFETY: SIGINT requests graceful interrupt of the target process.
+        let _ = unsafe { libc::kill(pid, libc::SIGINT) };
     }
     #[cfg(not(unix))]
     {
         anyhow::bail!("forced termination not supported on this platform");
     }
 
-    if wait_for_session_dead(team_name, agent, 3) {
+    if wait_for_session_dead(team_name, agent, 10) {
         crate::commands::teams::cleanup_single_agent(
             team_name.to_string(),
             agent.to_string(),
             true,
         )?;
-        println!("Forced termination + teardown cleanup complete for {agent}@{team_name}");
+        println!("SIGINT termination + teardown cleanup complete for {agent}@{team_name}");
         Ok(())
     } else {
-        anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+        #[cfg(unix)]
+        {
+            // SAFETY: SIGKILL force-terminates process that ignored prior shutdown attempts.
+            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        if wait_for_session_dead(team_name, agent, 3) {
+            crate::commands::teams::cleanup_single_agent(
+                team_name.to_string(),
+                agent.to_string(),
+                true,
+            )?;
+            println!("SIGKILL termination + teardown cleanup complete for {agent}@{team_name}");
+            Ok(())
+        } else {
+            anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+        }
     }
 }
 
-fn send_shutdown_request(home_dir: &std::path::Path, team_name: &str, agent_name: &str) -> Result<()> {
+fn validated_signal_pid(pid: u32) -> Option<i32> {
+    if pid > 1 && pid <= i32::MAX as u32 {
+        Some(pid as i32)
+    } else {
+        None
+    }
+}
+
+fn send_shutdown_request(
+    home_dir: &std::path::Path,
+    team_name: &str,
+    agent_name: &str,
+) -> Result<()> {
     let payload = serde_json::json!({
         "type": "shutdown_request",
         "requestId": Uuid::new_v4().to_string(),

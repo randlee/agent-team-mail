@@ -1051,7 +1051,10 @@ async fn handle_hook_event_command(
                 );
             }
             {
-                session_registry.lock().unwrap().mark_dead_for_team(&team, &agent);
+                session_registry
+                    .lock()
+                    .unwrap()
+                    .mark_dead_for_team(&team, &agent);
             }
             {
                 let mut tracker = state_store.lock().unwrap();
@@ -1481,9 +1484,12 @@ async fn enqueue_elicitation_response(
         "decision": decision,
         "text": text,
     });
-    tokio::fs::write(path, serde_json::to_vec(&payload).map_err(|e| e.to_string())?)
-        .await
-        .map_err(|e| format!("failed to write elicitation_queue file: {e}"))?;
+    tokio::fs::write(
+        path,
+        serde_json::to_vec(&payload).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| format!("failed to write elicitation_queue file: {e}"))?;
     Ok(())
 }
 
@@ -1819,6 +1825,10 @@ fn handle_session_query(
                     "session_id": record.session_id,
                     "process_id": record.process_id,
                     "alive": alive,
+                    "runtime": record.runtime,
+                    "runtime_session_id": record.runtime_session_id,
+                    "pane_id": record.pane_id,
+                    "runtime_home": record.runtime_home,
                 }),
             )
         }
@@ -1920,6 +1930,10 @@ fn handle_session_query_team(
             "session_id": record.session_id,
             "process_id": record.process_id,
             "alive": alive,
+            "runtime": record.runtime,
+            "runtime_session_id": record.runtime_session_id,
+            "pane_id": record.pane_id,
+            "runtime_home": record.runtime_home,
         }),
     )
 }
@@ -4308,12 +4322,9 @@ mod tests {
         let store = make_store();
         let sr = make_sr();
         // Pre-populate registry so mark_dead has something to work with.
-        sr.lock().unwrap().upsert_for_team(
-            "atm-dev",
-            "arch-ctm",
-            "codex:sess-end-test",
-            0,
-        );
+        sr.lock()
+            .unwrap()
+            .upsert_for_team("atm-dev", "arch-ctm", "codex:sess-end-test", 0);
 
         let req = SocketRequest {
             version: PROTOCOL_VERSION,

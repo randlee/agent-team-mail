@@ -108,6 +108,8 @@ fn execute_unix(args: LaunchArgs) -> Result<()> {
         prompt: args.prompt.clone(),
         timeout_secs: args.timeout,
         env_vars,
+        runtime: Some("codex".to_string()),
+        resume_session_id: None,
     };
 
     // Send launch request to daemon
@@ -238,6 +240,8 @@ mod tests {
             prompt: Some("Review the bridge".to_string()),
             timeout_secs: 30,
             env_vars: HashMap::new(),
+            runtime: Some("codex".to_string()),
+            resume_session_id: None,
         };
 
         assert_eq!(config.agent, "arch-ctm");

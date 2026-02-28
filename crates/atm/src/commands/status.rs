@@ -47,6 +47,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     }
 
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let daemon_liveness = load_daemon_liveness(team_name, &team_config);
 
     // Count unread messages for each member
     let inbox_counts = count_inbox_messages(&team_dir, &team_config)?;
@@ -73,7 +74,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 json!({
                     "name": m.name,
                     "type": m.agent_type,
-                    "isActive": m.is_active.unwrap_or(false),
+                    "isActive": resolve_member_active(m, &daemon_liveness),
                     "unreadCount": unread,
                 })
             }).collect::<Vec<_>>(),
@@ -95,7 +96,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         let member_count = team_config.members.len();
         println!("Members ({member_count}):");
         for member in &team_config.members {
-            let active_str = if member.is_active.unwrap_or(false) {
+            let active_str = if resolve_member_active(member, &daemon_liveness) {
                 "Online "
             } else {
                 "Offline"
@@ -113,6 +114,28 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn load_daemon_liveness(team_name: &str, team_config: &TeamConfig) -> HashMap<String, bool> {
+    let mut liveness = HashMap::new();
+    for member in &team_config.members {
+        if let Ok(Some(info)) =
+            agent_team_mail_core::daemon_client::query_session_for_team(team_name, &member.name)
+        {
+            liveness.insert(member.name.clone(), info.alive);
+        }
+    }
+    liveness
+}
+
+fn resolve_member_active(
+    member: &agent_team_mail_core::schema::AgentMember,
+    daemon_liveness: &HashMap<String, bool>,
+) -> bool {
+    daemon_liveness
+        .get(&member.name)
+        .copied()
+        .unwrap_or_else(|| member.is_active.unwrap_or(false))
 }
 
 /// Count unread messages in inboxes

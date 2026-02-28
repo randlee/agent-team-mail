@@ -174,6 +174,17 @@ pub struct LaunchConfig {
     /// `ATM_IDENTITY` and `ATM_TEAM` are always set automatically and do not
     /// need to be included here.
     pub env_vars: std::collections::HashMap<String, String>,
+    /// Runtime adapter kind (e.g., `"codex"`, `"gemini"`).
+    ///
+    /// Older clients may omit this field; daemon should treat missing as
+    /// runtime default (`codex`).
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// Optional runtime-native session ID used for resume-aware launches.
+    ///
+    /// For Gemini this maps to the Gemini session UUID that should be resumed.
+    #[serde(default)]
+    pub resume_session_id: Option<String>,
 }
 
 /// Result of a successful agent launch returned by the daemon.
@@ -502,6 +513,18 @@ pub struct SessionQueryResult {
     pub process_id: u32,
     /// Whether the OS process is currently running.
     pub alive: bool,
+    /// Runtime kind (`codex`, `gemini`, etc.) when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Runtime-native session/thread identifier when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_session_id: Option<String>,
+    /// Backend pane identifier when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// Runtime home/state directory when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_home: Option<String>,
 }
 
 /// Query the daemon for the session record of a named agent.
@@ -557,7 +580,10 @@ pub fn query_session(name: &str) -> anyhow::Result<Option<SessionQueryResult>> {
 ///
 /// * `team` - Team name (e.g., `"atm-dev"`)
 /// * `name` - Agent name to look up (e.g., `"team-lead"`)
-pub fn query_session_for_team(team: &str, name: &str) -> anyhow::Result<Option<SessionQueryResult>> {
+pub fn query_session_for_team(
+    team: &str,
+    name: &str,
+) -> anyhow::Result<Option<SessionQueryResult>> {
     let request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
@@ -1022,6 +1048,8 @@ mod tests {
             prompt: Some("Review the bridge module".to_string()),
             timeout_secs: 30,
             env_vars,
+            runtime: Some("codex".to_string()),
+            resume_session_id: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1032,6 +1060,8 @@ mod tests {
         assert_eq!(decoded.command, "codex --yolo");
         assert_eq!(decoded.prompt.as_deref(), Some("Review the bridge module"));
         assert_eq!(decoded.timeout_secs, 30);
+        assert_eq!(decoded.runtime.as_deref(), Some("codex"));
+        assert!(decoded.resume_session_id.is_none());
         assert_eq!(
             decoded.env_vars.get("EXTRA_VAR").map(String::as_str),
             Some("value")
@@ -1047,6 +1077,8 @@ mod tests {
             prompt: None,
             timeout_secs: 60,
             env_vars: std::collections::HashMap::new(),
+            runtime: None,
+            resume_session_id: Some("sess-123".to_string()),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1055,6 +1087,8 @@ mod tests {
         assert_eq!(decoded.agent, "worker-1");
         assert!(decoded.prompt.is_none());
         assert!(decoded.env_vars.is_empty());
+        assert!(decoded.runtime.is_none());
+        assert_eq!(decoded.resume_session_id.as_deref(), Some("sess-123"));
     }
 
     #[test]
@@ -1099,6 +1133,10 @@ mod tests {
             session_id: "abc123".to_string(),
             process_id: 12345,
             alive: true,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         let decoded: SessionQueryResult = serde_json::from_str(&json).unwrap();
@@ -1114,6 +1152,8 @@ mod tests {
         assert_eq!(result.session_id, "xyz789");
         assert_eq!(result.process_id, 99);
         assert!(!result.alive);
+        assert!(result.runtime.is_none());
+        assert!(result.runtime_session_id.is_none());
     }
 
     #[test]
@@ -1138,6 +1178,8 @@ mod tests {
             prompt: None,
             timeout_secs: 5,
             env_vars: std::collections::HashMap::new(),
+            runtime: Some("codex".to_string()),
+            resume_session_id: None,
         };
         // Without a running daemon the call should gracefully return Ok(None).
         // On non-Unix platforms it always returns None.

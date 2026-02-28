@@ -3,7 +3,7 @@
 use super::activity::ActivityTracker;
 use super::agent_state::{AgentState, AgentStateTracker};
 use super::capture::LogTailer;
-use super::codex_tmux::CodexTmuxBackend;
+use super::codex_tmux::{CodexTmuxBackend, TmuxPayload};
 use super::config::WorkersConfig;
 use super::hook_watcher::HookWatcher;
 use super::lifecycle::{self, LifecycleManager, WorkerState};
@@ -15,6 +15,7 @@ use crate::daemon::session_registry::SharedSessionRegistry;
 use crate::daemon::socket::LaunchRequest;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use chrono::Utc;
@@ -176,6 +177,51 @@ impl WorkerAdapterPlugin {
             .join("daemon")
             .join("hooks")
             .join("events.jsonl")
+    }
+
+    /// Best-effort append of a runtime lifecycle hook event line.
+    fn append_agent_hook_event(
+        &self,
+        event_type: &str,
+        team: &str,
+        agent: &str,
+        session_id: &str,
+        process_id: Option<u32>,
+    ) {
+        let Some(ctx) = &self.ctx else {
+            return;
+        };
+        let path = Self::hook_events_path(ctx);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut event = serde_json::json!({
+            "type": event_type,
+            "team": team,
+            "agent": agent,
+            "sessionId": session_id,
+            "source": { "kind": "agent_hook" },
+            "received_at": chrono::Utc::now().to_rfc3339(),
+        });
+        if let Some(pid) = process_id {
+            event["processId"] = serde_json::json!(pid);
+        }
+
+        let line = format!("{event}\n");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+    }
+
+    fn runtime_from_handle(handle: &WorkerHandle) -> String {
+        handle
+            .payload_ref::<TmuxPayload>()
+            .map(|p| p.runtime.clone())
+            .unwrap_or_else(|| "codex".to_string())
     }
 
     fn resolve_team_name<'a>(
@@ -720,6 +766,20 @@ impl WorkerAdapterPlugin {
             None => return Err("Worker backend not initialized".to_string()),
         };
 
+        let runtime = config
+            .runtime
+            .clone()
+            .unwrap_or_else(|| "codex".to_string());
+        let spawn_mode = if config.resume_session_id.is_some() {
+            "resume"
+        } else {
+            "fresh"
+        };
+        let runtime_session_id = config
+            .resume_session_id
+            .clone()
+            .unwrap_or_else(|| format!("{runtime}-{}", Uuid::new_v4()));
+
         // Build env var map: ATM_IDENTITY + ATM_TEAM + extras
         let mut env_vars = config.env_vars.clone();
         env_vars
@@ -728,10 +788,16 @@ impl WorkerAdapterPlugin {
         env_vars
             .entry("ATM_TEAM".to_string())
             .or_insert_with(|| config.team.clone());
+        env_vars
+            .entry("ATM_RUNTIME".to_string())
+            .or_insert_with(|| runtime.clone());
+        env_vars
+            .entry("ATM_RUNTIME_SESSION_ID".to_string())
+            .or_insert_with(|| runtime_session_id.clone());
 
         debug!(
-            "Launching agent '{}' in team '{}' with command '{}'",
-            config.agent, config.team, config.command
+            "Launching agent '{}' in team '{}' (runtime '{}') with command '{}'",
+            config.agent, config.team, runtime, config.command
         );
 
         // Spawn the pane with env vars
@@ -755,6 +821,45 @@ impl WorkerAdapterPlugin {
             "Agent '{}' launched in pane {} (team: {})",
             config.agent, pane_id, config.team
         );
+
+        let process_id = lifecycle::get_pane_pid(&pane_id);
+        if let Some(registry) = &self.session_registry {
+            let runtime_home = handle
+                .payload_ref::<TmuxPayload>()
+                .and_then(|p| p.runtime_home.clone());
+            let process_id_for_registry = process_id.unwrap_or(0);
+            registry.lock().unwrap().upsert_runtime_for_team(
+                &config.team,
+                &config.agent,
+                &runtime_session_id,
+                process_id_for_registry,
+                Some(runtime.clone()),
+                Some(runtime_session_id.clone()),
+                Some(pane_id.clone()),
+                runtime_home,
+            );
+        }
+        self.append_agent_hook_event(
+            "session-start",
+            &config.team,
+            &config.agent,
+            &runtime_session_id,
+            process_id,
+        );
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm-daemon",
+            action: "runtime_spawn",
+            team: Some(config.team.clone()),
+            agent_id: Some(config.agent.clone()),
+            session_id: Some(runtime_session_id.clone()),
+            target: Some("worker_adapter".to_string()),
+            result: Some("ok".to_string()),
+            runtime: Some(runtime.clone()),
+            runtime_session_id: Some(runtime_session_id.clone()),
+            spawn_mode: Some(spawn_mode.to_string()),
+            ..Default::default()
+        });
 
         // Poll for Idle state transition
         let timeout = Duration::from_secs(u64::from(config.timeout_secs));
@@ -1066,11 +1171,13 @@ impl Plugin for WorkerAdapterPlugin {
 
     async fn shutdown(&mut self) -> Result<(), PluginError> {
         // Shut down all active workers gracefully
+        let mut teardown_events: Vec<(String, String, String, String)> = Vec::new();
         if let Some(backend) = &mut self.backend {
             info!("Shutting down {} workers", self.workers.len());
 
             for (member_name, handle) in self.workers.drain() {
                 debug!("Shutting down worker for member {}", member_name);
+                let runtime = Self::runtime_from_handle(&handle);
 
                 // Use graceful shutdown with timeout
                 let timeout_secs = self.config.shutdown_timeout_secs;
@@ -1084,6 +1191,19 @@ impl Plugin for WorkerAdapterPlugin {
                 {
                     error!("Failed to shut down worker for {member_name}: {e}");
                 }
+                let runtime_session_id = handle
+                    .payload_ref::<TmuxPayload>()
+                    .and_then(|p| p.runtime_session_id.clone())
+                    .unwrap_or_else(|| format!("{runtime}-{}", Uuid::new_v4()));
+                let team_name = if self.config.team_name.is_empty() {
+                    self.ctx
+                        .as_ref()
+                        .map(|c| c.system.default_team.clone())
+                        .unwrap_or_default()
+                } else {
+                    self.config.team_name.clone()
+                };
+                teardown_events.push((team_name, member_name.clone(), runtime_session_id, runtime));
 
                 // Unregister from lifecycle manager and state tracker
                 self.lifecycle.unregister_worker(&member_name);
@@ -1094,6 +1214,29 @@ impl Plugin for WorkerAdapterPlugin {
             }
 
             info!("All workers shut down");
+        }
+
+        for (team_name, member_name, runtime_session_id, runtime) in teardown_events {
+            self.append_agent_hook_event(
+                "session-end",
+                &team_name,
+                &member_name,
+                &runtime_session_id,
+                None,
+            );
+            emit_event_best_effort(EventFields {
+                level: "info",
+                source: "atm-daemon",
+                action: "runtime_teardown",
+                team: Some(team_name),
+                agent_id: Some(member_name),
+                session_id: Some(runtime_session_id),
+                target: Some("worker_adapter".to_string()),
+                result: Some("ok".to_string()),
+                runtime: Some(runtime),
+                teardown_stage: Some("request".to_string()),
+                ..Default::default()
+            });
         }
 
         Ok(())
@@ -1159,7 +1302,9 @@ impl Plugin for WorkerAdapterPlugin {
 
 #[cfg(test)]
 mod tests {
+    use super::super::mock_backend::{MockCall, MockTmuxBackend};
     use super::*;
+    use tempfile::TempDir;
 
     /// Helper to create a plugin that has a backend but no launch receiver.
     fn make_plugin_without_backend() -> WorkerAdapterPlugin {
@@ -1176,6 +1321,8 @@ mod tests {
             prompt: None,
             timeout_secs: 5,
             env_vars: std::collections::HashMap::new(),
+            runtime: Some("codex".to_string()),
+            resume_session_id: None,
         };
         let result = plugin.handle_launch(config).await;
         assert!(result.is_err());
@@ -1196,6 +1343,8 @@ mod tests {
             prompt: None,
             timeout_secs: 5,
             env_vars: std::collections::HashMap::new(),
+            runtime: Some("codex".to_string()),
+            resume_session_id: None,
         };
         let result = plugin.handle_launch(config).await;
         assert!(result.is_err());
@@ -1213,6 +1362,8 @@ mod tests {
             prompt: None,
             timeout_secs: 5,
             env_vars: std::collections::HashMap::new(),
+            runtime: Some("codex".to_string()),
+            resume_session_id: None,
         };
         let result = plugin.handle_launch(config).await;
         assert!(result.is_err());
@@ -1277,5 +1428,51 @@ mod tests {
         let plugin = WorkerAdapterPlugin::new();
         let states = plugin.get_agent_states();
         assert!(states.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_launch_gemini_passes_runtime_env_and_resume_session() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --prompt-interactive".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: Some("sess-abc".to_string()),
+        };
+
+        let result = plugin.handle_launch(config).await;
+        assert!(result.is_ok(), "launch should succeed with mock backend");
+
+        let calls = backend.get_calls();
+        let env_call = calls.into_iter().find_map(|c| match c {
+            MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+            _ => None,
+        });
+        let env_vars = env_call.expect("spawn_with_env should be recorded");
+        assert_eq!(
+            env_vars.get("ATM_RUNTIME").map(String::as_str),
+            Some("gemini")
+        );
+        assert_eq!(
+            env_vars.get("ATM_RUNTIME_SESSION_ID").map(String::as_str),
+            Some("sess-abc")
+        );
+        assert_eq!(
+            env_vars.get("ATM_IDENTITY").map(String::as_str),
+            Some("arch-ctm")
+        );
+        assert_eq!(
+            env_vars.get("ATM_TEAM").map(String::as_str),
+            Some("atm-dev")
+        );
     }
 }

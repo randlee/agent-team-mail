@@ -159,7 +159,9 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | O | Attached CLI Parity | Attach wiring, renderer parity, control-path + fixtures | COMPLETE |
 | O-R | Attach Renderer Parity | RenderClass, event coverage, diff/markdown/reasoning rendering | COMPLETE |
 | P | Attach Path Hardening Closure | Close O-R carry-forward attach deviations and parity hardening | COMPLETE |
-| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | IN PROGRESS |
+| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | COMPLETE |
+| R | Session Handoff + Hook Installer | Daemon singleton lock, session registry, `atm doctor` | COMPLETE |
+| S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
 
 ---
 
@@ -697,11 +699,11 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.7 Phase R: Session Handoff + Hook Installer — COMPLETE (R.0–R.0d); R.0e IN PROGRESS
+## 17.7 Phase R: Session Handoff + Hook Installer — COMPLETE
 
 **Goal**: Harden daemon foundations (singleton lock, canonical log sink), then build robust session startup for team-lead, hook installation via `atm init`, and embedded hook scripts in binary.
 
-**Status**: R.0, R.0b, R.0c, R.0d complete and merged (PR #272 → develop, v0.24.0). R.0e in progress. R.1 (session handoff) and R.2a/R.2b (hook installer) moved to **Phase S** for focused execution after further design review.
+**Status**: ALL COMPLETE. R.0–R.0d merged in v0.24.0 (PR #272). R.0b hardened with cross-platform PID liveness (PR #277). R.0e complete. R.1/R.2a/R.2b moved to Phase S (R.2a completed as S.2a; R.1 deferred to Phase T).
 
 ### R.0 — Daemon singleton lock + canonical log sink alignment *(prerequisite)*
 
@@ -853,17 +855,17 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | COMPLETE |
-| R.0b | Persistent session registry + agent lifecycle management | R.0 | M | COMPLETE |
+| R.0b | Persistent session registry + agent lifecycle management | R.0 | M | COMPLETE (PR #277) |
 | R.0c | `atm doctor` diagnostics and cleanup guidance | R.0b | S | COMPLETE |
 | R.0d | Runtime compatibility spec (Gemini first) (docs-only) | R.0b | S | COMPLETE |
-| R.0e | Runtime compatibility spec (OpenCode baseline) (docs-only) | R.0d | S | IN PROGRESS |
+| R.0e | Runtime compatibility spec (OpenCode baseline) (docs-only) | R.0d | S | COMPLETE |
 | R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | MOVED → Phase S |
 | R.2a | `atm init` hook installer core + embedded scripts | — | M | MOVED → Phase S |
 | R.2b | `atm init --check` + upgrade compatibility validation | S.2a | S | MOVED → Phase S |
 
 ---
 
-## 17.8 Phase S: Runtime Adapters + Hook Installer — PLANNED
+## 17.8 Phase S: Runtime Adapters + Hook Installer — COMPLETE (v0.25.0)
 
 **Goal**: Implement Gemini CLI runtime adapter, `atm init` hook installer, and (pending open-question resolution) OpenCode runtime adapter. Session handoff (old R.1) deferred for further design.
 
@@ -943,11 +945,162 @@ Old R.1. Deferred for further design review. The flow risks disrupting active no
 
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
-| S.1 | Gemini baseline adapter | R.0d | L | PLANNED |
-| S.2a | `atm init` hook installer core | — | M | PLANNED |
-| S.2b | `atm init --check` + upgrade validation | S.2a | S | PLANNED |
-| S.3 | OpenCode baseline adapter | R.0e, S.1 | L | DEFERRED |
-| S.4 | `atm teams resume` session handoff | S.1 | M | DEFERRED |
+| S.1 | Gemini baseline adapter | R.0d | L | COMPLETE (PR #278) |
+| S.2a | `atm init` hook installer core | — | M | COMPLETE (PR #276) |
+| S.2b | `atm init --check` + upgrade validation | S.2a | S | MOVED → Phase T |
+| S.3 | OpenCode baseline adapter | R.0e, S.1 | L | MOVED → Phase T |
+| S.4 | `atm teams resume` session handoff | S.1 | M | MOVED → Phase T |
+
+---
+
+## 17.9 Phase T: Daemon Reliability + Bug Debt + Deferred Sprints
+
+**Goal**: Fix critical daemon reliability bugs, close all open GitHub issues, and complete deferred Phase S work. The daemon is the foundation for state tracking — if it doesn't start, nothing else works.
+
+**Integration branch**: `integrate/phase-T` off `develop`.
+
+**Priority order**: Daemon reliability (#181-183) first, then remaining TUI/UX bugs, then deferred feature work.
+
+### T.1 — Daemon auto-start on CLI usage *(bug fix, [#181](https://github.com/randlee/agent-team-mail/issues/181))*
+
+**Problem**: Daemon does not auto-start when CLI commands are used. Users must manually start the daemon. `atm doctor` flags this as critical.
+
+**Deliverables**:
+1. CLI commands that require daemon (status, cleanup --agent, daemon --kill) auto-start daemon if not running.
+2. Auto-start is transparent — no user action required.
+3. Startup failure produces clear error message (port conflict, permissions, etc.).
+4. Tests: verify auto-start on first CLI call; verify graceful error on startup failure.
+
+**Acceptance criteria**:
+- `atm status` on a fresh machine starts daemon automatically and returns correct status.
+- `atm doctor` no longer flags "daemon not running" after any CLI usage.
+
+### T.2 — Agent roster seeding + config.json watcher *(bug fix, [#182](https://github.com/randlee/agent-team-mail/issues/182))*
+
+**Problem**: Agent roster is not seeded from team `config.json` on daemon startup. Daemon starts with empty roster even when agents are configured. The daemon's filesystem watcher watches `inboxes/` but ignores `config.json`, so member adds/removes are invisible to the daemon.
+
+**Deliverables**:
+1. On daemon startup, read `config.json` for each team and seed roster with configured members.
+2. Add `config.json` to the daemon's filesystem watcher (currently only watches `inboxes/` subdirectory).
+3. On config.json change: reconcile roster (add new members, mark removed members, update changed fields).
+4. Ensure config.json and mailbox state stay in sync — orphan mailboxes without config entries flagged, config entries without mailboxes get mailbox created.
+5. Tests: daemon startup seeding; config.json member add triggers roster update; config.json member remove triggers cleanup; orphan mailbox detection.
+
+**Acceptance criteria**:
+- Starting daemon with a configured team shows all members in `atm status` immediately.
+- Adding a member to config.json (e.g. via `atm teams add-member`) is reflected in daemon roster within one watch cycle.
+- Removing a member from config.json triggers mailbox cleanup (or at minimum flags the orphan).
+
+### T.3 — Agent state transitions *(bug fix, [#183](https://github.com/randlee/agent-team-mail/issues/183))*
+
+**Problem**: Agent state never transitions after initial registration. Agents are stuck in their initial state regardless of activity.
+
+**Deliverables**:
+1. Agent state transitions based on hook events (session_start → active, session_end → inactive).
+2. PID liveness check updates state on poll cycle (alive → active, dead → inactive).
+3. `atm status` reflects real-time state.
+4. Tests: state transition after session_start hook; state transition after PID death.
+
+**Acceptance criteria**:
+- Agent state in `atm status` matches reality within one poll cycle (30s).
+
+### T.4 — TUI panel consistency *(bug fix, [#184](https://github.com/randlee/agent-team-mail/issues/184))*
+
+**Problem**: TUI right panel status contradicts left panel + stream panel empty.
+
+**Deliverables**:
+1. Right panel state derived from same source as left panel (unified state store).
+2. Stream panel shows live output when available.
+3. Tests: panel consistency verified via TUI test harness.
+
+### T.5 — TUI message viewing *(enhancement, [#185](https://github.com/randlee/agent-team-mail/issues/185))*
+
+**Problem**: No message viewing capability in TUI.
+
+**Deliverables**:
+1. Message list view in TUI showing inbox messages.
+2. Message detail view with full content.
+3. Mark-as-read on view.
+
+### T.6 — TUI header version *(bug fix, [#187](https://github.com/randlee/agent-team-mail/issues/187))*
+
+**Problem**: TUI header missing version number.
+
+**Deliverables**:
+1. Display ATM version in TUI header bar.
+2. Version sourced from compile-time `CARGO_PKG_VERSION`.
+
+### T.7 — `atm init --check` + upgrade validation *(was S.2b)*
+
+Moved from Phase S. See S.2b description above.
+
+### T.8 — `atm teams resume` session handoff *(was S.4)*
+
+Moved from Phase S. Old R.1. Requires pre-flight guard design to avoid disrupting active non-lead members during team directory rotation.
+
+### T.9 — OpenCode baseline adapter *(was S.3, deferred — open questions)*
+
+Moved from Phase S. Deferred pending resolution of backend strategy (CLI-pane vs server/API control model). Key finding from research: `opencode serve` + REST API is the correct control model.
+
+### T.10 — `atm-monitor` agent: status polling + log watcher + alerting *(enhancement)*
+
+**Problem**: No continuous system health monitoring. Issues (stale sessions, config/mailbox drift, daemon errors) go undetected until someone manually runs `atm doctor`. Existing `log-monitor` agent (`.claude/agents/log-monitor.md`) can tail logs but doesn't poll status or alert proactively.
+
+**Vision**: A lightweight sentinel agent that:
+- **Polls** `atm status` / `atm doctor` periodically for health state changes
+- **Watches** unified log + hook event journal with filters for warn/error events
+- **Alerts** team-lead via `atm send` when issues are detected (config drift, stale sessions, daemon errors, PID death)
+- **Debug mode**: runs as a full named teammate you can query interactively ("what happened 5 minutes ago?", "watch for the next session-start event", "why did arch-ctm go offline?")
+- **Production mode**: runs as a background agent spun up on-demand when debugging issues
+
+**Deliverables**:
+1. Consolidated `atm-monitor` Claude Code agent definition (`.claude/agents/atm-monitor.md`) replacing/merging `log-monitor`.
+2. Status polling loop: runs `atm doctor --json` on interval (e.g. 60s), diffs against previous state, alerts on new findings.
+3. Log watcher: tails unified log (`atm.log.jsonl`) + hook events (`events.jsonl`) with configurable severity filter (default: warn+error).
+4. Alert dispatch: sends `atm send team-lead "[monitor] <finding>"` on new issues. Deduplicates repeat alerts (same finding within cooldown window).
+5. Interactive query support: when run as named teammate, responds to questions about recent events, agent state history, log excerpts.
+6. `atm monitor start` / `atm monitor stop` CLI subcommands to launch/stop as background process (future — may defer to T+1).
+
+**Acceptance criteria**:
+- Running `atm-monitor` as background agent detects a deliberately killed agent PID and sends alert to team-lead within 2 poll cycles.
+- Log watcher catches a warn-level event and alerts within 10s.
+- Duplicate alerts for same finding are suppressed within cooldown window.
+- As named teammate, responds to "what errors in the last 5 minutes?" with log excerpts.
+
+### T.11 — Tmux Sentinel Injection *(enhancement, [#45](https://github.com/randlee/agent-team-mail/issues/45))*
+
+Inject sentinel markers into tmux panes for reliable output boundary detection.
+
+### T.12 — Codex Idle Detection via Notify Hook *(enhancement, [#46](https://github.com/randlee/agent-team-mail/issues/46))*
+
+Detect Codex agent idle state via notify hook mechanism.
+
+### T.13 — Ephemeral Pub/Sub for Agent Availability *(enhancement, [#47](https://github.com/randlee/agent-team-mail/issues/47))*
+
+Lightweight pub/sub mechanism for agent availability announcements.
+
+### Closed/Superseded Issues
+
+| Issue | Status | Notes |
+|-------|--------|-------|
+| [#186](https://github.com/randlee/agent-team-mail/issues/186) | Superseded by Phase L | Per-agent output.log replaced by unified log filtering (`atm logs --agent`). **Verify and close.** |
+| [#188](https://github.com/randlee/agent-team-mail/issues/188) | Superseded by Phase L | Logging overhaul completed in L.1a-L.5. **Verify and close.** |
+
+| Sprint | Name | Depends On | Size | Status | Issue |
+|--------|------|------------|------|--------|-------|
+| T.1 | Daemon auto-start on CLI usage | — | M | PLANNED | [#181](https://github.com/randlee/agent-team-mail/issues/181) |
+| T.2 | Agent roster seeding + config.json watcher | T.1 | M | PLANNED | [#182](https://github.com/randlee/agent-team-mail/issues/182) |
+| T.3 | Agent state transitions | T.1 | M | PLANNED | [#183](https://github.com/randlee/agent-team-mail/issues/183) |
+| T.4 | TUI panel consistency (stdin fix) | T.3 | S | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184) |
+| T.5 | TUI message viewing | T.1 | M | PLANNED | [#185](https://github.com/randlee/agent-team-mail/issues/185) |
+| T.6 | TUI header version | — | XS | PLANNED | [#187](https://github.com/randlee/agent-team-mail/issues/187) |
+| T.7 | `atm init --check` + upgrade validation | S.2a | S | PLANNED | — |
+| T.8 | `atm teams resume` session handoff | S.1 | M | PLANNED | — |
+| T.9 | OpenCode baseline adapter | S.1 | L | DEFERRED | — |
+| T.10 | Operational health agent / continuous doctor | T.2, T.3 | M | PLANNED | — |
+| T.11 | Tmux Sentinel Injection | — | M | PLANNED | [#45](https://github.com/randlee/agent-team-mail/issues/45) |
+| T.12 | Codex Idle Detection via Notify Hook | — | M | PLANNED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
+| T.13 | Ephemeral Pub/Sub for Agent Availability | — | M | PLANNED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
 
 ---
 ## 18. Future Plugins
@@ -1118,18 +1271,23 @@ Old R.1. Deferred for further design review. The flow risks disrupting active no
 
 ---
 
-## 21. TUI Bugs (Issues #181-#188)
+## 21. Open Issues Tracker
 
-| Issue | Description | Notes |
-|-------|-------------|-------|
-| #181 | Daemon not auto-starting | Resolved in Phase L daemon/logging stabilization (closed). |
-| #182 | Agent roster not seeded from config.json | Resolved in TUI/daemon state sync hardening (closed). |
-| #183 | Agent state never transitions after registration | Resolved by turn-state streaming + state-store wiring (closed). |
-| #184 | TUI right panel contradicts left panel | Resolved by unified stream-state source in L.4-L.5 (closed). |
-| #185 | No message viewing in TUI | Resolved by TUI stream + log viewer implementation (closed). |
-| #186 | Per-agent output.log never written | Replaced by unified log filtering in L.4 (closed as superseded). |
-| #187 | TUI header missing version number | Resolved by TUI header/version updates (closed). |
-| #188 | Logging overhaul | Closed via Phase L completion (L.1a-L.5). |
+**WARNING**: All issues below are OPEN on GitHub. Do not mark as resolved without verifying the fix exists AND closing the GitHub issue.
+
+| Issue | Description | Phase T Sprint | Notes |
+|-------|-------------|----------------|-------|
+| [#181](https://github.com/randlee/agent-team-mail/issues/181) | Daemon not auto-starting | T.1 | **Critical** — blocks all daemon-dependent features |
+| [#182](https://github.com/randlee/agent-team-mail/issues/182) | Agent roster not seeded from config.json | T.2 | **Critical** — daemon starts with empty roster |
+| [#183](https://github.com/randlee/agent-team-mail/issues/183) | Agent state never transitions | T.3 | **Critical** — state tracking broken |
+| [#184](https://github.com/randlee/agent-team-mail/issues/184) | TUI right panel contradicts left panel | T.4 | Needs investigation — may be fixed by Phase L |
+| [#185](https://github.com/randlee/agent-team-mail/issues/185) | No message viewing in TUI | T.5 | Enhancement |
+| [#186](https://github.com/randlee/agent-team-mail/issues/186) | Per-agent output.log never written | — | May be superseded by Phase L unified logging — **needs verification** |
+| [#187](https://github.com/randlee/agent-team-mail/issues/187) | TUI header missing version number | T.6 | Quick fix |
+| [#188](https://github.com/randlee/agent-team-mail/issues/188) | Logging overhaul prerequisite | — | May be addressed by Phase L — **needs verification** |
+| [#45](https://github.com/randlee/agent-team-mail/issues/45) | Tmux Sentinel Injection | T.10 | Enhancement |
+| [#46](https://github.com/randlee/agent-team-mail/issues/46) | Codex Idle Detection via Notify Hook | T.11 | Enhancement |
+| [#47](https://github.com/randlee/agent-team-mail/issues/47) | Ephemeral Pub/Sub for Agent Availability | T.12 | Enhancement |
 
 ---
 
