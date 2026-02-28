@@ -484,6 +484,12 @@ pub fn get_pane_pid(pane_id: &str) -> Option<u32> {
     trimmed.parse::<u32>().ok()
 }
 
+/// Non-Unix stub for pane PID lookup.
+#[cfg(not(unix))]
+pub fn get_pane_pid(_pane_id: &str) -> Option<u32> {
+    None
+}
+
 /// Check whether a PID corresponds to a running process.
 ///
 /// Uses `kill(pid, 0)` (signal 0) which checks process existence without

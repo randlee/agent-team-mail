@@ -118,16 +118,31 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
         anyhow::bail!("forced termination not supported on this platform");
     }
 
-    if wait_for_session_dead(team_name, agent, 3) {
+    if wait_for_session_dead(team_name, agent, 10) {
         crate::commands::teams::cleanup_single_agent(
             team_name.to_string(),
             agent.to_string(),
             true,
         )?;
-        println!("Forced termination + teardown cleanup complete for {agent}@{team_name}");
+        println!("SIGINT termination + teardown cleanup complete for {agent}@{team_name}");
         Ok(())
     } else {
-        anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+        #[cfg(unix)]
+        {
+            // SAFETY: SIGKILL force-terminates process that ignored prior shutdown attempts.
+            let _ = unsafe { libc::kill(info.process_id as libc::pid_t, libc::SIGKILL) };
+        }
+        if wait_for_session_dead(team_name, agent, 3) {
+            crate::commands::teams::cleanup_single_agent(
+                team_name.to_string(),
+                agent.to_string(),
+                true,
+            )?;
+            println!("SIGKILL termination + teardown cleanup complete for {agent}@{team_name}");
+            Ok(())
+        } else {
+            anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+        }
     }
 }
 

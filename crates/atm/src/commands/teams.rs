@@ -407,6 +407,8 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         prompt: args.prompt.clone(),
         timeout_secs: args.timeout,
         env_vars,
+        runtime: Some(runtime_name(&args.runtime).to_string()),
+        resume_session_id: spec.resume_session_id.clone(),
     };
 
     let result = match launch_agent(&launch_config) {

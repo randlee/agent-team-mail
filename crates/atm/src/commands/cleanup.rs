@@ -175,11 +175,20 @@ fn execute_agent_cleanup(
                             "forced process termination is not supported on this platform"
                         );
                     }
-                    if !wait_for_session_dead(team_name, agent_name, 3) {
-                        anyhow::bail!(
-                            "failed to terminate '{}' within timeout; cleanup aborted",
-                            agent_name
-                        );
+                    if !wait_for_session_dead(team_name, agent_name, 10) {
+                        #[cfg(unix)]
+                        {
+                            // SAFETY: SIGKILL force-terminates process after graceful attempts.
+                            let _ = unsafe {
+                                libc::kill(info.process_id as libc::pid_t, libc::SIGKILL)
+                            };
+                        }
+                        if !wait_for_session_dead(team_name, agent_name, 3) {
+                            anyhow::bail!(
+                                "failed to terminate '{}' within timeout; cleanup aborted",
+                                agent_name
+                            );
+                        }
                     }
                 }
             }

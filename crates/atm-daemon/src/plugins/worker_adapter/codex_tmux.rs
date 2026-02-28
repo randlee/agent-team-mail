@@ -11,6 +11,7 @@ use crate::plugin::PluginError;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 /// Codex TMUX backend payload with tmux-specific metadata
@@ -22,6 +23,10 @@ pub struct TmuxPayload {
     pub pane_id: String,
     /// Window name
     pub window_name: String,
+    /// Runtime kind (e.g., "codex", "gemini")
+    pub runtime: String,
+    /// Runtime-specific session identifier if known.
+    pub runtime_session_id: Option<String>,
 }
 
 /// Codex TMUX backend — spawns Codex in tmux panes
@@ -179,6 +184,8 @@ impl WorkerAdapter for CodexTmuxBackend {
             session: self.tmux_session.clone(),
             pane_id: pane_id.clone(),
             window_name: agent_id.to_string(),
+            runtime: "codex".to_string(),
+            runtime_session_id: None,
         };
 
         Ok(WorkerHandle {
@@ -286,6 +293,11 @@ impl WorkerAdapter for CodexTmuxBackend {
             session: self.tmux_session.clone(),
             pane_id: pane_id.clone(),
             window_name: agent_id.to_string(),
+            runtime: env_vars
+                .get("ATM_RUNTIME")
+                .cloned()
+                .unwrap_or_else(|| "codex".to_string()),
+            runtime_session_id: env_vars.get("ATM_RUNTIME_SESSION_ID").cloned(),
         };
 
         Ok(WorkerHandle {
@@ -318,30 +330,110 @@ impl WorkerAdapter for CodexTmuxBackend {
     }
 
     async fn shutdown(&mut self, handle: &WorkerHandle) -> Result<(), PluginError> {
-        // Gracefully close the tmux pane
-        let output = Command::new("tmux")
-            .arg("kill-pane")
-            .arg("-t")
-            .arg(&handle.backend_id)
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Failed to kill tmux pane: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        if !output.status.success() {
-            let pane_id = &handle.backend_id;
-            let agent_id = &handle.agent_id;
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("Failed to kill pane {pane_id} for agent {agent_id}: {stderr}");
-            // Don't return error — pane may already be gone
-        } else {
-            let pane_id = &handle.backend_id;
-            let agent_id = &handle.agent_id;
-            debug!("Shut down tmux pane {pane_id} for agent {agent_id}");
+        if let Some(payload) = handle.payload_ref::<TmuxPayload>()
+            && payload.runtime == "gemini"
+            && let Some(pid) = pane_pid(&handle.backend_id)
+        {
+            send_sigint_to_pane(&handle.backend_id)?;
+            if !wait_for_pid_exit(pid, Duration::from_secs(10)) {
+                send_sigkill(pid);
+            }
         }
 
-        Ok(())
+        kill_pane(&handle.backend_id, &handle.agent_id)
+    }
+}
+
+fn kill_pane(pane_id: &str, agent_id: &str) -> Result<(), PluginError> {
+    let output = Command::new("tmux")
+        .arg("kill-pane")
+        .arg("-t")
+        .arg(pane_id)
+        .output()
+        .map_err(|e| PluginError::Runtime {
+            message: format!("Failed to kill tmux pane: {e}"),
+            source: Some(Box::new(e)),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("Failed to kill pane {pane_id} for agent {agent_id}: {stderr}");
+    } else {
+        debug!("Shut down tmux pane {pane_id} for agent {agent_id}");
+    }
+    Ok(())
+}
+
+fn send_sigint_to_pane(pane_id: &str) -> Result<(), PluginError> {
+    let output = Command::new("tmux")
+        .arg("send-keys")
+        .arg("-t")
+        .arg(pane_id)
+        .arg("C-c")
+        .output()
+        .map_err(|e| PluginError::Runtime {
+            message: format!("Failed to send C-c to pane {pane_id}: {e}"),
+            source: Some(Box::new(e)),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PluginError::Runtime {
+            message: format!("Failed to send C-c to pane {pane_id}: {stderr}"),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+fn pane_pid(pane_id: &str) -> Option<u32> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-t", pane_id, "-p", "#{pane_pid}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !is_pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    false
+}
+
+fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: `kill(pid, 0)` is an existence check and sends no signal.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+fn send_sigkill(pid: u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: SIGKILL to a specific process ID.
+        let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
     }
 }
 
@@ -395,11 +487,15 @@ mod tests {
             session: "test-session".to_string(),
             pane_id: "%42".to_string(),
             window_name: "arch-ctm@planning".to_string(),
+            runtime: "codex".to_string(),
+            runtime_session_id: None,
         };
 
         assert_eq!(payload.session, "test-session");
         assert_eq!(payload.pane_id, "%42");
         assert_eq!(payload.window_name, "arch-ctm@planning");
+        assert_eq!(payload.runtime, "codex");
+        assert!(payload.runtime_session_id.is_none());
     }
 
     #[test]
@@ -408,6 +504,8 @@ mod tests {
             session: "test-session".to_string(),
             pane_id: "%42".to_string(),
             window_name: "arch-ctm@planning".to_string(),
+            runtime: "codex".to_string(),
+            runtime_session_id: Some("sess-1".to_string()),
         };
 
         let cloned = payload.clone();

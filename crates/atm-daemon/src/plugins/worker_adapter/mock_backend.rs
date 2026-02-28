@@ -23,6 +23,10 @@ pub struct MockPayload {
 #[derive(Debug, Clone)]
 pub enum MockCall {
     Spawn { agent_id: String },
+    SpawnWithEnv {
+        agent_id: String,
+        env_vars: HashMap<String, String>,
+    },
     SendMessage { agent_id: String, message: String },
     Shutdown { agent_id: String },
 }
@@ -231,6 +235,22 @@ impl WorkerAdapter for MockTmuxBackend {
 
         debug!("Mock backend shut down worker {}", handle.agent_id);
         Ok(())
+    }
+
+    async fn spawn_with_env(
+        &mut self,
+        agent_id: &str,
+        command: &str,
+        env_vars: &HashMap<String, String>,
+    ) -> Result<WorkerHandle, PluginError> {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(MockCall::SpawnWithEnv {
+                agent_id: agent_id.to_string(),
+                env_vars: env_vars.clone(),
+            });
+        }
+        self.spawn(agent_id, command).await
     }
 }
 
