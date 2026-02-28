@@ -717,6 +717,25 @@ Harden daemon foundations required by R.1 session handoff:
 - Two concurrent daemon starts: second instance exits with clear "daemon already running" error.
 - requirements.md 4.6 and 4.7 path specs are internally consistent with implementation.
 
+### R.0b — Persistent session registry + agent lifecycle management
+
+Closes gaps identified during R.0 execution and dogfooding:
+
+1. **Persistent session registry via hooks**: `session_start` hook writes `{agent_name, pid, session_id, team}` to daemon registry persistently. `session_end` hook removes entry. Daemon uses this for kill signals and liveness queries.
+2. **`isActive` semantics**: `isActive` is advisory only. Daemon uses PID/session liveness as lifecycle truth and reconciles stale `isActive` drift in `config.json`.
+3. **Shutdown-first teardown flow**: For active-agent termination intent, daemon sends `shutdown_request` to mailbox, waits `--timeout`, then force-kills PID if needed.
+4. **Coupled teardown invariant**: After confirmed termination (already-dead or timeout+kill), daemon removes roster entry from `config.json` and deletes mailbox together (no partial state).
+5. **`atm cleanup --agent <name>`**: CLI cleanup command is non-destructive for active agents unless explicit kill semantics are requested; active termination uses shutdown-first flow.
+6. **Daemon `--kill <agent>`**: Runtime kill command backed by persistent registry and shutdown-first protocol.
+7. **`atm teams spawn` Claude baseline**: promote `spawn-teammate.sh` behavior into first-class CLI semantics (frontmatter model/color + prompt body, ATM env override compatibility, repo-root launch, resume-aware parent session handoff, post-spawn registration updates).
+
+**Acceptance criteria**:
+- `atm status` reflects PID/session truth for idle-but-alive teammates even when `isActive` drifts.
+- `atm cleanup --agent quality-mgr` does not remove active-agent mailbox/roster without explicit kill intent.
+- For terminal agents, mailbox deletion and roster removal converge together (already-dead and kill-timeout cases).
+- `atm daemon --kill <agent>` performs shutdown-first flow and terminates the named process by timeout boundary.
+- `atm teams spawn` can reproduce current Claude teammate launcher behavior without custom scripts.
+
 ### R.1 — `atm teams resume` session handoff
 
 **CLI flag semantics in handoff mode**:
@@ -768,7 +787,8 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
-| R.1 | `atm teams resume` session handoff + daemon member restore | R.0 | M | PLANNED |
+| R.0b | Persistent session registry + agent lifecycle management | R.0 | M | COMPLETE |
+| R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
 | R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
 

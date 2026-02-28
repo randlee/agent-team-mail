@@ -874,15 +874,8 @@ fn authorize_hook_event(
     agent: &str,
     source: agent_team_mail_core::daemon_client::LifecycleSourceKind,
 ) -> std::result::Result<HookEventAuth, String> {
-    let home_dir = if let Ok(path) = std::env::var("ATM_HOME") {
-        PathBuf::from(path)
-    } else if let Ok(path) = std::env::var("HOME") {
-        PathBuf::from(path)
-    } else if let Ok(path) = std::env::var("USERPROFILE") {
-        PathBuf::from(path)
-    } else {
-        return Err("missing ATM_HOME/HOME".to_string());
-    };
+    let home_dir = agent_team_mail_core::home::get_home_dir()
+        .map_err(|e| format!("failed to resolve home directory: {e}"))?;
 
     let config_path = home_dir
         .join(".claude/teams")
@@ -1006,23 +999,19 @@ async fn handle_hook_event_command(
     };
 
     // Determine whether the source requires team-lead restriction on
-    // session_start / session_end.  `claude_hook` and `unknown` are strictest
-    // (fail-closed default).  `atm_mcp` and `agent_hook` relax the restriction
-    // because those adapters manage their own agent sessions.
+    // session_end. `session_start` must be accepted for all known team members
+    // so spawned teammates can register runtime sessions.
+    // `claude_hook` and `unknown` remain strictest for termination semantics;
+    // `atm_mcp` and `agent_hook` relax the restriction because those adapters
+    // manage their own agent sessions.
     use agent_team_mail_core::daemon_client::LifecycleSourceKind;
-    let require_lead_for_lifecycle = matches!(
+    let require_lead_for_session_end = matches!(
         auth.source,
         LifecycleSourceKind::ClaudeHook | LifecycleSourceKind::Unknown
     );
 
     match event_type.as_str() {
         "session_start" => {
-            if require_lead_for_lifecycle && !auth.is_team_lead {
-                return make_ok_response(
-                    &request.request_id,
-                    serde_json::json!({"processed": false, "reason": "only team-lead may send session_start"}),
-                );
-            }
             if session_id.is_empty() {
                 return make_ok_response(
                     &request.request_id,
@@ -1030,14 +1019,10 @@ async fn handle_hook_event_command(
                 );
             }
             let pid = process_id.unwrap_or(0);
-            // SessionRegistry is currently keyed by bare agent name, not team.
-            // This matches existing daemon behavior but can collide across teams
-            // that reuse member names.
-            // TODO(atm-daemon): switch registry operations to team-scoped keys.
             session_registry
                 .lock()
                 .unwrap()
-                .upsert(&agent, &session_id, pid);
+                .upsert_for_team(&team, &agent, &session_id, pid);
             {
                 let mut tracker = state_store.lock().unwrap();
                 if tracker.get_state(&agent).is_none() {
@@ -1059,14 +1044,14 @@ async fn handle_hook_event_command(
             info!("hook_event teammate_idle: agent={agent}");
         }
         "session_end" => {
-            if require_lead_for_lifecycle && !auth.is_team_lead {
+            if require_lead_for_session_end && !auth.is_team_lead {
                 return make_ok_response(
                     &request.request_id,
                     serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
                 );
             }
             {
-                session_registry.lock().unwrap().mark_dead(&agent);
+                session_registry.lock().unwrap().mark_dead_for_team(&team, &agent);
             }
             {
                 let mut tracker = state_store.lock().unwrap();
@@ -1877,7 +1862,7 @@ fn handle_session_query_team(
     };
 
     let registry = session_registry.lock().unwrap();
-    let Some(record) = registry.query(&name) else {
+    let Some(record) = registry.query_for_team(&team, &name) else {
         return make_error_response(
             &request.request_id,
             "AGENT_NOT_FOUND",
@@ -3459,7 +3444,9 @@ mod tests {
             tracker.set_state("team-lead", AgentState::Idle);
         }
         {
-            sr.lock().unwrap().upsert("team-lead", "sess-end", 1111);
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "team-lead", "sess-end", 1111);
         }
         let req_json = r#"{"version":1,"request_id":"r5","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-end","team":"atm-dev"}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
@@ -3545,7 +3532,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
-    async fn test_hook_event_non_lead_session_start_rejected() {
+    async fn test_hook_event_non_lead_session_start_accepted() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
@@ -3553,13 +3540,7 @@ mod tests {
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
-        assert!(!payload["processed"].as_bool().unwrap());
-        assert!(
-            payload["reason"]
-                .as_str()
-                .unwrap()
-                .contains("only team-lead")
-        );
+        assert!(payload["processed"].as_bool().unwrap());
     }
 
     #[cfg(unix)]
@@ -3717,7 +3698,12 @@ mod tests {
         }
         {
             let mut reg = session_registry.lock().unwrap();
-            reg.upsert("team-lead", "sess-end-roundtrip", std::process::id());
+            reg.upsert_for_team(
+                "atm-dev",
+                "team-lead",
+                "sess-end-roundtrip",
+                std::process::id(),
+            );
         }
 
         let launch_tx = new_launch_sender();
@@ -4113,11 +4099,11 @@ mod tests {
 
     // ── source-aware lifecycle validation ────────────────────────────────────
 
-    /// `claude_hook` source: `session_start` from non-lead member is rejected.
+    /// `claude_hook` source: `session_start` from non-lead member is accepted.
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
-    async fn test_hook_event_claude_hook_source_non_lead_session_start_rejected() {
+    async fn test_hook_event_claude_hook_source_non_lead_session_start_accepted() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
@@ -4139,15 +4125,8 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
-            !payload["processed"].as_bool().unwrap(),
-            "non-lead claude_hook session_start must be rejected"
-        );
-        assert!(
-            payload["reason"]
-                .as_str()
-                .unwrap()
-                .contains("only team-lead"),
-            "rejection reason should mention team-lead"
+            payload["processed"].as_bool().unwrap(),
+            "non-lead claude_hook session_start must be accepted"
         );
     }
 
@@ -4191,11 +4170,11 @@ mod tests {
         assert_eq!(record.session_id, "codex:abc-session-1");
     }
 
-    /// `unknown` source behaves like `claude_hook` (fail-closed default).
+    /// `unknown` source still accepts non-lead `session_start`.
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
-    async fn test_hook_event_unknown_source_non_lead_session_start_rejected() {
+    async fn test_hook_event_unknown_source_non_lead_session_start_accepted() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
@@ -4218,23 +4197,16 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
-            !payload["processed"].as_bool().unwrap(),
-            "unknown source must be treated like claude_hook (strictest)"
-        );
-        assert!(
-            payload["reason"]
-                .as_str()
-                .unwrap()
-                .contains("only team-lead"),
-            "rejection reason should mention team-lead"
+            payload["processed"].as_bool().unwrap(),
+            "unknown source must accept non-lead session_start"
         );
     }
 
-    /// Missing `source` field also behaves like `claude_hook` (backward compat).
+    /// Missing `source` field also accepts non-lead `session_start`.
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
-    async fn test_hook_event_absent_source_non_lead_session_start_rejected() {
+    async fn test_hook_event_absent_source_non_lead_session_start_accepted() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
@@ -4256,15 +4228,15 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
-            !payload["processed"].as_bool().unwrap(),
-            "absent source must default to Unknown (strictest) and reject non-lead"
+            payload["processed"].as_bool().unwrap(),
+            "absent source must default to Unknown and accept non-lead session_start"
         );
     }
 
     /// Legacy E.3 payloads used a flat string for `source` on session_start
     /// (for example `"init"` / `"compact"`). The E.7 parser expects an object
     /// (`{"kind":"..."}`), so legacy string payloads must degrade gracefully
-    /// to `unknown` and enforce strict validation.
+    /// to `unknown` while still accepting non-lead `session_start`.
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
@@ -4290,15 +4262,8 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
-            !payload["processed"].as_bool().unwrap(),
-            "legacy flat-string source must degrade to Unknown (strictest)"
-        );
-        assert!(
-            payload["reason"]
-                .as_str()
-                .unwrap()
-                .contains("only team-lead"),
-            "legacy flat-string source should follow Unknown/claude_hook restrictions"
+            payload["processed"].as_bool().unwrap(),
+            "legacy flat-string source must degrade to Unknown and still accept session_start"
         );
     }
 
@@ -4343,9 +4308,12 @@ mod tests {
         let store = make_store();
         let sr = make_sr();
         // Pre-populate registry so mark_dead has something to work with.
-        sr.lock()
-            .unwrap()
-            .upsert("arch-ctm", "codex:sess-end-test", 0);
+        sr.lock().unwrap().upsert_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "codex:sess-end-test",
+            0,
+        );
 
         let req = SocketRequest {
             version: PROTOCOL_VERSION,
