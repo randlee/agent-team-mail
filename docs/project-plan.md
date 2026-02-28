@@ -162,6 +162,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | COMPLETE |
 | R | Session Handoff + Hook Installer | Daemon singleton lock, session registry, `atm doctor` | COMPLETE |
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
+| T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | PLANNED |
 
 ---
 
@@ -1079,12 +1080,24 @@ Detect Codex agent idle state via notify hook mechanism.
 
 Lightweight pub/sub mechanism for agent availability announcements.
 
+### T.14 — Gemini adapter resume flag fix *(bug fix, [#281](https://github.com/randlee/agent-team-mail/issues/281))*
+
+`GeminiAdapter.build_command()` emits `--resume --resume-session-id <id>` but verified Gemini CLI uses `--resume <session_id>` as positional arg. Fix flag construction and unit test.
+
+### T.15 — Gemini adapter end-to-end spawn/teardown wiring *(enhancement, [#282](https://github.com/randlee/agent-team-mail/issues/282))*
+
+S.1 delivered the adapter trait only. Wire `GeminiAdapter` into the tmux spawn pipeline: pane creation, daemon registration, SIGINT/SIGKILL teardown, lifecycle event emission.
+
+### T.16 — S.2a/S.1 plan deliverable accuracy *(documentation, [#283](https://github.com/randlee/agent-team-mail/issues/283))*
+
+Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (SessionStart, PreToolUse identity, PreToolUse Task gate, PostToolUse cleanup). Note TeammateIdle/SessionEnd deferred.
+
 ### Closed/Superseded Issues
 
 | Issue | Status | Notes |
 |-------|--------|-------|
-| [#186](https://github.com/randlee/agent-team-mail/issues/186) | Superseded by Phase L | Per-agent output.log replaced by unified log filtering (`atm logs --agent`). **Verify and close.** |
-| [#188](https://github.com/randlee/agent-team-mail/issues/188) | Superseded by Phase L | Logging overhaul completed in L.1a-L.5. **Verify and close.** |
+| [#186](https://github.com/randlee/agent-team-mail/issues/186) | CLOSED | Superseded by Phase L. Per-agent output.log replaced by unified log filtering (`atm logs --agent`). |
+| [#188](https://github.com/randlee/agent-team-mail/issues/188) | CLOSED | Superseded by Phase L. Logging overhaul completed in L.1a-L.5. |
 
 | Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
@@ -1101,6 +1114,9 @@ Lightweight pub/sub mechanism for agent availability announcements.
 | T.11 | Tmux Sentinel Injection | — | M | PLANNED | [#45](https://github.com/randlee/agent-team-mail/issues/45) |
 | T.12 | Codex Idle Detection via Notify Hook | — | M | PLANNED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
 | T.13 | Ephemeral Pub/Sub for Agent Availability | — | M | PLANNED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
+| T.14 | Gemini adapter resume flag fix | — | XS | PLANNED | [#281](https://github.com/randlee/agent-team-mail/issues/281) |
+| T.15 | Gemini adapter end-to-end spawn wiring | T.14 | L | PLANNED | [#282](https://github.com/randlee/agent-team-mail/issues/282) |
+| T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | PLANNED | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
 
 ---
 ## 18. Future Plugins
