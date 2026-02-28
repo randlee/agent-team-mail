@@ -725,13 +725,13 @@ Closes gaps identified during R.0 execution and dogfooding:
 2. **`isActive` semantics**: `isActive` is advisory only. Daemon uses PID/session liveness as lifecycle truth and reconciles stale `isActive` drift in `config.json`.
 3. **Shutdown-first teardown flow**: For active-agent termination intent, daemon sends `shutdown_request` to mailbox, waits `--timeout`, then force-kills PID if needed.
 4. **Coupled teardown invariant**: After confirmed termination (already-dead or timeout+kill), daemon removes roster entry from `config.json` and deletes mailbox together (no partial state).
-5. **`atm clean --agent <name>`**: CLI cleanup command is non-destructive for active agents unless explicit kill semantics are requested; active termination uses shutdown-first flow.
+5. **`atm cleanup --agent <name>`**: CLI cleanup command is non-destructive for active agents unless explicit kill semantics are requested; active termination uses shutdown-first flow.
 6. **Daemon `--kill <agent>`**: Runtime kill command backed by persistent registry and shutdown-first protocol.
 7. **`atm teams spawn` Claude baseline**: promote `spawn-teammate.sh` behavior into first-class CLI semantics (frontmatter model/color + prompt body, ATM env override compatibility, repo-root launch, resume-aware parent session handoff, post-spawn registration updates).
 
 **Acceptance criteria**:
 - `atm status` reflects PID/session truth for idle-but-alive teammates even when `isActive` drifts.
-- `atm clean --agent quality-mgr` does not remove active-agent mailbox/roster without explicit kill intent.
+- `atm cleanup --agent quality-mgr` does not remove active-agent mailbox/roster without explicit kill intent.
 - For terminal agents, mailbox deletion and roster removal converge together (already-dead and kill-timeout cases).
 - `atm daemon --kill <agent>` performs shutdown-first flow and terminates the named process by timeout boundary.
 - `atm teams spawn` can reproduce current Claude teammate launcher behavior without custom scripts.

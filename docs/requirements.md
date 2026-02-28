@@ -589,7 +589,7 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
   PID/session-verified active agent unless the caller explicitly requested kill semantics.
 
 **Command expectations**:
-- `atm clean --agent <name>`: non-destructive for active agents; applies teardown cleanup
+- `atm cleanup --agent <name>`: non-destructive for active agents; applies teardown cleanup
   only when daemon verifies dead state (or explicit kill mode is requested). In kill mode,
   it MUST deliver `shutdown_request` first, then enforce timeout/kill fallback.
 - `atm daemon --kill <agent> [--timeout <seconds>]`: executes shutdown protocol above,
