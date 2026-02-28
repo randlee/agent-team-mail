@@ -37,7 +37,6 @@ pub struct CleanupArgs {
     /// Force cleanup when daemon liveness checks are unavailable (agent mode only)
     #[arg(long)]
     force: bool,
-
     /// Enable kill semantics for active agents (agent mode only)
     #[arg(long)]
     kill: bool,
@@ -141,12 +140,18 @@ fn execute_agent_cleanup(
         anyhow::bail!("team-lead is protected and cannot be removed by cleanup");
     }
 
-    if agent_team_mail_core::daemon_client::daemon_is_running() {
-        let session = agent_team_mail_core::daemon_client::query_session_for_team(
-            team_name, agent_name,
-        );
+    if daemon_is_running() {
+        let session = query_session_for_team(team_name, agent_name);
         match session {
             Ok(Some(info)) if info.alive => {
+                let pid = validated_signal_pid(info.process_id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "refusing to signal invalid pid {} for {}@{}",
+                        info.process_id,
+                        agent_name,
+                        team_name
+                    )
+                })?;
                 if !kill_mode {
                     anyhow::bail!(
                         "agent '{}' is active; refusing destructive cleanup without --kill",
@@ -158,20 +163,27 @@ fn execute_agent_cleanup(
                 if !wait_for_session_dead(team_name, agent_name, timeout_secs) {
                     #[cfg(unix)]
                     {
-                        let _ =
-                            unsafe { libc::kill(info.process_id as libc::pid_t, libc::SIGTERM) };
+                        // SAFETY: SIGINT requests graceful interrupt of the target process.
+                        let _ = unsafe { libc::kill(pid, libc::SIGINT) };
                     }
                     #[cfg(not(unix))]
                     {
-                        eprintln!(
-                            "Warning: forced process termination is not supported on this platform"
+                        anyhow::bail!(
+                            "forced process termination is not supported on this platform"
                         );
                     }
-                    if !wait_for_session_dead(team_name, agent_name, 3) {
-                        anyhow::bail!(
-                            "failed to terminate '{}' within timeout; cleanup aborted",
-                            agent_name
-                        );
+                    if !wait_for_session_dead(team_name, agent_name, 10) {
+                        #[cfg(unix)]
+                        {
+                            // SAFETY: SIGKILL force-terminates process after graceful attempts.
+                            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+                        }
+                        if !wait_for_session_dead(team_name, agent_name, 3) {
+                            anyhow::bail!(
+                                "failed to terminate '{}' within timeout; cleanup aborted",
+                                agent_name
+                            );
+                        }
                     }
                 }
             }
@@ -201,6 +213,28 @@ fn execute_agent_cleanup(
     }
 
     teams::cleanup_single_agent(team_name.to_string(), agent_name.to_string(), force)
+}
+
+fn daemon_is_running() -> bool {
+    #[cfg(test)]
+    if let Some(state) = test_daemon_state::snapshot() {
+        return state.running;
+    }
+    agent_team_mail_core::daemon_client::daemon_is_running()
+}
+
+fn query_session_for_team(
+    team_name: &str,
+    agent_name: &str,
+) -> Result<Option<agent_team_mail_core::daemon_client::SessionQueryResult>> {
+    #[cfg(test)]
+    if let Some(state) = test_daemon_state::snapshot() {
+        return match state.query_error {
+            Some(msg) => Err(anyhow::Error::msg(msg)),
+            None => Ok(state.query_result),
+        };
+    }
+    agent_team_mail_core::daemon_client::query_session_for_team(team_name, agent_name)
 }
 
 fn send_shutdown_request(home_dir: &Path, team_name: &str, agent_name: &str) -> Result<()> {
@@ -235,7 +269,7 @@ fn send_shutdown_request(home_dir: &Path, team_name: &str, agent_name: &str) -> 
 fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -> bool {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
-        match agent_team_mail_core::daemon_client::query_session_for_team(team_name, agent_name) {
+        match query_session_for_team(team_name, agent_name) {
             Ok(Some(info)) if !info.alive => return true,
             Ok(None) => return true,
             Ok(Some(_)) => {}
@@ -246,6 +280,42 @@ fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -
     false
 }
 
+fn validated_signal_pid(pid: u32) -> Option<i32> {
+    if pid > 1 && pid <= i32::MAX as u32 {
+        Some(pid as i32)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod test_daemon_state {
+    use std::sync::{Mutex, OnceLock};
+
+    #[derive(Clone)]
+    pub(super) struct State {
+        pub(super) running: bool,
+        pub(super) query_result: Option<agent_team_mail_core::daemon_client::SessionQueryResult>,
+        pub(super) query_error: Option<String>,
+    }
+
+    fn slot() -> &'static Mutex<Option<State>> {
+        static SLOT: OnceLock<Mutex<Option<State>>> = OnceLock::new();
+        SLOT.get_or_init(|| Mutex::new(None))
+    }
+
+    pub(super) fn set(state: State) {
+        *slot().lock().unwrap() = Some(state);
+    }
+
+    pub(super) fn clear() {
+        *slot().lock().unwrap() = None;
+    }
+
+    pub(super) fn snapshot() -> Option<State> {
+        slot().lock().unwrap().clone()
+    }
+}
 /// Clean up a single team's inboxes
 fn cleanup_team(
     home_dir: &Path,
@@ -381,4 +451,153 @@ fn cleanup_team(
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use tempfile::TempDir;
+
+    fn create_test_team(temp_dir: &TempDir, team_name: &str) -> std::path::PathBuf {
+        let team_dir = temp_dir.path().join(".claude/teams").join(team_name);
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+
+        let config = serde_json::json!({
+            "name": team_name,
+            "createdAt": 1739284800000i64,
+            "leadAgentId": format!("team-lead@{team_name}"),
+            "leadSessionId": "old-session-id-1234",
+            "members": [
+                {
+                    "agentId": format!("team-lead@{team_name}"),
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "claude-opus-4-6",
+                    "joinedAt": 1739284800000i64,
+                    "tmuxPaneId": "",
+                    "cwd": temp_dir.path().to_str().unwrap(),
+                    "subscriptions": []
+                },
+                {
+                    "agentId": format!("publisher@{team_name}"),
+                    "name": "publisher",
+                    "agentType": "general-purpose",
+                    "model": "claude-haiku-4-5",
+                    "joinedAt": 1739284800000i64,
+                    "tmuxPaneId": "%1",
+                    "cwd": temp_dir.path().to_str().unwrap(),
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]
+        });
+
+        let config_path = team_dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        team_dir
+    }
+
+    #[test]
+    #[serial]
+    fn test_execute_agent_cleanup_refuses_active_without_kill() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let inbox = team_dir.join("inboxes/publisher.json");
+        std::fs::write(&inbox, "[]").unwrap();
+
+        test_daemon_state::set(test_daemon_state::State {
+            running: true,
+            query_result: Some(agent_team_mail_core::daemon_client::SessionQueryResult {
+                session_id: "sess-1".to_string(),
+                process_id: 4242,
+                alive: true,
+                runtime: Some("codex".to_string()),
+                runtime_session_id: None,
+                pane_id: None,
+                runtime_home: None,
+            }),
+            query_error: None,
+        });
+
+        let result =
+            execute_agent_cleanup(temp_dir.path(), "atm-dev", "publisher", false, false, 1);
+        test_daemon_state::clear();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("refusing destructive cleanup without --kill"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_execute_agent_cleanup_refuses_without_daemon_or_force() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let inbox = team_dir.join("inboxes/publisher.json");
+        std::fs::write(&inbox, "[]").unwrap();
+
+        test_daemon_state::set(test_daemon_state::State {
+            running: false,
+            query_result: None,
+            query_error: None,
+        });
+        let result =
+            execute_agent_cleanup(temp_dir.path(), "atm-dev", "publisher", false, false, 1);
+        test_daemon_state::clear();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("daemon is not running"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_execute_agent_cleanup_force_removes_roster_and_mailbox() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let inbox = team_dir.join("inboxes/publisher.json");
+        std::fs::write(&inbox, "[]").unwrap();
+        let home_env = temp_dir.path().to_string_lossy().to_string();
+        let original_home = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        test_daemon_state::set(test_daemon_state::State {
+            running: false,
+            query_result: None,
+            query_error: None,
+        });
+        let result = execute_agent_cleanup(temp_dir.path(), "atm-dev", "publisher", true, false, 1);
+        test_daemon_state::clear();
+        // SAFETY: test-only cleanup.
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+
+        assert!(
+            !inbox.exists(),
+            "mailbox should be removed during coupled teardown"
+        );
+        let config_path = team_dir.join("config.json");
+        let cfg: TeamConfig =
+            serde_json::from_str(&std::fs::read_to_string(config_path).unwrap()).unwrap();
+        assert!(
+            !cfg.members.iter().any(|m| m.name == "publisher"),
+            "roster member should be removed together with mailbox"
+        );
+    }
 }
