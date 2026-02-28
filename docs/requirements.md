@@ -1071,6 +1071,29 @@ Spool filename convention:
 - Human-readable `atm doctor` output must report degraded/unavailable logging as
   actionable findings with remediation commands.
 - `atm status --json` must expose logging health state for operator visibility.
+- A runbook mapping each health state to remediation commands must be maintained
+  in `docs/logging-troubleshooting.md`.
+
+#### Shared Logging Health Evaluator Requirements
+
+- Logging health evaluation must be implemented once in a shared module used by
+  both `atm doctor` and `atm status` outputs.
+- Health state computation must not be duplicated across command handlers.
+- The shared evaluator must consume canonical inputs:
+  - daemon reachability
+  - canonical log/spool path resolution
+  - spool inventory/age
+  - dropped-event counters and last logging error metadata where available
+
+#### JSON Schema and Compatibility Requirements
+
+- Logging health JSON object shape must be stable and versioned.
+- `atm doctor --json` and `atm status --json` must use the same logging-health
+  schema fields for overlapping data.
+- Additive fields are allowed; field removal or semantic redefinition requires
+  an explicit compatibility note in release docs.
+- For one minor release after schema expansion, newly added fields should be
+  documented as optional for external consumers.
 
 #### Path Resolution Consistency Requirements
 
