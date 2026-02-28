@@ -16,10 +16,12 @@
 //! The registry itself is not `Sync`. Callers are expected to wrap it in
 //! `Arc<Mutex<SessionRegistry>>` before sharing between tasks.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Lifecycle state of a tracked agent session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionState {
     /// Session is believed to be running.
     Active,
@@ -28,7 +30,7 @@ pub enum SessionState {
 }
 
 /// A single agent session record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
     /// Claude Code session UUID (from `CLAUDE_SESSION_ID`).
     pub session_id: String,
@@ -59,6 +61,7 @@ impl SessionRecord {
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
     sessions: HashMap<String, SessionRecord>,
+    persist_path: Option<PathBuf>,
 }
 
 impl SessionRegistry {
@@ -66,6 +69,28 @@ impl SessionRegistry {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            persist_path: None,
+        }
+    }
+
+    /// Create a registry that persists on every mutation.
+    pub fn with_persist_path(persist_path: PathBuf) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            persist_path: Some(persist_path),
+        }
+    }
+
+    /// Load a persisted registry from disk, or return an empty registry when
+    /// the file is missing/corrupt.
+    pub fn load_or_new(persist_path: PathBuf) -> Self {
+        if let Some(sessions) = load_sessions_from_file(&persist_path) {
+            Self {
+                sessions,
+                persist_path: Some(persist_path),
+            }
+        } else {
+            Self::with_persist_path(persist_path)
         }
     }
 
@@ -83,6 +108,7 @@ impl SessionRegistry {
                 state: SessionState::Active,
             },
         );
+        self.persist_best_effort();
     }
 
     /// Return an immutable reference to the session record for `name`, or
@@ -97,6 +123,7 @@ impl SessionRegistry {
     pub fn mark_dead(&mut self, name: &str) {
         if let Some(record) = self.sessions.get_mut(name) {
             record.state = SessionState::Dead;
+            self.persist_best_effort();
         }
     }
 
@@ -109,6 +136,19 @@ impl SessionRegistry {
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
+
+    fn persist_best_effort(&self) {
+        let Some(path) = self.persist_path.as_ref() else {
+            return;
+        };
+
+        if let Err(e) = write_sessions_to_file(path, &self.sessions) {
+            eprintln!(
+                "[session-registry] warn: failed to persist {}: {e}",
+                path.display()
+            );
+        }
+    }
 }
 
 /// Shared, thread-safe session registry handle.
@@ -116,7 +156,18 @@ pub type SharedSessionRegistry = std::sync::Arc<std::sync::Mutex<SessionRegistry
 
 /// Create a new empty [`SharedSessionRegistry`].
 pub fn new_session_registry() -> SharedSessionRegistry {
-    std::sync::Arc::new(std::sync::Mutex::new(SessionRegistry::new()))
+    #[cfg(test)]
+    let registry = SessionRegistry::new();
+
+    #[cfg(not(test))]
+    let registry = match agent_team_mail_core::home::get_home_dir() {
+        Ok(home) => {
+            let path = home.join(".claude/daemon/session-registry.json");
+            SessionRegistry::load_or_new(path)
+        }
+        Err(_) => SessionRegistry::new(),
+    };
+    std::sync::Arc::new(std::sync::Mutex::new(registry))
 }
 
 // ── Platform-specific liveness check ─────────────────────────────────────────
@@ -140,14 +191,35 @@ pub fn is_pid_alive(pid: u32) -> bool {
 
 #[cfg(unix)]
 fn pid_alive_unix(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) is a read-only existence check; no signal is sent.
-    unsafe extern "C" {
-        fn kill(pid: libc::pid_t, sig: libc::c_int) -> libc::c_int;
-    }
     let pid_t = pid as libc::pid_t;
     // SAFETY: kill with sig=0 never sends a signal; it only checks PID existence.
-    let result = unsafe { kill(pid_t, 0) };
+    let result = unsafe { libc::kill(pid_t, 0) };
     result == 0
+}
+
+fn load_sessions_from_file(path: &Path) -> Option<HashMap<String, SessionRecord>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let persisted: PersistedRegistry = serde_json::from_str(&content).ok()?;
+    Some(persisted.sessions)
+}
+
+fn write_sessions_to_file(path: &Path, sessions: &HashMap<String, SessionRecord>) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let persisted = PersistedRegistry {
+        sessions: sessions.clone(),
+    };
+    let serialized = serde_json::to_string_pretty(&persisted)?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serialized)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedRegistry {
+    sessions: HashMap<String, SessionRecord>,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -243,6 +315,22 @@ mod tests {
         }
         let reg = shared.lock().unwrap();
         assert!(reg.query("team-lead").is_some());
+    }
+
+    #[test]
+    fn test_persisted_registry_writes_and_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude/daemon/session-registry.json");
+
+        let mut reg = SessionRegistry::with_persist_path(path.clone());
+        reg.upsert("team-lead", "sess-a", 42);
+        reg.mark_dead("team-lead");
+
+        let loaded = SessionRegistry::load_or_new(path);
+        let rec = loaded.query("team-lead").unwrap();
+        assert_eq!(rec.session_id, "sess-a");
+        assert_eq!(rec.process_id, 42);
+        assert_eq!(rec.state, SessionState::Dead);
     }
 
     /// Liveness check: the current process must be alive.
