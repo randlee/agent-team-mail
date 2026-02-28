@@ -228,6 +228,9 @@ pub fn new_session_registry() -> SharedSessionRegistry {
 /// On Unix this uses `kill(pid, 0)` — a read-only existence probe that sends
 /// no signal. On non-Unix platforms this always returns `false`.
 pub fn is_pid_alive(pid: u32) -> bool {
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return false;
+    }
     #[cfg(unix)]
     {
         pid_alive_unix(pid)
@@ -271,7 +274,10 @@ fn load_sessions_from_file(path: &Path) -> Option<HashMap<String, SessionRecord>
     )
 }
 
-fn write_sessions_to_file(path: &Path, sessions: &HashMap<String, SessionRecord>) -> std::io::Result<()> {
+fn write_sessions_to_file(
+    path: &Path,
+    sessions: &HashMap<String, SessionRecord>,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

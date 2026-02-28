@@ -767,7 +767,7 @@ impl WorkerAdapterPlugin {
         };
 
         let runtime = config.runtime.clone().unwrap_or_else(|| "codex".to_string());
-        let spawn_mode = if config.resume_session_id.is_some() || config.command.contains(" --resume") {
+        let spawn_mode = if config.resume_session_id.is_some() {
             "resume"
         } else {
             "fresh"

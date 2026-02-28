@@ -412,6 +412,9 @@ fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
 }
 
 fn is_pid_alive(pid: u32) -> bool {
+    if !is_valid_signal_pid(pid) {
+        return false;
+    }
     #[cfg(unix)]
     {
         // SAFETY: `kill(pid, 0)` is an existence check and sends no signal.
@@ -426,6 +429,9 @@ fn is_pid_alive(pid: u32) -> bool {
 }
 
 fn send_sigkill(pid: u32) {
+    if !is_valid_signal_pid(pid) {
+        return;
+    }
     #[cfg(unix)]
     {
         // SAFETY: SIGKILL to a specific process ID.
@@ -435,6 +441,10 @@ fn send_sigkill(pid: u32) {
     {
         let _ = pid;
     }
+}
+
+fn is_valid_signal_pid(pid: u32) -> bool {
+    pid > 1 && pid <= i32::MAX as u32
 }
 
 #[cfg(test)]
@@ -510,5 +520,28 @@ mod tests {
 
         let cloned = payload.clone();
         assert_eq!(cloned, payload);
+    }
+
+    #[test]
+    fn test_is_pid_alive_with_live_and_dead_pid() {
+        let live_pid = std::process::id();
+        assert!(is_pid_alive(live_pid));
+        assert!(!is_pid_alive(u32::MAX));
+    }
+
+    #[test]
+    fn test_wait_for_pid_exit_with_dead_pid_returns_true() {
+        assert!(wait_for_pid_exit(u32::MAX, Duration::from_millis(5)));
+    }
+
+    #[test]
+    fn test_send_sigkill_dead_pid_does_not_panic() {
+        send_sigkill(u32::MAX);
+    }
+
+    #[test]
+    fn test_send_sigint_to_pane_invalid_target_returns_error() {
+        let result = send_sigint_to_pane("%999999");
+        assert!(result.is_err());
     }
 }

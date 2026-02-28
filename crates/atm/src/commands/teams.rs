@@ -2917,4 +2917,40 @@ mod tests {
             "prune on nonexistent dir should be Ok: {result:?}"
         );
     }
+
+    #[test]
+    fn test_parse_env_vars_valid_pair() {
+        let parsed = parse_env_vars(&["FOO=bar".to_string()]).expect("valid env should parse");
+        assert_eq!(parsed.get("FOO").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn test_parse_env_vars_value_with_equals() {
+        let parsed = parse_env_vars(&["URL=https://x.test?a=1&b=2".to_string()])
+            .expect("value with equals should parse");
+        assert_eq!(
+            parsed.get("URL").map(String::as_str),
+            Some("https://x.test?a=1&b=2")
+        );
+    }
+
+    #[test]
+    fn test_parse_env_vars_missing_delimiter_errors() {
+        let err = parse_env_vars(&["NO_DELIM".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_parse_env_vars_empty_key_errors() {
+        let err = parse_env_vars(&["=value".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_runtime_name_all_variants() {
+        assert_eq!(runtime_name(&RuntimeKind::Claude), "claude");
+        assert_eq!(runtime_name(&RuntimeKind::Codex), "codex");
+        assert_eq!(runtime_name(&RuntimeKind::Gemini), "gemini");
+        assert_eq!(runtime_name(&RuntimeKind::Opencode), "opencode");
+    }
 }

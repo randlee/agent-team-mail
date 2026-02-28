@@ -91,6 +91,15 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
         return Ok(());
     }
 
+    let pid = validated_signal_pid(info.process_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "refusing to signal invalid pid {} for {}@{}",
+            info.process_id,
+            agent,
+            team_name
+        )
+    })?;
+
     send_shutdown_request(&home_dir, team_name, agent)?;
     if wait_for_session_dead(team_name, agent, timeout_secs) {
         crate::commands::teams::cleanup_single_agent(
@@ -104,14 +113,8 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
 
     #[cfg(unix)]
     {
-        let pid = validated_signal_pid(info.process_id)
-            .ok_or_else(|| anyhow::anyhow!("invalid process id {}", info.process_id))?;
-        // SAFETY: validated PID, graceful-first interruption signal.
+        // SAFETY: SIGINT requests graceful interrupt of the target process.
         let _ = unsafe { libc::kill(pid, libc::SIGINT) };
-        if !wait_for_session_dead(team_name, agent, 3) {
-            // SAFETY: escalation after graceful attempt timed out.
-            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
     }
     #[cfg(not(unix))]
     {
@@ -130,7 +133,7 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
         #[cfg(unix)]
         {
             // SAFETY: SIGKILL force-terminates process that ignored prior shutdown attempts.
-            let _ = unsafe { libc::kill(info.process_id as libc::pid_t, libc::SIGKILL) };
+            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         if wait_for_session_dead(team_name, agent, 3) {
             crate::commands::teams::cleanup_single_agent(
@@ -143,6 +146,14 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
         } else {
             anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
         }
+    }
+}
+
+fn validated_signal_pid(pid: u32) -> Option<libc::pid_t> {
+    if pid > 1 && pid <= i32::MAX as u32 {
+        Some(pid as libc::pid_t)
+    } else {
+        None
     }
 }
 

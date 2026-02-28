@@ -144,6 +144,14 @@ fn execute_agent_cleanup(
         let session = query_session_for_team(team_name, agent_name);
         match session {
             Ok(Some(info)) if info.alive => {
+                let pid = validated_signal_pid(info.process_id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "refusing to signal invalid pid {} for {}@{}",
+                        info.process_id,
+                        agent_name,
+                        team_name
+                    )
+                })?;
                 if !kill_mode {
                     anyhow::bail!(
                         "agent '{}' is active; refusing destructive cleanup without --kill",
@@ -155,19 +163,8 @@ fn execute_agent_cleanup(
                 if !wait_for_session_dead(team_name, agent_name, timeout_secs) {
                     #[cfg(unix)]
                     {
-                        let pid = validated_signal_pid(info.process_id).ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "invalid process id {} for '{}'",
-                                info.process_id,
-                                agent_name
-                            )
-                        })?;
-                        // SAFETY: `pid` validated to avoid special/invalid values.
+                        // SAFETY: SIGINT requests graceful interrupt of the target process.
                         let _ = unsafe { libc::kill(pid, libc::SIGINT) };
-                        if !wait_for_session_dead(team_name, agent_name, 3) {
-                            // SAFETY: escalation to SIGKILL after graceful-first attempt.
-                            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
-                        }
                     }
                     #[cfg(not(unix))]
                     {
@@ -179,9 +176,7 @@ fn execute_agent_cleanup(
                         #[cfg(unix)]
                         {
                             // SAFETY: SIGKILL force-terminates process after graceful attempts.
-                            let _ = unsafe {
-                                libc::kill(info.process_id as libc::pid_t, libc::SIGKILL)
-                            };
+                            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
                         }
                         if !wait_for_session_dead(team_name, agent_name, 3) {
                             anyhow::bail!(
@@ -285,9 +280,9 @@ fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -
     false
 }
 
-fn validated_signal_pid(pid: u32) -> Option<i32> {
+fn validated_signal_pid(pid: u32) -> Option<libc::pid_t> {
     if pid > 1 && pid <= i32::MAX as u32 {
-        Some(pid as i32)
+        Some(pid as libc::pid_t)
     } else {
         None
     }
@@ -321,7 +316,6 @@ mod test_daemon_state {
         slot().lock().unwrap().clone()
     }
 }
-
 /// Clean up a single team's inboxes
 fn cleanup_team(
     home_dir: &Path,

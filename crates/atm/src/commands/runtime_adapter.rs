@@ -191,7 +191,8 @@ mod tests {
     fn gemini_build_env_sets_runtime_home_and_system_prompt() {
         let adapter = GeminiAdapter;
         let mut spec = base_spec();
-        spec.system_prompt = Some(PathBuf::from("/tmp/system.md"));
+        let system_md = std::env::temp_dir().join("system.md");
+        spec.system_prompt = Some(system_md.clone());
 
         let env = adapter
             .build_env(&spec, Path::new("/home/tester"))
@@ -202,7 +203,7 @@ mod tests {
         assert!(runtime_home.contains(".claude/runtime/gemini/atm-dev/arch-ctm/home"));
         assert_eq!(
             env.get("GEMINI_SYSTEM_MD").map(String::as_str),
-            Some("/tmp/system.md")
+            Some(system_md.to_string_lossy().as_ref())
         );
     }
 }
