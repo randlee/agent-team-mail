@@ -874,15 +874,8 @@ fn authorize_hook_event(
     agent: &str,
     source: agent_team_mail_core::daemon_client::LifecycleSourceKind,
 ) -> std::result::Result<HookEventAuth, String> {
-    let home_dir = if let Ok(path) = std::env::var("ATM_HOME") {
-        PathBuf::from(path)
-    } else if let Ok(path) = std::env::var("HOME") {
-        PathBuf::from(path)
-    } else if let Ok(path) = std::env::var("USERPROFILE") {
-        PathBuf::from(path)
-    } else {
-        return Err("missing ATM_HOME/HOME".to_string());
-    };
+    let home_dir = agent_team_mail_core::home::get_home_dir()
+        .map_err(|e| format!("failed to resolve home directory: {e}"))?;
 
     let config_path = home_dir
         .join(".claude/teams")

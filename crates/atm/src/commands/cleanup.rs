@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use std::path::Path;
 
+use crate::commands::teams;
 use crate::util::settings::get_home_dir;
 
 /// Apply retention policies to clean up old messages
@@ -16,6 +17,10 @@ pub struct CleanupArgs {
     #[arg(short, long)]
     team: Option<String>,
 
+    /// Remove stale state for a specific agent (compatibility alias for teams cleanup)
+    #[arg(long)]
+    agent: Option<String>,
+
     /// Apply to all teams
     #[arg(long)]
     all_teams: bool,
@@ -23,6 +28,10 @@ pub struct CleanupArgs {
     /// Show what would be cleaned without modifying
     #[arg(long)]
     dry_run: bool,
+
+    /// Force cleanup when daemon liveness checks are unavailable (agent mode only)
+    #[arg(long)]
+    force: bool,
 }
 
 /// Execute the cleanup command
@@ -36,6 +45,22 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
     };
 
     let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+
+    // Agent cleanup compatibility mode:
+    // `atm cleanup --agent <name> [--team <team>] [--force]`
+    if let Some(agent) = &args.agent {
+        if args.all_teams {
+            anyhow::bail!("--agent cannot be combined with --all-teams");
+        }
+        if args.dry_run {
+            anyhow::bail!("--dry-run is not supported with --agent");
+        }
+        let team_name = args
+            .team
+            .clone()
+            .unwrap_or_else(|| config.core.default_team.clone());
+        return teams::cleanup_single_agent(team_name, agent.clone(), args.force);
+    }
 
     let teams_dir = home_dir.join(".claude/teams");
     if !teams_dir.exists() {
