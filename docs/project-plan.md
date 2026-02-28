@@ -76,14 +76,14 @@ uncommitted until planning gates are completed:
 | `atm init --check` + upgrade validation | T.7 | Candidate only |
 | `atm teams resume` session handoff | T.8 | Candidate only |
 | OpenCode baseline adapter | T.9 | Candidate only |
-| Operational health agent (`atm-monitor`) | T.10 | Candidate only |
+| Operational health agent (`atm-monitor`) | T.5b | Candidate only |
 | Tmux Sentinel Injection | T.11 / #45 | Candidate only |
-| Codex Idle Detection via Notify Hook | T.12 / #46 | Candidate only |
-| Ephemeral Pub/Sub for Agent Availability | T.13 / #47 | Candidate only |
-| Gemini resume flag drift | T.14 / #281 | Candidate only |
-| Gemini end-to-end spawn wiring | T.15 / #282 | Candidate only |
+| Codex Idle Detection via Notify Hook | T.5c / #46 | Candidate only |
+| Ephemeral Pub/Sub for Agent Availability | T.5c / #47 | Candidate only |
+| Gemini resume flag drift | T.4 / #281 | Candidate only |
+| Gemini end-to-end spawn wiring | T.3 / #282 | Candidate only |
 | S.2a/S.1 deliverable accuracy cleanup | T.16 / #283 | Candidate only |
-| CLI crate publish failure (`include_str!` packaging) | T.17 / #284 | Candidate only |
+| CLI crate publish failure (`include_str!` packaging) | T.5a / #284 | Candidate only |
 
 ## Open Issues Source Of Truth
 
@@ -102,7 +102,8 @@ This plan references that issue list and uses it to drive Phase T planning decis
 
 ## Planning Hygiene Items
 
-- Reconcile sprint mapping consistency for [#45](https://github.com/randlee/agent-team-mail/issues/45), [#46](https://github.com/randlee/agent-team-mail/issues/46), [#47](https://github.com/randlee/agent-team-mail/issues/47) across all planning docs.
+- Keep provisional sprint mappings synchronized between `docs/test-plan-phase-T.md`,
+  `docs/project-plan.md`, and `docs/issues.md`.
 - Keep `docs/issues.md` synchronized with actual issue status/priority changes.
 
 ## References
