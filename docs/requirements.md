@@ -595,6 +595,32 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 - `atm daemon --kill <agent> [--timeout <seconds>]`: executes shutdown protocol above,
   then teardown cleanup invariant.
 
+### 4.3.2 `atm teams spawn` (Claude Runtime Baseline)
+
+`atm teams spawn` must provide a first-class CLI path equivalent to the current
+`scripts/spawn-teammate.sh` behavior for Claude teammates.
+
+Required baseline behavior:
+- Resolve agent runtime metadata from `.claude/agents/<agent>.md` frontmatter
+  (at minimum `model`, `color`; prompt body used for initial instruction delivery).
+- Resolve team/identity using explicit args first, then `ATM_TEAM` / `ATM_IDENTITY`.
+- Resolve working directory from explicit `--repo-root` (or equivalent), else current
+  project root; launch command MUST `cd` into that root before starting Claude.
+- Register teammate in team config before launch, then update pane/session metadata
+  after successful spawn.
+- Support resume-aware launch by passing parent session when available (for example,
+  `leadSessionId`-derived handoff).
+- Deliver initial prompt/body content after launch using ATM messaging path.
+
+Hook/path compatibility requirements:
+- Generated hook commands must use `"$CLAUDE_PROJECT_DIR"` for project scripts and guard
+  missing files with `test -f` before execution.
+- Spawn semantics must not rely on fragile relative paths.
+
+Non-goal for R.0b:
+- Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
+  baseline parity is the immediate requirement.
+
 ### 4.4 Configuration
 
 #### Resolution Order (highest priority first)
