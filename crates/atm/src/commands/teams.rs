@@ -38,6 +38,8 @@ pub struct TeamsArgs {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum TeamsCommand {
+    /// Spawn an agent via daemon-backed launcher
+    Spawn(SpawnArgs),
     /// Add a member to a team without launching an agent
     AddMember(AddMemberArgs),
     /// Update fields on an existing team member
@@ -50,6 +52,46 @@ pub enum TeamsCommand {
     Backup(BackupArgs),
     /// Restore a team's members, inboxes, and tasks from a backup snapshot
     Restore(RestoreArgs),
+}
+
+/// Spawn an agent via daemon-backed launcher.
+#[derive(Args, Debug)]
+pub struct SpawnArgs {
+    /// Agent identity name (positional form)
+    #[arg(value_name = "AGENT")]
+    agent: Option<String>,
+
+    /// Agent identity name (flag form)
+    #[arg(long, value_name = "AGENT", conflicts_with = "agent")]
+    agent_name: Option<String>,
+
+    /// Runtime selector (claude|codex|gemini|opencode)
+    #[arg(long, default_value = "claude")]
+    runtime: String,
+
+    /// Command override for pane launch
+    #[arg(long)]
+    command: Option<String>,
+
+    /// Initial prompt to send after the agent becomes ready
+    #[arg(long)]
+    prompt: Option<String>,
+
+    /// Override the team name (default: from config)
+    #[arg(long)]
+    team: Option<String>,
+
+    /// Readiness timeout in seconds
+    #[arg(long, default_value_t = 30)]
+    timeout: u32,
+
+    /// Output result as JSON
+    #[arg(long)]
+    json: bool,
+
+    /// Extra environment variables for the pane (KEY=VALUE, repeatable)
+    #[arg(long = "env", value_name = "KEY=VALUE")]
+    env: Vec<String>,
 }
 
 /// Add a member to a team (no agent spawn)
@@ -210,6 +252,7 @@ struct TeamSummary {
 pub fn execute(args: TeamsArgs) -> Result<()> {
     if let Some(command) = args.command {
         return match command {
+            TeamsCommand::Spawn(spawn_args) => spawn(spawn_args),
             TeamsCommand::AddMember(add_args) => add_member(add_args),
             TeamsCommand::UpdateMember(update_args) => update_member(update_args),
             TeamsCommand::Resume(resume_args) => resume(resume_args),
@@ -291,6 +334,37 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn spawn(args: SpawnArgs) -> Result<()> {
+    let agent_name = args.agent_name.or(args.agent).ok_or_else(|| {
+        anyhow::anyhow!("Missing agent name. Use `atm teams spawn --agent <name>`")
+    })?;
+
+    let runtime = args.runtime.to_ascii_lowercase();
+    let default_command = match runtime.as_str() {
+        "claude" => "claude".to_string(),
+        "codex" => "codex --yolo".to_string(),
+        "gemini" => "gemini".to_string(),
+        "opencode" => "opencode".to_string(),
+        _ => {
+            anyhow::bail!(
+                "Unsupported runtime '{}'. Expected one of: claude, codex, gemini, opencode",
+                args.runtime
+            );
+        }
+    };
+
+    let launch_args = crate::commands::launch::LaunchArgs {
+        agent_name,
+        command: args.command.unwrap_or(default_command),
+        prompt: args.prompt,
+        team: args.team,
+        timeout: args.timeout,
+        json: args.json,
+        env: args.env,
+    };
+    crate::commands::launch::execute(launch_args)
 }
 
 fn add_member(args: AddMemberArgs) -> Result<()> {
@@ -763,7 +837,10 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             }
         } else {
             // Standard Claude Code member: existing liveness logic unchanged.
-            match agent_team_mail_core::daemon_client::query_session_for_team(&args.team, &member.name) {
+            match agent_team_mail_core::daemon_client::query_session_for_team(
+                &args.team,
+                &member.name,
+            ) {
                 Ok(Some(ref info)) => {
                     // Daemon responded with an explicit record — trust it.
                     !info.alive
@@ -1356,6 +1433,56 @@ mod tests {
 
         let age = format_age(timestamp);
         assert!(age.contains("day"));
+    }
+
+    #[test]
+    fn test_spawn_requires_agent_name() {
+        let args = SpawnArgs {
+            agent: None,
+            agent_name: None,
+            runtime: "claude".to_string(),
+            command: None,
+            prompt: None,
+            team: None,
+            timeout: 30,
+            json: false,
+            env: Vec::new(),
+        };
+
+        let result = spawn(args);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Missing agent name"),
+            "missing-agent error should be explicit"
+        );
+    }
+
+    #[test]
+    fn test_spawn_rejects_unsupported_runtime() {
+        let args = SpawnArgs {
+            agent: Some("arch-ctm".to_string()),
+            agent_name: None,
+            runtime: "invalid-runtime".to_string(),
+            command: None,
+            prompt: None,
+            team: None,
+            timeout: 30,
+            json: false,
+            env: Vec::new(),
+        };
+
+        let result = spawn(args);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported runtime"),
+            "runtime validation should fail before daemon interaction"
+        );
     }
 
     #[test]

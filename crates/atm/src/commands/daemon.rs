@@ -4,8 +4,8 @@ use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use anyhow::{Context, Result};
-use clap::{Args, Subcommand};
 use chrono::Utc;
+use clap::{Args, Subcommand};
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
@@ -51,9 +51,10 @@ pub fn execute(args: DaemonArgs) -> Result<()> {
         return execute_kill(agent, args.team.as_deref(), args.timeout.max(1));
     }
 
-    match args.command.unwrap_or(DaemonCommands::Status(StatusArgs {
-        json: false,
-    })) {
+    match args
+        .command
+        .unwrap_or(DaemonCommands::Status(StatusArgs { json: false }))
+    {
         DaemonCommands::Status(status_args) => execute_status(status_args),
     }
 }
@@ -103,8 +104,14 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
 
     #[cfg(unix)]
     {
-        // SAFETY: SIGTERM requests process termination by PID.
-        let _ = unsafe { libc::kill(info.process_id as libc::pid_t, libc::SIGTERM) };
+        let pid = validated_signal_pid(info.process_id)
+            .ok_or_else(|| anyhow::anyhow!("invalid process id {}", info.process_id))?;
+        // SAFETY: validated PID, graceful-first interruption signal.
+        let _ = unsafe { libc::kill(pid, libc::SIGINT) };
+        if !wait_for_session_dead(team_name, agent, 3) {
+            // SAFETY: escalation after graceful attempt timed out.
+            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
     }
     #[cfg(not(unix))]
     {
@@ -124,7 +131,11 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
     }
 }
 
-fn send_shutdown_request(home_dir: &std::path::Path, team_name: &str, agent_name: &str) -> Result<()> {
+fn send_shutdown_request(
+    home_dir: &std::path::Path,
+    team_name: &str,
+    agent_name: &str,
+) -> Result<()> {
     let payload = serde_json::json!({
         "type": "shutdown_request",
         "requestId": Uuid::new_v4().to_string(),
@@ -162,6 +173,14 @@ fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -
         std::thread::sleep(Duration::from_millis(500));
     }
     false
+}
+
+fn validated_signal_pid(pid: u32) -> Option<i32> {
+    if pid > 1 && pid <= i32::MAX as u32 {
+        Some(pid as i32)
+    } else {
+        None
+    }
 }
 
 /// Execute daemon status command
