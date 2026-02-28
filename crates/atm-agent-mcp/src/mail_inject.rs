@@ -329,7 +329,40 @@ pub fn fetch_unread_mail(
         }
     };
 
-    build_mail_envelopes(&messages, max_messages, max_message_length)
+    let current_session = std::env::var("CLAUDE_SESSION_ID").ok();
+    let filtered: Vec<InboxMessage> = messages
+        .into_iter()
+        .filter(|m| message_matches_current_session(m, current_session.as_deref()))
+        .collect();
+
+    build_mail_envelopes(&filtered, max_messages, max_message_length)
+}
+
+fn message_matches_current_session(msg: &InboxMessage, current_session: Option<&str>) -> bool {
+    let Some(current_session) = current_session else {
+        return true;
+    };
+
+    let msg_session = msg
+        .unknown_fields
+        .get("session_id")
+        .or_else(|| msg.unknown_fields.get("sessionId"))
+        .and_then(|v| v.as_str().map(ToString::to_string))
+        .or_else(|| {
+            serde_json::from_str::<serde_json::Value>(&msg.text)
+                .ok()
+                .and_then(|json| {
+                    json.get("session_id")
+                        .or_else(|| json.get("sessionId"))
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string)
+                })
+        });
+
+    match msg_session {
+        Some(s) => s == current_session,
+        None => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +736,17 @@ mod tests {
         // Should not panic when inbox doesn't exist
         mark_messages_read("nobody", "team", &["id-1".to_string()]);
         unset_atm_home();
+    }
+
+    #[test]
+    fn session_filter_rejects_stale_session_scoped_messages() {
+        let mut msg = make_msg("sender", r#"{"session_id":"old-session"}"#, false, Some("id-1"));
+        msg.unknown_fields
+            .insert("session_id".to_string(), serde_json::json!("old-session"));
+
+        assert!(!message_matches_current_session(&msg, Some("new-session")));
+        assert!(message_matches_current_session(&msg, Some("old-session")));
+        assert!(message_matches_current_session(&msg, None));
     }
 
     // -----------------------------------------------------------------------

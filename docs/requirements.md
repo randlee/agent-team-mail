@@ -333,6 +333,7 @@ Commands:
   teams       List teams on this machine (and manage members)
   members     List agents in a team
   status      Show team status overview
+  doctor      Run daemon/team health diagnostics
   config      Show/set configuration
   cleanup     Apply retention policies
   mcp         MCP server setup and management
@@ -558,6 +559,234 @@ atm status <team>                # specific team
 
 **Output**: Team info, member list with activity, unread message counts, pending tasks.
 
+### 4.3.1 Lifecycle Teardown and Cleanup Semantics
+
+Daemon-managed teammate shutdown and cleanup MUST follow one canonical flow so that
+team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
+
+**Primary shutdown protocol**:
+- Daemon sends a structured `shutdown_request` control message to the target agent mailbox.
+- Daemon waits for graceful exit up to `--timeout` while monitoring PID/session liveness.
+- If the process exits within timeout, daemon proceeds to teardown cleanup.
+- If still alive after timeout, daemon force-kills PID using backend/platform-appropriate
+  termination, then proceeds to teardown cleanup after death is confirmed.
+- Mailbox deletion MUST NOT be used as a primary shutdown signal.
+
+**Teardown cleanup invariant (REQUIRED)**:
+- Roster removal and mailbox deletion are coupled operations and MUST converge together.
+- For an agent in terminal state (`already terminated` or `killed after timeout`), daemon
+  MUST:
+  1. remove the member entry from team `config.json`, and
+  2. delete `inboxes/<agent>.json`.
+- A partial result (only roster removed or only mailbox deleted) is a failure state and
+  MUST be retried/reconciled by daemon until converged.
+
+**Already-terminated case**:
+- If daemon verifies PID/session is already dead at operation start, daemon skips control
+  delivery and runs teardown cleanup directly using the same coupled invariant above.
+
+**Active-agent safety guard**:
+- Daemon cleanup commands MUST NOT delete mailbox or remove roster entry for a
+  PID/session-verified active agent unless the caller explicitly requested kill semantics.
+
+**Command expectations**:
+- `atm cleanup --agent <name>`: non-destructive for active agents; applies teardown cleanup
+  only when daemon verifies dead state (or explicit kill mode is requested). In kill mode,
+  it MUST deliver `shutdown_request` first, then enforce timeout/kill fallback.
+- `atm daemon --kill <agent> [--timeout <seconds>]`: executes shutdown protocol above,
+  then teardown cleanup invariant.
+
+### 4.3.2 `atm teams spawn` (Claude Runtime Baseline)
+
+`atm teams spawn` must provide a first-class CLI path equivalent to the current
+`scripts/spawn-teammate.sh` behavior for Claude teammates.
+
+Required baseline behavior:
+- Resolve agent runtime metadata from `.claude/agents/<agent>.md` frontmatter
+  (at minimum `model`, `color`; prompt body used for initial instruction delivery).
+- Resolve team/identity using explicit args first, then `ATM_TEAM` / `ATM_IDENTITY`.
+- Resolve working directory from explicit `--repo-root` (or equivalent), else current
+  project root; launch command MUST `cd` into that root before starting Claude.
+- Register teammate in team config before launch, then update pane/session metadata
+  after successful spawn.
+- Support resume-aware launch by passing parent session when available (for example,
+  `leadSessionId`-derived handoff).
+- Deliver initial prompt/body content after launch using ATM messaging path.
+
+Hook/path compatibility requirements:
+- Generated hook commands must use `"$CLAUDE_PROJECT_DIR"` for project scripts and guard
+  missing files with `test -f` before execution.
+- Spawn semantics must not rely on fragile relative paths.
+
+Non-goal for R.0b:
+- Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
+  baseline parity is the immediate requirement.
+
+### 4.3.3 `atm doctor`
+
+`atm doctor` provides a single operational triage report for daemon-backed ATM health.
+
+```
+atm doctor
+atm doctor --team <name>
+atm doctor --json
+atm doctor --since <iso8601|duration>
+atm doctor --errors-only
+atm doctor --full
+```
+
+**Checks performed**:
+- Daemon health: lock/socket/PID coherence and daemon availability.
+- PID/session reconciliation: live process verification for registered team members.
+- Roster/session integrity: detect mismatches between `config.json` members and daemon session registry.
+- Mailbox/teardown integrity: detect terminal-agent partial teardown states
+  (roster removed xor mailbox present).
+- Config/runtime drift: detect path/env mismatches relevant to daemon/team operation.
+- Unified log diagnostics: summarize warning/error events in the configured time window.
+
+**Default warning/error log window**:
+- `since = max(team-lead session start, last doctor call time)`.
+- First call (no prior doctor state) uses team-lead session start.
+- Repeated calls are incremental by default (new events since prior doctor call).
+- `--since` overrides default window.
+- `--full` forces full window from team-lead session start.
+
+**`--errors-only` behavior**:
+- Scope: affects only the unified log diagnostics check.
+- With `--errors-only`, log scanning includes only `error` level events.
+- With `--errors-only`, doctor must suppress non-error log findings (for example,
+  warning-count summaries and "no events in window" informational findings).
+- `--errors-only` does not suppress non-log findings from daemon/session/roster/mailbox/config checks.
+
+**`--since` duration format**:
+- Accepted duration grammar: `<positive-integer><unit>`.
+- Accepted units: `s` = seconds, `m` = minutes, `h` = hours, `d` = days.
+- Examples: `30m`, `2h`, `1d`, `45s`.
+- Invalid examples: `0m`, `1w`, `1.5h`, `-5m`, `m30`.
+
+**Output requirements**:
+- Human-readable output: ordered findings by severity, then recommended remediation commands.
+- JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
+- Recommendations must include directly runnable commands when applicable.
+
+**JSON output schema (`--json`)**:
+- `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
+- `findings[]`: `severity`, `check`, `code`, `message`
+- `recommendations[]`: `command`, `reason`
+- `log_window`: `mode`, `start`, `end`
+
+**Last-doctor-call persistence**:
+- Path: `~/.config/atm/doctor-state.json`.
+- Format: `{"last_call_by_team": {"<team>": "<rfc3339-timestamp>"}}`
+- Update timing: on successful `atm doctor` completion.
+- Missing/unreadable/invalid state file treated as empty (first-call semantics).
+
+**Exit codes**: `0` = no critical findings, `2` = critical findings, `1` = execution error.
+
+### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
+
+`atm` must support runtime-aware teammate spawn semantics that keep ATM identity
+stable across runtimes (Claude/Codex/Gemini/OpenCode) while allowing runtime-
+specific session handles.
+
+Required baseline:
+- `atm teams spawn` accepts an explicit runtime selector (initially `claude`,
+  `codex`, `gemini` where supported).
+- Proposed baseline command surface:
+  - `atm teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [--model <model>] [--cwd <path>] [--system-prompt <path>] [--sandbox <on|off>] [--approval-mode <mode>] [--include-directories <paths>] [--env KEY=VALUE ...] [--resume] [--resume-session-id <runtime_session_id>]`
+- Spawn supports two modes:
+  - **fresh**: start a new runtime session with a system prompt/bootstrap prompt.
+  - **resume**: continue an existing runtime session bound to the ATM agent.
+- User-facing control remains agent-centric (`team`, `agent`) rather than runtime
+  session-centric for normal usage.
+
+### 4.3.5 Runtime Session and Identity Mapping
+
+Daemon/session registry must store both ATM identity and runtime identity:
+- canonical ATM identity: `team`, `agent`
+- runtime metadata:
+  - `runtime` (e.g., `gemini`)
+  - `runtime_session_id` (runtime-native session/thread identifier)
+  - `process_id`
+  - `pane_id` (for tmux-based workers)
+  - `runtime_home` (runtime state root when isolated per agent)
+  - `state`, `updated_at`
+
+Invariants:
+- ATM identity (`team`, `agent`) is stable and is the authoritative routing key
+  for ATM mail semantics.
+- Runtime session identifiers are adapter-specific and may change between fresh
+  and resumed launches.
+- Resume-by-agent is the default UX. Runtime session IDs are resolved from ATM
+  registry/state in normal flow.
+
+### 4.3.6 Teardown and Liveness Escalation Contract
+
+Teammate teardown must follow request-first semantics:
+1. Send polite shutdown request to the target agent.
+2. Wait a bounded grace window (default: `15s`, configurable).
+3. If unresponsive, escalate with runtime/process signals.
+
+For process-backed runtimes (including Gemini tmux workers), minimum escalation:
+- `SIGINT` (`10s` wait, configurable) -> `SIGTERM` (`10s` wait, configurable) -> `SIGKILL`.
+
+Safety requirements:
+- Teardown escalation must never target agents outside the current team scope.
+- Every escalation stage must emit a structured event to unified logging (section 4.6).
+
+### 4.3.7 Steering Contract (Interactive and Headless)
+
+Steering must support both:
+- interactive tmux-pane workers (stdin prompt/control injection), and
+- headless/structured transports for MCP-style orchestration.
+
+For runtimes without in-turn prompt injection APIs, ATM must enforce and
+document `cancel-then-steer` semantics (no silent assumptions of live turn
+mutation).
+
+### 4.3.8 Gemini Baseline Adapter Requirements
+
+Gemini is the first non-Claude runtime baseline for this contract.
+
+Required Gemini behavior:
+- Launch options must support:
+  - `--model`
+  - `--sandbox` / approval mode where configured
+  - fresh prompt mode and resume mode (`--resume`)
+- Structured headless output must use `--output-format stream-json` for event
+  transport where applicable.
+- System prompt override support must be available through Gemini-supported
+  mechanism (`GEMINI_SYSTEM_MD`).
+- Per-agent state isolation must be supported via `GEMINI_CLI_HOME`.
+- Lifecycle mapping should use one ATM envelope (`hook-event`) with
+  `source.kind = "agent_hook"` for Gemini-origin events (`session_start`,
+  `teammate_idle`, `session_end`).
+- `teammate_idle` above refers to the existing canonical lifecycle event already
+  defined in section 4.5 (not a new event type).
+
+### 4.3.9 OpenCode Baseline Adapter Requirements (Discovery Draft)
+
+OpenCode is the next runtime baseline after Gemini for this contract.
+
+Required OpenCode behavior:
+- Launch options must support OpenCode-native resume controls:
+  - latest-root resume (`--continue`),
+  - explicit session resume (`--session <runtime_session_id>`),
+  - optional `--fork` on resume flows where requested.
+- Runtime identity mapping must persist OpenCode session IDs (`ses_*`) as
+  `runtime_session_id` in ATM registry/state.
+- System prompt integration must use OpenCode-supported instruction surfaces
+  (instruction files/config), since no single CLI `--system-prompt` flag exists
+  in the current runtime.
+- Per-agent runtime isolation must be provided by agent-scoped XDG roots for
+  OpenCode processes.
+- Runtime-aware interrupt must prefer API/session cancellation (`session.abort`)
+  before process signal escalation.
+- Lifecycle and observability events must continue to flow through existing ATM
+  unified envelope and logging requirements (sections 4.5 and 4.6), including
+  runtime adapter fields (`runtime=opencode`, `runtime_session_id`,
+  teardown stage, spawn/resume mode).
+
 ### 4.4 Configuration
 
 #### Resolution Order (highest priority first)
@@ -737,12 +966,11 @@ Validation rules:
 #### Sink Paths and Files
 
 Canonical log file (daemon-writer mode):
-- `${ATM_HOME}/atm.log.jsonl` if `ATM_HOME` is set
-- else `${config_dir}/atm/atm.log.jsonl` (`~/.config/atm` on Linux/macOS, `%APPDATA%\\atm` on Windows)
+- `${home_dir}/.config/atm/atm.log.jsonl` where `home_dir` is resolved via `get_home_dir()`
+  (`ATM_HOME` when set, otherwise platform home directory)
 
 Producer fallback spool directory:
-- `${ATM_HOME}/log-spool` if `ATM_HOME` is set
-- else `${config_dir}/atm/log-spool`
+- `${home_dir}/.config/atm/log-spool` where `home_dir` is resolved via `get_home_dir()`
 
 Spool filename convention:
 - `{source_binary}-{pid}-{unix_millis}.jsonl`
@@ -763,6 +991,9 @@ Spool filename convention:
 - Daemon startup merges spool files via claim/rename then append; delete source file
   only after successful merge.
 - Merge ordering: timestamp then file order, append-only.
+- Daemon startup spool merge and daemon runtime writer MUST target the same canonical
+  path resolved from `ATM_LOG_FILE`/`ATM_LOG_PATH` (or default `atm.log.jsonl`).
+  Divergent startup/runtime sink paths are forbidden.
 
 #### Migration Bridge (Legacy `events.jsonl`) — REMOVED (Phase M.1b)
 
@@ -800,12 +1031,26 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 
 #### Single-Instance Contract
 
-- Daemon startup acquires an exclusive process lock in `${config_dir}/atm/daemon.lock`.
+- Daemon startup acquires an exclusive process lock in
+  `${home_dir}/.config/atm/daemon.lock`, where `home_dir` is resolved via
+  `get_home_dir()` (`ATM_HOME` when set, otherwise platform home directory).
 - If lock acquisition fails, new daemon process exits immediately (existing daemon is authoritative).
 - Socket path is fixed per user scope:
   - Unix/macOS: `${ATM_HOME:-$HOME/.claude}/daemon/atm-daemon.sock` (existing convention)
   - Windows: named-pipe equivalent (canonical path documented in daemon crate)
 - CLI must never spawn a second daemon when lock/socket indicate an existing healthy instance.
+- Daemon startup MUST acquire `daemon.lock` before mutating socket or PID files.
+- Daemon MUST NOT remove an existing socket file unless lock ownership has already
+  been acquired by the current process.
+
+#### Required Acceptance Checks
+
+- Starting a second daemon while one is healthy must fail immediately with an
+  actionable single-instance error.
+- Existing healthy daemon must retain lock ownership; socket/PID files must not
+  be overwritten by a second process.
+- `atm logs` default view and daemon startup spool merge must observe the same
+  canonical `atm.log.jsonl` sink path.
 
 #### Daemon Session Registry Contract
 
@@ -1483,6 +1728,13 @@ The core has no awareness of whether a team member is local or remote.
 - Default behavior for non-Claude-managed members: archive or delete old messages automatically.
 - If Claude does not perform cleanup for its own agents, `atm` should optionally apply retention there as well.
 - Retention policies must be configurable by max message count and/or max age.
+- For daemon-managed teammate teardown, inbox deletion and roster removal from
+  `config.json` MUST occur together for terminal agents (already-dead or killed after
+  timeout). Partial cleanup states are invalid and must be reconciled.
+- For active agents, retention/cleanup MUST NOT remove mailbox or roster entry unless
+  explicit kill semantics are invoked.
+- For active-agent termination intent, cleanup tooling MUST send `shutdown_request` and
+  wait for termination/timeout before performing mailbox deletion and roster removal.
 
 ### 8.7 Large Payloads and File References
 
