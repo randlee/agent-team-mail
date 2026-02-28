@@ -753,6 +753,53 @@ Builds operational triage tooling on top of R.0b lifecycle truth.
 - `atm doctor` detects and reports partial teardown drift (roster removed xor mailbox present).
 - Default repeated runs are incremental for warning/error log output.
 - JSON output mode is stable for automation.
+### R.0d — Runtime compatibility spec (Gemini first, docs-only)
+
+Define and review runtime-agnostic spawn/identity/teardown/steering contracts
+using Gemini CLI as the first external runtime baseline. This sprint is
+documentation/specification only (no implementation).
+
+Deliverables:
+1. Runtime compatibility design doc for Gemini covering launch flags, session
+   model, lifecycle hooks, structured output transport, and signal behavior.
+2. Requirements updates for:
+   - runtime-aware teammate spawn (fresh + resume),
+   - ATM identity vs runtime session identity mapping,
+   - request-first teardown with escalation,
+   - steering semantics (interactive + headless).
+3. Explicit lifecycle envelope mapping for runtime adapters (`source.kind =
+   "agent_hook"`) aligned with daemon authZ model.
+4. Open-questions list for ACP/interactive steering reliability and default
+   sandbox policy, plus additional integration questions (resume override UX,
+   lifecycle event provenance, and default teardown timeout policy).
+
+Acceptance criteria:
+- Approved docs exist before any runtime adapter code is started.
+- Requirements and project plan are consistent on Gemini-first scope and
+  implementation sequencing.
+- Docs explicitly capture known runtime limitations (e.g., cancel-then-steer if
+  in-turn mutation is unavailable).
+
+### R.0e — Runtime compatibility spec (OpenCode baseline, docs-only)
+
+Extend the runtime compatibility spec with OpenCode-specific findings and draft
+adapter requirements before implementation.
+
+Deliverables:
+1. Verified OpenCode runtime facts in `runtime-compatibility.md` covering:
+   - CLI launch/resume controls (`--continue`, `--session`, `--fork`),
+   - session identity model (`ses_*`),
+   - instruction/system prompt surfaces,
+   - interrupt/abort behavior.
+2. Requirements updates for OpenCode baseline adapter behavior in section 4.3.
+3. Open questions list for OpenCode backend strategy (CLI-pane vs server/API)
+   and system-prompt materialization approach.
+
+Acceptance criteria:
+- OpenCode discovery findings are source-referenced and reviewable.
+- Requirements are consistent with runtime-agnostic contracts already defined in
+  R.0d.
+- No adapter implementation code starts before docs review sign-off.
 ### R.1 — `atm teams resume` session handoff
 
 **CLI flag semantics in handoff mode**:
@@ -806,6 +853,8 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
 | R.0b | Persistent session registry + agent lifecycle management | R.0 | M | COMPLETE |
 | R.0c | `atm doctor` diagnostics and cleanup guidance | R.0b | S | COMPLETE |
+| R.0d | Runtime compatibility spec (Gemini first) (docs-only) | R.0b | S | COMPLETE |
+| R.0e | Runtime compatibility spec (OpenCode baseline) (docs-only) | R.0d | S | IN PROGRESS |
 | R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
 | R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
