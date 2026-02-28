@@ -149,9 +149,9 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
     }
 }
 
-fn validated_signal_pid(pid: u32) -> Option<libc::pid_t> {
+fn validated_signal_pid(pid: u32) -> Option<i32> {
     if pid > 1 && pid <= i32::MAX as u32 {
-        Some(pid as libc::pid_t)
+        Some(pid as i32)
     } else {
         None
     }
