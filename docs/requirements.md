@@ -660,58 +660,133 @@ atm doctor --full
 
 **`--since` duration format**:
 - Accepted duration grammar: `<positive-integer><unit>`.
-- Accepted units:
-  - `s` = seconds
-  - `m` = minutes
-  - `h` = hours
-  - `d` = days
+- Accepted units: `s` = seconds, `m` = minutes, `h` = hours, `d` = days.
 - Examples: `30m`, `2h`, `1d`, `45s`.
 - Invalid examples: `0m`, `1w`, `1.5h`, `-5m`, `m30`.
 
 **Output requirements**:
 - Human-readable output: ordered findings by severity, then recommended remediation commands.
-- JSON output (`--json`): stable schema with
-  `summary`, `findings[]`, `recommendations[]`, `log_window`.
-- Recommendations must include directly runnable commands when applicable
-  (for example: `atm cleanup --agent <name>`, `atm daemon start`, `atm register <team>`).
+- JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
+- Recommendations must include directly runnable commands when applicable.
 
 **JSON output schema (`--json`)**:
-- Top-level object:
-  - `summary` (object)
-  - `findings` (array)
-  - `recommendations` (array)
-  - `log_window` (object)
-- `summary` object:
-  - `team` (string)
-  - `generated_at` (string, RFC3339 UTC timestamp)
-  - `has_critical` (boolean)
-  - `counts` (object): `{ "critical": number, "warn": number, "info": number }`
-- `findings[]` item object:
-  - `severity` (enum string): `"critical" | "warn" | "info"`
-  - `check` (string; stable check category identifier)
-  - `code` (string; stable machine-readable finding code)
-  - `message` (string; human-readable detail)
-- `recommendations[]` item object:
-  - `command` (string; directly runnable command where applicable)
-  - `reason` (string; concise remediation rationale)
-- `log_window` object:
-  - `mode` (enum string): `"default_incremental" | "since_override" | "full"`
-  - `start` (string, RFC3339 UTC timestamp)
-  - `end` (string, RFC3339 UTC timestamp)
+- `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
+- `findings[]`: `severity`, `check`, `code`, `message`
+- `recommendations[]`: `command`, `reason`
+- `log_window`: `mode`, `start`, `end`
 
 **Last-doctor-call persistence**:
 - Path: `~/.config/atm/doctor-state.json`.
-- Format: JSON object with per-team RFC3339 timestamps:
-  - `{"last_call_by_team": {"<team>": "<rfc3339-timestamp>"}}`
-- Update timing: on successful `atm doctor` completion (after report generation/output).
-- Fallback behavior:
-  - Missing/unreadable/invalid state file is treated as empty state.
-  - Empty state means "first call" semantics for default window calculation.
+- Format: `{"last_call_by_team": {"<team>": "<rfc3339-timestamp>"}}`
+- Update timing: on successful `atm doctor` completion.
+- Missing/unreadable/invalid state file treated as empty (first-call semantics).
 
-**Exit codes**:
-- `0`: no critical findings.
-- `2`: critical findings detected (operator action required).
-- `1`: doctor execution failed (I/O/parsing/runtime error).
+**Exit codes**: `0` = no critical findings, `2` = critical findings, `1` = execution error.
+
+### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
+
+`atm` must support runtime-aware teammate spawn semantics that keep ATM identity
+stable across runtimes (Claude/Codex/Gemini/OpenCode) while allowing runtime-
+specific session handles.
+
+Required baseline:
+- `atm teams spawn` accepts an explicit runtime selector (initially `claude`,
+  `codex`, `gemini` where supported).
+- Proposed baseline command surface:
+  - `atm teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [--model <model>] [--cwd <path>] [--system-prompt <path>] [--sandbox <on|off>] [--approval-mode <mode>] [--include-directories <paths>] [--env KEY=VALUE ...] [--resume] [--resume-session-id <runtime_session_id>]`
+- Spawn supports two modes:
+  - **fresh**: start a new runtime session with a system prompt/bootstrap prompt.
+  - **resume**: continue an existing runtime session bound to the ATM agent.
+- User-facing control remains agent-centric (`team`, `agent`) rather than runtime
+  session-centric for normal usage.
+
+### 4.3.5 Runtime Session and Identity Mapping
+
+Daemon/session registry must store both ATM identity and runtime identity:
+- canonical ATM identity: `team`, `agent`
+- runtime metadata:
+  - `runtime` (e.g., `gemini`)
+  - `runtime_session_id` (runtime-native session/thread identifier)
+  - `process_id`
+  - `pane_id` (for tmux-based workers)
+  - `runtime_home` (runtime state root when isolated per agent)
+  - `state`, `updated_at`
+
+Invariants:
+- ATM identity (`team`, `agent`) is stable and is the authoritative routing key
+  for ATM mail semantics.
+- Runtime session identifiers are adapter-specific and may change between fresh
+  and resumed launches.
+- Resume-by-agent is the default UX. Runtime session IDs are resolved from ATM
+  registry/state in normal flow.
+
+### 4.3.6 Teardown and Liveness Escalation Contract
+
+Teammate teardown must follow request-first semantics:
+1. Send polite shutdown request to the target agent.
+2. Wait a bounded grace window (default: `15s`, configurable).
+3. If unresponsive, escalate with runtime/process signals.
+
+For process-backed runtimes (including Gemini tmux workers), minimum escalation:
+- `SIGINT` (`10s` wait, configurable) -> `SIGTERM` (`10s` wait, configurable) -> `SIGKILL`.
+
+Safety requirements:
+- Teardown escalation must never target agents outside the current team scope.
+- Every escalation stage must emit a structured event to unified logging (section 4.6).
+
+### 4.3.7 Steering Contract (Interactive and Headless)
+
+Steering must support both:
+- interactive tmux-pane workers (stdin prompt/control injection), and
+- headless/structured transports for MCP-style orchestration.
+
+For runtimes without in-turn prompt injection APIs, ATM must enforce and
+document `cancel-then-steer` semantics (no silent assumptions of live turn
+mutation).
+
+### 4.3.8 Gemini Baseline Adapter Requirements
+
+Gemini is the first non-Claude runtime baseline for this contract.
+
+Required Gemini behavior:
+- Launch options must support:
+  - `--model`
+  - `--sandbox` / approval mode where configured
+  - fresh prompt mode and resume mode (`--resume`)
+- Structured headless output must use `--output-format stream-json` for event
+  transport where applicable.
+- System prompt override support must be available through Gemini-supported
+  mechanism (`GEMINI_SYSTEM_MD`).
+- Per-agent state isolation must be supported via `GEMINI_CLI_HOME`.
+- Lifecycle mapping should use one ATM envelope (`hook-event`) with
+  `source.kind = "agent_hook"` for Gemini-origin events (`session_start`,
+  `teammate_idle`, `session_end`).
+- `teammate_idle` above refers to the existing canonical lifecycle event already
+  defined in section 4.5 (not a new event type).
+
+### 4.3.9 OpenCode Baseline Adapter Requirements (Discovery Draft)
+
+OpenCode is the next runtime baseline after Gemini for this contract.
+
+Required OpenCode behavior:
+- Launch options must support OpenCode-native resume controls:
+  - latest-root resume (`--continue`),
+  - explicit session resume (`--session <runtime_session_id>`),
+  - optional `--fork` on resume flows where requested.
+- Runtime identity mapping must persist OpenCode session IDs (`ses_*`) as
+  `runtime_session_id` in ATM registry/state.
+- System prompt integration must use OpenCode-supported instruction surfaces
+  (instruction files/config), since no single CLI `--system-prompt` flag exists
+  in the current runtime.
+- Per-agent runtime isolation must be provided by agent-scoped XDG roots for
+  OpenCode processes.
+- Runtime-aware interrupt must prefer API/session cancellation (`session.abort`)
+  before process signal escalation.
+- Lifecycle and observability events must continue to flow through existing ATM
+  unified envelope and logging requirements (sections 4.5 and 4.6), including
+  runtime adapter fields (`runtime=opencode`, `runtime_session_id`,
+  teardown stage, spawn/resume mode).
+
 ### 4.4 Configuration
 
 #### Resolution Order (highest priority first)
