@@ -3,6 +3,11 @@
 **Status**: Active / Evolving
 **Date**: 2026-02-20 (updated from 2026-02-11)
 
+> Note: Some findings below are historical observations from pre-R.0b behavior.
+> Canonical shutdown/cleanup behavior is now defined in `docs/requirements.md`
+> section 4.3.1 and section 8.6 (shutdown_request-first teardown, timeout/kill
+> fallback, and coupled roster+mailbox cleanup after confirmed termination).
+
 ---
 
 ## Background
