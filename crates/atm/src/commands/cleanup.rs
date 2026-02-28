@@ -136,21 +136,41 @@ fn execute_agent_cleanup(
     }
 
     if agent_team_mail_core::daemon_client::daemon_is_running() {
-        if let Ok(Some(info)) = agent_team_mail_core::daemon_client::query_session_for_team(
+        let session = agent_team_mail_core::daemon_client::query_session_for_team(
             team_name, agent_name,
-        ) && info.alive
-        {
-            send_shutdown_request(home_dir, team_name, agent_name)?;
+        );
+        match session {
+            Ok(Some(info)) if info.alive => {
+                send_shutdown_request(home_dir, team_name, agent_name)?;
 
-            if !wait_for_session_dead(team_name, agent_name, timeout_secs) {
-                #[cfg(unix)]
-                {
-                    let _ = unsafe { libc::kill(info.process_id as libc::pid_t, libc::SIGTERM) };
+                if !wait_for_session_dead(team_name, agent_name, timeout_secs) {
+                    #[cfg(unix)]
+                    {
+                        let _ =
+                            unsafe { libc::kill(info.process_id as libc::pid_t, libc::SIGTERM) };
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        eprintln!(
+                            "Warning: forced process termination is not supported on this platform"
+                        );
+                    }
                 }
-                #[cfg(not(unix))]
-                {
-                    eprintln!(
-                        "Warning: forced process termination is not supported on this platform"
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if !force {
+                    anyhow::bail!(
+                        "daemon is running but has no session record for '{}'; refusing cleanup without --force",
+                        agent_name
+                    );
+                }
+            }
+            Err(e) => {
+                if !force {
+                    anyhow::bail!(
+                        "failed to query daemon session for '{}': {e}. Re-run with --force to override",
+                        agent_name
                     );
                 }
             }
