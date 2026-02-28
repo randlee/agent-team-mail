@@ -263,7 +263,7 @@ impl WorkerAdapter for CodexTmuxBackend {
         for (key, value) in env_vars {
             // Validate key to prevent shell injection via variable name
             if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                let export_cmd = format!("export {key}={value}");
+                let export_cmd = format!("export {key}={}", shell_single_quote(value));
                 self.sender
                     .send_text_and_enter(
                         &pane_id,
@@ -472,6 +472,13 @@ fn is_valid_signal_pid(pid: u32) -> bool {
     pid > 1 && pid <= i32::MAX as u32
 }
 
+fn shell_single_quote(input: &str) -> String {
+    if input.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", input.replace('\'', "'\"'\"'"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +571,13 @@ mod tests {
     #[test]
     fn test_send_sigkill_dead_pid_does_not_panic() {
         send_sigkill(u32::MAX);
+    }
+
+    #[test]
+    fn test_shell_single_quote_escapes_single_quotes() {
+        assert_eq!(shell_single_quote(""), "''");
+        assert_eq!(shell_single_quote("abc"), "'abc'");
+        assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
     }
 
     #[test]
