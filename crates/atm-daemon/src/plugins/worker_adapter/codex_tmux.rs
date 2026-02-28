@@ -27,6 +27,8 @@ pub struct TmuxPayload {
     pub runtime: String,
     /// Runtime-specific session identifier if known.
     pub runtime_session_id: Option<String>,
+    /// Runtime state/home directory if configured.
+    pub runtime_home: Option<String>,
 }
 
 /// Codex TMUX backend — spawns Codex in tmux panes
@@ -186,6 +188,7 @@ impl WorkerAdapter for CodexTmuxBackend {
             window_name: agent_id.to_string(),
             runtime: "codex".to_string(),
             runtime_session_id: None,
+            runtime_home: None,
         };
 
         Ok(WorkerHandle {
@@ -298,6 +301,10 @@ impl WorkerAdapter for CodexTmuxBackend {
                 .cloned()
                 .unwrap_or_else(|| "codex".to_string()),
             runtime_session_id: env_vars.get("ATM_RUNTIME_SESSION_ID").cloned(),
+            runtime_home: env_vars
+                .get("ATM_RUNTIME_HOME")
+                .cloned()
+                .or_else(|| env_vars.get("GEMINI_CLI_HOME").cloned()),
         };
 
         Ok(WorkerHandle {
@@ -336,7 +343,10 @@ impl WorkerAdapter for CodexTmuxBackend {
         {
             send_sigint_to_pane(&handle.backend_id)?;
             if !wait_for_pid_exit(pid, Duration::from_secs(10)) {
-                send_sigkill(pid);
+                send_sigterm(pid);
+                if !wait_for_pid_exit(pid, Duration::from_secs(10)) {
+                    send_sigkill(pid);
+                }
             }
         }
 
@@ -443,6 +453,21 @@ fn send_sigkill(pid: u32) {
     }
 }
 
+fn send_sigterm(pid: u32) {
+    if !is_valid_signal_pid(pid) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: SIGTERM to a specific process ID.
+        let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
 fn is_valid_signal_pid(pid: u32) -> bool {
     pid > 1 && pid <= i32::MAX as u32
 }
@@ -499,6 +524,7 @@ mod tests {
             window_name: "arch-ctm@planning".to_string(),
             runtime: "codex".to_string(),
             runtime_session_id: None,
+            runtime_home: None,
         };
 
         assert_eq!(payload.session, "test-session");
@@ -516,6 +542,7 @@ mod tests {
             window_name: "arch-ctm@planning".to_string(),
             runtime: "codex".to_string(),
             runtime_session_id: Some("sess-1".to_string()),
+            runtime_home: None,
         };
 
         let cloned = payload.clone();

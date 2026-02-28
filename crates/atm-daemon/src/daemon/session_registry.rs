@@ -44,6 +44,18 @@ pub struct SessionRecord {
     pub state: SessionState,
     /// Last state update timestamp (RFC3339 UTC).
     pub updated_at: String,
+    /// Runtime kind (e.g., `codex`, `gemini`) when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Runtime-native session/thread identifier when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_session_id: Option<String>,
+    /// Runtime backend pane identifier when applicable (e.g., tmux `%42`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// Runtime home/state directory when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_home: Option<String>,
 }
 
 impl SessionRecord {
@@ -105,10 +117,40 @@ impl SessionRegistry {
 
     /// Insert or update the session record for `team/name`.
     pub fn upsert_for_team(&mut self, team: &str, name: &str, session_id: &str, process_id: u32) {
-        let now = chrono::Utc::now().to_rfc3339();
         let key = make_key(team, name);
+        let existing = self.sessions.get(&key).cloned();
+        let runtime = existing.as_ref().and_then(|r| r.runtime.clone());
+        let runtime_session_id = existing.as_ref().and_then(|r| r.runtime_session_id.clone());
+        let pane_id = existing.as_ref().and_then(|r| r.pane_id.clone());
+        let runtime_home = existing.as_ref().and_then(|r| r.runtime_home.clone());
+        self.upsert_runtime_for_team(
+            team,
+            name,
+            session_id,
+            process_id,
+            runtime,
+            runtime_session_id,
+            pane_id,
+            runtime_home,
+        );
+    }
+
+    /// Insert or update the session record for `team/name` with runtime metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_runtime_for_team(
+        &mut self,
+        team: &str,
+        name: &str,
+        session_id: &str,
+        process_id: u32,
+        runtime: Option<String>,
+        runtime_session_id: Option<String>,
+        pane_id: Option<String>,
+        runtime_home: Option<String>,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
         self.sessions.insert(
-            key,
+            make_key(team, name),
             SessionRecord {
                 team: team.to_string(),
                 agent_name: name.to_string(),
@@ -116,6 +158,10 @@ impl SessionRegistry {
                 process_id,
                 state: SessionState::Active,
                 updated_at: now,
+                runtime,
+                runtime_session_id,
+                pane_id,
+                runtime_home,
             },
         );
         self.persist_best_effort();
@@ -444,6 +490,10 @@ mod tests {
             process_id: std::process::id(),
             state: SessionState::Active,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
         };
         assert!(record.is_process_alive());
     }

@@ -77,6 +77,10 @@ impl RuntimeAdapter for GeminiAdapter {
             "GEMINI_CLI_HOME".to_string(),
             runtime_home.to_string_lossy().to_string(),
         );
+        env.insert(
+            "ATM_RUNTIME_HOME".to_string(),
+            runtime_home.to_string_lossy().to_string(),
+        );
 
         if let Some(path) = &spec.system_prompt {
             env.insert(
@@ -201,6 +205,10 @@ mod tests {
             .get("GEMINI_CLI_HOME")
             .expect("GEMINI_CLI_HOME should be set");
         assert!(runtime_home.contains(".claude/runtime/gemini/atm-dev/arch-ctm/home"));
+        assert_eq!(
+            env.get("ATM_RUNTIME_HOME").map(String::as_str),
+            Some(runtime_home.as_str())
+        );
         assert_eq!(
             env.get("GEMINI_SYSTEM_MD").map(String::as_str),
             Some(system_md.to_string_lossy().as_ref())

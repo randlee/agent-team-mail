@@ -377,7 +377,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         query_session_for_team(&team_name, &args.agent)
             .ok()
             .flatten()
-            .map(|info| info.session_id)
+            .map(|info| info.runtime_session_id.unwrap_or(info.session_id))
     } else {
         None
     };

@@ -22,13 +22,20 @@ pub struct MockPayload {
 /// Call record for mock backend operations
 #[derive(Debug, Clone)]
 pub enum MockCall {
-    Spawn { agent_id: String },
+    Spawn {
+        agent_id: String,
+    },
     SpawnWithEnv {
         agent_id: String,
         env_vars: HashMap<String, String>,
     },
-    SendMessage { agent_id: String, message: String },
-    Shutdown { agent_id: String },
+    SendMessage {
+        agent_id: String,
+        message: String,
+    },
+    Shutdown {
+        agent_id: String,
+    },
 }
 
 /// Shared state for mock backend
@@ -315,6 +322,7 @@ mod tests {
                 window_name: "gem-agent".to_string(),
                 runtime: "gemini".to_string(),
                 runtime_session_id: Some("sess-gem".to_string()),
+                runtime_home: None,
             })),
         };
 

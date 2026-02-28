@@ -766,7 +766,10 @@ impl WorkerAdapterPlugin {
             None => return Err("Worker backend not initialized".to_string()),
         };
 
-        let runtime = config.runtime.clone().unwrap_or_else(|| "codex".to_string());
+        let runtime = config
+            .runtime
+            .clone()
+            .unwrap_or_else(|| "codex".to_string());
         let spawn_mode = if config.resume_session_id.is_some() {
             "resume"
         } else {
@@ -820,6 +823,22 @@ impl WorkerAdapterPlugin {
         );
 
         let process_id = lifecycle::get_pane_pid(&pane_id);
+        if let Some(registry) = &self.session_registry {
+            let runtime_home = handle
+                .payload_ref::<TmuxPayload>()
+                .and_then(|p| p.runtime_home.clone());
+            let process_id_for_registry = process_id.unwrap_or(0);
+            registry.lock().unwrap().upsert_runtime_for_team(
+                &config.team,
+                &config.agent,
+                &runtime_session_id,
+                process_id_for_registry,
+                Some(runtime.clone()),
+                Some(runtime_session_id.clone()),
+                Some(pane_id.clone()),
+                runtime_home,
+            );
+        }
         self.append_agent_hook_event(
             "session-start",
             &config.team,
@@ -1184,12 +1203,7 @@ impl Plugin for WorkerAdapterPlugin {
                 } else {
                     self.config.team_name.clone()
                 };
-                teardown_events.push((
-                    team_name,
-                    member_name.clone(),
-                    runtime_session_id,
-                    runtime,
-                ));
+                teardown_events.push((team_name, member_name.clone(), runtime_session_id, runtime));
 
                 // Unregister from lifecycle manager and state tracker
                 self.lifecycle.unregister_worker(&member_name);
@@ -1288,8 +1302,8 @@ impl Plugin for WorkerAdapterPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::mock_backend::{MockCall, MockTmuxBackend};
+    use super::*;
     use tempfile::TempDir;
 
     /// Helper to create a plugin that has a backend but no launch receiver.
@@ -1444,12 +1458,21 @@ mod tests {
             _ => None,
         });
         let env_vars = env_call.expect("spawn_with_env should be recorded");
-        assert_eq!(env_vars.get("ATM_RUNTIME").map(String::as_str), Some("gemini"));
+        assert_eq!(
+            env_vars.get("ATM_RUNTIME").map(String::as_str),
+            Some("gemini")
+        );
         assert_eq!(
             env_vars.get("ATM_RUNTIME_SESSION_ID").map(String::as_str),
             Some("sess-abc")
         );
-        assert_eq!(env_vars.get("ATM_IDENTITY").map(String::as_str), Some("arch-ctm"));
-        assert_eq!(env_vars.get("ATM_TEAM").map(String::as_str), Some("atm-dev"));
+        assert_eq!(
+            env_vars.get("ATM_IDENTITY").map(String::as_str),
+            Some("arch-ctm")
+        );
+        assert_eq!(
+            env_vars.get("ATM_TEAM").map(String::as_str),
+            Some("atm-dev")
+        );
     }
 }

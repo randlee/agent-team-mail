@@ -513,6 +513,18 @@ pub struct SessionQueryResult {
     pub process_id: u32,
     /// Whether the OS process is currently running.
     pub alive: bool,
+    /// Runtime kind (`codex`, `gemini`, etc.) when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Runtime-native session/thread identifier when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_session_id: Option<String>,
+    /// Backend pane identifier when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// Runtime home/state directory when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_home: Option<String>,
 }
 
 /// Query the daemon for the session record of a named agent.
@@ -1121,6 +1133,10 @@ mod tests {
             session_id: "abc123".to_string(),
             process_id: 12345,
             alive: true,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         let decoded: SessionQueryResult = serde_json::from_str(&json).unwrap();
@@ -1136,6 +1152,8 @@ mod tests {
         assert_eq!(result.session_id, "xyz789");
         assert_eq!(result.process_id, 99);
         assert!(!result.alive);
+        assert!(result.runtime.is_none());
+        assert!(result.runtime_session_id.is_none());
     }
 
     #[test]
