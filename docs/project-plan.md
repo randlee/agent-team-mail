@@ -805,7 +805,7 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 |--------|------|------------|------|--------|
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
 | R.0b | Persistent session registry + agent lifecycle management | R.0 | M | COMPLETE |
-| R.0c | `atm doctor` diagnostics and cleanup guidance | R.0b | S | PLANNED |
+| R.0c | `atm doctor` diagnostics and cleanup guidance | R.0b | S | COMPLETE |
 | R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
 | R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
