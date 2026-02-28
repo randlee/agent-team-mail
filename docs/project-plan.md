@@ -753,7 +753,6 @@ Builds operational triage tooling on top of R.0b lifecycle truth.
 - `atm doctor` detects and reports partial teardown drift (roster removed xor mailbox present).
 - Default repeated runs are incremental for warning/error log output.
 - JSON output mode is stable for automation.
-
 ### R.0d — Runtime compatibility spec (Gemini first, docs-only)
 
 Define and review runtime-agnostic spawn/identity/teardown/steering contracts
