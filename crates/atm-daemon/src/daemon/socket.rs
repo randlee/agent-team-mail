@@ -3444,7 +3444,9 @@ mod tests {
             tracker.set_state("team-lead", AgentState::Idle);
         }
         {
-            sr.lock().unwrap().upsert("team-lead", "sess-end", 1111);
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "team-lead", "sess-end", 1111);
         }
         let req_json = r#"{"version":1,"request_id":"r5","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-end","team":"atm-dev"}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
@@ -3696,7 +3698,12 @@ mod tests {
         }
         {
             let mut reg = session_registry.lock().unwrap();
-            reg.upsert("team-lead", "sess-end-roundtrip", std::process::id());
+            reg.upsert_for_team(
+                "atm-dev",
+                "team-lead",
+                "sess-end-roundtrip",
+                std::process::id(),
+            );
         }
 
         let launch_tx = new_launch_sender();
@@ -4301,9 +4308,12 @@ mod tests {
         let store = make_store();
         let sr = make_sr();
         // Pre-populate registry so mark_dead has something to work with.
-        sr.lock()
-            .unwrap()
-            .upsert("arch-ctm", "codex:sess-end-test", 0);
+        sr.lock().unwrap().upsert_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "codex:sess-end-test",
+            0,
+        );
 
         let req = SocketRequest {
             version: PROTOCOL_VERSION,

@@ -42,6 +42,8 @@ pub struct SessionRecord {
     pub process_id: u32,
     /// Current lifecycle state.
     pub state: SessionState,
+    /// Last state update timestamp (RFC3339 UTC).
+    pub updated_at: String,
 }
 
 impl SessionRecord {
@@ -103,6 +105,7 @@ impl SessionRegistry {
 
     /// Insert or update the session record for `team/name`.
     pub fn upsert_for_team(&mut self, team: &str, name: &str, session_id: &str, process_id: u32) {
+        let now = chrono::Utc::now().to_rfc3339();
         let key = make_key(team, name);
         self.sessions.insert(
             key,
@@ -112,6 +115,7 @@ impl SessionRegistry {
                 session_id: session_id.to_string(),
                 process_id,
                 state: SessionState::Active,
+                updated_at: now,
             },
         );
         self.persist_best_effort();
@@ -169,6 +173,7 @@ impl SessionRegistry {
     pub fn mark_dead_for_team(&mut self, team: &str, name: &str) {
         if let Some(record) = self.sessions.get_mut(&make_key(team, name)) {
             record.state = SessionState::Dead;
+            record.updated_at = chrono::Utc::now().to_rfc3339();
             self.persist_best_effort();
         }
     }
@@ -433,6 +438,7 @@ mod tests {
             session_id: "test".to_string(),
             process_id: std::process::id(),
             state: SessionState::Active,
+            updated_at: chrono::Utc::now().to_rfc3339(),
         };
         assert!(record.is_process_alive());
     }
