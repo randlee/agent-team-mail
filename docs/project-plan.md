@@ -697,9 +697,11 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.7 Phase R: Session Handoff + Hook Installer — PLANNED
+## 17.7 Phase R: Session Handoff + Hook Installer — COMPLETE (R.0–R.0d); R.0e IN PROGRESS
 
 **Goal**: Harden daemon foundations (singleton lock, canonical log sink), then build robust session startup for team-lead, hook installation via `atm init`, and embedded hook scripts in binary.
+
+**Status**: R.0, R.0b, R.0c, R.0d complete and merged (PR #272 → develop, v0.24.0). R.0e in progress. R.1 (session handoff) and R.2a/R.2b (hook installer) moved to **Phase S** for focused execution after further design review.
 
 ### R.0 — Daemon singleton lock + canonical log sink alignment *(prerequisite)*
 
@@ -850,14 +852,102 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
-| R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
+| R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | COMPLETE |
 | R.0b | Persistent session registry + agent lifecycle management | R.0 | M | COMPLETE |
 | R.0c | `atm doctor` diagnostics and cleanup guidance | R.0b | S | COMPLETE |
 | R.0d | Runtime compatibility spec (Gemini first) (docs-only) | R.0b | S | COMPLETE |
 | R.0e | Runtime compatibility spec (OpenCode baseline) (docs-only) | R.0d | S | IN PROGRESS |
-| R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | PLANNED |
-| R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
-| R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
+| R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | MOVED → Phase S |
+| R.2a | `atm init` hook installer core + embedded scripts | — | M | MOVED → Phase S |
+| R.2b | `atm init --check` + upgrade compatibility validation | S.2a | S | MOVED → Phase S |
+
+---
+
+## 17.8 Phase S: Runtime Adapters + Hook Installer — PLANNED
+
+**Goal**: Implement Gemini CLI runtime adapter, `atm init` hook installer, and (pending open-question resolution) OpenCode runtime adapter. Session handoff (old R.1) deferred for further design.
+
+**Integration branch**: `integrate/phase-S` off `develop`.
+
+### S.1 — Gemini baseline adapter *(runtime adapter, implementation)*
+
+Implement the Gemini CLI runtime adapter defined in `docs/runtime-compatibility.md` sections 3–4 and requirements 4.3.8 (R-GEM-1 through R-GEM-7).
+
+**Deliverables**:
+1. `GeminiAdapter` struct implementing the runtime-agnostic spawn/identity/teardown/steering trait contract.
+2. **Spawn** (R-GEM-1): launch `gemini` in a tmux pane with correct flags (`--sandbox false`, `--model`, system-prompt injection via stdin or `--prompt-interactive`). ATM identity set via env before launch.
+3. **Identity contract** (R-GEM-2): ATM agent name is the identity anchor; Gemini session ID is ephemeral and opaque. `atm status` shows agent name, not Gemini session ID.
+4. **Teardown** (R-GEM-3): request-first teardown (Ctrl-C / SIGINT to pane), 10s wait, SIGKILL escalation.
+5. **Steering** (R-GEM-4): pane-based steering via `tmux send-keys`; no in-turn mutation assumed.
+6. **Lifecycle hooks** (R-GEM-5): emit `agent_hook` lifecycle events (spawn, teardown) into daemon event stream.
+7. **Observability** (R-GEM-6): `atm logs --agent <name>` surfaces Gemini adapter events using same log pipeline.
+8. **Resume** (R-GEM-7): `atm teams spawn --resume <agent>` passes `--resume-session-id <id>` if daemon registry has a prior Gemini session ID for that agent name.
+9. `atm teams spawn --runtime gemini <agent>` CLI flag to select adapter.
+10. Tests: spawn/teardown integration test using a mock pane; resume flag test; identity isolation test.
+
+**Acceptance criteria**:
+- `atm teams spawn --runtime gemini arch-ctm` launches Gemini in a tmux pane and registers in daemon.
+- `atm status` shows correct Online/Offline for Gemini agents using PID/pane liveness.
+- Teardown flow sends SIGINT → waits → SIGKILL; no zombie panes.
+- Resume flag is passed when prior session ID exists in registry.
+- `cargo clippy -- -D warnings` clean; `cargo test` passes.
+
+**References**: `docs/runtime-compatibility.md` §2–4; `docs/requirements.md` §4.3.4–4.3.8.
+
+### S.2a — `atm init` hook installer core *(hook installer, implementation)*
+
+Implement `atm init` as specified in `docs/requirements.md` §4.9.
+
+**Deliverables**:
+1. `atm init <team>` — writes ATM hook entries into `.claude/settings.json` (project-local).
+2. `atm init <team> --global` — writes into `~/.claude/settings.json` (global scope).
+3. Hook scripts embedded in binary at compile time (no external files needed post-install).
+4. Idempotent: merges hook entries, never stomps existing user hooks; safe to re-run.
+5. Global hooks are guarded by `.atm.toml` presence check as first operation (passive in non-ATM repos).
+6. Hooks installed: `SessionStart`, `PreToolUse` (identity write), `PostToolUse` (state tracker).
+7. Clear success/error output; non-zero exit on permission or parse errors.
+8. Tests: idempotency test; merge test (existing hooks preserved); guard test (non-ATM repo no-op).
+
+**Acceptance criteria**:
+- `atm init atm-dev` writes correct hook entries and is safe to run multiple times.
+- Existing user hooks in `settings.json` are preserved after `atm init`.
+- Running in a repo without `.atm.toml` with `--global` skips execution with informational output.
+- `cargo clippy -- -D warnings` clean; `cargo test` passes.
+
+**References**: `docs/requirements.md` §4.9; `docs/agent-teams-hooks.md`.
+
+### S.2b — `atm init --check` + upgrade validation
+
+- `atm init --check` — report what's installed, what's missing, what's outdated; no writes.
+- Validate upgrade path for existing installs: detect stale script hashes, offer `atm init` to refresh.
+- Exit code: 0 = fully installed, 1 = missing/outdated, 2 = error.
+
+**Acceptance criteria**:
+- `atm init --check` exits 0 on a freshly-initialized repo and 1 when hooks are absent.
+- Stale script hash is detected and reported with suggested remediation command.
+
+### S.3 — OpenCode baseline adapter *(deferred — open questions)*
+
+Deferred pending resolution of:
+- Backend strategy: CLI-pane control vs server/API control model.
+- System-prompt materialization: transient `--instructions` file vs persistent instruction surface.
+- `ses_*` IDs in `atm status --verbose`: debug-only or default output?
+
+**Status**: Not scheduled. Will be planned once open questions are resolved in user discussion.
+
+### S.4 — `atm teams resume` session handoff *(deferred — needs design review)*
+
+Old R.1. Deferred for further design review. The flow risks disrupting active non-lead members during team directory rotation. Requires pre-flight guard design before implementation.
+
+**Status**: Not scheduled.
+
+| Sprint | Name | Depends On | Size | Status |
+|--------|------|------------|------|--------|
+| S.1 | Gemini baseline adapter | R.0d | L | PLANNED |
+| S.2a | `atm init` hook installer core | — | M | PLANNED |
+| S.2b | `atm init --check` + upgrade validation | S.2a | S | PLANNED |
+| S.3 | OpenCode baseline adapter | R.0e, S.1 | L | DEFERRED |
+| S.4 | `atm teams resume` session handoff | S.1 | M | DEFERRED |
 
 ---
 ## 18. Future Plugins
