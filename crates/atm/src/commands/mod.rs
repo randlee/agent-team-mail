@@ -8,6 +8,7 @@ mod broadcast;
 mod cleanup;
 mod config_cmd;
 mod daemon;
+mod doctor;
 mod inbox;
 pub mod launch;
 mod logs;
@@ -62,6 +63,9 @@ enum Commands {
     /// Show team status overview
     Status(status::StatusArgs),
 
+    /// Run daemon/team health diagnostics
+    Doctor(doctor::DoctorArgs),
+
     /// Show effective configuration
     Config(config_cmd::ConfigArgs),
 
@@ -108,6 +112,7 @@ impl Cli {
             Commands::Teams(args) => teams::execute(args),
             Commands::Members(args) => members::execute(args),
             Commands::Status(args) => status::execute(args),
+            Commands::Doctor(args) => doctor::execute(args),
             Commands::Config(args) => config_cmd::execute(args),
             Commands::Cleanup(args) => cleanup::execute(args),
             Commands::Bridge(args) => bridge::execute(args),

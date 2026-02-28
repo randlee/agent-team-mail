@@ -2,7 +2,7 @@
 
 **Version**: 0.5
 **Date**: 2026-02-25
-**Status**: Phase P complete (v0.21.0).
+**Status**: Phase Q.3 complete (v0.23.0); Q.4 planned.
 
 ---
 
@@ -159,7 +159,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | O | Attached CLI Parity | Attach wiring, renderer parity, control-path + fixtures | COMPLETE |
 | O-R | Attach Renderer Parity | RenderClass, event coverage, diff/markdown/reasoning rendering | COMPLETE |
 | P | Attach Path Hardening Closure | Close O-R carry-forward attach deviations and parity hardening | COMPLETE |
-| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | PLANNED |
+| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | IN PROGRESS |
 
 ---
 
@@ -359,13 +359,13 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 13. Phase B: Team-Lead Session Management — COMPLETE
+## 13. Phase B: Team-Lead Session Management — COMPLETE (B.1 deferred to Phase E)
 
 **Integration PR**: [#121](https://github.com/randlee/agent-team-mail/pull/121)
 
 | Sprint | Name | PR |
 |--------|------|----|
-| B.1 | Daemon session tracking + `atm teams resume` + `atm teams cleanup` | [#119](https://github.com/randlee/agent-team-mail/pull/119) |
+| B.1 | Daemon session tracking + `atm teams resume` + `atm teams cleanup` (deferred to Phase E as E.1) | — |
 | B.2 | Unicode-safe message truncation + input validation | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
 | B.3 | Cleanup safety hardening + documentation alignment | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
 
@@ -398,7 +398,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 16. Phase E: ATM Core Bug Fixes — COMPLETE (v0.15.0)
+## 16. Phase E: ATM Core Bug Fixes — COMPLETE (v0.15.0; E.6/E.7 deferred)
 
 **Integration PR**: [#166](https://github.com/randlee/agent-team-mail/pull/166)
 
@@ -409,8 +409,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | E.3 | Hook-to-daemon state bridge | [#152](https://github.com/randlee/agent-team-mail/pull/152) |
 | E.4 | TUI reliability hardening (restart, reconnect, failure injection) | [#158](https://github.com/randlee/agent-team-mail/pull/158) |
 | E.5 | TUI performance, UX polish, operational validation | [#161](https://github.com/randlee/agent-team-mail/pull/161) |
-| E.6 | External agent member management + model registry | [#164](https://github.com/randlee/agent-team-mail/pull/164) |
-| E.7 | Unified lifecycle source model + MCP lifecycle emission | [#165](https://github.com/randlee/agent-team-mail/pull/165) |
+| E.6 | External agent member management + model registry (deferred) | — |
+| E.7 | Unified lifecycle source model + MCP lifecycle emission (deferred) | — |
 | E.8 | ATM Identity Role Mapping + Team Backup/Restore | [#162](https://github.com/randlee/agent-team-mail/pull/162) |
 | — | Daemon hook-event auth validation | [#163](https://github.com/randlee/agent-team-mail/pull/163) |
 
@@ -421,6 +421,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 ## 16.5 Phase F: Team Installer (`atm team init`) — PLANNED
 
 **Goal**: Install orchestration packages (hooks, agents, skills) into `~/.claude/` with `atm team init`.
+
+**Status note (2026-02-27)**: Phase F is a historical planning bucket. Current execution for session handoff and hook installer work proceeds under **Phase R** (see section 17.7). Do not add new F.* sprints.
 
 **Two install scopes**:
 1. **Global** (machine-level): Hook scripts (`session-start.py`, `session-end.py`) + `~/.claude/settings.json` entries. Installed once per machine.
@@ -655,7 +657,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 |--------|------|------------|------|--------|
 | Q.1 | `atm mcp install` + `atm mcp status` commands | — | M | COMPLETE |
 | Q.2 | Integration tests + cross-platform validation | Q.1 | S | COMPLETE |
-| Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | Q.2 | S | IN PROGRESS |
+| Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | Q.2 | S | COMPLETE |
 | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | Q.3 | M | PLANNED |
 
 **Q.1 deliverables**:
@@ -695,6 +697,259 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
+## 17.7 Phase R: Session Handoff + Hook Installer — COMPLETE (R.0–R.0d); R.0e IN PROGRESS
+
+**Goal**: Harden daemon foundations (singleton lock, canonical log sink), then build robust session startup for team-lead, hook installation via `atm init`, and embedded hook scripts in binary.
+
+**Status**: R.0, R.0b, R.0c, R.0d complete and merged (PR #272 → develop, v0.24.0). R.0e in progress. R.1 (session handoff) and R.2a/R.2b (hook installer) moved to **Phase S** for focused execution after further design review.
+
+### R.0 — Daemon singleton lock + canonical log sink alignment *(prerequisite)*
+
+Harden daemon foundations required by R.1 session handoff:
+
+1. **Singleton daemon lock**: Daemon acquires an exclusive process lock at `${config_dir}/atm/daemon.lock` on startup. Prevents multiple daemon instances from corrupting shared state (socket, PID file, session registry).
+2. **Canonical log sink**: Resolve the path ambiguity between `ATM_HOME` override and XDG `config_dir`. Establish a single canonical scheme used consistently by daemon lock, `atm.log.jsonl`, and `log-spool` across all code paths and requirements docs.
+3. **Structural lock enforcement in socket module**: The socket module must not remove the stale socket file unless the daemon lock is already held — enforce structurally (lock guard or marker type), not just by call-site ordering.
+4. **Update requirements.md** sections 4.6 and 4.7 to reflect the canonical path scheme (removing the two-root ambiguity between ATM_HOME and config_dir).
+5. **Tests**: Unit tests for lock acquisition, single-instance rejection, and log path resolution under both ATM_HOME-set and ATM_HOME-unset scenarios.
+
+**Acceptance criteria**:
+- `cargo clippy -- -D warnings` clean.
+- `atm logs --limit 10` returns entries (not "Log file not found") in both default and `ATM_HOME`-override configurations.
+- Two concurrent daemon starts: second instance exits with clear "daemon already running" error.
+- requirements.md 4.6 and 4.7 path specs are internally consistent with implementation.
+
+### R.0b — Persistent session registry + agent lifecycle management
+
+Closes gaps identified during R.0 execution and dogfooding:
+
+1. **Persistent session registry via hooks**: `session_start` hook writes `{agent_name, pid, session_id, team}` to daemon registry persistently. `session_end` hook removes entry. Daemon uses this for kill signals and liveness queries.
+2. **`isActive` semantics**: `isActive` is advisory only. Daemon uses PID/session liveness as lifecycle truth and reconciles stale `isActive` drift in `config.json`.
+3. **Shutdown-first teardown flow**: For active-agent termination intent, daemon sends `shutdown_request` to mailbox, waits `--timeout`, then force-kills PID if needed.
+4. **Coupled teardown invariant**: After confirmed termination (already-dead or timeout+kill), daemon removes roster entry from `config.json` and deletes mailbox together (no partial state).
+5. **`atm cleanup --agent <name>`**: CLI cleanup command is non-destructive for active agents unless explicit kill semantics are requested; active termination uses shutdown-first flow.
+6. **Daemon `--kill <agent>`**: Runtime kill command backed by persistent registry and shutdown-first protocol.
+7. **`atm teams spawn` Claude baseline**: promote `spawn-teammate.sh` behavior into first-class CLI semantics (frontmatter model/color + prompt body, ATM env override compatibility, repo-root launch, resume-aware parent session handoff, post-spawn registration updates).
+
+**Acceptance criteria**:
+- `atm status` reflects PID/session truth for idle-but-alive teammates even when `isActive` drifts.
+- `atm cleanup --agent quality-mgr` does not remove active-agent mailbox/roster without explicit kill intent.
+- For terminal agents, mailbox deletion and roster removal converge together (already-dead and kill-timeout cases).
+- `atm daemon --kill <agent>` performs shutdown-first flow and terminates the named process by timeout boundary.
+- `atm teams spawn` can reproduce current Claude teammate launcher behavior without custom scripts.
+
+### R.0c — `atm doctor` diagnostics and operational cleanup guidance
+
+Builds operational triage tooling on top of R.0b lifecycle truth.
+
+1. **`atm doctor` command**: single health report command for daemon/session/cleanup drift.
+2. **Daemon + PID scan**: verify daemon availability and reconcile live PID/session state for all members.
+3. **Roster/session integrity**: detect config roster vs session registry mismatches and zombie artifacts.
+4. **Mailbox hygiene checks**: detect stale terminal-agent mailboxes and partial teardown states.
+5. **Unified log surfacing**: report warning/error events using incremental default window:
+   `max(team-lead session start, last doctor call time)`.
+6. **Cleanup recommendations**: output explicit remediation commands (`atm cleanup --agent`, daemon restart, re-register).
+
+**Acceptance criteria**:
+- `atm doctor` reports daemon-not-running as critical with clear recovery command.
+- `atm doctor` detects and reports partial teardown drift (roster removed xor mailbox present).
+- Default repeated runs are incremental for warning/error log output.
+- JSON output mode is stable for automation.
+### R.0d — Runtime compatibility spec (Gemini first, docs-only)
+
+Define and review runtime-agnostic spawn/identity/teardown/steering contracts
+using Gemini CLI as the first external runtime baseline. This sprint is
+documentation/specification only (no implementation).
+
+Deliverables:
+1. Runtime compatibility design doc for Gemini covering launch flags, session
+   model, lifecycle hooks, structured output transport, and signal behavior.
+2. Requirements updates for:
+   - runtime-aware teammate spawn (fresh + resume),
+   - ATM identity vs runtime session identity mapping,
+   - request-first teardown with escalation,
+   - steering semantics (interactive + headless).
+3. Explicit lifecycle envelope mapping for runtime adapters (`source.kind =
+   "agent_hook"`) aligned with daemon authZ model.
+4. Open-questions list for ACP/interactive steering reliability and default
+   sandbox policy, plus additional integration questions (resume override UX,
+   lifecycle event provenance, and default teardown timeout policy).
+
+Acceptance criteria:
+- Approved docs exist before any runtime adapter code is started.
+- Requirements and project plan are consistent on Gemini-first scope and
+  implementation sequencing.
+- Docs explicitly capture known runtime limitations (e.g., cancel-then-steer if
+  in-turn mutation is unavailable).
+
+### R.0e — Runtime compatibility spec (OpenCode baseline, docs-only)
+
+Extend the runtime compatibility spec with OpenCode-specific findings and draft
+adapter requirements before implementation.
+
+Deliverables:
+1. Verified OpenCode runtime facts in `runtime-compatibility.md` covering:
+   - CLI launch/resume controls (`--continue`, `--session`, `--fork`),
+   - session identity model (`ses_*`),
+   - instruction/system prompt surfaces,
+   - interrupt/abort behavior.
+2. Requirements updates for OpenCode baseline adapter behavior in section 4.3.
+3. Open questions list for OpenCode backend strategy (CLI-pane vs server/API)
+   and system-prompt materialization approach.
+
+Acceptance criteria:
+- OpenCode discovery findings are source-referenced and reviewable.
+- Requirements are consistent with runtime-agnostic contracts already defined in
+  R.0d.
+- No adapter implementation code starts before docs review sign-off.
+### R.1 — `atm teams resume` session handoff
+
+**CLI flag semantics in handoff mode**:
+- `message`: optional status text shown with refusal/re-establish guidance.
+- `--session-id <id>`: target only the specified lead session. If it does not match the daemon's active lead session, refuse.
+- `--force`: bypass soft refusal checks only when no active lead session is confirmed; never steals an active lead identity.
+- `--kill`: explicitly terminate stale daemon-tracked lead process before handoff.
+
+**Handoff flow**:
+1. Daemon checks whether `team-lead` is active for the team (PID + session ID).
+2. **If YES** (team-lead running in another process): refuse; do not steal team-lead identity.
+3. **If NO** (no active team-lead):
+   - Ensure backup destination exists at `.backups/<team>/<timestamp>/` (agent-team-api backup convention).
+   - Create a flat backup snapshot compatible with `atm teams restore`: `config.json`, `inboxes/`, and `tasks/` directly under `.backups/<team>/<timestamp>/`.
+   - Remove the active `<team>/` directory only after successful snapshot write.
+   - Output: `"Call TeamCreate(<team>) to re-establish as team-lead"`.
+4. Team-lead calls `TeamCreate(<team>)`; this succeeds because the active team directory is absent.
+5. Daemon watches for `<team>/config.json` to appear.
+6. Daemon restores non-Claude members from backup (pane IDs, agent types, inbox history).
+7. Preserve the new `leadSessionId` from TeamCreate; restore never overwrites it. `team-lead` member is never restored from backup.
+8. Daemon injects status into team-lead session: `"<team> re-established. Active members: <name> (<type>, pane <id>), ..."`.
+
+**Failure-mode acceptance criteria**:
+- Stale PID/session mismatch is detected and does not cause identity theft.
+- Backup/move failure is surfaced with actionable error and no partial destructive delete.
+- Daemon restart during restore resumes idempotently without duplicate members.
+- Missing/corrupt backup is handled with explicit degraded-mode warning.
+- Duplicate member IDs in backup are deduped deterministically.
+
+### R.2a — `atm init` hook installer core
+
+Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (no external files needed).
+
+**Hook path reference (Claude docs)**:
+- https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
+- Use `"$CLAUDE_PROJECT_DIR"/.claude/scripts/...` for project scripts.
+- Use `"${CLAUDE_PLUGIN_ROOT}"/...` for plugin-bundled scripts.
+
+- `atm init <team>` — local install (project `.claude/settings.json`)
+- `atm init <team> --global` — global install (`~/.claude/settings.json`)
+- Global hooks are passive in non-ATM repos (`.atm.toml` guard as first operation)
+- Idempotent: safe to run multiple times; merges hook entries, never overwrites
+
+### R.2b — `atm init --check` + upgrade validation
+
+- `atm init --check` — report what's missing without making changes
+- Validate upgrade path for existing installs while preserving user customizations
+
+| Sprint | Name | Depends On | Size | Status |
+|--------|------|------------|------|--------|
+| R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | COMPLETE |
+| R.0b | Persistent session registry + agent lifecycle management | R.0 | M | COMPLETE |
+| R.0c | `atm doctor` diagnostics and cleanup guidance | R.0b | S | COMPLETE |
+| R.0d | Runtime compatibility spec (Gemini first) (docs-only) | R.0b | S | COMPLETE |
+| R.0e | Runtime compatibility spec (OpenCode baseline) (docs-only) | R.0d | S | IN PROGRESS |
+| R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | MOVED → Phase S |
+| R.2a | `atm init` hook installer core + embedded scripts | — | M | MOVED → Phase S |
+| R.2b | `atm init --check` + upgrade compatibility validation | S.2a | S | MOVED → Phase S |
+
+---
+
+## 17.8 Phase S: Runtime Adapters + Hook Installer — PLANNED
+
+**Goal**: Implement Gemini CLI runtime adapter, `atm init` hook installer, and (pending open-question resolution) OpenCode runtime adapter. Session handoff (old R.1) deferred for further design.
+
+**Integration branch**: `integrate/phase-S` off `develop`.
+
+### S.1 — Gemini baseline adapter *(runtime adapter, implementation)*
+
+Implement the Gemini CLI runtime adapter defined in `docs/runtime-compatibility.md` sections 3–4 and requirements 4.3.8 (R-GEM-1 through R-GEM-7).
+
+**Deliverables**:
+1. `GeminiAdapter` struct implementing the runtime-agnostic spawn/identity/teardown/steering trait contract.
+2. **Spawn** (R-GEM-1): launch `gemini` in a tmux pane with correct flags (`--sandbox false`, `--model`, system-prompt injection via stdin or `--prompt-interactive`). ATM identity set via env before launch.
+3. **Identity contract** (R-GEM-2): ATM agent name is the identity anchor; Gemini session ID is ephemeral and opaque. `atm status` shows agent name, not Gemini session ID.
+4. **Teardown** (R-GEM-3): request-first teardown (Ctrl-C / SIGINT to pane), 10s wait, SIGKILL escalation.
+5. **Steering** (R-GEM-4): pane-based steering via `tmux send-keys`; no in-turn mutation assumed.
+6. **Lifecycle hooks** (R-GEM-5): emit `agent_hook` lifecycle events (spawn, teardown) into daemon event stream.
+7. **Observability** (R-GEM-6): `atm logs --agent <name>` surfaces Gemini adapter events using same log pipeline.
+8. **Resume** (R-GEM-7): `atm teams spawn --resume <agent>` passes `--resume-session-id <id>` if daemon registry has a prior Gemini session ID for that agent name.
+9. `atm teams spawn --runtime gemini <agent>` CLI flag to select adapter.
+10. Tests: spawn/teardown integration test using a mock pane; resume flag test; identity isolation test.
+
+**Acceptance criteria**:
+- `atm teams spawn --runtime gemini arch-ctm` launches Gemini in a tmux pane and registers in daemon.
+- `atm status` shows correct Online/Offline for Gemini agents using PID/pane liveness.
+- Teardown flow sends SIGINT → waits → SIGKILL; no zombie panes.
+- Resume flag is passed when prior session ID exists in registry.
+- `cargo clippy -- -D warnings` clean; `cargo test` passes.
+
+**References**: `docs/runtime-compatibility.md` §2–4; `docs/requirements.md` §4.3.4–4.3.8.
+
+### S.2a — `atm init` hook installer core *(hook installer, implementation)*
+
+Implement `atm init` as specified in `docs/requirements.md` §4.9.
+
+**Deliverables**:
+1. `atm init <team>` — writes ATM hook entries into `.claude/settings.json` (project-local).
+2. `atm init <team> --global` — writes into `~/.claude/settings.json` (global scope).
+3. Hook scripts embedded in binary at compile time (no external files needed post-install).
+4. Idempotent: merges hook entries, never stomps existing user hooks; safe to re-run.
+5. Global hooks are guarded by `.atm.toml` presence check as first operation (passive in non-ATM repos).
+6. Hooks installed: `SessionStart`, `PreToolUse` (identity write), `PostToolUse` (state tracker).
+7. Clear success/error output; non-zero exit on permission or parse errors.
+8. Tests: idempotency test; merge test (existing hooks preserved); guard test (non-ATM repo no-op).
+
+**Acceptance criteria**:
+- `atm init atm-dev` writes correct hook entries and is safe to run multiple times.
+- Existing user hooks in `settings.json` are preserved after `atm init`.
+- Running in a repo without `.atm.toml` with `--global` skips execution with informational output.
+- `cargo clippy -- -D warnings` clean; `cargo test` passes.
+
+**References**: `docs/requirements.md` §4.9; `docs/agent-teams-hooks.md`.
+
+### S.2b — `atm init --check` + upgrade validation
+
+- `atm init --check` — report what's installed, what's missing, what's outdated; no writes.
+- Validate upgrade path for existing installs: detect stale script hashes, offer `atm init` to refresh.
+- Exit code: 0 = fully installed, 1 = missing/outdated, 2 = error.
+
+**Acceptance criteria**:
+- `atm init --check` exits 0 on a freshly-initialized repo and 1 when hooks are absent.
+- Stale script hash is detected and reported with suggested remediation command.
+
+### S.3 — OpenCode baseline adapter *(deferred — open questions)*
+
+Deferred pending resolution of:
+- Backend strategy: CLI-pane control vs server/API control model.
+- System-prompt materialization: transient `--instructions` file vs persistent instruction surface.
+- `ses_*` IDs in `atm status --verbose`: debug-only or default output?
+
+**Status**: Not scheduled. Will be planned once open questions are resolved in user discussion.
+
+### S.4 — `atm teams resume` session handoff *(deferred — needs design review)*
+
+Old R.1. Deferred for further design review. The flow risks disrupting active non-lead members during team directory rotation. Requires pre-flight guard design before implementation.
+
+**Status**: Not scheduled.
+
+| Sprint | Name | Depends On | Size | Status |
+|--------|------|------------|------|--------|
+| S.1 | Gemini baseline adapter | R.0d | L | PLANNED |
+| S.2a | `atm init` hook installer core | — | M | PLANNED |
+| S.2b | `atm init --check` + upgrade validation | S.2a | S | PLANNED |
+| S.3 | OpenCode baseline adapter | R.0e, S.1 | L | DEFERRED |
+| S.4 | `atm teams resume` session handoff | S.1 | M | DEFERRED |
+
+---
 ## 18. Future Plugins
 
 | Plugin | Priority | Notes |
@@ -769,7 +1024,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **A** | A.6 | Thread lifecycle state machine | COMPLETE | [#108](https://github.com/randlee/agent-team-mail/pull/108) |
 | **A** | A.7 | Auto mail injection + polling | COMPLETE | [#109](https://github.com/randlee/agent-team-mail/pull/109) |
 | **A** | A.8 | Shutdown + resume + arch review | COMPLETE | [#110](https://github.com/randlee/agent-team-mail/pull/110), [#111](https://github.com/randlee/agent-team-mail/pull/111) |
-| **B** | B.1 | Teams daemon session tracking + resume | COMPLETE | [#119](https://github.com/randlee/agent-team-mail/pull/119) |
+| **B** | B.1 | Teams daemon session tracking + resume | DEFERRED (moved to E.1) | — |
 | **B** | B.2 | Unicode-safe message truncation | COMPLETE | [#120](https://github.com/randlee/agent-team-mail/pull/120) |
 | **B** | B.3 | Teams session stabilization | COMPLETE | [#122](https://github.com/randlee/agent-team-mail/pull/122) |
 | **C** | C.1 | Unified structured JSONL logging | COMPLETE | [#125](https://github.com/randlee/agent-team-mail/pull/125), [#128](https://github.com/randlee/agent-team-mail/pull/128) |
@@ -784,8 +1039,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **E** | E.3 | Hook-to-daemon state bridge | COMPLETE | [#152](https://github.com/randlee/agent-team-mail/pull/152) |
 | **E** | E.4 | TUI reliability hardening | COMPLETE | [#158](https://github.com/randlee/agent-team-mail/pull/158) |
 | **E** | E.5 | TUI performance + UX polish | COMPLETE | [#161](https://github.com/randlee/agent-team-mail/pull/161) |
-| **E** | E.6 | External agent member mgmt + model registry | COMPLETE | [#164](https://github.com/randlee/agent-team-mail/pull/164) |
-| **E** | E.7 | Unified lifecycle source + MCP emission | COMPLETE | [#165](https://github.com/randlee/agent-team-mail/pull/165) |
+| **E** | E.6 | External agent member mgmt + model registry | DEFERRED | — |
+| **E** | E.7 | Unified lifecycle source + MCP emission | DEFERRED | — |
 | **E** | E.8 | Identity Role Mapping + Backup/Restore | COMPLETE | [#162](https://github.com/randlee/agent-team-mail/pull/162) |
 | **E** | — | Daemon hook-event auth validation | COMPLETE | [#163](https://github.com/randlee/agent-team-mail/pull/163) |
 | **G** | G.1 | Mode baseline docs + naming cleanup | COMPLETE | [#168](https://github.com/randlee/agent-team-mail/pull/168) |
@@ -829,7 +1084,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | **P** | P.5 | Attach help/UX contract parity (`Ctrl-C`/SIGINT) + closeout | COMPLETE | [#246](https://github.com/randlee/agent-team-mail/pull/246) |
 | **Q** | Q.1 | `atm mcp install/uninstall/status` commands | COMPLETE | [#252](https://github.com/randlee/agent-team-mail/pull/252) |
 | **Q** | Q.2 | Integration tests + cross-platform validation | COMPLETE | [#253](https://github.com/randlee/agent-team-mail/pull/253) |
-| **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | IN PROGRESS | — |
+| **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | COMPLETE | — |
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
 
 **Completed**: 99+ sprints across 22 phases (CI green)

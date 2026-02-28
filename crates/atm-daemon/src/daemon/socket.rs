@@ -102,6 +102,7 @@ pub async fn start_socket_server(
     stream_state_store: SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
     log_event_queue: LogEventQueue,
+    _daemon_lock: &agent_team_mail_core::io::lock::FileLock,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Option<SocketServerHandle>> {
     #[cfg(unix)]
@@ -116,6 +117,7 @@ pub async fn start_socket_server(
             stream_state_store,
             stream_event_sender,
             log_event_queue,
+            _daemon_lock,
             cancel,
         )
         .await
@@ -281,6 +283,7 @@ async fn start_unix_socket_server(
     stream_state_store: SharedStreamStateStore,
     stream_event_sender: SharedStreamEventSender,
     log_event_queue: LogEventQueue,
+    _daemon_lock: &agent_team_mail_core::io::lock::FileLock,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
@@ -871,15 +874,8 @@ fn authorize_hook_event(
     agent: &str,
     source: agent_team_mail_core::daemon_client::LifecycleSourceKind,
 ) -> std::result::Result<HookEventAuth, String> {
-    let home_dir = if let Ok(path) = std::env::var("ATM_HOME") {
-        PathBuf::from(path)
-    } else if let Ok(path) = std::env::var("HOME") {
-        PathBuf::from(path)
-    } else if let Ok(path) = std::env::var("USERPROFILE") {
-        PathBuf::from(path)
-    } else {
-        return Err("missing ATM_HOME/HOME".to_string());
-    };
+    let home_dir = agent_team_mail_core::home::get_home_dir()
+        .map_err(|e| format!("failed to resolve home directory: {e}"))?;
 
     let config_path = home_dir
         .join(".claude/teams")
@@ -1003,23 +999,19 @@ async fn handle_hook_event_command(
     };
 
     // Determine whether the source requires team-lead restriction on
-    // session_start / session_end.  `claude_hook` and `unknown` are strictest
-    // (fail-closed default).  `atm_mcp` and `agent_hook` relax the restriction
-    // because those adapters manage their own agent sessions.
+    // session_end. `session_start` must be accepted for all known team members
+    // so spawned teammates can register runtime sessions.
+    // `claude_hook` and `unknown` remain strictest for termination semantics;
+    // `atm_mcp` and `agent_hook` relax the restriction because those adapters
+    // manage their own agent sessions.
     use agent_team_mail_core::daemon_client::LifecycleSourceKind;
-    let require_lead_for_lifecycle = matches!(
+    let require_lead_for_session_end = matches!(
         auth.source,
         LifecycleSourceKind::ClaudeHook | LifecycleSourceKind::Unknown
     );
 
     match event_type.as_str() {
         "session_start" => {
-            if require_lead_for_lifecycle && !auth.is_team_lead {
-                return make_ok_response(
-                    &request.request_id,
-                    serde_json::json!({"processed": false, "reason": "only team-lead may send session_start"}),
-                );
-            }
             if session_id.is_empty() {
                 return make_ok_response(
                     &request.request_id,
@@ -1027,14 +1019,10 @@ async fn handle_hook_event_command(
                 );
             }
             let pid = process_id.unwrap_or(0);
-            // SessionRegistry is currently keyed by bare agent name, not team.
-            // This matches existing daemon behavior but can collide across teams
-            // that reuse member names.
-            // TODO(atm-daemon): switch registry operations to team-scoped keys.
             session_registry
                 .lock()
                 .unwrap()
-                .upsert(&agent, &session_id, pid);
+                .upsert_for_team(&team, &agent, &session_id, pid);
             {
                 let mut tracker = state_store.lock().unwrap();
                 if tracker.get_state(&agent).is_none() {
@@ -1056,14 +1044,14 @@ async fn handle_hook_event_command(
             info!("hook_event teammate_idle: agent={agent}");
         }
         "session_end" => {
-            if require_lead_for_lifecycle && !auth.is_team_lead {
+            if require_lead_for_session_end && !auth.is_team_lead {
                 return make_ok_response(
                     &request.request_id,
                     serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
                 );
             }
             {
-                session_registry.lock().unwrap().mark_dead(&agent);
+                session_registry.lock().unwrap().mark_dead_for_team(&team, &agent);
             }
             {
                 let mut tracker = state_store.lock().unwrap();
@@ -1730,6 +1718,7 @@ fn parse_and_dispatch(
         "subscribe" => handle_subscribe(&request, pubsub_store),
         "unsubscribe" => handle_unsubscribe(&request, pubsub_store),
         "session-query" => handle_session_query(&request, session_registry),
+        "session-query-team" => handle_session_query_team(&request, session_registry),
         "agent-stream-state" => handle_agent_stream_state(&request, stream_state_store),
         // "launch" is handled asynchronously before parse_and_dispatch is called.
         // If it somehow reaches here, return a clear internal error.
@@ -1839,6 +1828,100 @@ fn handle_session_query(
             &format!("No session record for agent '{name}'"),
         ),
     }
+}
+
+/// Handle the `session-query-team` command.
+///
+/// Payload: `{"team": "<team-name>", "name": "<agent-name>"}`
+/// Response (found, alive):   `{"session_id": "...", "process_id": 12345, "alive": true}`
+/// Response (found, dead):    `{"session_id": "...", "process_id": 12345, "alive": false}`
+/// Response (not found/mismatch): error with code `AGENT_NOT_FOUND`
+fn handle_session_query_team(
+    request: &agent_team_mail_core::daemon_client::SocketRequest,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    let team = match request.payload.get("team").and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'team'",
+            );
+        }
+    };
+    let name = match request.payload.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'name'",
+            );
+        }
+    };
+
+    let registry = session_registry.lock().unwrap();
+    let Some(record) = registry.query_for_team(&team, &name) else {
+        return make_error_response(
+            &request.request_id,
+            "AGENT_NOT_FOUND",
+            &format!("No session record for agent '{name}'"),
+        );
+    };
+
+    // Team-scoped verification: the queried record must match the team's current leadSessionId
+    // for team-lead lookups. This avoids cross-team collisions when names overlap.
+    if name == "team-lead" {
+        let home = match agent_team_mail_core::home::get_home_dir() {
+            Ok(h) => h,
+            Err(_) => {
+                return make_error_response(
+                    &request.request_id,
+                    "INTERNAL_ERROR",
+                    "Failed to resolve home directory",
+                );
+            }
+        };
+        let config_path = home.join(".claude/teams").join(&team).join("config.json");
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(_) => {
+                return make_error_response(
+                    &request.request_id,
+                    "TEAM_NOT_FOUND",
+                    &format!("Team config not found for '{team}'"),
+                );
+            }
+        };
+        let cfg: agent_team_mail_core::schema::TeamConfig = match serde_json::from_str(&content) {
+            Ok(c) => c,
+            Err(_) => {
+                return make_error_response(
+                    &request.request_id,
+                    "INVALID_TEAM_CONFIG",
+                    &format!("Failed to parse team config for '{team}'"),
+                );
+            }
+        };
+        if cfg.lead_session_id != record.session_id {
+            return make_error_response(
+                &request.request_id,
+                "AGENT_NOT_FOUND",
+                &format!("No team-scoped session record for agent '{name}' in team '{team}'"),
+            );
+        }
+    }
+
+    let alive = record.is_process_alive();
+    make_ok_response(
+        &request.request_id,
+        serde_json::json!({
+            "session_id": record.session_id,
+            "process_id": record.process_id,
+            "alive": alive,
+        }),
+    )
 }
 
 /// Handle the `agent-state` command.
@@ -2871,6 +2954,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         // Set up state store with one agent
         let state_store = make_store();
@@ -2893,6 +2981,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -2942,6 +3031,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         {
@@ -2963,6 +3057,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3011,6 +3106,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let launch_tx = new_launch_sender();
         let (dd, _dd_dir) = make_dd();
@@ -3024,6 +3124,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3081,6 +3182,11 @@ mod tests {
         // SAFETY: serialized test; env var scoped by process.
         unsafe { std::env::set_var("ATM_HOME", &home_dir) };
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         {
@@ -3107,6 +3213,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3161,6 +3268,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
         let state_store = make_store();
 
         let launch_tx = new_launch_sender();
@@ -3175,6 +3287,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3331,7 +3444,9 @@ mod tests {
             tracker.set_state("team-lead", AgentState::Idle);
         }
         {
-            sr.lock().unwrap().upsert("team-lead", "sess-end", 1111);
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "team-lead", "sess-end", 1111);
         }
         let req_json = r#"{"version":1,"request_id":"r5","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-end","team":"atm-dev"}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
@@ -3417,7 +3532,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
-    async fn test_hook_event_non_lead_session_start_rejected() {
+    async fn test_hook_event_non_lead_session_start_accepted() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
@@ -3425,13 +3540,7 @@ mod tests {
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
-        assert!(!payload["processed"].as_bool().unwrap());
-        assert!(
-            payload["reason"]
-                .as_str()
-                .unwrap()
-                .contains("only team-lead")
-        );
+        assert!(payload["processed"].as_bool().unwrap());
     }
 
     #[cfg(unix)]
@@ -3447,6 +3556,11 @@ mod tests {
         let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
         write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         let session_registry = make_sr();
@@ -3463,6 +3577,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3566,6 +3681,11 @@ mod tests {
         let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
         write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
 
         let state_store = make_store();
         let session_registry = make_sr();
@@ -3578,7 +3698,12 @@ mod tests {
         }
         {
             let mut reg = session_registry.lock().unwrap();
-            reg.upsert("team-lead", "sess-end-roundtrip", std::process::id());
+            reg.upsert_for_team(
+                "atm-dev",
+                "team-lead",
+                "sess-end-roundtrip",
+                std::process::id(),
+            );
         }
 
         let launch_tx = new_launch_sender();
@@ -3593,6 +3718,7 @@ mod tests {
             new_stream_state_store(),
             new_stream_event_sender(),
             crate::daemon::new_log_event_queue(),
+            &daemon_lock,
             cancel.clone(),
         )
         .await
@@ -3707,6 +3833,11 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
+        let daemon_lock = {
+            let path = home_dir.join(".config/atm/daemon.lock");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
+        };
         let state_store = make_store();
 
         let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
@@ -3724,6 +3855,7 @@ mod tests {
                 new_stream_state_store(),
                 new_stream_event_sender(),
                 crate::daemon::new_log_event_queue(),
+                &daemon_lock,
                 cancel.clone(),
             )
             .await
@@ -3967,11 +4099,11 @@ mod tests {
 
     // ── source-aware lifecycle validation ────────────────────────────────────
 
-    /// `claude_hook` source: `session_start` from non-lead member is rejected.
+    /// `claude_hook` source: `session_start` from non-lead member is accepted.
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
-    async fn test_hook_event_claude_hook_source_non_lead_session_start_rejected() {
+    async fn test_hook_event_claude_hook_source_non_lead_session_start_accepted() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
@@ -3993,15 +4125,8 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
-            !payload["processed"].as_bool().unwrap(),
-            "non-lead claude_hook session_start must be rejected"
-        );
-        assert!(
-            payload["reason"]
-                .as_str()
-                .unwrap()
-                .contains("only team-lead"),
-            "rejection reason should mention team-lead"
+            payload["processed"].as_bool().unwrap(),
+            "non-lead claude_hook session_start must be accepted"
         );
     }
 
@@ -4045,11 +4170,11 @@ mod tests {
         assert_eq!(record.session_id, "codex:abc-session-1");
     }
 
-    /// `unknown` source behaves like `claude_hook` (fail-closed default).
+    /// `unknown` source still accepts non-lead `session_start`.
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
-    async fn test_hook_event_unknown_source_non_lead_session_start_rejected() {
+    async fn test_hook_event_unknown_source_non_lead_session_start_accepted() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
@@ -4072,23 +4197,16 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
-            !payload["processed"].as_bool().unwrap(),
-            "unknown source must be treated like claude_hook (strictest)"
-        );
-        assert!(
-            payload["reason"]
-                .as_str()
-                .unwrap()
-                .contains("only team-lead"),
-            "rejection reason should mention team-lead"
+            payload["processed"].as_bool().unwrap(),
+            "unknown source must accept non-lead session_start"
         );
     }
 
-    /// Missing `source` field also behaves like `claude_hook` (backward compat).
+    /// Missing `source` field also accepts non-lead `session_start`.
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
-    async fn test_hook_event_absent_source_non_lead_session_start_rejected() {
+    async fn test_hook_event_absent_source_non_lead_session_start_accepted() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
@@ -4110,15 +4228,15 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
-            !payload["processed"].as_bool().unwrap(),
-            "absent source must default to Unknown (strictest) and reject non-lead"
+            payload["processed"].as_bool().unwrap(),
+            "absent source must default to Unknown and accept non-lead session_start"
         );
     }
 
     /// Legacy E.3 payloads used a flat string for `source` on session_start
     /// (for example `"init"` / `"compact"`). The E.7 parser expects an object
     /// (`{"kind":"..."}`), so legacy string payloads must degrade gracefully
-    /// to `unknown` and enforce strict validation.
+    /// to `unknown` while still accepting non-lead `session_start`.
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
@@ -4144,15 +4262,8 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
-            !payload["processed"].as_bool().unwrap(),
-            "legacy flat-string source must degrade to Unknown (strictest)"
-        );
-        assert!(
-            payload["reason"]
-                .as_str()
-                .unwrap()
-                .contains("only team-lead"),
-            "legacy flat-string source should follow Unknown/claude_hook restrictions"
+            payload["processed"].as_bool().unwrap(),
+            "legacy flat-string source must degrade to Unknown and still accept session_start"
         );
     }
 
@@ -4197,9 +4308,12 @@ mod tests {
         let store = make_store();
         let sr = make_sr();
         // Pre-populate registry so mark_dead has something to work with.
-        sr.lock()
-            .unwrap()
-            .upsert("arch-ctm", "codex:sess-end-test", 0);
+        sr.lock().unwrap().upsert_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "codex:sess-end-test",
+            0,
+        );
 
         let req = SocketRequest {
             version: PROTOCOL_VERSION,

@@ -3,22 +3,19 @@
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
-use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::model_registry::ModelId;
-use agent_team_mail_core::schema::{BackendType, InboxMessage, TeamConfig};
+use agent_team_mail_core::schema::{BackendType, TeamConfig};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use clap::Args;
 use serde_json::json;
-use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::warn;
-use uuid::Uuid;
 
 use crate::util::settings::get_home_dir;
 
@@ -148,7 +145,7 @@ pub struct ResumeArgs {
 
     /// Explicit session ID override (e.g., from the SessionStart hook output).
     /// If omitted, the session ID is resolved from CLAUDE_SESSION_ID env var or
-    /// /tmp/atm-session-id (written by the gate hook on every tool call).
+    /// the platform temp-dir session-id file (written by the gate hook on every tool call).
     #[arg(long)]
     session_id: Option<String>,
 }
@@ -536,43 +533,12 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the current Claude Code session ID using a priority chain:
-///
-/// 1. Explicit value passed via `--session-id` flag
-/// 2. `CLAUDE_SESSION_ID` env var (available when the Rust binary is executed
-///    directly by Claude Code, but **not** exported to bash subshells)
-/// 3. `/tmp/atm-session-id` file written by the gate hook on every `Task` tool
-///    call — this acts as a persistent fallback after the first tool call fires
-///
-/// Returns `None` if no non-empty session ID can be found through any channel.
-fn resolve_session_id(explicit: Option<&str>) -> Option<String> {
-    if let Some(id) = explicit {
-        let trimmed = id.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
-    }
-    if let Ok(id) = std::env::var("CLAUDE_SESSION_ID") {
-        let trimmed = id.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
-    }
-    let session_file_path = std::env::temp_dir().join("atm-session-id");
-    if let Ok(content) = std::fs::read_to_string(&session_file_path) {
-        let trimmed = content.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
-    }
-    None
-}
-
 /// Implement `atm teams resume <team> [message]`
 ///
-/// Updates `leadSessionId` in the team's `config.json` so that the current
-/// Claude Code session becomes the team-lead.  Notifies all members with an
-/// optional or default message via ATM inbox delivery.
+/// Performs R.1 handoff semantics:
+/// - Refuses takeover when team-lead is actively running for the team.
+/// - For inactive/no session: creates a flat backup snapshot and removes the
+///   active team directory, prompting the caller to re-establish via TeamCreate.
 fn resume(args: ResumeArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
     let team_dir = home_dir.join(".claude/teams").join(&args.team);
@@ -600,157 +566,72 @@ fn resume(args: ResumeArgs) -> Result<()> {
         ));
     }
 
-    // Load team config
-    let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-    let old_session_id = team_config.lead_session_id.clone();
+    use agent_team_mail_core::daemon_client::query_session_for_team;
 
-    // Auto-backup before making any state changes — provides a safety net for every resume.
-    // Non-fatal: a backup failure logs a warning but does not abort the resume.
-    match do_backup(&home_dir, &args.team, false) {
-        Ok(backup_path) => {
-            eprintln!("Auto-backup created: {}", backup_path.display());
-            // Also prune old backups after a successful auto-backup (non-fatal).
-            if let Err(e) = prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT) {
-                eprintln!("Warning: Auto-prune failed (proceeding anyway): {e}");
-            }
-        }
-        Err(e) => {
-            eprintln!("Warning: Auto-backup failed (proceeding anyway): {e}");
-        }
-    }
+    let requested_session_id = args
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
 
-    // Check existing session liveness if there is one.
-    // NOTE: query_session uses a bare agent name ("team-lead") without team qualification.
-    // The daemon session registry is currently scoped by process/name only, not by team.
-    // If a user runs multiple teams that each have a "team-lead" member, liveness queries
-    // may collide across teams. This is an accepted limitation; team-scoped session queries
-    // require a daemon API change that is tracked separately.
-    if !old_session_id.is_empty() {
-        use agent_team_mail_core::daemon_client::query_session;
-
-        let session_result = query_session("team-lead");
-
-        match session_result {
-            Ok(Some(ref info)) => {
-                // Daemon responded — check if old session is the same as ours
-                let current_session_id =
-                    resolve_session_id(args.session_id.as_deref()).unwrap_or_default();
-
-                if info.session_id == current_session_id && !current_session_id.is_empty() {
-                    // Re-read config for description
-                    let existing_config: TeamConfig =
-                        serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-                    let description = existing_config
-                        .description
-                        .clone()
-                        .unwrap_or_else(|| format!("{} team", args.team));
-                    println!(
-                        "Already active session, no-op.\n\nTo re-establish as team-lead, call:\n  TeamCreate(team_name=\"{}\", description=\"{}\")",
-                        args.team, description
-                    );
-                    return Ok(());
-                }
-
-                if info.alive && !args.force {
-                    let short = &info.session_id[..8.min(info.session_id.len())];
+    match query_session_for_team(&args.team, "team-lead") {
+        Ok(Some(info)) => {
+            // --session-id must match daemon's tracked lead session when provided.
+            if let Some(ref sid) = requested_session_id {
+                if &info.session_id != sid {
                     return Err(anyhow::anyhow!(
-                        "team-lead is already active in session {}... (use --force to override)",
-                        short
+                        "--session-id '{}' does not match daemon active record '{}'",
+                        sid,
+                        info.session_id
                     ));
                 }
+            }
 
-                if info.alive && args.kill {
-                    kill_process(info.process_id);
-                }
+            if info.alive {
+                return Err(anyhow::anyhow!(
+                    "team-lead already active in PID {}, cannot steal identity",
+                    info.process_id
+                ));
             }
-            Ok(None) => {
-                // Daemon not running or agent not found — proceed
-                warn!("daemon not running, assuming old session is dead");
+
+            // Stale/dead record path: require explicit force to proceed.
+            if args.kill {
+                kill_process(info.process_id);
             }
-            Err(_) => {
-                warn!("daemon not running, assuming old session is dead");
+            if !args.force {
+                return Err(anyhow::anyhow!(
+                    "stale team-lead session detected (PID {}). Use --force to proceed.",
+                    info.process_id
+                ));
             }
+        }
+        Ok(None) => {
+            // No daemon record for this team scope — proceed.
+        }
+        Err(e) => {
+            warn!("daemon session-query-team failed: {e}");
         }
     }
 
-    // Determine new session ID using a priority chain:
-    // 1. --session-id flag  2. CLAUDE_SESSION_ID env  3. /tmp/atm-session-id file
-    let new_session_id = resolve_session_id(args.session_id.as_deref()).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Could not determine current session ID.\n\
-             Try one of:\n\
-             1. Pass --session-id <uuid> explicitly (find it in the SessionStart hook output)\n\
-             2. Make any tool call first (gate hook writes the ID to /tmp/atm-session-id)\n\
-             3. Ensure CLAUDE_SESSION_ID is set in your environment"
-        )
-    })?;
+    // Snapshot first; abort if backup fails.
+    let backup_path = do_backup(&home_dir, &args.team, false)?;
+    prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT)?;
 
-    // Atomically write updated config.json
-    {
-        let lock_path = config_path.with_extension("lock");
-        let _lock = acquire_lock(&lock_path, 5)
-            .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
+    // Remove active team directory so TeamCreate can re-establish the team lead context.
+    fs::remove_dir_all(&team_dir)?;
 
-        // Re-read under lock (could have changed)
-        let mut config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-        config.lead_session_id = new_session_id.clone();
-        // Mark all non-team-lead members as inactive to clear stale active status.
-        for member in config.members.iter_mut() {
-            if member.name != "team-lead" {
-                member.is_active = Some(false);
-            }
-        }
-        write_team_config(&config_path, &config)?;
-    }
-
-    // Reload config for member iteration
-    let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-
-    // Send notification to all members except self
-    let notify_text = args.message.clone().unwrap_or_else(|| {
-        "Team-lead has rejoined the session. Context may have been reset. Please provide a brief status update.".to_string()
-    });
-
-    let mut notified = 0usize;
-    let inboxes_dir = team_dir.join("inboxes");
-    if !inboxes_dir.exists() {
-        fs::create_dir_all(&inboxes_dir)?;
-    }
-
-    for member in &team_config.members {
-        if member.name == "team-lead" {
-            continue; // Don't send to self
-        }
-
-        let inbox_path = inboxes_dir.join(format!("{}.json", member.name));
-        let msg = InboxMessage {
-            from: "team-lead".to_string(),
-            text: notify_text.clone(),
-            timestamp: Utc::now().to_rfc3339(),
-            read: false,
-            summary: Some("Team lead session resumed".to_string()),
-            message_id: Some(Uuid::new_v4().to_string()),
-            unknown_fields: HashMap::new(),
-        };
-
-        match inbox_append(&inbox_path, &msg, &args.team, &member.name) {
-            Ok(_) => {
-                notified += 1;
-            }
-            Err(e) => {
-                warn!("Failed to notify {}: {e}", member.name);
-            }
-        }
-    }
-
-    let description = team_config
-        .description
-        .clone()
-        .unwrap_or_else(|| format!("{} team", args.team));
-
+    let maybe_msg = args
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("team archived for re-establishment");
     println!(
-        "{} resumed. leadSessionId updated. {} members notified.\n\nTo re-establish as team-lead, call:\n  TeamCreate(team_name=\"{}\", description=\"{}\")",
-        args.team, notified, args.team, description
+        "{}.\nBackup: {}\nCall TeamCreate({}) to re-establish as team-lead",
+        maybe_msg,
+        backup_path.display(),
+        args.team
     );
 
     Ok(())
@@ -814,10 +695,6 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     };
 
     // Check daemon reachability once before iterating members.
-    // NOTE: query_session uses bare agent names without team qualification because
-    // the current daemon session registry is process/name scoped, not team scoped.
-    // If two teams have a member with the same name, liveness queries may collide.
-    // This is an accepted limitation; team-scoped queries require a daemon API change.
     let daemon_running = agent_team_mail_core::daemon_client::daemon_is_running();
     let mut skipped_names: Vec<String> = Vec::new();
 
@@ -886,7 +763,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             }
         } else {
             // Standard Claude Code member: existing liveness logic unchanged.
-            match agent_team_mail_core::daemon_client::query_session(&member.name) {
+            match agent_team_mail_core::daemon_client::query_session_for_team(&args.team, &member.name) {
                 Ok(Some(ref info)) => {
                     // Daemon responded with an explicit record — trust it.
                     !info.alive
@@ -1003,6 +880,15 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     });
 
     Ok(())
+}
+
+/// Entry point for `atm cleanup --agent` compatibility.
+pub(crate) fn cleanup_single_agent(team: String, agent: String, force: bool) -> Result<()> {
+    cleanup(CleanupArgs {
+        team,
+        agent: Some(agent),
+        force,
+    })
 }
 
 /// Core backup logic: creates a timestamped snapshot directory and returns its path.
@@ -1417,6 +1303,7 @@ fn format_age(timestamp_ms: u64) -> String {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     fn create_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
@@ -1694,13 +1581,12 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_resume_no_session_id_returns_helpful_error() {
-        // When no session ID is available from any source (no --session-id flag,
-        // CLAUDE_SESSION_ID env absent/empty, /tmp/atm-session-id absent/empty),
-        // resume() must return an Err with a helpful message.
+    fn test_resume_no_session_id_archives_team_when_daemon_unreachable() {
+        // R.1 contract: if no active team-lead record is found, resume archives
+        // the team for re-establishment, independent of CLAUDE_SESSION_ID.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
-        create_test_team(&temp_dir, "atm-dev");
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
 
         let original_home = std::env::var("ATM_HOME").ok();
         let original_id = std::env::var("ATM_IDENTITY").ok();
@@ -1710,20 +1596,7 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
-            std::env::remove_var("CLAUDE_SESSION_ID"); // no env var
-        }
-
-        // Ensure the session-id file is absent or empty for this test
-        let session_file = std::env::temp_dir().join("atm-session-id");
-        let session_file_existed = session_file.exists();
-        let session_file_backup: Option<String> = if session_file_existed {
-            std::fs::read_to_string(&session_file).ok()
-        } else {
-            None
-        };
-        // Remove the file so the fallback chain has nothing to read
-        if session_file_existed {
-            let _ = std::fs::remove_file(&session_file);
+            std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
         let args = ResumeArgs {
@@ -1731,26 +1604,17 @@ mod tests {
             message: None,
             force: false,
             kill: false,
-            session_id: None, // no explicit flag
+            session_id: None,
         };
 
         let result = resume(args);
+        assert!(result.is_ok(), "resume should succeed: {result:?}");
         assert!(
-            result.is_err(),
-            "resume without any session ID source should fail"
+            !team_dir.exists(),
+            "team directory should be removed after archive handoff"
         );
-        let msg = format!("{}", result.unwrap_err());
-        assert!(
-            msg.contains("Could not determine")
-                || msg.contains("session ID")
-                || msg.contains("session-id"),
-            "error should explain how to fix it: {msg}"
-        );
-
-        // Restore the session file if it was there before
-        if let Some(ref content) = session_file_backup {
-            let _ = std::fs::write(&session_file, content);
-        }
+        let backups_root = temp_dir.path().join(".claude/teams/.backups/atm-dev");
+        assert!(backups_root.exists(), "backup root should exist");
 
         // SAFETY: test-only cleanup
         unsafe {
@@ -2398,9 +2262,8 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_resume_sets_non_team_lead_members_inactive() {
-        // After a successful resume, members other than team-lead should have
-        // is_active set to Some(false).
+    fn test_resume_removes_team_directory_instead_of_mutating_members() {
+        // R.1 changed resume semantics: config is no longer mutated in-place.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
@@ -2426,33 +2289,9 @@ mod tests {
 
         let result = resume(args);
         assert!(result.is_ok(), "resume should succeed: {result:?}");
-
-        // Read config back and verify publisher member has is_active = false
-        let config_path = team_dir.join("config.json");
-        let config: TeamConfig =
-            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-
-        let publisher = config
-            .members
-            .iter()
-            .find(|m| m.name == "publisher")
-            .expect("publisher should still be a member");
-        assert_eq!(
-            publisher.is_active,
-            Some(false),
-            "publisher.isActive should be false after resume"
-        );
-
-        // team-lead should not be touched (is_active not forced to false)
-        let lead = config
-            .members
-            .iter()
-            .find(|m| m.name == "team-lead")
-            .expect("team-lead should be a member");
-        // team-lead had no is_active field in test fixture, so should still be None
         assert!(
-            lead.is_active.is_none() || lead.is_active == Some(true),
-            "team-lead.isActive should not be forced to false"
+            !team_dir.exists(),
+            "team directory should be removed after resume archive handoff"
         );
 
         // SAFETY: test-only cleanup
@@ -2524,9 +2363,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_resume_explicit_session_id() {
-        // When --session-id is passed, resume uses that ID directly without
-        // reading env or file.
+    fn test_resume_explicit_session_id_succeeds_without_config_mutation() {
+        // R.1 keeps --session-id for daemon consistency checks, but successful
+        // path archives/removes team directory.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
@@ -2556,12 +2395,10 @@ mod tests {
             result.is_ok(),
             "resume with explicit session_id should succeed: {result:?}"
         );
-
-        // Verify the config was updated with the explicit session ID
-        let config_path = team_dir.join("config.json");
-        let config: TeamConfig =
-            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-        assert_eq!(config.lead_session_id, explicit_id);
+        assert!(
+            !team_dir.exists(),
+            "team directory should be removed after resume archive handoff"
+        );
 
         // SAFETY: test-only cleanup
         unsafe {
@@ -2582,17 +2419,11 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_resume_session_id_from_file_fallback() {
-        // When CLAUDE_SESSION_ID env var is absent but /tmp/atm-session-id exists,
-        // resume should use the file's content.
+    fn test_resume_without_explicit_session_id_succeeds_when_daemon_unreachable() {
+        // With no daemon session record available, resume should still archive.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
-
-        // Write a test session ID to the file
-        let session_file = std::env::temp_dir().join("atm-session-id");
-        let file_session_id = "file-session-id-67890";
-        std::fs::write(&session_file, file_session_id).unwrap();
 
         let original_home = std::env::var("ATM_HOME").ok();
         let original_id = std::env::var("ATM_IDENTITY").ok();
@@ -2616,14 +2447,12 @@ mod tests {
         let result = resume(args);
         assert!(
             result.is_ok(),
-            "resume with file fallback should succeed: {result:?}"
+            "resume without explicit session_id should succeed: {result:?}"
         );
-
-        // Verify the config was updated with the file's session ID
-        let config_path = team_dir.join("config.json");
-        let config: TeamConfig =
-            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-        assert_eq!(config.lead_session_id, file_session_id);
+        assert!(
+            !team_dir.exists(),
+            "team directory should be removed after resume archive handoff"
+        );
 
         // SAFETY: test-only cleanup
         unsafe {

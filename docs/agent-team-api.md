@@ -312,12 +312,16 @@ Adds to team config at `~/.claude/teams/{team_name}/config.json`:
 
 ### Shutdown Behavior
 
-When an agent receives a `shutdown_request` and approves it:
-- The agent process terminates (tmux pane destroyed)
-- The agent **may or may not** be removed from `config.json` members array (behavior is inconsistent)
-- If removed: the member entry is deleted entirely
-- If retained: `isActive` is set to `false`, `tmuxPaneId` becomes stale (points to dead pane)
-- **Inbox files persist** on disk — both the agent's own inbox (`{name}.json`) and messages it sent to others
+Daemon-managed shutdown uses a shutdown-first flow:
+- Daemon sends a `shutdown_request` message to the target mailbox.
+- Daemon waits for graceful shutdown up to configured timeout while monitoring PID/session liveness.
+- If the agent does not exit by timeout, daemon force-terminates the process.
+
+After termination is confirmed (already-dead or timeout+kill), daemon teardown cleanup is coupled:
+- Remove member entry from `config.json`.
+- Delete the agent inbox file (`inboxes/{name}.json`).
+
+Mailbox deletion is not a shutdown signal and must not be used to terminate an active agent.
 
 ### Respawn Behavior
 
@@ -327,6 +331,7 @@ Spawning a new agent with the same `name` into the same team:
 - The member entry in `config.json` is updated (not duplicated)
 - `joinedAt` and `prompt` are updated to reflect the new spawn
 - The agent starts with **fresh context** — no memory of previous sessions
+- When daemon teardown has completed, mailbox history for the terminated instance is removed
 - The **spawn prompt** is the primary driver of initial behavior
 
 ### Routing Architecture
@@ -351,13 +356,9 @@ The `agentId` is an internal bookkeeping field. It does not appear in inbox file
 
 ### Queued Message Processing on Respawn
 
-When an agent is respawned (same name), it inherits the full inbox history:
-- All prior messages (from all previous lifetimes) are visible in the agent's conversation context
-- Messages are marked `read: true` by the system
-- **The agent may or may not act on queued messages** — behavior depends on:
-  - **Inbox noise**: With few messages, plain instructions are acted on. With many old messages (prior prompts, shutdowns, old requests), plain instructions blend into history and are ignored.
-  - **Spawn prompt**: The spawn prompt takes priority. If it gives a specific task, queued messages may be ignored even if noticed.
-  - **Call-to-action tags**: Prefixing queued messages with a tag like `[PENDING ACTION]` or `[OFFLINE MESSAGE - Acknowledge and respond]` reliably causes agents to act on them, even in noisy inboxes.
+When an agent is respawned (same name), behavior depends on teardown state:
+- If prior instance teardown completed, the new agent starts with an empty mailbox.
+- If prior teardown has not completed yet, stale messages may remain until daemon reconciliation finishes.
 
 ### Reliable Offline Queuing Pattern
 
@@ -1019,13 +1020,15 @@ Approve or reject agent's implementation plan.
 
 ### Claude Code Settings (`settings.json`)
 
-Claude Code uses a layered settings system. The `settings.json` file is the official mechanism for configuration across user, project, and local scopes, with managed policies and CLI overrides taking precedence. citeturn1view0
+Claude Code uses a layered settings system. The `settings.json` file is the official mechanism for configuration across user, project, and local scopes, with managed policies and CLI overrides taking precedence.
+
+Reference: https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
 
 **Settings file locations (by scope)**:
-- User: `~/.claude/settings.json` citeturn1view0
-- Project (shared): `.claude/settings.json` citeturn1view0
-- Local (personal, gitignored): `.claude/settings.local.json` citeturn1view0
-- Managed (enterprise policy): `managed-settings.json` in system locations (macOS `/Library/Application Support/ClaudeCode/`, Linux/WSL `/etc/claude-code/`, Windows `C:\Program Files\ClaudeCode\`) citeturn1view0
+- User: `~/.claude/settings.json` 
+- Project (shared): `.claude/settings.json` 
+- Local (personal, gitignored): `.claude/settings.local.json` 
+- Managed (enterprise policy): `managed-settings.json` in system locations (macOS `/Library/Application Support/ClaudeCode/`, Linux/WSL `/etc/claude-code/`, Windows `C:\Program Files\ClaudeCode\`) 
 
 **Settings precedence (highest → lowest)**:
 1. Managed (cannot be overridden)
@@ -1033,7 +1036,7 @@ Claude Code uses a layered settings system. The `settings.json` file is the offi
 3. Local (`.claude/settings.local.json`)
 4. Project (`.claude/settings.json`)
 5. User (`~/.claude/settings.json`)
-citeturn1view0
+
 
 **Schema reference**:
 ```json
@@ -1041,7 +1044,7 @@ Claude Code uses a layered settings system. The `settings.json` file is the offi
   "$schema": "https://json.schemastore.org/claude-code-settings.json"
 }
 ```
-citeturn1view0
+
 
 **Example settings.json**:
 ```json
@@ -1056,18 +1059,18 @@ Claude Code uses a layered settings system. The `settings.json` file is the offi
   }
 }
 ```
-citeturn1view0
+
 
 **Core settings fields (non-exhaustive)**:
 - `permissions`: rule lists (e.g., `allow`, `deny`, `ask`) controlling tool access and file reads.
 - `env`: environment variables applied to sessions.
 - Additional keys exist (hooks, model, status line, plugin settings, etc.) and are defined by the official JSON schema.
-citeturn1view0
+
 
 **Implementation guidance**:
 - Consumers must accept and preserve unknown settings fields.
 - The official JSON schema is the source of truth for the full settings surface.
-citeturn1view0
+
 
 ## Error Handling
 
@@ -1193,7 +1196,7 @@ SendMessage:
   recipient: "sprint-1-dev"
   content: "Sprint complete, shutting you down"
 # Wait for shutdown_response
-# Team, tasks, inboxes all preserved — spawn new agents as needed
+# Team and tasks are preserved; the terminated agent's mailbox is cleaned up by daemon teardown
 
 # ✅ Shut down ENTIRE team (all data removed)
 # First: shutdown all remaining agents
