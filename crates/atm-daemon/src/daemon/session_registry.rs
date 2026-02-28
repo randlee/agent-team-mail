@@ -300,7 +300,6 @@ fn parse_key(key: &str) -> (String, String) {
         None => ("".to_string(), key.to_string()),
     }
 }
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
