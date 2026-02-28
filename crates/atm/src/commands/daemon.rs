@@ -201,14 +201,6 @@ fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -
     false
 }
 
-fn validated_signal_pid(pid: u32) -> Option<i32> {
-    if pid > 1 && pid <= i32::MAX as u32 {
-        Some(pid as i32)
-    } else {
-        None
-    }
-}
-
 /// Execute daemon status command
 fn execute_status(args: StatusArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
