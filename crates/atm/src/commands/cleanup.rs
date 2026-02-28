@@ -38,6 +38,10 @@ pub struct CleanupArgs {
     #[arg(long)]
     force: bool,
 
+    /// Enable kill semantics for active agents (agent mode only)
+    #[arg(long)]
+    kill: bool,
+
     /// Wait timeout in seconds for graceful shutdown (agent mode only)
     #[arg(long, default_value_t = 10)]
     timeout: u64,
@@ -73,6 +77,7 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
             &team_name,
             agent,
             args.force,
+            args.kill,
             args.timeout.max(1),
         );
     }
@@ -129,6 +134,7 @@ fn execute_agent_cleanup(
     team_name: &str,
     agent_name: &str,
     force: bool,
+    kill_mode: bool,
     timeout_secs: u64,
 ) -> Result<()> {
     if agent_name == "team-lead" {
@@ -141,6 +147,12 @@ fn execute_agent_cleanup(
         );
         match session {
             Ok(Some(info)) if info.alive => {
+                if !kill_mode {
+                    anyhow::bail!(
+                        "agent '{}' is active; refusing destructive cleanup without --kill",
+                        agent_name
+                    );
+                }
                 send_shutdown_request(home_dir, team_name, agent_name)?;
 
                 if !wait_for_session_dead(team_name, agent_name, timeout_secs) {
@@ -153,6 +165,12 @@ fn execute_agent_cleanup(
                     {
                         eprintln!(
                             "Warning: forced process termination is not supported on this platform"
+                        );
+                    }
+                    if !wait_for_session_dead(team_name, agent_name, 3) {
+                        anyhow::bail!(
+                            "failed to terminate '{}' within timeout; cleanup aborted",
+                            agent_name
                         );
                     }
                 }

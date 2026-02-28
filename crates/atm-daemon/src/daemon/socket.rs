@@ -1019,14 +1019,10 @@ async fn handle_hook_event_command(
                 );
             }
             let pid = process_id.unwrap_or(0);
-            // SessionRegistry is currently keyed by bare agent name, not team.
-            // This matches existing daemon behavior but can collide across teams
-            // that reuse member names.
-            // TODO(atm-daemon): switch registry operations to team-scoped keys.
             session_registry
                 .lock()
                 .unwrap()
-                .upsert(&agent, &session_id, pid);
+                .upsert_for_team(&team, &agent, &session_id, pid);
             {
                 let mut tracker = state_store.lock().unwrap();
                 if tracker.get_state(&agent).is_none() {
@@ -1055,7 +1051,7 @@ async fn handle_hook_event_command(
                 );
             }
             {
-                session_registry.lock().unwrap().mark_dead(&agent);
+                session_registry.lock().unwrap().mark_dead_for_team(&team, &agent);
             }
             {
                 let mut tracker = state_store.lock().unwrap();
@@ -1866,7 +1862,7 @@ fn handle_session_query_team(
     };
 
     let registry = session_registry.lock().unwrap();
-    let Some(record) = registry.query(&name) else {
+    let Some(record) = registry.query_for_team(&team, &name) else {
         return make_error_response(
             &request.request_id,
             "AGENT_NOT_FOUND",

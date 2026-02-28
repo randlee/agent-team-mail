@@ -393,10 +393,12 @@ fn apply_hook_event(
                 "SessionStart hook received for {agent_id} (session: {session_id}, pid: {process_id})"
             );
             if let Some(registry) = session_registry {
-                registry
-                    .lock()
-                    .unwrap()
-                    .upsert(&agent_id, &session_id, process_id);
+                let mut reg = registry.lock().unwrap();
+                if let Some(team) = event.team.as_deref() {
+                    reg.upsert_for_team(team, &agent_id, &session_id, process_id);
+                } else {
+                    reg.upsert(&agent_id, &session_id, process_id);
+                }
             }
 
             // Best-effort: auto-update session_id on matching external members
@@ -422,7 +424,12 @@ fn apply_hook_event(
             };
             debug!("SessionEnd hook received for {agent_id}");
             if let Some(registry) = session_registry {
-                registry.lock().unwrap().mark_dead(&agent_id);
+                let mut reg = registry.lock().unwrap();
+                if let Some(team) = event.team.as_deref() {
+                    reg.mark_dead_for_team(team, &agent_id);
+                } else {
+                    reg.mark_dead(&agent_id);
+                }
             }
         }
         unknown => {
