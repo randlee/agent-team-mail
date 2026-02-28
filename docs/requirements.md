@@ -333,6 +333,7 @@ Commands:
   teams       List teams on this machine (and manage members)
   members     List agents in a team
   status      Show team status overview
+  doctor      Run daemon/team health diagnostics
   config      Show/set configuration
   cleanup     Apply retention policies
   mcp         MCP server setup and management
@@ -620,6 +621,47 @@ Hook/path compatibility requirements:
 Non-goal for R.0b:
 - Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
   baseline parity is the immediate requirement.
+
+### 4.3.3 `atm doctor`
+
+`atm doctor` provides a single operational triage report for daemon-backed ATM health.
+
+```
+atm doctor
+atm doctor --team <name>
+atm doctor --json
+atm doctor --since <iso8601|duration>
+atm doctor --errors-only
+atm doctor --full
+```
+
+**Checks performed**:
+- Daemon health: lock/socket/PID coherence and daemon availability.
+- PID/session reconciliation: live process verification for registered team members.
+- Roster/session integrity: detect mismatches between `config.json` members and daemon session registry.
+- Mailbox/teardown integrity: detect terminal-agent partial teardown states
+  (roster removed xor mailbox present).
+- Config/runtime drift: detect path/env mismatches relevant to daemon/team operation.
+- Unified log diagnostics: summarize warning/error events in the configured time window.
+
+**Default warning/error log window**:
+- `since = max(team-lead session start, last doctor call time)`.
+- First call (no prior doctor state) uses team-lead session start.
+- Repeated calls are incremental by default (new events since prior doctor call).
+- `--since` overrides default window.
+- `--full` forces full window from team-lead session start.
+
+**Output requirements**:
+- Human-readable output: ordered findings by severity, then recommended remediation commands.
+- JSON output (`--json`): stable schema with
+  `summary`, `findings[]`, `recommendations[]`, `log_window`.
+- Recommendations must include directly runnable commands when applicable
+  (for example: `atm cleanup --agent <name>`, `atm daemon start`, `atm register <team>`).
+
+**Exit codes**:
+- `0`: no critical findings.
+- `2`: critical findings detected (operator action required).
+- `1`: doctor execution failed (I/O/parsing/runtime error).
 
 ### 4.4 Configuration
 

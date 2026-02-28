@@ -736,6 +736,24 @@ Closes gaps identified during R.0 execution and dogfooding:
 - `atm daemon --kill <agent>` performs shutdown-first flow and terminates the named process by timeout boundary.
 - `atm teams spawn` can reproduce current Claude teammate launcher behavior without custom scripts.
 
+### R.0c — `atm doctor` diagnostics and operational cleanup guidance
+
+Builds operational triage tooling on top of R.0b lifecycle truth.
+
+1. **`atm doctor` command**: single health report command for daemon/session/cleanup drift.
+2. **Daemon + PID scan**: verify daemon availability and reconcile live PID/session state for all members.
+3. **Roster/session integrity**: detect config roster vs session registry mismatches and zombie artifacts.
+4. **Mailbox hygiene checks**: detect stale terminal-agent mailboxes and partial teardown states.
+5. **Unified log surfacing**: report warning/error events using incremental default window:
+   `max(team-lead session start, last doctor call time)`.
+6. **Cleanup recommendations**: output explicit remediation commands (`atm cleanup --agent`, daemon restart, re-register).
+
+**Acceptance criteria**:
+- `atm doctor` reports daemon-not-running as critical with clear recovery command.
+- `atm doctor` detects and reports partial teardown drift (roster removed xor mailbox present).
+- Default repeated runs are incremental for warning/error log output.
+- JSON output mode is stable for automation.
+
 ### R.1 — `atm teams resume` session handoff
 
 **CLI flag semantics in handoff mode**:
@@ -788,6 +806,7 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 |--------|------|------------|------|--------|
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
 | R.0b | Persistent session registry + agent lifecycle management | R.0 | M | PLANNED |
+| R.0c | `atm doctor` diagnostics and cleanup guidance | R.0b | S | PLANNED |
 | R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
 | R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
