@@ -567,6 +567,8 @@ specific session handles.
 Required baseline:
 - `atm teams spawn` accepts an explicit runtime selector (initially `claude`,
   `codex`, `gemini` where supported).
+- Proposed baseline command surface:
+  - `atm teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [--model <model>] [--cwd <path>] [--system-prompt <path>] [--sandbox <on|off>] [--approval-mode <mode>] [--include-directories <paths>] [--env KEY=VALUE ...] [--resume] [--resume-session-id <runtime_session_id>]`
 - Spawn supports two modes:
   - **fresh**: start a new runtime session with a system prompt/bootstrap prompt.
   - **resume**: continue an existing runtime session bound to the ATM agent.
@@ -597,11 +599,11 @@ Invariants:
 
 Teammate teardown must follow request-first semantics:
 1. Send polite shutdown request to the target agent.
-2. Wait a bounded grace window.
+2. Wait a bounded grace window (default: `15s`, configurable).
 3. If unresponsive, escalate with runtime/process signals.
 
 For process-backed runtimes (including Gemini tmux workers), minimum escalation:
-- `SIGINT` -> `SIGTERM` -> `SIGKILL` (bounded timeout between stages).
+- `SIGINT` (`10s` wait, configurable) -> `SIGTERM` (`10s` wait, configurable) -> `SIGKILL`.
 
 Safety requirements:
 - Teardown escalation must never target agents outside the current team scope.
@@ -634,6 +636,8 @@ Required Gemini behavior:
 - Lifecycle mapping should use one ATM envelope (`hook-event`) with
   `source.kind = "agent_hook"` for Gemini-origin events (`session_start`,
   `teammate_idle`, `session_end`).
+- `teammate_idle` above refers to the existing canonical lifecycle event already
+  defined in section 4.5 (not a new event type).
 
 ### 4.4 Configuration
 

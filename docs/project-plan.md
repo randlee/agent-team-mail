@@ -752,7 +752,8 @@ Deliverables:
 3. Explicit lifecycle envelope mapping for runtime adapters (`source.kind =
    "agent_hook"`) aligned with daemon authZ model.
 4. Open-questions list for ACP/interactive steering reliability and default
-   sandbox policy.
+   sandbox policy, plus additional integration questions (resume override UX,
+   lifecycle event provenance, and default teardown timeout policy).
 
 Acceptance criteria:
 - Approved docs exist before any runtime adapter code is started.
@@ -813,7 +814,7 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 |--------|------|------------|------|--------|
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
 | R.0b | Persistent session registry + agent lifecycle management | R.0 | M | PLANNED |
-| R.0c | Runtime compatibility spec (Gemini first, docs-only) | R.0b | S | PLANNED |
+| R.0c | Runtime compatibility spec (Gemini first) (docs-only) | R.0b | S | PLANNED |
 | R.1 | `atm teams resume` session handoff + daemon member restore | R.0c | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
 | R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |

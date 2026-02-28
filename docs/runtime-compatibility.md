@@ -1,6 +1,7 @@
-# Runtime Compatibility Draft (Gemini First)
+# Runtime Compatibility (Gemini First)
 
-Status: draft for review, no implementation in this pass.
+Status: accepted for docs/spec scope in R.0c (docs-only). Implementation is
+deferred until a follow-on implementation sprint.
 
 ## 1. Scope
 
@@ -130,6 +131,9 @@ Fresh spawn (interactive pane baseline):
 Resume spawn:
 - `GEMINI_CLI_HOME=... GEMINI_SYSTEM_MD=<path-or-1> gemini --resume <runtime_session_id> --model <model> [--sandbox] [--approval-mode <mode>]`
 
+Proposed `atm teams spawn` signature (runtime-agnostic baseline):
+- `atm teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [--model <model>] [--cwd <path>] [--system-prompt <path>] [--sandbox <on|off>] [--approval-mode <mode>] [--include-directories <paths>] [--env KEY=VALUE ...] [--resume] [--resume-session-id <runtime_session_id>]`
+
 ### 3.3 Steer model
 
 Phase 1 (tmux steering):
@@ -148,9 +152,9 @@ Important limitation:
 
 Required sequence:
 1. polite shutdown request (ATM message + in-pane steer text)
-2. wait grace window for normal exit
-3. if alive: `SIGINT`
-4. if still alive after timeout: `SIGTERM`
+2. wait grace window for normal exit (default: 15s, configurable)
+3. if alive: `SIGINT` (wait 10s, configurable)
+4. if still alive after timeout: `SIGTERM` (wait 10s, configurable)
 5. if still alive: `SIGKILL`
 
 Rationale:
@@ -163,6 +167,10 @@ Emit ATM `hook-event` envelope with `source.kind = "agent_hook"` for Gemini hook
 - `SessionStart` -> `session_start`
 - agent idle/turn complete from stream-json/result boundary -> `teammate_idle`
 - `SessionEnd` -> `session_end`
+
+Clarification: `teammate_idle` is an existing canonical ATM lifecycle event
+already defined in requirements section 4.5 (not a new event type introduced by
+this doc).
 
 ## 4. Proposed Requirements Deltas (Draft)
 
@@ -225,8 +233,10 @@ Implementation resolves runtime session ID from ATM registry/state, not from use
 
 ## 6. Suggested Next Step (Still Docs-Only)
 
-After review approval, update canonical docs with accepted deltas:
-- `docs/requirements.md`
-- `docs/project-plan.md` (Phase R planning rows for Gemini adapter)
+R.0c scope is complete when:
+- docs for Gemini compatibility are accepted,
+- requirements/project-plan deltas are merged,
+- open questions are tracked for implementation planning.
 
-No code changes should begin until those docs are accepted.
+Implementation is explicitly deferred until the next runtime adapter
+implementation sprint.
