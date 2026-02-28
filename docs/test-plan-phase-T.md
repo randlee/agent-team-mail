@@ -1,0 +1,277 @@
+# Phase T Test Plan (Draft)
+
+Last updated: 2026-02-28
+Status: Draft for ATM-QA review
+
+## Scope
+
+This document defines sprint-level acceptance criteria and test coverage for the
+Phase T candidate execution order.
+
+## Proposed Execution Sequence
+
+1. T.1: #181 daemon auto-start and single-instance reliability
+2. T.2: #182 roster seeding/config watcher + #183 agent state transitions
+3. Parallel tranche:
+   - T.5a: #284 CLI crate publishability
+   - T.5b: atm-monitor implementation
+   - T.5c: #46/#47 availability signaling clarification
+4. T.3: #282 Gemini end-to-end spawn wiring
+5. T.4: #281 Gemini resume correctness
+
+---
+
+## T.1 — Daemon Auto-Start + Single-Instance (#181)
+
+### Requirements Coverage
+
+- `requirements.md` section 4.7 (daemon auto-start and single-instance guarantees)
+
+### Acceptance Criteria
+
+- Daemon-backed commands succeed without manual daemon startup.
+- Exactly one daemon instance is authoritative per user scope.
+- Concurrent CLI invocations do not create duplicate daemon instances.
+- Startup failure returns actionable diagnostics.
+
+### Test Matrix
+
+- Unit:
+  - readiness probe helpers
+  - stale socket/pid detection helpers
+  - lock ownership guards
+- Integration:
+  - command invokes auto-start when daemon absent
+  - command no-ops when daemon already healthy
+  - concurrent command startup race (single daemon survives)
+- Failure-path:
+  - lock contention (second daemon rejected)
+  - unreadable/invalid state files
+  - startup timeout path
+- Cross-platform:
+  - Windows CI validates spawn/readiness/lock behavior
+  - Unix signal/file-socket paths validated
+
+### Observability Checks
+
+- Unified log contains daemon start attempt/outcome events.
+- `atm doctor` reports daemon availability healthy after successful auto-start.
+
+### Completion Gates
+
+- Required tests pass in CI.
+- `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- No regression in existing daemon-backed command behavior.
+
+---
+
+## T.2 — Roster Seeding + State Transitions (#182, #183)
+
+### Requirements Coverage
+
+- `requirements.md` roster seeding/config watcher requirements
+- `requirements.md` agent state transition requirements
+- `requirements.md` section 4.3.1 cleanup invariants (drift safety)
+
+### Acceptance Criteria
+
+- Daemon startup seeds roster from `config.json`.
+- `config.json` edits reconcile roster adds/removes/updates within one watch cycle.
+- Agent states transition deterministically (`unknown/active/idle/offline`) with source/reason.
+- Drift is surfaced via diagnostics.
+
+### Test Matrix
+
+- Unit:
+  - roster reconciliation logic (add/remove/update)
+  - state transition reducer/ordering rules
+  - liveness reconciliation logic
+- Integration:
+  - startup with pre-populated config -> roster matches
+  - file watcher update propagates to daemon roster
+  - hook events + PID changes update visible state
+- Failure-path:
+  - malformed config update handling
+  - conflicting/out-of-order lifecycle events
+  - missing session_end with PID death fallback
+- Cross-platform:
+  - watcher + state behavior stable on Windows/macOS/Linux
+
+### Observability Checks
+
+- Unified logs include roster reconcile events and state transition events.
+- `atm doctor` detects injected drift and reports actionable findings.
+- `atm status` reflects reconciled state within one poll window.
+
+### Completion Gates
+
+- Required tests pass in CI.
+- `clippy -D warnings` passes.
+- No regressions to cleanup safety invariants.
+
+---
+
+## T.5a — CLI Crate Publishability (#284)
+
+### Requirements Coverage
+
+- `requirements.md` section 4.8.6 (CLI crate publishability requirements)
+
+### Acceptance Criteria
+
+- CLI crate packages/publishes without external-path include failures.
+- Release workflow fails hard on publish failure.
+- Installability check confirms expected CLI version.
+
+### Test Matrix
+
+- Unit:
+  - n/a (mostly packaging/workflow)
+- Integration/CI:
+  - `cargo package` and `cargo publish --dry-run` for CLI crate
+  - workflow failure simulation for publish error
+  - post-release version install validation step
+- Failure-path:
+  - intentional publish failure is not masked
+
+### Observability Checks
+
+- Release logs clearly indicate publish success/failure.
+
+### Completion Gates
+
+- Packaging and publish dry-run checks pass in CI.
+- Workflow no longer masks publish failures.
+
+---
+
+## T.5b — Operational Health Monitor (`atm-monitor`)
+
+### Requirements Coverage
+
+- `requirements.md` section 4.3.3a (operational health monitor)
+
+### Acceptance Criteria
+
+- Monitor polls on interval and emits alerts for new critical findings.
+- Alert deduplication works within cooldown window.
+- Alerts contain severity/code/remediation context.
+
+### Test Matrix
+
+- Unit:
+  - dedupe window logic
+  - finding diff logic
+- Integration:
+  - injected daemon/session fault produces alert within 2 poll intervals
+  - repeated fault within cooldown suppressed
+  - fault clear + reintroduce produces new alert
+- Failure-path:
+  - monitor survives temporary daemon unavailability
+
+### Observability Checks
+
+- Alerts can be correlated to unified log events and doctor finding codes.
+
+### Completion Gates
+
+- Required tests pass and alert behavior is deterministic.
+
+---
+
+## T.5c — Availability Signaling Clarification (#46, #47)
+
+### Requirements Coverage
+
+- `requirements.md` section 4.3.10 (availability signaling contract)
+
+### Acceptance Criteria
+
+- Documented source-of-truth ownership: daemon state is authoritative.
+- Hook events and pub/sub roles are explicitly bounded.
+- Event payload contract includes idempotency key and required fields.
+
+### Test Matrix
+
+- Unit:
+  - idempotency/dedup handling for duplicate availability events
+- Integration:
+  - hook-derived idle event transitions state within one window
+  - duplicate replay does not double-transition
+  - lost pub/sub message still converges via daemon reconciliation
+
+### Observability Checks
+
+- Availability state changes are visible via status + unified logs.
+
+### Completion Gates
+
+- Design and behavior contract approved before dependent implementation expands.
+
+---
+
+## T.3 — Gemini End-to-End Spawn Wiring (#282)
+
+### Requirements Coverage
+
+- `requirements.md` sections 4.3.4, 4.3.5, 4.3.8
+
+### Acceptance Criteria
+
+- Gemini spawn works end-to-end via runtime adapter path.
+- Runtime metadata is persisted and queryable.
+- Lifecycle mapping uses unified envelope.
+
+### Test Matrix
+
+- Unit:
+  - runtime option mapping and env shaping
+  - metadata persistence serialization
+- Integration:
+  - spawn -> registry metadata present (`runtime`, `runtime_session_id`, `runtime_home`)
+  - status/query surfaces include runtime metadata
+- Failure-path:
+  - spawn failure surfaces actionable errors without corrupting registry
+
+### Completion Gates
+
+- Runtime adapter tests pass across supported platforms.
+
+---
+
+## T.4 — Gemini Resume Correctness (#281)
+
+### Requirements Coverage
+
+- `requirements.md` sections 4.3.4, 4.3.5, 4.3.8 (resume behavior)
+
+### Acceptance Criteria
+
+- Resume binds to correct prior runtime session for same `(team, agent)`.
+- Explicit resume override works deterministically.
+- Resume does not drift to wrong session/flags.
+
+### Test Matrix
+
+- Unit:
+  - resume session resolution precedence
+- Integration:
+  - spawn fresh -> capture session -> resume same session
+  - explicit override path
+- Failure-path:
+  - missing/stale session id fallback behavior is deterministic and reported
+
+### Completion Gates
+
+- Resume-specific integration tests pass in CI.
+- No regressions in fresh spawn behavior.
+
+---
+
+## Global Quality Gates
+
+- All changed behavior covered by tests in this plan.
+- No implementation without corresponding requirements entry.
+- `cargo test` + targeted integration suites pass.
+- `cargo clippy --workspace --all-targets -- -D warnings` passes.
+
