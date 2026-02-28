@@ -651,12 +651,62 @@ atm doctor --full
 - `--since` overrides default window.
 - `--full` forces full window from team-lead session start.
 
+**`--errors-only` behavior**:
+- Scope: affects only the unified log diagnostics check.
+- With `--errors-only`, log scanning includes only `error` level events.
+- With `--errors-only`, doctor must suppress non-error log findings (for example,
+  warning-count summaries and "no events in window" informational findings).
+- `--errors-only` does not suppress non-log findings from daemon/session/roster/mailbox/config checks.
+
+**`--since` duration format**:
+- Accepted duration grammar: `<positive-integer><unit>`.
+- Accepted units:
+  - `s` = seconds
+  - `m` = minutes
+  - `h` = hours
+  - `d` = days
+- Examples: `30m`, `2h`, `1d`, `45s`.
+- Invalid examples: `0m`, `1w`, `1.5h`, `-5m`, `m30`.
+
 **Output requirements**:
 - Human-readable output: ordered findings by severity, then recommended remediation commands.
 - JSON output (`--json`): stable schema with
   `summary`, `findings[]`, `recommendations[]`, `log_window`.
 - Recommendations must include directly runnable commands when applicable
   (for example: `atm cleanup --agent <name>`, `atm daemon start`, `atm register <team>`).
+
+**JSON output schema (`--json`)**:
+- Top-level object:
+  - `summary` (object)
+  - `findings` (array)
+  - `recommendations` (array)
+  - `log_window` (object)
+- `summary` object:
+  - `team` (string)
+  - `generated_at` (string, RFC3339 UTC timestamp)
+  - `has_critical` (boolean)
+  - `counts` (object): `{ "critical": number, "warn": number, "info": number }`
+- `findings[]` item object:
+  - `severity` (enum string): `"critical" | "warn" | "info"`
+  - `check` (string; stable check category identifier)
+  - `code` (string; stable machine-readable finding code)
+  - `message` (string; human-readable detail)
+- `recommendations[]` item object:
+  - `command` (string; directly runnable command where applicable)
+  - `reason` (string; concise remediation rationale)
+- `log_window` object:
+  - `mode` (enum string): `"default_incremental" | "since_override" | "full"`
+  - `start` (string, RFC3339 UTC timestamp)
+  - `end` (string, RFC3339 UTC timestamp)
+
+**Last-doctor-call persistence**:
+- Path: `~/.config/atm/doctor-state.json`.
+- Format: JSON object with per-team RFC3339 timestamps:
+  - `{"last_call_by_team": {"<team>": "<rfc3339-timestamp>"}}`
+- Update timing: on successful `atm doctor` completion (after report generation/output).
+- Fallback behavior:
+  - Missing/unreadable/invalid state file is treated as empty state.
+  - Empty state means "first call" semantics for default window calculation.
 
 **Exit codes**:
 - `0`: no critical findings.
