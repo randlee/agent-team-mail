@@ -1,12 +1,18 @@
 //! Cleanup command implementation - apply retention policies to inboxes
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::retention::apply_retention;
-use agent_team_mail_core::schema::TeamConfig;
+use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::Args;
+use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
 
+use crate::commands::teams;
 use crate::util::settings::get_home_dir;
 
 /// Apply retention policies to clean up old messages
@@ -16,6 +22,10 @@ pub struct CleanupArgs {
     #[arg(short, long)]
     team: Option<String>,
 
+    /// Remove stale state for a specific agent (compatibility alias for teams cleanup)
+    #[arg(long)]
+    agent: Option<String>,
+
     /// Apply to all teams
     #[arg(long)]
     all_teams: bool,
@@ -23,6 +33,14 @@ pub struct CleanupArgs {
     /// Show what would be cleaned without modifying
     #[arg(long)]
     dry_run: bool,
+
+    /// Force cleanup when daemon liveness checks are unavailable (agent mode only)
+    #[arg(long)]
+    force: bool,
+
+    /// Wait timeout in seconds for graceful shutdown (agent mode only)
+    #[arg(long, default_value_t = 10)]
+    timeout: u64,
 }
 
 /// Execute the cleanup command
@@ -36,6 +54,28 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
     };
 
     let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+
+    // Agent cleanup compatibility mode:
+    // `atm cleanup --agent <name> [--team <team>] [--force]`
+    if let Some(agent) = &args.agent {
+        if args.all_teams {
+            anyhow::bail!("--agent cannot be combined with --all-teams");
+        }
+        if args.dry_run {
+            anyhow::bail!("--dry-run is not supported with --agent");
+        }
+        let team_name = args
+            .team
+            .clone()
+            .unwrap_or_else(|| config.core.default_team.clone());
+        return execute_agent_cleanup(
+            &home_dir,
+            &team_name,
+            agent,
+            args.force,
+            args.timeout.max(1),
+        );
+    }
 
     let teams_dir = home_dir.join(".claude/teams");
     if !teams_dir.exists() {
@@ -82,6 +122,110 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn execute_agent_cleanup(
+    home_dir: &Path,
+    team_name: &str,
+    agent_name: &str,
+    force: bool,
+    timeout_secs: u64,
+) -> Result<()> {
+    if agent_name == "team-lead" {
+        anyhow::bail!("team-lead is protected and cannot be removed by cleanup");
+    }
+
+    if agent_team_mail_core::daemon_client::daemon_is_running() {
+        let session = agent_team_mail_core::daemon_client::query_session_for_team(
+            team_name, agent_name,
+        );
+        match session {
+            Ok(Some(info)) if info.alive => {
+                send_shutdown_request(home_dir, team_name, agent_name)?;
+
+                if !wait_for_session_dead(team_name, agent_name, timeout_secs) {
+                    #[cfg(unix)]
+                    {
+                        let _ =
+                            unsafe { libc::kill(info.process_id as libc::pid_t, libc::SIGTERM) };
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        eprintln!(
+                            "Warning: forced process termination is not supported on this platform"
+                        );
+                    }
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if !force {
+                    anyhow::bail!(
+                        "daemon is running but has no session record for '{}'; refusing cleanup without --force",
+                        agent_name
+                    );
+                }
+            }
+            Err(e) => {
+                if !force {
+                    anyhow::bail!(
+                        "failed to query daemon session for '{}': {e}. Re-run with --force to override",
+                        agent_name
+                    );
+                }
+            }
+        }
+    } else if !force {
+        anyhow::bail!(
+            "daemon is not running; cannot safely confirm liveness for '{}'. Start daemon or re-run with --force",
+            agent_name
+        );
+    }
+
+    teams::cleanup_single_agent(team_name.to_string(), agent_name.to_string(), force)
+}
+
+fn send_shutdown_request(home_dir: &Path, team_name: &str, agent_name: &str) -> Result<()> {
+    let request_id = Uuid::new_v4().to_string();
+    let shutdown_payload = serde_json::json!({
+        "type": "shutdown_request",
+        "requestId": request_id,
+        "from": "atm",
+        "reason": "cleanup --agent",
+        "timestamp": Utc::now().to_rfc3339(),
+    });
+
+    let msg = InboxMessage {
+        from: "atm".to_string(),
+        text: shutdown_payload.to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        read: false,
+        summary: Some("shutdown_request".to_string()),
+        message_id: Some(Uuid::new_v4().to_string()),
+        unknown_fields: HashMap::new(),
+    };
+
+    let inbox_path = home_dir
+        .join(".claude/teams")
+        .join(team_name)
+        .join("inboxes")
+        .join(format!("{agent_name}.json"));
+    inbox_append(&inbox_path, &msg, team_name, "atm")?;
+    Ok(())
+}
+
+fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        match agent_team_mail_core::daemon_client::query_session_for_team(team_name, agent_name) {
+            Ok(Some(info)) if !info.alive => return true,
+            Ok(None) => return true,
+            Ok(Some(_)) => {}
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
 }
 
 /// Clean up a single team's inboxes

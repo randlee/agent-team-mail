@@ -1,16 +1,34 @@
 //! Daemon management commands
 
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::io::inbox::inbox_append;
+use agent_team_mail_core::schema::InboxMessage;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use std::time::{Duration, SystemTime};
+use chrono::Utc;
+use std::collections::HashMap;
+use std::time::{Duration, Instant, SystemTime};
+use uuid::Uuid;
 
 use crate::util::settings::get_home_dir;
 
 /// Daemon management commands
 #[derive(Args, Debug)]
 pub struct DaemonArgs {
+    /// Kill the named agent process via daemon session tracking
+    #[arg(long, value_name = "AGENT", conflicts_with = "command")]
+    kill: Option<String>,
+
+    /// Team override for --kill
+    #[arg(long, requires = "kill")]
+    team: Option<String>,
+
+    /// Wait timeout in seconds for graceful shutdown before forced termination
+    #[arg(long, default_value_t = 10, requires = "kill")]
+    timeout: u64,
+
     #[command(subcommand)]
-    command: DaemonCommands,
+    command: Option<DaemonCommands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -29,9 +47,106 @@ pub struct StatusArgs {
 
 /// Execute daemon command
 pub fn execute(args: DaemonArgs) -> Result<()> {
-    match args.command {
+    if let Some(agent) = args.kill.as_deref() {
+        return execute_kill(agent, args.team.as_deref(), args.timeout.max(1));
+    }
+
+    match args.command.unwrap_or(DaemonCommands::Status(StatusArgs {
+        json: false,
+    })) {
         DaemonCommands::Status(status_args) => execute_status(status_args),
     }
+}
+
+fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> Result<()> {
+    if !agent_team_mail_core::daemon_client::daemon_is_running() {
+        anyhow::bail!("daemon is not running");
+    }
+
+    let home_dir = get_home_dir()?;
+    let current_dir = std::env::current_dir()?;
+    let config = resolve_config(
+        &ConfigOverrides {
+            team: team_override.map(ToString::to_string),
+            ..Default::default()
+        },
+        &current_dir,
+        &home_dir,
+    )?;
+    let team_name = team_override.unwrap_or(&config.core.default_team);
+
+    let Some(info) = agent_team_mail_core::daemon_client::query_session_for_team(team_name, agent)?
+    else {
+        anyhow::bail!("no daemon session record found for {agent}@{team_name}");
+    };
+
+    if !info.alive {
+        println!("Agent {agent}@{team_name} already not alive");
+        return Ok(());
+    }
+
+    send_shutdown_request(&home_dir, team_name, agent)?;
+    if wait_for_session_dead(team_name, agent, timeout_secs) {
+        println!("Graceful shutdown complete for {agent}@{team_name}");
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        // SAFETY: SIGTERM requests process termination by PID.
+        let _ = unsafe { libc::kill(info.process_id as libc::pid_t, libc::SIGTERM) };
+    }
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("forced termination not supported on this platform");
+    }
+
+    if wait_for_session_dead(team_name, agent, 3) {
+        println!("Forced termination complete for {agent}@{team_name}");
+        Ok(())
+    } else {
+        anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+    }
+}
+
+fn send_shutdown_request(home_dir: &std::path::Path, team_name: &str, agent_name: &str) -> Result<()> {
+    let payload = serde_json::json!({
+        "type": "shutdown_request",
+        "requestId": Uuid::new_v4().to_string(),
+        "from": "atm",
+        "reason": "daemon --kill",
+        "timestamp": Utc::now().to_rfc3339(),
+    });
+    let msg = InboxMessage {
+        from: "atm".to_string(),
+        text: payload.to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        read: false,
+        summary: Some("shutdown_request".to_string()),
+        message_id: Some(Uuid::new_v4().to_string()),
+        unknown_fields: HashMap::new(),
+    };
+    let inbox_path = home_dir
+        .join(".claude/teams")
+        .join(team_name)
+        .join("inboxes")
+        .join(format!("{agent_name}.json"));
+    inbox_append(&inbox_path, &msg, team_name, "atm")?;
+    Ok(())
+}
+
+fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        match agent_team_mail_core::daemon_client::query_session_for_team(team_name, agent_name) {
+            Ok(Some(info)) if !info.alive => return true,
+            Ok(None) => return true,
+            Ok(Some(_)) => {}
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
 }
 
 /// Execute daemon status command

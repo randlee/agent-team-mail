@@ -145,7 +145,7 @@ pub struct ResumeArgs {
 
     /// Explicit session ID override (e.g., from the SessionStart hook output).
     /// If omitted, the session ID is resolved from CLAUDE_SESSION_ID env var or
-    /// /tmp/atm-session-id (written by the gate hook on every tool call).
+    /// the platform temp-dir session-id file (written by the gate hook on every tool call).
     #[arg(long)]
     session_id: Option<String>,
 }
@@ -884,6 +884,15 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     });
 
     Ok(())
+}
+
+/// Entry point for `atm cleanup --agent` compatibility.
+pub(crate) fn cleanup_single_agent(team: String, agent: String, force: bool) -> Result<()> {
+    cleanup(CleanupArgs {
+        team,
+        agent: Some(agent),
+        force,
+    })
 }
 
 /// Core backup logic: creates a timestamped snapshot directory and returns its path.

@@ -8,11 +8,13 @@ use crate::daemon::{
 };
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
+use agent_team_mail_core::schema::TeamConfig;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -144,7 +146,7 @@ pub async fn run(
         state_store,
         pubsub_store,
         launch_tx,
-        session_registry,
+        session_registry.clone(),
         dedup_store,
         stream_state_store,
         stream_event_sender,
@@ -343,6 +345,13 @@ pub async fn run(
         .await;
     });
 
+    let reconcile_cancel = cancel.clone();
+    let reconcile_ctx = ctx.clone();
+    let reconcile_registry = session_registry.clone();
+    let reconcile_task = tokio::spawn(async move {
+        reconcile_loop(reconcile_ctx, reconcile_registry, reconcile_cancel).await;
+    });
+
     info!("Daemon event loop running. Waiting for cancellation signal...");
 
     // Wait for cancellation
@@ -371,6 +380,9 @@ pub async fn run(
     if let Err(e) = tokio::time::timeout(Duration::from_secs(5), status_task).await {
         error!("Status writer task did not complete in time: {}", e);
     }
+    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), reconcile_task).await {
+        error!("Reconcile task did not complete in time: {}", e);
+    }
 
     // Graceful shutdown of all plugins
     graceful_shutdown(plugins, Duration::from_secs(5))
@@ -385,6 +397,138 @@ pub async fn run(
     }
 
     info!("Daemon event loop shutdown complete");
+    Ok(())
+}
+
+async fn reconcile_loop(
+    ctx: PluginContext,
+    session_registry: SharedSessionRegistry,
+    cancel: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => {
+                let claude_root = ctx.system.claude_root.clone();
+                let session_registry = session_registry.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    reconcile_team_member_activity(&claude_root, &session_registry)
+                }).await;
+
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => warn!("reconcile loop failed: {e}"),
+                    Err(e) => warn!("reconcile loop task panicked: {e}"),
+                }
+            }
+        }
+    }
+}
+
+fn reconcile_team_member_activity(
+    claude_root: &std::path::Path,
+    session_registry: &SharedSessionRegistry,
+) -> Result<()> {
+    let teams_root = claude_root.join("teams");
+    if !teams_root.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(&teams_root)? {
+        let Ok(entry) = entry else { continue };
+        let team_dir = entry.path();
+        if !team_dir.is_dir() {
+            continue;
+        }
+        let config_path = team_dir.join("config.json");
+        if !config_path.exists() {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let mut config: TeamConfig = match serde_json::from_str(&content) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let mut changed = false;
+        for member in &mut config.members {
+            let record = {
+                let reg = session_registry.lock().unwrap();
+                reg.query(&member.name).cloned()
+            };
+
+            let Some(record) = record else {
+                continue;
+            };
+
+            let alive = record.state == crate::daemon::session_registry::SessionState::Active
+                && record.is_process_alive();
+
+            if !alive
+                && record.state == crate::daemon::session_registry::SessionState::Active
+            {
+                session_registry.lock().unwrap().mark_dead(&member.name);
+            }
+
+            if member.is_active != Some(alive) {
+                let was_active = member.is_active == Some(true);
+                member.is_active = Some(alive);
+                changed = true;
+
+                if alive {
+                    member.last_active = Some(now_ms);
+                } else if was_active {
+                    archive_member_inbox(&team_dir, &member.name)?;
+                }
+            }
+        }
+
+        if changed {
+            write_team_config_atomic(&config_path, &config)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn archive_member_inbox(team_dir: &std::path::Path, agent_name: &str) -> Result<()> {
+    let inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
+    if !inbox_path.exists() {
+        return Ok(());
+    }
+
+    let archive_dir = team_dir.join("inboxes/.archive");
+    std::fs::create_dir_all(&archive_dir)?;
+
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
+    let archived = archive_dir.join(format!("{agent_name}-{stamp}.json"));
+
+    std::fs::rename(&inbox_path, &archived)?;
+    std::fs::write(&inbox_path, "[]")?;
+    Ok(())
+}
+
+fn write_team_config_atomic(path: &std::path::Path, config: &TeamConfig) -> Result<()> {
+    let lock_path = path.with_extension("lock");
+    let _lock = acquire_lock(&lock_path, 5)
+        .map_err(|e| anyhow::anyhow!("failed to acquire config lock: {e}"))?;
+
+    let tmp = path.with_extension("tmp");
+    let serialized = serde_json::to_string_pretty(config)?;
+    std::fs::write(&tmp, serialized)?;
+    atomic_swap(path, &tmp)?;
     Ok(())
 }
 
@@ -855,7 +999,7 @@ fn format_timestamp(time: SystemTime) -> String {
     use chrono::{DateTime, Utc};
 
     let duration = time
-        .duration_since(SystemTime::UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO);
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
