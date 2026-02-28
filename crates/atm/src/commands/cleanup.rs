@@ -37,7 +37,6 @@ pub struct CleanupArgs {
     /// Force cleanup when daemon liveness checks are unavailable (agent mode only)
     #[arg(long)]
     force: bool,
-
     /// Enable kill semantics for active agents (agent mode only)
     #[arg(long)]
     kill: bool,
