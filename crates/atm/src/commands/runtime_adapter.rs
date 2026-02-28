@@ -204,7 +204,8 @@ mod tests {
         let runtime_home = env
             .get("GEMINI_CLI_HOME")
             .expect("GEMINI_CLI_HOME should be set");
-        assert!(runtime_home.contains(".claude/runtime/gemini/atm-dev/arch-ctm/home"));
+        let runtime_home_norm = runtime_home.replace('\\', "/");
+        assert!(runtime_home_norm.contains(".claude/runtime/gemini/atm-dev/arch-ctm/home"));
         assert_eq!(
             env.get("ATM_RUNTIME_HOME").map(String::as_str),
             Some(runtime_home.as_str())
