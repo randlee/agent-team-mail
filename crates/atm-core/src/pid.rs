@@ -37,7 +37,7 @@ mod platform {
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const STILL_ACTIVE: u32 = 259;
 
-    extern "system" {
+    unsafe extern "system" {
         fn OpenProcess(
             desired_access: u32,
             inherit_handles: i32,
