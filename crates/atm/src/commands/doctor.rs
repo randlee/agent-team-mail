@@ -477,12 +477,14 @@ fn check_log_diagnostics(
     };
 
     if events.is_empty() {
-        findings.push(finding(
-            Severity::Info,
-            "log_diagnostics",
-            "NO_EVENTS_IN_WINDOW",
-            "No matching log events found in selected window".to_string(),
-        ));
+        if !errors_only {
+            findings.push(finding(
+                Severity::Info,
+                "log_diagnostics",
+                "NO_EVENTS_IN_WINDOW",
+                "No matching log events found in selected window".to_string(),
+            ));
+        }
         return findings;
     }
 
