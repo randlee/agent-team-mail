@@ -639,6 +639,29 @@ Required Gemini behavior:
 - `teammate_idle` above refers to the existing canonical lifecycle event already
   defined in section 4.5 (not a new event type).
 
+### 4.3.6 OpenCode Baseline Adapter Requirements (Discovery Draft)
+
+OpenCode is the next runtime baseline after Gemini for this contract.
+
+Required OpenCode behavior:
+- Launch options must support OpenCode-native resume controls:
+  - latest-root resume (`--continue`),
+  - explicit session resume (`--session <runtime_session_id>`),
+  - optional `--fork` on resume flows where requested.
+- Runtime identity mapping must persist OpenCode session IDs (`ses_*`) as
+  `runtime_session_id` in ATM registry/state.
+- System prompt integration must use OpenCode-supported instruction surfaces
+  (instruction files/config), since no single CLI `--system-prompt` flag exists
+  in the current runtime.
+- Per-agent runtime isolation must be provided by agent-scoped XDG roots for
+  OpenCode processes.
+- Runtime-aware interrupt must prefer API/session cancellation (`session.abort`)
+  before process signal escalation.
+- Lifecycle and observability events must continue to flow through existing ATM
+  unified envelope and logging requirements (sections 4.5 and 4.6), including
+  runtime adapter fields (`runtime=opencode`, `runtime_session_id`,
+  teardown stage, spawn/resume mode).
+
 ### 4.4 Configuration
 
 #### Resolution Order (highest priority first)

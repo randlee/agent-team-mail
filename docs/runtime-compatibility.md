@@ -1,7 +1,9 @@
-# Runtime Compatibility (Gemini First)
+# Runtime Compatibility (Gemini First, OpenCode Discovery)
 
-Status: accepted for docs/spec scope in R.0c (docs-only). Implementation is
-deferred until a follow-on implementation sprint.
+Status:
+- Gemini scope: accepted for docs/spec scope in R.0c (docs-only).
+- OpenCode scope: discovery findings captured for review in this doc; adapter
+  implementation is deferred to a follow-on sprint.
 
 ## 1. Scope
 
@@ -240,3 +242,124 @@ R.0c scope is complete when:
 
 Implementation is explicitly deferred until the next runtime adapter
 implementation sprint.
+
+## 7. OpenCode Discovery Findings (Docs-Only, Pre-Adapter)
+
+### 7.1 Verified Runtime Facts (OpenCode CLI)
+
+#### 7.1.1 Launch and resume controls
+
+OpenCode supports both TUI and headless paths with explicit session reuse
+controls:
+- default TUI command (`opencode`) accepts:
+  - `--continue/-c` (continue most recent root session),
+  - `--session/-s <session_id>`,
+  - `--fork` (requires `--continue` or `--session`),
+  - `--agent`, `--model`, `--prompt`.
+- headless command (`opencode run`) accepts:
+  - `--continue/-c`, `--session/-s <session_id>`, `--fork`,
+  - `--agent`, `--model`, `--variant`,
+  - `--format default|json`.
+
+Source refs:
+- `../opencode/packages/opencode/src/cli/cmd/tui/thread.ts`
+- `../opencode/packages/opencode/src/cli/cmd/run.ts`
+
+#### 7.1.2 Session identity model
+
+- Session IDs are OpenCode-native identifiers with `ses_` prefix.
+- Session list ordering is by `time_updated DESC`.
+- `--continue` behavior resolves latest root session (`parentID` absent).
+
+Source refs:
+- `../opencode/packages/opencode/src/id/id.ts`
+- `../opencode/packages/opencode/src/session/index.ts`
+- `../opencode/packages/opencode/src/cli/cmd/run.ts`
+
+#### 7.1.3 System prompt and instruction model
+
+OpenCode does not expose a single CLI flag equivalent to Gemini's
+`GEMINI_SYSTEM_MD`.
+
+Instead, system instruction composition is runtime-internal and includes:
+- model-specific built-in prompt templates,
+- environment/system context,
+- discovered instruction files (including `AGENTS.md` and `CLAUDE.md`),
+- optional extra instruction globs/URLs via config `instructions`.
+
+Source refs:
+- `../opencode/packages/opencode/src/session/system.ts`
+- `../opencode/packages/opencode/src/session/instruction.ts`
+- `../opencode/packages/opencode/src/session/prompt.ts`
+- `../opencode/packages/opencode/src/config/config.ts`
+
+#### 7.1.4 Runtime state location/isolation
+
+OpenCode state/config/data roots are derived from XDG paths with `opencode`
+subdirectories:
+- `xdgData/opencode`
+- `xdgConfig/opencode`
+- `xdgState/opencode`
+- `xdgCache/opencode`
+
+Source refs:
+- `../opencode/packages/opencode/src/global/index.ts`
+
+Inference for ATM isolation:
+- Agent-isolated runtime homes should be implemented via per-agent XDG env
+  overrides (instead of a runtime-specific home flag like Gemini).
+
+#### 7.1.5 Teardown/interrupt behavior
+
+- API-level interrupt is explicit: `POST /session/{sessionID}/abort` ->
+  `SessionPrompt.cancel(sessionID)`.
+- TUI interrupt keybind defaults to `escape`; prompt UI requires repeated
+  interrupt action before issuing `session.abort`.
+- Worker shutdown path calls `shutdown` and aborts stream subscriptions before
+  disposal.
+
+Source refs:
+- `../opencode/packages/opencode/src/server/routes/session.ts`
+- `../opencode/packages/opencode/src/session/prompt.ts`
+- `../opencode/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`
+- `../opencode/packages/opencode/src/cli/cmd/tui/worker.ts`
+- `../opencode/packages/opencode/src/config/config.ts`
+
+### 7.2 Proposed ATM Design Deltas for OpenCode Adapter
+
+1. Resume semantics mapping:
+- ATM `--resume` for runtime `opencode` maps to:
+  - default: `--continue`,
+  - explicit runtime session override: `--session <ses_...>`.
+
+2. System prompt mapping:
+- ATM `--system-prompt` for OpenCode should materialize as adapter-managed
+  instruction file(s) loaded through OpenCode's instruction discovery path
+  (`AGENTS.md`/config `instructions`), not direct CLI flag injection.
+
+3. Runtime state isolation:
+- Adapter must set per-agent XDG roots for OpenCode process launch to guarantee
+  stable, isolated state and resume behavior.
+
+4. Teardown semantics:
+- Teardown request-first behavior should call runtime-aware abort first
+  (`session.abort` where available), then process escalation (`SIGINT` ->
+  `SIGTERM` -> `SIGKILL`) only if process liveness remains.
+
+5. Steerability semantics:
+- For OpenCode, prefer API/message submission into session (`session.prompt` /
+  `session.command`) for steer flows.
+- In-turn mutation remains runtime-limited; retain explicit
+  cancel-then-steer fallback.
+
+### 7.3 Open Questions (OpenCode-Specific)
+
+1. Should ATM OpenCode adapter primarily use:
+   - CLI-in-pane control (`opencode`/`opencode run`), or
+   - server/API control (`opencode serve` + SDK calls),
+   as the default runtime backend?
+2. What is the preferred adapter policy for system prompt injection:
+   transient generated instruction file per spawn vs managed persistent file in
+   agent-isolated config?
+3. Should OpenCode runtime session IDs (`ses_*`) be exposed in
+   `atm status --verbose` by default, or only in debug mode?

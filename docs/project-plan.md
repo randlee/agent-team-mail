@@ -762,6 +762,27 @@ Acceptance criteria:
 - Docs explicitly capture known runtime limitations (e.g., cancel-then-steer if
   in-turn mutation is unavailable).
 
+### R.0d — Runtime compatibility spec (OpenCode baseline, docs-only)
+
+Extend the runtime compatibility spec with OpenCode-specific findings and draft
+adapter requirements before implementation.
+
+Deliverables:
+1. Verified OpenCode runtime facts in `runtime-compatibility.md` covering:
+   - CLI launch/resume controls (`--continue`, `--session`, `--fork`),
+   - session identity model (`ses_*`),
+   - instruction/system prompt surfaces,
+   - interrupt/abort behavior.
+2. Requirements updates for OpenCode baseline adapter behavior in section 4.3.
+3. Open questions list for OpenCode backend strategy (CLI-pane vs server/API)
+   and system-prompt materialization approach.
+
+Acceptance criteria:
+- OpenCode discovery findings are source-referenced and reviewable.
+- Requirements are consistent with runtime-agnostic contracts already defined in
+  R.0c.
+- No adapter implementation code starts before docs review sign-off.
+
 ### R.1 — `atm teams resume` session handoff
 
 **CLI flag semantics in handoff mode**:
@@ -815,6 +836,7 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
 | R.0b | Persistent session registry + agent lifecycle management | R.0 | M | PLANNED |
 | R.0c | Runtime compatibility spec (Gemini first) (docs-only) | R.0b | S | PLANNED |
+| R.0d | Runtime compatibility spec (OpenCode baseline) (docs-only) | R.0c | S | IN PROGRESS |
 | R.1 | `atm teams resume` session handoff + daemon member restore | R.0c | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
 | R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
