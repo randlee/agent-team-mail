@@ -558,7 +558,70 @@ atm status <team>                # specific team
 
 **Output**: Team info, member list with activity, unread message counts, pending tasks.
 
-### 4.3.1 Runtime-Agnostic Teammate Spawn Contract
+### 4.3.1 Lifecycle Teardown and Cleanup Semantics
+
+Daemon-managed teammate shutdown and cleanup MUST follow one canonical flow so that
+team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
+
+**Primary shutdown protocol**:
+- Daemon sends a structured `shutdown_request` control message to the target agent mailbox.
+- Daemon waits for graceful exit up to `--timeout` while monitoring PID/session liveness.
+- If the process exits within timeout, daemon proceeds to teardown cleanup.
+- If still alive after timeout, daemon force-kills PID using backend/platform-appropriate
+  termination, then proceeds to teardown cleanup after death is confirmed.
+- Mailbox deletion MUST NOT be used as a primary shutdown signal.
+
+**Teardown cleanup invariant (REQUIRED)**:
+- Roster removal and mailbox deletion are coupled operations and MUST converge together.
+- For an agent in terminal state (`already terminated` or `killed after timeout`), daemon
+  MUST:
+  1. remove the member entry from team `config.json`, and
+  2. delete `inboxes/<agent>.json`.
+- A partial result (only roster removed or only mailbox deleted) is a failure state and
+  MUST be retried/reconciled by daemon until converged.
+
+**Already-terminated case**:
+- If daemon verifies PID/session is already dead at operation start, daemon skips control
+  delivery and runs teardown cleanup directly using the same coupled invariant above.
+
+**Active-agent safety guard**:
+- Daemon cleanup commands MUST NOT delete mailbox or remove roster entry for a
+  PID/session-verified active agent unless the caller explicitly requested kill semantics.
+
+**Command expectations**:
+- `atm cleanup --agent <name>`: non-destructive for active agents; applies teardown cleanup
+  only when daemon verifies dead state (or explicit kill mode is requested). In kill mode,
+  it MUST deliver `shutdown_request` first, then enforce timeout/kill fallback.
+- `atm daemon --kill <agent> [--timeout <seconds>]`: executes shutdown protocol above,
+  then teardown cleanup invariant.
+
+### 4.3.2 `atm teams spawn` (Claude Runtime Baseline)
+
+`atm teams spawn` must provide a first-class CLI path equivalent to the current
+`scripts/spawn-teammate.sh` behavior for Claude teammates.
+
+Required baseline behavior:
+- Resolve agent runtime metadata from `.claude/agents/<agent>.md` frontmatter
+  (at minimum `model`, `color`; prompt body used for initial instruction delivery).
+- Resolve team/identity using explicit args first, then `ATM_TEAM` / `ATM_IDENTITY`.
+- Resolve working directory from explicit `--repo-root` (or equivalent), else current
+  project root; launch command MUST `cd` into that root before starting Claude.
+- Register teammate in team config before launch, then update pane/session metadata
+  after successful spawn.
+- Support resume-aware launch by passing parent session when available (for example,
+  `leadSessionId`-derived handoff).
+- Deliver initial prompt/body content after launch using ATM messaging path.
+
+Hook/path compatibility requirements:
+- Generated hook commands must use `"$CLAUDE_PROJECT_DIR"` for project scripts and guard
+  missing files with `test -f` before execution.
+- Spawn semantics must not rely on fragile relative paths.
+
+Non-goal for R.0b:
+- Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
+  baseline parity is the immediate requirement.
+
+### 4.3.3 Runtime-Agnostic Teammate Spawn Contract
 
 `atm` must support runtime-aware teammate spawn semantics that keep ATM identity
 stable across runtimes (Claude/Codex/Gemini/OpenCode) while allowing runtime-
@@ -575,7 +638,7 @@ Required baseline:
 - User-facing control remains agent-centric (`team`, `agent`) rather than runtime
   session-centric for normal usage.
 
-### 4.3.2 Runtime Session and Identity Mapping
+### 4.3.4 Runtime Session and Identity Mapping
 
 Daemon/session registry must store both ATM identity and runtime identity:
 - canonical ATM identity: `team`, `agent`
@@ -595,7 +658,7 @@ Invariants:
 - Resume-by-agent is the default UX. Runtime session IDs are resolved from ATM
   registry/state in normal flow.
 
-### 4.3.3 Teardown and Liveness Escalation Contract
+### 4.3.5 Teardown and Liveness Escalation Contract
 
 Teammate teardown must follow request-first semantics:
 1. Send polite shutdown request to the target agent.
@@ -609,7 +672,7 @@ Safety requirements:
 - Teardown escalation must never target agents outside the current team scope.
 - Every escalation stage must emit a structured event to unified logging (section 4.6).
 
-### 4.3.4 Steering Contract (Interactive and Headless)
+### 4.3.6 Steering Contract (Interactive and Headless)
 
 Steering must support both:
 - interactive tmux-pane workers (stdin prompt/control injection), and
@@ -619,7 +682,7 @@ For runtimes without in-turn prompt injection APIs, ATM must enforce and
 document `cancel-then-steer` semantics (no silent assumptions of live turn
 mutation).
 
-### 4.3.5 Gemini Baseline Adapter Requirements
+### 4.3.7 Gemini Baseline Adapter Requirements
 
 Gemini is the first non-Claude runtime baseline for this contract.
 
@@ -639,7 +702,7 @@ Required Gemini behavior:
 - `teammate_idle` above refers to the existing canonical lifecycle event already
   defined in section 4.5 (not a new event type).
 
-### 4.3.6 OpenCode Baseline Adapter Requirements (Discovery Draft)
+### 4.3.8 OpenCode Baseline Adapter Requirements (Discovery Draft)
 
 OpenCode is the next runtime baseline after Gemini for this contract.
 
@@ -841,12 +904,11 @@ Validation rules:
 #### Sink Paths and Files
 
 Canonical log file (daemon-writer mode):
-- `${ATM_HOME}/atm.log.jsonl` if `ATM_HOME` is set
-- else `${config_dir}/atm/atm.log.jsonl` (`~/.config/atm` on Linux/macOS, `%APPDATA%\\atm` on Windows)
+- `${home_dir}/.config/atm/atm.log.jsonl` where `home_dir` is resolved via `get_home_dir()`
+  (`ATM_HOME` when set, otherwise platform home directory)
 
 Producer fallback spool directory:
-- `${ATM_HOME}/log-spool` if `ATM_HOME` is set
-- else `${config_dir}/atm/log-spool`
+- `${home_dir}/.config/atm/log-spool` where `home_dir` is resolved via `get_home_dir()`
 
 Spool filename convention:
 - `{source_binary}-{pid}-{unix_millis}.jsonl`
@@ -867,6 +929,9 @@ Spool filename convention:
 - Daemon startup merges spool files via claim/rename then append; delete source file
   only after successful merge.
 - Merge ordering: timestamp then file order, append-only.
+- Daemon startup spool merge and daemon runtime writer MUST target the same canonical
+  path resolved from `ATM_LOG_FILE`/`ATM_LOG_PATH` (or default `atm.log.jsonl`).
+  Divergent startup/runtime sink paths are forbidden.
 
 #### Migration Bridge (Legacy `events.jsonl`) — REMOVED (Phase M.1b)
 
@@ -904,12 +969,26 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 
 #### Single-Instance Contract
 
-- Daemon startup acquires an exclusive process lock in `${config_dir}/atm/daemon.lock`.
+- Daemon startup acquires an exclusive process lock in
+  `${home_dir}/.config/atm/daemon.lock`, where `home_dir` is resolved via
+  `get_home_dir()` (`ATM_HOME` when set, otherwise platform home directory).
 - If lock acquisition fails, new daemon process exits immediately (existing daemon is authoritative).
 - Socket path is fixed per user scope:
   - Unix/macOS: `${ATM_HOME:-$HOME/.claude}/daemon/atm-daemon.sock` (existing convention)
   - Windows: named-pipe equivalent (canonical path documented in daemon crate)
 - CLI must never spawn a second daemon when lock/socket indicate an existing healthy instance.
+- Daemon startup MUST acquire `daemon.lock` before mutating socket or PID files.
+- Daemon MUST NOT remove an existing socket file unless lock ownership has already
+  been acquired by the current process.
+
+#### Required Acceptance Checks
+
+- Starting a second daemon while one is healthy must fail immediately with an
+  actionable single-instance error.
+- Existing healthy daemon must retain lock ownership; socket/PID files must not
+  be overwritten by a second process.
+- `atm logs` default view and daemon startup spool merge must observe the same
+  canonical `atm.log.jsonl` sink path.
 
 #### Daemon Session Registry Contract
 
@@ -1587,6 +1666,13 @@ The core has no awareness of whether a team member is local or remote.
 - Default behavior for non-Claude-managed members: archive or delete old messages automatically.
 - If Claude does not perform cleanup for its own agents, `atm` should optionally apply retention there as well.
 - Retention policies must be configurable by max message count and/or max age.
+- For daemon-managed teammate teardown, inbox deletion and roster removal from
+  `config.json` MUST occur together for terminal agents (already-dead or killed after
+  timeout). Partial cleanup states are invalid and must be reconciled.
+- For active agents, retention/cleanup MUST NOT remove mailbox or roster entry unless
+  explicit kill semantics are invoked.
+- For active-agent termination intent, cleanup tooling MUST send `shutdown_request` and
+  wait for termination/timeout before performing mailbox deletion and roster removal.
 
 ### 8.7 Large Payloads and File References
 

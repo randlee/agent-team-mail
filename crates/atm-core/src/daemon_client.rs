@@ -544,6 +544,47 @@ pub fn query_session(name: &str) -> anyhow::Result<Option<SessionQueryResult>> {
     }
 }
 
+/// Query the daemon for the session record of a named agent scoped to a team.
+///
+/// Returns:
+/// - `Ok(Some(result))` when the agent is registered and matches the team's
+///   current lead-session context.
+/// - `Ok(None)` when the daemon is not running, the agent is not registered
+///   for that team context, or the platform does not support Unix sockets.
+/// - `Err` only for unexpected I/O errors *after* a connection is established.
+///
+/// # Arguments
+///
+/// * `team` - Team name (e.g., `"atm-dev"`)
+/// * `name` - Agent name to look up (e.g., `"team-lead"`)
+pub fn query_session_for_team(team: &str, name: &str) -> anyhow::Result<Option<SessionQueryResult>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "session-query-team".to_string(),
+        payload: serde_json::json!({ "team": team, "name": name }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    if !response.is_ok() {
+        return Ok(None);
+    }
+
+    let payload = match response.payload {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    match serde_json::from_value::<SessionQueryResult>(payload) {
+        Ok(result) => Ok(Some(result)),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Query the daemon for the stream turn state of a named agent.
 ///
 /// Returns:

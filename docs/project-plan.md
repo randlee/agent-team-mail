@@ -722,18 +722,19 @@ Harden daemon foundations required by R.1 session handoff:
 Closes gaps identified during R.0 execution and dogfooding:
 
 1. **Persistent session registry via hooks**: `session_start` hook writes `{agent_name, pid, session_id, team}` to daemon registry persistently. `session_end` hook removes entry. Daemon uses this for kill signals and liveness queries.
-2. **`isActive` reconciliation**: Daemon reconciles `isActive` in `config.json` against PID liveness — prevents live agents showing as Offline when Claude Code sets `isActive=False` on idle.
-3. **Automatic inbox cleanup on agent exit**: When daemon detects a registered agent's PID is gone, it archives/clears that agent's inbox. Enables re-spawning a fresh agent with the same name and empty mailbox. Prevents stale messages polluting context on next read.
-4. **Stale inbox message filtering**: New teammate instances skip messages from previous sessions (filter by session ID or age predicate) — prevents stale `shutdown_request` messages killing freshly-spawned agents.
-5. **`atm cleanup --agent <name>`**: CLI command to explicitly clear or archive a specific agent's inbox.
-6. **Daemon `--kill <agent>`**: Kill a Claude session by agent name using persistent PID registry.
+2. **`isActive` semantics**: `isActive` is advisory only. Daemon uses PID/session liveness as lifecycle truth and reconciles stale `isActive` drift in `config.json`.
+3. **Shutdown-first teardown flow**: For active-agent termination intent, daemon sends `shutdown_request` to mailbox, waits `--timeout`, then force-kills PID if needed.
+4. **Coupled teardown invariant**: After confirmed termination (already-dead or timeout+kill), daemon removes roster entry from `config.json` and deletes mailbox together (no partial state).
+5. **`atm cleanup --agent <name>`**: CLI cleanup command is non-destructive for active agents unless explicit kill semantics are requested; active termination uses shutdown-first flow.
+6. **Daemon `--kill <agent>`**: Runtime kill command backed by persistent registry and shutdown-first protocol.
+7. **`atm teams spawn` Claude baseline**: promote `spawn-teammate.sh` behavior into first-class CLI semantics (frontmatter model/color + prompt body, ATM env override compatibility, repo-root launch, resume-aware parent session handoff, post-spawn registration updates).
 
 **Acceptance criteria**:
-- Spawning a fresh teammate does not auto-approve stale `shutdown_request` from a previous session.
-- `atm status` shows correct Online/Offline for idle-but-alive teammates.
-- `atm cleanup --agent quality-mgr` clears inbox without touching other agents.
-- Agent exit (PID gone) automatically clears that agent's inbox within one daemon cycle.
-- `atm daemon --kill <agent>` terminates the Claude process for the named agent.
+- `atm status` reflects PID/session truth for idle-but-alive teammates even when `isActive` drifts.
+- `atm cleanup --agent quality-mgr` does not remove active-agent mailbox/roster without explicit kill intent.
+- For terminal agents, mailbox deletion and roster removal converge together (already-dead and kill-timeout cases).
+- `atm daemon --kill <agent>` performs shutdown-first flow and terminates the named process by timeout boundary.
+- `atm teams spawn` can reproduce current Claude teammate launcher behavior without custom scripts.
 
 ### R.0c — Runtime compatibility spec (Gemini first, docs-only)
 
@@ -834,10 +835,10 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 | Sprint | Name | Depends On | Size | Status |
 |--------|------|------------|------|--------|
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
-| R.0b | Persistent session registry + agent lifecycle management | R.0 | M | PLANNED |
-| R.0c | Runtime compatibility spec (Gemini first) (docs-only) | R.0b | S | PLANNED |
+| R.0b | Persistent session registry + agent lifecycle management | R.0 | M | COMPLETE |
+| R.0c | Runtime compatibility spec (Gemini first) (docs-only) | R.0b | S | COMPLETE |
 | R.0d | Runtime compatibility spec (OpenCode baseline) (docs-only) | R.0c | S | IN PROGRESS |
-| R.1 | `atm teams resume` session handoff + daemon member restore | R.0c | M | PLANNED |
+| R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
 | R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |
 

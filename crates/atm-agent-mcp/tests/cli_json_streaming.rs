@@ -210,7 +210,7 @@ async fn all_event_types_forwarded_through_duplex() {
         r#"{"type":"agent_message","content":"hi"}"#,
         r#"{"type":"tool_call","name":"read_file"}"#,
         r#"{"type":"tool_result","call_id":"c1","output":"ok"}"#,
-        r#"{"type":"file_change","path":"/tmp/x","action":"write"}"#,
+        r#"{"type":"file_change","path":"workspace/x.txt","action":"write"}"#,
         r#"{"type":"idle"}"#,
         r#"{"type":"done"}"#,
     ];
@@ -648,7 +648,7 @@ async fn no_cli_json_event_produces_busy_turn_state() {
             false,
         ),
         (
-            r#"{"type":"file_change","path":"/tmp/x","action":"write"}"#,
+            r#"{"type":"file_change","path":"workspace/x.txt","action":"write"}"#,
             false,
         ),
         // idle and done are valid state-changing events but never produce Busy.

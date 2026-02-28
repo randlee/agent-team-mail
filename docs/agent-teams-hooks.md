@@ -101,12 +101,15 @@ This enables:
 - **`atm teams resume`** daemon guard: if previous team-lead's session is `Dead`, resume proceeds without `--force`
 - **`atm teams cleanup`**: skip PID polling for recently-exited sessions already marked `Dead`
 - **TUI live-state gate**: agent state transitions to `Closed` on session exit, disabling control input immediately
+- **Daemon teardown convergence**: once session death is confirmed, daemon can reconcile
+  coupled cleanup (remove roster entry + delete mailbox) without waiting for long PID sweep windows
 
 **`.atm.toml` guard**: Both `session-end.py` and `session-start.py` check for `.atm.toml` in `cwd` before contacting the daemon. If `.atm.toml` is absent, the daemon socket call is skipped entirely. This ensures the daemon only receives hook events from ATM project sessions — not from unrelated Claude Code sessions on the same machine.
 
 **Fail-open**: The hook always exits `0`. If the daemon isn't running or `.atm.toml` is absent, the socket call is silently skipped.
 
 **Note**: `SessionEnd` cannot block session termination — it is for cleanup/notification only.
+`shutdown_request` remains the active termination mechanism; mailbox deletion is not a termination signal.
 
 ---
 
