@@ -275,3 +275,11 @@ Phase T candidate execution order.
 - `cargo test` + targeted integration suites pass.
 - `cargo clippy --workspace --all-targets -- -D warnings` passes.
 
+## MCP Readiness Gates (Before Live MCP Testing)
+
+- `atm doctor --json` reports logging health `healthy` (not degraded/unavailable).
+- Daemon/session/roster diagnostics show no critical findings.
+- Unified logs contain required lifecycle and command-correlation events for
+  at least one end-to-end smoke workflow.
+- No unresolved logging path mismatch between producer and daemon diagnostics.
+- Any remaining warnings are triaged and explicitly accepted before MCP test start.

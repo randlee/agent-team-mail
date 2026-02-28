@@ -1048,6 +1048,37 @@ Spool filename convention:
   path resolved from `ATM_LOG_FILE`/`ATM_LOG_PATH` (or default `atm.log.jsonl`).
   Divergent startup/runtime sink paths are forbidden.
 
+#### Default-On and Health State Requirements
+
+- Unified structured logging is enabled by default for all ATM binaries.
+- Logging health must be explicit and queryable with these states:
+  - `healthy` — events reaching canonical log sink
+  - `degraded_spooling` — daemon/sink unavailable, events spooled
+  - `degraded_dropping` — queue overflow or unrecoverable emit failures
+  - `unavailable` — no active sink and no successful spool fallback
+- Silent degradation is not allowed. State transitions into degraded/unavailable
+  must emit structured warning/error events.
+
+#### Logging Diagnostics Surface Requirements
+
+- `atm doctor --json` must include logging health summary with:
+  - current health state
+  - canonical log path
+  - spool directory path
+  - dropped-event counter
+  - spool-file count and oldest spool age
+  - last logging error (if any)
+- Human-readable `atm doctor` output must report degraded/unavailable logging as
+  actionable findings with remediation commands.
+- `atm status --json` must expose logging health state for operator visibility.
+
+#### Path Resolution Consistency Requirements
+
+- CLI producers and daemon writer must resolve the same canonical home/log/spool
+  paths under identical environment configuration.
+- Diagnostics must print resolved paths used by the current process to support
+  troubleshooting of path/env mismatches.
+
 #### Migration Bridge (Legacy `events.jsonl`) — REMOVED
 
 The `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var were removed.

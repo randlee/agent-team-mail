@@ -53,6 +53,7 @@ This document is the concise execution plan.
 4. Confirm dependencies/sequence for selected work.
 5. Freeze a first execution slice only after the above are complete.
 6. Pass requirements/plan consistency review (ATM-QA doc review gate) before build starts.
+7. Before MCP testing, pass observability readiness gates defined in `docs/test-plan-phase-T.md`.
 
 ### Phase T Candidate Backlog Source
 
