@@ -699,7 +699,7 @@ mod tests {
             plan_mode_required: None,
             joined_at,
             tmux_pane_id: None,
-            cwd: "/tmp".to_string(),
+            cwd: std::env::temp_dir().to_string_lossy().to_string(),
             subscriptions: vec![],
             backend_type: None,
             is_active,
@@ -813,5 +813,33 @@ mod tests {
         let findings = check_config_runtime_drift(team, &Some(team.to_string()));
         // no assertion on env here; just ensure function emits deterministic info for explicit team.
         assert!(!findings.iter().any(|f| f.code == "TEAM_FROM_DEFAULT"));
+    }
+
+    #[test]
+    fn check_log_diagnostics_errors_only_suppresses_no_events_info() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_dir = tmp.path().join(".config/atm");
+        fs::create_dir_all(&log_dir).unwrap();
+        fs::write(log_dir.join("atm.log.jsonl"), "").unwrap();
+
+        let start = Utc::now() - Duration::minutes(5);
+        let end = Utc::now();
+        let findings = check_log_diagnostics(tmp.path(), start, end, true);
+
+        assert!(!findings.iter().any(|f| f.code == "NO_EVENTS_IN_WINDOW"));
+    }
+
+    #[test]
+    fn check_log_diagnostics_non_errors_only_emits_no_events_info() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_dir = tmp.path().join(".config/atm");
+        fs::create_dir_all(&log_dir).unwrap();
+        fs::write(log_dir.join("atm.log.jsonl"), "").unwrap();
+
+        let start = Utc::now() - Duration::minutes(5);
+        let end = Utc::now();
+        let findings = check_log_diagnostics(tmp.path(), start, end, false);
+
+        assert!(findings.iter().any(|f| f.code == "NO_EVENTS_IN_WINDOW"));
     }
 }
