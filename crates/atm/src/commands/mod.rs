@@ -10,6 +10,7 @@ mod config_cmd;
 mod daemon;
 mod doctor;
 mod inbox;
+mod init;
 pub mod launch;
 mod logs;
 mod mcp;
@@ -98,6 +99,9 @@ enum Commands {
 
     /// MCP server setup and management (install for Claude Code, Codex, Gemini)
     Mcp(mcp::McpArgs),
+
+    /// Install Claude Code hook wiring for ATM session coordination
+    Init(init::InitArgs),
 }
 
 impl Cli {
@@ -124,6 +128,7 @@ impl Cli {
             Commands::Logs(args) => logs::execute(args),
             Commands::Register(args) => register::execute(args),
             Commands::Mcp(args) => mcp::execute(args),
+            Commands::Init(args) => init::execute(args),
         }
     }
 }
