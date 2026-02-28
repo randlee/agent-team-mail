@@ -736,7 +736,25 @@ Closes gaps identified during R.0 execution and dogfooding:
 - `atm daemon --kill <agent>` performs shutdown-first flow and terminates the named process by timeout boundary.
 - `atm teams spawn` can reproduce current Claude teammate launcher behavior without custom scripts.
 
-### R.0c — Runtime compatibility spec (Gemini first, docs-only)
+### R.0c — `atm doctor` diagnostics and operational cleanup guidance
+
+Builds operational triage tooling on top of R.0b lifecycle truth.
+
+1. **`atm doctor` command**: single health report command for daemon/session/cleanup drift.
+2. **Daemon + PID scan**: verify daemon availability and reconcile live PID/session state for all members.
+3. **Roster/session integrity**: detect config roster vs session registry mismatches and zombie artifacts.
+4. **Mailbox hygiene checks**: detect stale terminal-agent mailboxes and partial teardown states.
+5. **Unified log surfacing**: report warning/error events using incremental default window:
+   `max(team-lead session start, last doctor call time)`.
+6. **Cleanup recommendations**: output explicit remediation commands (`atm cleanup --agent`, daemon restart, re-register).
+
+**Acceptance criteria**:
+- `atm doctor` reports daemon-not-running as critical with clear recovery command.
+- `atm doctor` detects and reports partial teardown drift (roster removed xor mailbox present).
+- Default repeated runs are incremental for warning/error log output.
+- JSON output mode is stable for automation.
+
+### R.0d — Runtime compatibility spec (Gemini first, docs-only)
 
 Define and review runtime-agnostic spawn/identity/teardown/steering contracts
 using Gemini CLI as the first external runtime baseline. This sprint is
@@ -763,7 +781,7 @@ Acceptance criteria:
 - Docs explicitly capture known runtime limitations (e.g., cancel-then-steer if
   in-turn mutation is unavailable).
 
-### R.0d — Runtime compatibility spec (OpenCode baseline, docs-only)
+### R.0e — Runtime compatibility spec (OpenCode baseline, docs-only)
 
 Extend the runtime compatibility spec with OpenCode-specific findings and draft
 adapter requirements before implementation.
@@ -781,9 +799,8 @@ Deliverables:
 Acceptance criteria:
 - OpenCode discovery findings are source-referenced and reviewable.
 - Requirements are consistent with runtime-agnostic contracts already defined in
-  R.0c.
+  R.0d.
 - No adapter implementation code starts before docs review sign-off.
-
 ### R.1 — `atm teams resume` session handoff
 
 **CLI flag semantics in handoff mode**:
@@ -836,8 +853,9 @@ Install Claude Code hooks for ATM integration. Embedded hook scripts in binary (
 |--------|------|------------|------|--------|
 | R.0 | Daemon singleton lock + canonical log sink alignment | Phase Q | S | IN PROGRESS |
 | R.0b | Persistent session registry + agent lifecycle management | R.0 | M | COMPLETE |
-| R.0c | Runtime compatibility spec (Gemini first) (docs-only) | R.0b | S | COMPLETE |
-| R.0d | Runtime compatibility spec (OpenCode baseline) (docs-only) | R.0c | S | IN PROGRESS |
+| R.0c | `atm doctor` diagnostics and cleanup guidance | R.0b | S | COMPLETE |
+| R.0d | Runtime compatibility spec (Gemini first) (docs-only) | R.0b | S | COMPLETE |
+| R.0e | Runtime compatibility spec (OpenCode baseline) (docs-only) | R.0d | S | IN PROGRESS |
 | R.1 | `atm teams resume` session handoff + daemon member restore | R.0b | M | PLANNED |
 | R.2a | `atm init` hook installer core + embedded scripts | R.1 | M | PLANNED |
 | R.2b | `atm init --check` + upgrade compatibility validation | R.2a | S | PLANNED |

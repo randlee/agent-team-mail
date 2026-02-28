@@ -333,6 +333,7 @@ Commands:
   teams       List teams on this machine (and manage members)
   members     List agents in a team
   status      Show team status overview
+  doctor      Run daemon/team health diagnostics
   config      Show/set configuration
   cleanup     Apply retention policies
   mcp         MCP server setup and management
@@ -621,7 +622,68 @@ Non-goal for R.0b:
 - Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
   baseline parity is the immediate requirement.
 
-### 4.3.3 Runtime-Agnostic Teammate Spawn Contract
+### 4.3.3 `atm doctor`
+
+`atm doctor` provides a single operational triage report for daemon-backed ATM health.
+
+```
+atm doctor
+atm doctor --team <name>
+atm doctor --json
+atm doctor --since <iso8601|duration>
+atm doctor --errors-only
+atm doctor --full
+```
+
+**Checks performed**:
+- Daemon health: lock/socket/PID coherence and daemon availability.
+- PID/session reconciliation: live process verification for registered team members.
+- Roster/session integrity: detect mismatches between `config.json` members and daemon session registry.
+- Mailbox/teardown integrity: detect terminal-agent partial teardown states
+  (roster removed xor mailbox present).
+- Config/runtime drift: detect path/env mismatches relevant to daemon/team operation.
+- Unified log diagnostics: summarize warning/error events in the configured time window.
+
+**Default warning/error log window**:
+- `since = max(team-lead session start, last doctor call time)`.
+- First call (no prior doctor state) uses team-lead session start.
+- Repeated calls are incremental by default (new events since prior doctor call).
+- `--since` overrides default window.
+- `--full` forces full window from team-lead session start.
+
+**`--errors-only` behavior**:
+- Scope: affects only the unified log diagnostics check.
+- With `--errors-only`, log scanning includes only `error` level events.
+- With `--errors-only`, doctor must suppress non-error log findings (for example,
+  warning-count summaries and "no events in window" informational findings).
+- `--errors-only` does not suppress non-log findings from daemon/session/roster/mailbox/config checks.
+
+**`--since` duration format**:
+- Accepted duration grammar: `<positive-integer><unit>`.
+- Accepted units: `s` = seconds, `m` = minutes, `h` = hours, `d` = days.
+- Examples: `30m`, `2h`, `1d`, `45s`.
+- Invalid examples: `0m`, `1w`, `1.5h`, `-5m`, `m30`.
+
+**Output requirements**:
+- Human-readable output: ordered findings by severity, then recommended remediation commands.
+- JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
+- Recommendations must include directly runnable commands when applicable.
+
+**JSON output schema (`--json`)**:
+- `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
+- `findings[]`: `severity`, `check`, `code`, `message`
+- `recommendations[]`: `command`, `reason`
+- `log_window`: `mode`, `start`, `end`
+
+**Last-doctor-call persistence**:
+- Path: `~/.config/atm/doctor-state.json`.
+- Format: `{"last_call_by_team": {"<team>": "<rfc3339-timestamp>"}}`
+- Update timing: on successful `atm doctor` completion.
+- Missing/unreadable/invalid state file treated as empty (first-call semantics).
+
+**Exit codes**: `0` = no critical findings, `2` = critical findings, `1` = execution error.
+
+### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
 
 `atm` must support runtime-aware teammate spawn semantics that keep ATM identity
 stable across runtimes (Claude/Codex/Gemini/OpenCode) while allowing runtime-
@@ -638,7 +700,7 @@ Required baseline:
 - User-facing control remains agent-centric (`team`, `agent`) rather than runtime
   session-centric for normal usage.
 
-### 4.3.4 Runtime Session and Identity Mapping
+### 4.3.5 Runtime Session and Identity Mapping
 
 Daemon/session registry must store both ATM identity and runtime identity:
 - canonical ATM identity: `team`, `agent`
@@ -658,7 +720,7 @@ Invariants:
 - Resume-by-agent is the default UX. Runtime session IDs are resolved from ATM
   registry/state in normal flow.
 
-### 4.3.5 Teardown and Liveness Escalation Contract
+### 4.3.6 Teardown and Liveness Escalation Contract
 
 Teammate teardown must follow request-first semantics:
 1. Send polite shutdown request to the target agent.
@@ -672,7 +734,7 @@ Safety requirements:
 - Teardown escalation must never target agents outside the current team scope.
 - Every escalation stage must emit a structured event to unified logging (section 4.6).
 
-### 4.3.6 Steering Contract (Interactive and Headless)
+### 4.3.7 Steering Contract (Interactive and Headless)
 
 Steering must support both:
 - interactive tmux-pane workers (stdin prompt/control injection), and
@@ -682,7 +744,7 @@ For runtimes without in-turn prompt injection APIs, ATM must enforce and
 document `cancel-then-steer` semantics (no silent assumptions of live turn
 mutation).
 
-### 4.3.7 Gemini Baseline Adapter Requirements
+### 4.3.8 Gemini Baseline Adapter Requirements
 
 Gemini is the first non-Claude runtime baseline for this contract.
 
@@ -702,7 +764,7 @@ Required Gemini behavior:
 - `teammate_idle` above refers to the existing canonical lifecycle event already
   defined in section 4.5 (not a new event type).
 
-### 4.3.8 OpenCode Baseline Adapter Requirements (Discovery Draft)
+### 4.3.9 OpenCode Baseline Adapter Requirements (Discovery Draft)
 
 OpenCode is the next runtime baseline after Gemini for this contract.
 
