@@ -52,6 +52,7 @@ This document is the concise execution plan.
 3. Define sprint boundaries with explicit acceptance criteria and test gates.
 4. Confirm dependencies/sequence for selected work.
 5. Freeze a first execution slice only after the above are complete.
+6. Pass requirements/plan consistency review (ATM-QA doc review gate) before build starts.
 
 ### Phase T Candidate Backlog Source
 

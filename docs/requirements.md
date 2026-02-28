@@ -618,7 +618,7 @@ Hook/path compatibility requirements:
   missing files with `test -f` before execution.
 - Spawn semantics must not rely on fragile relative paths.
 
-Non-goal for R.0b:
+Non-goal:
 - Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
   baseline parity is the immediate requirement.
 
@@ -682,6 +682,28 @@ atm doctor --full
 - Missing/unreadable/invalid state file treated as empty (first-call semantics).
 
 **Exit codes**: `0` = no critical findings, `2` = critical findings, `1` = execution error.
+
+### 4.3.3a Operational Health Monitor (`atm-monitor`)
+
+ATM must support a continuous health monitor mode that detects and reports
+daemon/team regressions without manual polling.
+
+Required monitor behavior:
+- Poll daemon/team health on a configurable interval (default: `60s`).
+- Consume the same checks as `atm doctor` and report only new findings by default.
+- Emit alerts via ATM messaging with severity, finding code, and remediation hint.
+- Deduplicate repeated alerts for the same finding within a configurable cooldown.
+- Preserve enough context in alerts to correlate back to unified logs.
+
+Required monitor outputs:
+- Human-readable alert form for team operators.
+- Stable JSON payload for machine-readable consumers.
+
+Acceptance checks:
+- Injecting a controlled daemon/session fault must produce a monitor alert within
+  two poll intervals.
+- Repeating the same fault within cooldown must not spam duplicate alerts.
+- Clearing and re-introducing the fault must emit a new alert.
 
 ### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
 
@@ -764,6 +786,14 @@ Required Gemini behavior:
 - `teammate_idle` above refers to the existing canonical lifecycle event already
   defined in section 4.5 (not a new event type).
 
+Gemini-specific acceptance checks:
+- Fresh spawn persists `runtime=gemini` and a non-empty `runtime_session_id`
+  when the runtime provides one.
+- Resume spawn binds to the previously persisted `runtime_session_id` for the
+  same `(team, agent)` unless an explicit override is provided.
+- Registry/query surfaces must return consistent runtime metadata before and
+  after resume operations.
+
 ### 4.3.9 OpenCode Baseline Adapter Requirements (Discovery Draft)
 
 OpenCode is the next runtime baseline after Gemini for this contract.
@@ -786,6 +816,29 @@ Required OpenCode behavior:
   unified envelope and logging requirements (sections 4.5 and 4.6), including
   runtime adapter fields (`runtime=opencode`, `runtime_session_id`,
   teardown stage, spawn/resume mode).
+
+### 4.3.10 Availability Signaling Contract
+
+Agent availability signaling must be consistent across hook events and transport layers.
+
+Required contract:
+- Availability state source of truth is daemon-maintained agent state.
+- Idle/busy transitions may be produced by hooks/adapters, but must be normalized
+  through one daemon lifecycle/event pipeline.
+- Ephemeral pub/sub may distribute availability changes, but must not become the
+  canonical persistence source.
+- Availability events must include: `team`, `agent`, `state`, `source`, `ts`,
+  and an idempotency key for deduplication.
+
+Reliability requirements:
+- Duplicate/out-of-order availability events must not permanently corrupt state.
+- On daemon restart, availability state must recover from durable sources and/or
+  liveness checks, not transient pub/sub buffers.
+
+Acceptance checks:
+- Hook-derived idle event transitions agent to idle within one update window.
+- Replayed duplicate event does not produce duplicate state transition.
+- Lost pub/sub message does not prevent eventual correct state via daemon reconciliation.
 
 ### 4.4 Configuration
 
@@ -901,13 +954,13 @@ Rationale:
 
 ---
 
-### 4.6 Unified Event Logging (Phase C.1)
+### 4.6 Unified Event Logging
 
 `atm` must provide one structured event stream across `atm`, `atm-daemon`, `atm-tui`,
 and `atm-agent-mcp` so operators can reconstruct causality and filter by team/session.
 
-Phase C.1 established baseline instrumentation. Phase L hardens this into a single
-daemon-owned write path with producer fan-in and spool fallback.
+Unified event logging uses a single daemon-owned write path with producer fan-in
+and spool fallback.
 
 #### Goals
 
@@ -917,7 +970,7 @@ daemon-owned write path with producer fan-in and spool fallback.
 - Fail-open behavior (logging must never block or fail core workflows)
 - Safe multi-process operation (no cross-process file append races)
 
-#### Canonical Architecture (Phase L)
+#### Canonical Architecture
 
 - Producers (`atm`, `atm-tui`, `atm-agent-mcp`) emit `log-event` messages to daemon over
   the existing socket envelope.
@@ -995,9 +1048,9 @@ Spool filename convention:
   path resolved from `ATM_LOG_FILE`/`ATM_LOG_PATH` (or default `atm.log.jsonl`).
   Divergent startup/runtime sink paths are forbidden.
 
-#### Migration Bridge (Legacy `events.jsonl`) — REMOVED (Phase M.1b)
+#### Migration Bridge (Legacy `events.jsonl`) — REMOVED
 
-The `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var were removed in Phase M.1b.
+The `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var were removed.
 `emit_event_best_effort` now routes exclusively through the unified producer channel.
 No legacy `events.jsonl` sink code remains in any crate.
 
@@ -1014,7 +1067,7 @@ No legacy `events.jsonl` sink code remains in any crate.
 - `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy.
 - `ATM_LOG_FILE` may override file path for tests/ops; `ATM_LOG_PATH` remains alias.
 
-### 4.7 Daemon Auto-Start and Single-Instance Guarantees (Issue #181)
+### 4.7 Daemon Auto-Start and Single-Instance Guarantees
 
 Daemon-backed features must work without manual `atm-daemon` bootstrapping while
 guaranteeing at most one live daemon per machine/user scope.
@@ -1054,7 +1107,8 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 
 #### Daemon Session Registry Contract
 
-R.1 handoff logic depends on daemon truth for active lead session identity and liveness.
+`teams resume` handoff logic depends on daemon truth for active lead session
+identity and liveness.
 
 - **Storage path**: `${ATM_HOME:-$HOME}/.claude/daemon/session-registry.json`
 - **Ownership**: daemon is sole writer; CLI reads via daemon socket API only.
@@ -1063,7 +1117,7 @@ R.1 handoff logic depends on daemon truth for active lead session identity and l
   - `hook-event` `session_end`: mark record dead (`state=dead`, `updated_at`)
   - daemon liveness sweeps may mark stale PIDs dead when process no longer exists
 - **Lookup semantics**:
-  - Team-scoped lead check for R.1 must resolve by `(team, agent=team-lead)`
+  - Team-scoped lead check must resolve by `(team, agent=team-lead)`
   - CLI `teams resume` refusal logic must use this team-scoped daemon result, not bare-name process lookup
 
 Minimum record shape:
@@ -1104,6 +1158,34 @@ Minimum record shape:
 - Use `std::process::Command`/Tokio process APIs only; no shell-specific assumptions.
 - Path handling must use `Path`/`PathBuf`; avoid hardcoded separators.
 - Readiness timeout/backoff defaults must be shared across platforms.
+
+#### Roster Seeding and Config Watcher Requirements
+
+- On daemon startup, roster state must be seeded from each team `config.json`.
+- Daemon must watch `config.json` changes and reconcile member adds/removes/updates.
+- Roster reconciliation must preserve mailbox/roster coupling invariants from
+  section 4.3.1.
+- Drift conditions (roster without mailbox, mailbox without roster) must be
+  surfaced to diagnostics (`atm doctor`) as actionable findings.
+
+Acceptance checks:
+- Starting daemon with pre-populated team config yields matching in-memory roster.
+- Editing `config.json` to add/remove a member updates daemon roster within one
+  watch cycle.
+- Drift injection is detected and reported by diagnostics.
+
+#### Agent State Transition Requirements
+
+- Agent state must transition based on lifecycle events plus PID liveness checks.
+- Supported baseline states: `unknown`, `active`, `idle`, `offline`.
+- State transitions must record `reason` and `source` for troubleshooting.
+- Team/status outputs must reflect reconciled state within one poll window.
+
+Acceptance checks:
+- `session_start` drives `unknown/offline -> active`.
+- `teammate_idle` drives `active -> idle`.
+- PID death drives `active/idle -> offline` when lifecycle end is missing.
+- Conflicting signals resolve deterministically (latest valid event with liveness guard).
 
 ### 4.8 MCP Server Setup (`atm mcp`)
 
@@ -1321,6 +1403,27 @@ Install atm-agent-mcp with:
 - Validation that `atm-agent-mcp serve` actually starts successfully
 - `atm mcp test` — run a quick connectivity check against configured servers
 
+#### 4.8.6 CLI Crate Publishability Requirements
+
+`agent-team-mail` CLI crate must be publishable and installable via crates.io
+without relying on repository-external paths.
+
+Required constraints:
+- Crate code must not use compile-time file includes (`include_str!`,
+  `include_bytes!`, or equivalent) that reference files outside the crate
+  publish boundary.
+- Release workflows must fail hard on publish failures for required artifacts.
+  Failure masking through shell fallbacks is not allowed.
+- Publish validation must run before release completion and must include:
+  - package manifest validation,
+  - build from packaged sources,
+  - version installability check (`cargo install` path for released version).
+
+Acceptance checks:
+- `cargo package` and `cargo publish --dry-run` succeed for CLI crate in CI.
+- Simulated publish failure causes workflow failure (non-zero overall status).
+- Post-release install validation resolves the expected CLI version.
+
 ### 4.9 Team Hook Setup (`atm init`)
 
 The `atm init` command installs and validates Claude Code hook wiring for ATM
@@ -1457,7 +1560,7 @@ Plugins access shared system info (repo name, git provider, claude version) via 
 - Plugin state, caches, and report outputs must be scoped by repo/root context.
 - When `repo` is missing, plugins should fall back to `root` for storage and either disable or degrade gracefully if git context is required.
 
-**Proposed direction (from Phase 6 review)**:
+**Proposed direction**:
 - Single daemon per machine, started on first plugin activation.
 - Plugins maintain repo registries and agent subscriptions (per repo).
 - CI Monitor supports multiple agents per repo, potentially branch-scoped subscriptions.
@@ -1792,7 +1895,7 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 - [ ] Human chat interface plugin
 - [ ] Dynamic plugin loading (`.so` / `.dylib`)
 - [ ] Task management commands
-- [ ] `atm mcp` command group (MCP server setup — Phase Q, section 4.8)
+- [ ] `atm mcp` command group (MCP server setup — section 4.8)
 
 ---
 
