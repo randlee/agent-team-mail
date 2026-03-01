@@ -376,6 +376,9 @@ atm send <agent> --stdin             # message from stdin
 **Addressing**:
 - `<agent>` alone resolves to the default team
 - `<agent>@<team>` specifies an explicit team (cross-team messaging)
+- Namespace-qualified addresses for cross-computer/plugin routing must be
+  accepted and routed when configured by transport plugins. ATM core must treat
+  namespace suffixes as routable address components, not invalid identifiers.
 - Agent name must exist in team's `config.json` members array
 
 **Options**:
@@ -1203,6 +1206,11 @@ Required isolation rules:
   - `atm doctor` analyzes one team by default.
 - Cross-team/global operations must be explicit opt-in flags and must not be
   implicit side effects.
+- Cross-team messaging remains explicitly supported by address form
+  (`<agent>@<team>`) and must continue working under multi-team scale.
+- Namespace-qualified cross-computer addresses must remain supported where
+  bridge/transport plugins are enabled; isolation guarantees still apply to the
+  resolved team scope.
 - Repo-scoped plugin/state data must remain isolated by repo/root context.
 - No cross-team data bleed in outputs (`status`, `doctor`, `logs` filters) when
   command scope is a single team.
@@ -1211,6 +1219,8 @@ Scalability expectation:
 - Behavior for one team and many teams is semantically identical from the team
   perspective (same correctness/isolation guarantees), independent of total
   number of active teams.
+- Multi-team validation should use representative concurrency (multiple active
+  teams), not a fixed hardcoded team-count threshold.
 
 #### Required Acceptance Checks
 

@@ -52,7 +52,7 @@ Phase T candidate execution order.
   - Windows CI validates spawn/readiness/lock behavior
   - Unix signal/file-socket paths validated
 - Multi-team scale:
-  - with many active teams (target stress case: 30), verify only one daemon
+  - with multiple active teams (representative scale), verify only one daemon
     instance runs and startup/readiness behavior remains deterministic.
 
 ### Observability Checks
@@ -100,10 +100,14 @@ Phase T candidate execution order.
 - Cross-platform:
   - watcher + state behavior stable on Windows/macOS/Linux
 - Multi-team isolation:
-  - with many active teams (target stress case: 30), updates in one team do not
+  - with multiple active teams (representative scale), updates in one team do not
     mutate roster/state/diagnostics for unrelated teams.
   - `atm doctor` default run reports findings only for the requested/default team.
   - `atm broadcast` targets only the resolved team scope.
+  - explicit cross-team addressing (`<agent>@<team>`) continues to deliver to
+    the selected team and does not bleed into other teams.
+  - namespace-qualified cross-computer addresses (when transport is configured)
+    remain routable and preserve resolved team isolation semantics.
 
 ### Observability Checks
 
