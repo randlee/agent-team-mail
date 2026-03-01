@@ -1105,7 +1105,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.12 | Codex Idle Detection via Notify Hook | — | M | PLANNED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
 | T.13 | Ephemeral Pub/Sub for Agent Availability | — | M | PLANNED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
 | T.14 | Gemini adapter resume flag fix | — | XS | PLANNED | [#281](https://github.com/randlee/agent-team-mail/issues/281) |
-| T.15 | Gemini adapter end-to-end spawn wiring | T.14 | L | PLANNED | [#282](https://github.com/randlee/agent-team-mail/issues/282) |
+| T.15 | Gemini adapter end-to-end spawn wiring | T.14 | L | COMPLETE | [#282](https://github.com/randlee/agent-team-mail/issues/282) |
 | T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | PLANNED | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
 
 ---
