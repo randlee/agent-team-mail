@@ -150,12 +150,16 @@ Phase T candidate execution order.
 ### Requirements Coverage
 
 - `requirements.md` section 4.3.3a (operational health monitor)
+- `requirements.md` section 4.6 (logging diagnostics surfaces and shared health evaluator contract)
 
 ### Acceptance Criteria
 
 - Monitor polls on interval and emits alerts for new critical findings.
 - Alert deduplication works within cooldown window.
 - Alerts contain severity/code/remediation context.
+- Health polling reuses the shared logging-health evaluator module; no health
+  state computation logic is duplicated between `atm-monitor`, `atm doctor`,
+  and `atm status` handlers.
 
 ### Test Matrix
 
@@ -287,6 +291,13 @@ defined now so they are not left unspecified.
 
 - Acceptance: header shows current ATM version from build metadata.
 - Tests: render test verifies non-empty version token in header output.
+
+### U.4 — `atm status --json` Logging Health Exposure
+
+- Requirement: `requirements.md` section 4.6 logging diagnostics surface requirements.
+- Status: Deferred post-Phase T pending logging field implementation.
+- Acceptance (when scheduled): status JSON includes logging health payload from
+  shared evaluator contract.
 
 ---
 
