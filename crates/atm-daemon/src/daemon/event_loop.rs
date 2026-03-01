@@ -6,8 +6,8 @@ use crate::daemon::{
     SharedSessionRegistry, SharedStateStore, SharedStreamEventSender, graceful_shutdown,
     spool_drain_loop, start_socket_server, watch_inboxes,
 };
-use crate::plugins::worker_adapter::AgentState;
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
+use crate::plugins::worker_adapter::AgentState;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
 use agent_team_mail_core::schema::TeamConfig;
