@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 #[cfg(unix)]
-fn acquire_test_daemon_lock(home_dir: &std::path::Path) -> agent_team_mail_core::io::lock::FileLock {
+fn acquire_test_daemon_lock(
+    home_dir: &std::path::Path,
+) -> agent_team_mail_core::io::lock::FileLock {
     let lock_path = home_dir.join(".config/atm/daemon.lock");
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).unwrap()

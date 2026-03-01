@@ -1223,7 +1223,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (frames, new_pos) = tail_watch_stream_file(&watch_path, 0, "agent-a").await.unwrap();
+        let (frames, new_pos) = tail_watch_stream_file(&watch_path, 0, "agent-a")
+            .await
+            .unwrap();
         let replay_frames = frames
             .iter()
             .filter(|f| {
@@ -1233,8 +1235,7 @@ mod tests {
             })
             .count();
         assert_eq!(
-            replay_frames,
-            50,
+            replay_frames, 50,
             "attach replay must be bounded to last 50 frames"
         );
         assert!(
@@ -1264,10 +1265,15 @@ mod tests {
             "agent_id": "agent-a",
             "event": {"params": {"type": "item_delta", "delta": "old-old-old-old-old-old-old-old"}}
         });
-        tokio::fs::write(&watch_path, format!("{}\n", serde_json::to_string(&initial).unwrap()))
+        tokio::fs::write(
+            &watch_path,
+            format!("{}\n", serde_json::to_string(&initial).unwrap()),
+        )
+        .await
+        .unwrap();
+        let (_, pos_after_first) = tail_watch_stream_file(&watch_path, 0, "agent-a")
             .await
             .unwrap();
-        let (_, pos_after_first) = tail_watch_stream_file(&watch_path, 0, "agent-a").await.unwrap();
         assert!(pos_after_first > 0);
 
         let replacement = serde_json::json!({
@@ -1288,10 +1294,9 @@ mod tests {
             new_pos <= pos_after_first,
             "reconnect replay should not advance past prior position after truncation/rotation"
         );
-        let first_delta = frames.iter().find_map(|f| {
-            f.pointer("/event/params/delta")
-                .and_then(|v| v.as_str())
-        });
+        let first_delta = frames
+            .iter()
+            .find_map(|f| f.pointer("/event/params/delta").and_then(|v| v.as_str()));
         assert_eq!(first_delta, Some("new"));
     }
 

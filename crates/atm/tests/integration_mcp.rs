@@ -59,7 +59,9 @@ fn test_mcp_install_claude_global_and_idempotent_reinstall() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Installed atm MCP server for Claude Code"));
+        .stdout(predicate::str::contains(
+            "Installed atm MCP server for Claude Code",
+        ));
 
     let claude_global = temp.path().join(".claude.json");
     let content = fs::read_to_string(&claude_global).expect("claude config exists");
@@ -102,9 +104,9 @@ fn test_mcp_install_codex_local_scope_errors() {
         "--binary",
         fake.to_str().expect("fake path utf-8"),
     ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("only supports global"));
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("only supports global"));
 }
 
 #[test]
