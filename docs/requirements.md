@@ -861,14 +861,53 @@ Required OpenCode behavior:
 
 Agent availability signaling must be consistent across hook events and transport layers.
 
+#### T.5c Canonical Payload
+
+Sprint T.5c standardized the availability event payload. The canonical contract
+fields are:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `team` | string | Team name the agent belongs to |
+| `agent` | string | Agent identity (matches config.json member name) |
+| `state` | string | Availability state: `"idle"` or `"busy"` |
+| `timestamp` | ISO 8601 string | Event time (UTC). Replaces the legacy `ts` short-hand. |
+| `idempotency_key` | string | Stable deduplication key per logical event. Must survive replay. |
+
+**Field notes**:
+
+- `timestamp` (not `ts`): T.5c standardizes on the full `timestamp` field name.
+  Legacy relays that emit `ts` are accepted during a backward-compat window; the
+  daemon normalizes `ts → timestamp` internally. New producers must emit
+  `timestamp`.
+- `idempotency_key`: Stable per logical event so that replaying the same hook
+  event (e.g., after a crash or file-rotation reset) does not produce a duplicate
+  state transition. The key must NOT include wall-clock receipt time — it must be
+  derived from content-stable fields such as `team`, `agent`, and `turn-id` only.
+  Format: `"<team>:<agent>:<turn-id>"`.
+- `source` field: **intentionally absent** from the T.5c canonical contract.
+  Daemon state is the authoritative source of truth; the originating hook relay
+  or adapter is implicit context, not a required field. Emitting `source` is
+  permitted but the daemon does not consume or persist it.
+
 Required contract:
 - Availability state source of truth is daemon-maintained agent state.
 - Idle/busy transitions may be produced by hooks/adapters, but must be normalized
   through one daemon lifecycle/event pipeline.
 - Ephemeral pub/sub may distribute availability changes, but must not become the
   canonical persistence source.
-- Availability events must include: `team`, `agent`, `state`, `source`, `ts`,
-  and an idempotency key for deduplication.
+- Availability events must include: `team`, `agent`, `state`, `timestamp`,
+  and `idempotency_key` (stable per logical event replay).
+- Hook relays and adapter emitters may provide these fields directly; daemon
+  normalization may derive backward-compatible defaults for legacy payloads, but
+  durable behavior and tests must target the canonical contract fields above.
+
+Role boundaries:
+- Hook/adapters are signal producers only (emit lifecycle/availability events).
+- Daemon lifecycle pipeline validates, normalizes, deduplicates, and mutates
+  authoritative availability state.
+- Pub/sub is fanout-only notification transport and must not be used as
+  persistent state.
 
 Reliability requirements:
 - Duplicate/out-of-order availability events must not permanently corrupt state.
