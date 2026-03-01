@@ -1,7 +1,7 @@
 //! Status command implementation
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
-use agent_team_mail_core::daemon_client::{ensure_daemon_running, query_list_agents};
+use agent_team_mail_core::daemon_client::query_list_agents;
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use anyhow::Result;
 use clap::Args;
@@ -25,7 +25,6 @@ pub struct StatusArgs {
 
 /// Execute the status command
 pub fn execute(args: StatusArgs) -> Result<()> {
-    let _ = ensure_daemon_running();
     // Prime daemon connectivity so daemon-backed liveness fields are available.
     let _ = query_list_agents()?;
 
