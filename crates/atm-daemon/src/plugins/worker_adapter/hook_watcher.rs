@@ -609,7 +609,7 @@ mod tests {
         state
             .lock()
             .unwrap()
-            .set_state("arch-ctm", AgentState::Launching);
+            .set_state("arch-ctm", AgentState::Unknown);
 
         let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev"}"#;
         process_hook_line(json, &state, None, None);
@@ -627,7 +627,7 @@ mod tests {
         state
             .lock()
             .unwrap()
-            .set_state("arch-ctm", AgentState::Busy);
+            .set_state("arch-ctm", AgentState::Active);
 
         let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev"}"#;
         process_hook_line(json, &state, None, None);

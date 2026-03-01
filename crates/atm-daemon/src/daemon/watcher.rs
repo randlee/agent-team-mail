@@ -120,7 +120,7 @@ pub async fn watch_inboxes(
 
 /// Parse a notify Event into zero or more InboxEvents.
 ///
-/// Returns None if the event is not relevant (non-inbox file, config.json, etc).
+/// Returns None if the event is not relevant (non-inbox/config file).
 /// Returns Some(vec) with InboxEvent(s) if the event is for an inbox file.
 ///
 /// Path pattern: <teams_root>/<team>/inboxes/<agent>.json or <agent>.<hostname>.json
@@ -160,16 +160,31 @@ fn parse_event(
 
         let components: Vec<_> = rel_path.components().collect();
 
-        // Need at least: <team>/inboxes/<agent>.json (3 components)
-        if components.len() < 3 {
+        // Extract team name (first component).
+        if components.is_empty() {
             continue;
         }
-
-        // Extract team name (first component)
         let team = match components[0].as_os_str().to_str() {
             Some(s) => s.to_string(),
             None => continue,
         };
+
+        // Team config events: <team>/config.json
+        if components.len() == 2 && components[1].as_os_str().to_str() == Some("config.json") {
+            events.push(InboxEvent {
+                team,
+                agent: "__config__".to_string(),
+                path: path.clone(),
+                kind: inbox_kind,
+                origin: None,
+            });
+            continue;
+        }
+
+        // Need at least: <team>/inboxes/<agent>.json (3 components)
+        if components.len() < 3 {
+            continue;
+        }
 
         // Check if second component is "inboxes"
         if components[1].as_os_str().to_str() != Some("inboxes") {
@@ -317,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_event_non_inbox_file() {
+    fn test_parse_event_team_config_file() {
         let teams_root = std::env::temp_dir().join("teams");
         let config_path = teams_root.join("my-team/config.json");
 
@@ -327,9 +342,14 @@ mod tests {
             attrs: Default::default(),
         };
 
-        // Should be ignored (not in inbox/ subdirectory)
         let result = parse_event(&teams_root, event, None);
-        assert!(result.is_none());
+        assert!(result.is_some());
+        let events = result.unwrap();
+        assert_eq!(events.len(), 1);
+        let config_event = &events[0];
+        assert_eq!(config_event.team, "my-team");
+        assert_eq!(config_event.agent, "__config__");
+        assert_eq!(config_event.kind, InboxEventKind::MessageReceived);
     }
 
     #[test]

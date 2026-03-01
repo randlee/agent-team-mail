@@ -285,7 +285,7 @@ mod tests {
         ps.subscribe("team-lead", "arch-ctm", vec!["idle".to_string()])
             .unwrap();
 
-        let matches = ps.matching_subscribers("arch-ctm", "busy");
+        let matches = ps.matching_subscribers("arch-ctm", "active");
         assert!(matches.is_empty());
     }
 
@@ -305,7 +305,7 @@ mod tests {
         // Empty events list = wildcard
         ps.subscribe("team-lead", "arch-ctm", vec![]).unwrap();
 
-        for state in &["idle", "busy", "killed", "launching"] {
+        for state in &["idle", "active", "offline", "unknown"] {
             let matches = ps.matching_subscribers("arch-ctm", state);
             assert_eq!(matches, vec!["team-lead"], "should match state={state}");
         }
@@ -318,14 +318,14 @@ mod tests {
             .unwrap();
         ps.subscribe("sub-b", "arch-ctm", vec!["idle".to_string()])
             .unwrap();
-        ps.subscribe("sub-c", "arch-ctm", vec!["busy".to_string()])
+        ps.subscribe("sub-c", "arch-ctm", vec!["active".to_string()])
             .unwrap();
 
         let mut idle_matches = ps.matching_subscribers("arch-ctm", "idle");
         idle_matches.sort();
         assert_eq!(idle_matches, vec!["sub-a", "sub-b"]);
 
-        let busy_matches = ps.matching_subscribers("arch-ctm", "busy");
+        let busy_matches = ps.matching_subscribers("arch-ctm", "active");
         assert_eq!(busy_matches, vec!["sub-c"]);
     }
 
@@ -337,13 +337,13 @@ mod tests {
         ps.subscribe("team-lead", "arch-ctm", vec!["idle".to_string()])
             .unwrap();
         // Re-subscribe with different events — should update, not add duplicate
-        ps.subscribe("team-lead", "arch-ctm", vec!["killed".to_string()])
+        ps.subscribe("team-lead", "arch-ctm", vec!["offline".to_string()])
             .unwrap();
 
         assert_eq!(ps.len(), 1, "upsert must not create duplicate");
 
-        // Now the subscription should respond to "killed" not "idle"
-        let matches = ps.matching_subscribers("arch-ctm", "killed");
+        // Now the subscription should respond to "offline" not "idle"
+        let matches = ps.matching_subscribers("arch-ctm", "offline");
         assert_eq!(matches, vec!["team-lead"]);
 
         let old_matches = ps.matching_subscribers("arch-ctm", "idle");
@@ -357,7 +357,7 @@ mod tests {
         ps.subscribe("team-lead", "arch-ctm", vec!["idle".to_string()])
             .unwrap();
         // This is an upsert, not a new entry — must not fail
-        ps.subscribe("team-lead", "arch-ctm", vec!["busy".to_string()])
+        ps.subscribe("team-lead", "arch-ctm", vec!["active".to_string()])
             .unwrap();
         assert_eq!(ps.len(), 1);
     }
@@ -513,13 +513,13 @@ mod tests {
         ps.subscribe(
             "team-lead",
             "arch-ctm",
-            vec!["idle".to_string(), "killed".to_string()],
+            vec!["idle".to_string(), "offline".to_string()],
         )
         .unwrap();
 
         assert!(!ps.matching_subscribers("arch-ctm", "idle").is_empty());
-        assert!(!ps.matching_subscribers("arch-ctm", "killed").is_empty());
-        assert!(ps.matching_subscribers("arch-ctm", "busy").is_empty());
-        assert!(ps.matching_subscribers("arch-ctm", "launching").is_empty());
+        assert!(!ps.matching_subscribers("arch-ctm", "offline").is_empty());
+        assert!(ps.matching_subscribers("arch-ctm", "active").is_empty());
+        assert!(ps.matching_subscribers("arch-ctm", "unknown").is_empty());
     }
 }

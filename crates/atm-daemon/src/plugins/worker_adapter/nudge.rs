@@ -351,7 +351,7 @@ mod tests {
     fn test_nudge_skipped_when_busy() {
         let engine = make_engine();
         let entries = vec![unread_entry("msg-1")];
-        let decision = engine.should_nudge("arch-ctm", AgentState::Busy, &entries);
+        let decision = engine.should_nudge("arch-ctm", AgentState::Active, &entries);
         assert_eq!(decision, NudgeDecision::SkippedNotIdle);
     }
 
@@ -359,7 +359,7 @@ mod tests {
     fn test_nudge_skipped_when_launching() {
         let engine = make_engine();
         let entries = vec![unread_entry("msg-1")];
-        let decision = engine.should_nudge("arch-ctm", AgentState::Launching, &entries);
+        let decision = engine.should_nudge("arch-ctm", AgentState::Unknown, &entries);
         assert_eq!(decision, NudgeDecision::SkippedNotIdle);
     }
 
@@ -367,7 +367,7 @@ mod tests {
     fn test_nudge_skipped_when_killed() {
         let engine = make_engine();
         let entries = vec![unread_entry("msg-1")];
-        let decision = engine.should_nudge("arch-ctm", AgentState::Killed, &entries);
+        let decision = engine.should_nudge("arch-ctm", AgentState::Offline, &entries);
         assert_eq!(decision, NudgeDecision::SkippedNotIdle);
     }
 
