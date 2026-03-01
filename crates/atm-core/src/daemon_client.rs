@@ -1123,6 +1123,21 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    fn with_autostart_disabled<T>(f: impl FnOnce() -> T) -> T {
+        let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        // SAFETY: test-only env mutation guarded by #[serial] on callers.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "0") };
+        let out = f();
+        // SAFETY: test-only env mutation guarded by #[serial] on callers.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+        out
+    }
+
     #[test]
     fn test_socket_request_serialization() {
         let req = SocketRequest {
@@ -1181,22 +1196,25 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_query_daemon_no_socket_returns_none() {
-        // Without a running daemon the query should gracefully return None.
-        // We ensure no real socket path is present by using a non-existent dir.
-        // This test is platform-independent: on non-unix it always returns None.
-        let req = SocketRequest {
-            version: PROTOCOL_VERSION,
-            request_id: "req-test".to_string(),
-            command: "agent-state".to_string(),
-            payload: serde_json::json!({}),
-        };
-        // Override socket path resolution is not straightforward without DI;
-        // the test relies on the daemon not being present in the test environment.
-        // On CI this will always be None. Locally too unless daemon is running.
-        let result = query_daemon(&req);
-        assert!(result.is_ok());
-        // If daemon happens to be running, we just check the call didn't panic.
+        with_autostart_disabled(|| {
+            // Without a running daemon the query should gracefully return None.
+            // We ensure no real socket path is present by using a non-existent dir.
+            // This test is platform-independent: on non-unix it always returns None.
+            let req = SocketRequest {
+                version: PROTOCOL_VERSION,
+                request_id: "req-test".to_string(),
+                command: "agent-state".to_string(),
+                payload: serde_json::json!({}),
+            };
+            // Override socket path resolution is not straightforward without DI;
+            // the test relies on the daemon not being present in the test environment.
+            // On CI this will always be None. Locally too unless daemon is running.
+            let result = query_daemon(&req);
+            assert!(result.is_ok());
+            // If daemon happens to be running, we just check the call didn't panic.
+        });
     }
 
     #[cfg(unix)]
@@ -1488,11 +1506,14 @@ sleep 2
     }
 
     #[test]
+    #[serial]
     fn test_query_agent_state_no_daemon_returns_none() {
-        // Graceful fallback: no daemon → Ok(None)
-        let result = query_agent_state("arch-ctm", "atm-dev");
-        assert!(result.is_ok());
-        // Result is None unless daemon happens to be running
+        with_autostart_disabled(|| {
+            // Graceful fallback: no daemon → Ok(None)
+            let result = query_agent_state("arch-ctm", "atm-dev");
+            assert!(result.is_ok());
+            // Result is None unless daemon happens to be running
+        });
     }
 
     #[test]
@@ -1504,11 +1525,14 @@ sleep 2
     }
 
     #[test]
+    #[serial]
     fn test_query_agent_pane_no_daemon_returns_none() {
-        // Graceful fallback: no daemon → Ok(None)
-        let result = query_agent_pane("arch-ctm");
-        assert!(result.is_ok());
-        // Result is None unless daemon happens to be running
+        with_autostart_disabled(|| {
+            // Graceful fallback: no daemon → Ok(None)
+            let result = query_agent_pane("arch-ctm");
+            assert!(result.is_ok());
+            // Result is None unless daemon happens to be running
+        });
     }
 
     #[test]
@@ -1632,38 +1656,44 @@ sleep 2
     }
 
     #[test]
+    #[serial]
     fn test_query_session_no_daemon_returns_none() {
-        // Graceful fallback: no daemon → Ok(None)
-        let result = query_session("team-lead");
-        assert!(result.is_ok());
-        // None unless daemon happens to be running
+        with_autostart_disabled(|| {
+            // Graceful fallback: no daemon → Ok(None)
+            let result = query_session("team-lead");
+            assert!(result.is_ok());
+            // None unless daemon happens to be running
+        });
     }
 
     #[test]
+    #[serial]
     fn test_launch_agent_no_daemon_returns_none() {
-        if daemon_is_running() {
-            // Shared dev machines may have daemon active; this test validates
-            // no-daemon behavior only.
-            return;
-        }
-        let config = LaunchConfig {
-            agent: "test-agent".to_string(),
-            team: "test-team".to_string(),
-            command: "codex --yolo".to_string(),
-            prompt: None,
-            timeout_secs: 5,
-            env_vars: std::collections::HashMap::new(),
-            runtime: Some("codex".to_string()),
-            resume_session_id: None,
-        };
-        // Without a running daemon the call should gracefully return Ok(None).
-        // On non-Unix platforms it always returns None.
-        // On Unix with no daemon socket present it also returns None.
-        let result = launch_agent(&config);
-        // The result should be Ok (no I/O error on missing socket)
-        assert!(result.is_ok());
-        // Result is None unless daemon happens to be running and handling "launch"
-        // (which it won't be in a unit test environment)
+        with_autostart_disabled(|| {
+            if daemon_is_running() {
+                // Shared dev machines may have daemon active; this test validates
+                // no-daemon behavior only.
+                return;
+            }
+            let config = LaunchConfig {
+                agent: "test-agent".to_string(),
+                team: "test-team".to_string(),
+                command: "codex --yolo".to_string(),
+                prompt: None,
+                timeout_secs: 5,
+                env_vars: std::collections::HashMap::new(),
+                runtime: Some("codex".to_string()),
+                resume_session_id: None,
+            };
+            // Without a running daemon the call should gracefully return Ok(None).
+            // On non-Unix platforms it always returns None.
+            // On Unix with no daemon socket present it also returns None.
+            let result = launch_agent(&config);
+            // The result should be Ok (no I/O error on missing socket)
+            assert!(result.is_ok());
+            // Result is None unless daemon happens to be running and handling "launch"
+            // (which it won't be in a unit test environment)
+        });
     }
 
     #[test]
