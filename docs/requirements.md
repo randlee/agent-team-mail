@@ -376,6 +376,9 @@ atm send <agent> --stdin             # message from stdin
 **Addressing**:
 - `<agent>` alone resolves to the default team
 - `<agent>@<team>` specifies an explicit team (cross-team messaging)
+- Namespace-qualified addresses for cross-computer/plugin routing must be
+  accepted and routed when configured by transport plugins. ATM core must treat
+  namespace suffixes as routable address components, not invalid identifiers.
 - Agent name must exist in team's `config.json` members array
 
 **Options**:
@@ -618,7 +621,7 @@ Hook/path compatibility requirements:
   missing files with `test -f` before execution.
 - Spawn semantics must not rely on fragile relative paths.
 
-Non-goal for R.0b:
+Non-goal:
 - Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
   baseline parity is the immediate requirement.
 
@@ -675,6 +678,35 @@ atm doctor --full
 - `recommendations[]`: `command`, `reason`
 - `log_window`: `mode`, `start`, `end`
 
+#### `DoctorReport` Schema Contract and Compatibility
+
+`atm doctor --json` must return a stable top-level object (`DoctorReport`) with:
+- `summary`
+- `findings`
+- `recommendations`
+- `log_window`
+
+Current required `DoctorReport` shape:
+- `summary`: `team`, `generated_at`, `has_critical`, `counts`
+- `findings[]`: `severity`, `check`, `code`, `message`
+- `recommendations[]`: `command`, `reason`
+- `log_window`: `mode`, `start`, `end`
+
+Logging-health expansion contract:
+- Target shape adds `logging` object with at least:
+  - `health_state` (`healthy|degraded_spooling|degraded_dropping|unavailable`)
+  - `log_path`
+  - `spool_path`
+  - `dropped_count`
+  - `spool_file_count`
+  - `oldest_spool_age_secs`
+  - `last_error` (nullable)
+- Until this object is implemented, diagnostics may infer logging state from
+  findings/recommendations. This is temporary and must be replaced by explicit
+  `logging` fields once available.
+- Field additions must be backward-compatible (additive-only); existing fields
+  above are required and must not be removed or repurposed.
+
 **Last-doctor-call persistence**:
 - Path: `~/.config/atm/doctor-state.json`.
 - Format: `{"last_call_by_team": {"<team>": "<rfc3339-timestamp>"}}`
@@ -682,6 +714,36 @@ atm doctor --full
 - Missing/unreadable/invalid state file treated as empty (first-call semantics).
 
 **Exit codes**: `0` = no critical findings, `2` = critical findings, `1` = execution error.
+
+### 4.3.3a Operational Health Monitor (`atm-monitor`)
+
+ATM must support a continuous health monitor mode that detects and reports
+daemon/team regressions without manual polling.
+
+Required monitor behavior:
+- `atm-monitor` must operate as an ATM teammate agent (background-capable), not
+  only as an internal function call path.
+- As a teammate agent, it must be able to send ATM mail notifications to other
+  agents (for example `team-lead`) when actionable findings are detected.
+- Poll daemon/team health on a configurable interval (default: `60s`).
+- Consume the same checks as `atm doctor` and report only new findings by default.
+- Emit alerts via ATM messaging with severity, finding code, and remediation hint.
+- Deduplicate repeated alerts for the same finding within a configurable cooldown.
+- Preserve enough context in alerts to correlate back to unified logs.
+- It may reuse shared evaluator/software components, but agent behavior remains
+  the primary operational interface.
+
+Required monitor outputs:
+- Human-readable alert form for team operators.
+- Stable JSON payload for machine-readable consumers.
+
+Acceptance checks:
+- Injecting a controlled daemon/session fault must produce a monitor alert within
+  two poll intervals.
+- Repeating the same fault within cooldown must not spam duplicate alerts.
+- Clearing and re-introducing the fault must emit a new alert.
+- Monitor can be launched as a background teammate and continues polling/sending
+  alerts without interactive prompting.
 
 ### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
 
@@ -764,6 +826,14 @@ Required Gemini behavior:
 - `teammate_idle` above refers to the existing canonical lifecycle event already
   defined in section 4.5 (not a new event type).
 
+Gemini-specific acceptance checks:
+- Fresh spawn persists `runtime=gemini` and a non-empty `runtime_session_id`
+  when the runtime provides one.
+- Resume spawn binds to the previously persisted `runtime_session_id` for the
+  same `(team, agent)` unless an explicit override is provided.
+- Registry/query surfaces must return consistent runtime metadata before and
+  after resume operations.
+
 ### 4.3.9 OpenCode Baseline Adapter Requirements (Discovery Draft)
 
 OpenCode is the next runtime baseline after Gemini for this contract.
@@ -786,6 +856,29 @@ Required OpenCode behavior:
   unified envelope and logging requirements (sections 4.5 and 4.6), including
   runtime adapter fields (`runtime=opencode`, `runtime_session_id`,
   teardown stage, spawn/resume mode).
+
+### 4.3.10 Availability Signaling Contract
+
+Agent availability signaling must be consistent across hook events and transport layers.
+
+Required contract:
+- Availability state source of truth is daemon-maintained agent state.
+- Idle/busy transitions may be produced by hooks/adapters, but must be normalized
+  through one daemon lifecycle/event pipeline.
+- Ephemeral pub/sub may distribute availability changes, but must not become the
+  canonical persistence source.
+- Availability events must include: `team`, `agent`, `state`, `source`, `ts`,
+  and an idempotency key for deduplication.
+
+Reliability requirements:
+- Duplicate/out-of-order availability events must not permanently corrupt state.
+- On daemon restart, availability state must recover from durable sources and/or
+  liveness checks, not transient pub/sub buffers.
+
+Acceptance checks:
+- Hook-derived idle event transitions agent to idle within one update window.
+- Replayed duplicate event does not produce duplicate state transition.
+- Lost pub/sub message does not prevent eventual correct state via daemon reconciliation.
 
 ### 4.4 Configuration
 
@@ -901,13 +994,13 @@ Rationale:
 
 ---
 
-### 4.6 Unified Event Logging (Phase C.1)
+### 4.6 Unified Event Logging
 
 `atm` must provide one structured event stream across `atm`, `atm-daemon`, `atm-tui`,
 and `atm-agent-mcp` so operators can reconstruct causality and filter by team/session.
 
-Phase C.1 established baseline instrumentation. Phase L hardens this into a single
-daemon-owned write path with producer fan-in and spool fallback.
+Unified event logging uses a single daemon-owned write path with producer fan-in
+and spool fallback.
 
 #### Goals
 
@@ -917,7 +1010,7 @@ daemon-owned write path with producer fan-in and spool fallback.
 - Fail-open behavior (logging must never block or fail core workflows)
 - Safe multi-process operation (no cross-process file append races)
 
-#### Canonical Architecture (Phase L)
+#### Canonical Architecture
 
 - Producers (`atm`, `atm-tui`, `atm-agent-mcp`) emit `log-event` messages to daemon over
   the existing socket envelope.
@@ -995,9 +1088,63 @@ Spool filename convention:
   path resolved from `ATM_LOG_FILE`/`ATM_LOG_PATH` (or default `atm.log.jsonl`).
   Divergent startup/runtime sink paths are forbidden.
 
-#### Migration Bridge (Legacy `events.jsonl`) — REMOVED (Phase M.1b)
+#### Default-On and Health State Requirements
 
-The `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var were removed in Phase M.1b.
+- Unified structured logging is enabled by default for all ATM binaries.
+- Logging health must be explicit and queryable with these states:
+  - `healthy` — events reaching canonical log sink
+  - `degraded_spooling` — daemon/sink unavailable, events spooled
+  - `degraded_dropping` — queue overflow or unrecoverable emit failures
+  - `unavailable` — no active sink and no successful spool fallback
+- Silent degradation is not allowed. State transitions into degraded/unavailable
+  must emit structured warning/error events.
+
+#### Logging Diagnostics Surface Requirements
+
+- `atm doctor --json` must include logging health summary with:
+  - current health state
+  - canonical log path
+  - spool directory path
+  - dropped-event counter
+  - spool-file count and oldest spool age
+  - last logging error (if any)
+- Human-readable `atm doctor` output must report degraded/unavailable logging as
+  actionable findings with remediation commands.
+- `atm status --json` must expose logging health state for operator visibility.
+- A runbook mapping each health state to remediation commands must be maintained
+  in `docs/logging-troubleshooting.md`.
+
+#### Shared Logging Health Evaluator Requirements
+
+- Logging health evaluation must be implemented once in a shared module used by
+  both `atm doctor` and `atm status` outputs.
+- Health state computation must not be duplicated across command handlers.
+- The shared evaluator must consume canonical inputs:
+  - daemon reachability
+  - canonical log/spool path resolution
+  - spool inventory/age
+  - dropped-event counters and last logging error metadata where available
+
+#### JSON Schema and Compatibility Requirements
+
+- Logging health JSON object shape must be stable and versioned.
+- `atm doctor --json` and `atm status --json` must use the same logging-health
+  schema fields for overlapping data.
+- Additive fields are allowed; field removal or semantic redefinition requires
+  an explicit compatibility note in release docs.
+- For one minor release after schema expansion, newly added fields should be
+  documented as optional for external consumers.
+
+#### Path Resolution Consistency Requirements
+
+- CLI producers and daemon writer must resolve the same canonical home/log/spool
+  paths under identical environment configuration.
+- Diagnostics must print resolved paths used by the current process to support
+  troubleshooting of path/env mismatches.
+
+#### Migration Bridge (Legacy `events.jsonl`) — REMOVED
+
+The `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var were removed.
 `emit_event_best_effort` now routes exclusively through the unified producer channel.
 No legacy `events.jsonl` sink code remains in any crate.
 
@@ -1014,7 +1161,7 @@ No legacy `events.jsonl` sink code remains in any crate.
 - `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy.
 - `ATM_LOG_FILE` may override file path for tests/ops; `ATM_LOG_PATH` remains alias.
 
-### 4.7 Daemon Auto-Start and Single-Instance Guarantees (Issue #181)
+### 4.7 Daemon Auto-Start and Single-Instance Guarantees
 
 Daemon-backed features must work without manual `atm-daemon` bootstrapping while
 guaranteeing at most one live daemon per machine/user scope.
@@ -1043,6 +1190,38 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 - Daemon MUST NOT remove an existing socket file unless lock ownership has already
   been acquired by the current process.
 
+#### Team/Repo Isolation Contract
+
+Single daemon process does not imply shared team behavior. Runtime behavior must
+remain isolated per team/repo scope.
+
+Required isolation rules:
+- Team state is namespace-isolated by team identifier for:
+  - roster/session queries
+  - lifecycle state transitions
+  - inbox/mailbox integrity checks
+  - diagnostics findings and recommendations
+- Command scope defaults are single-team:
+  - `atm broadcast` targets one team only (resolved team scope), never all teams.
+  - `atm doctor` analyzes one team by default.
+- Cross-team/global operations must be explicit opt-in flags and must not be
+  implicit side effects.
+- Cross-team messaging remains explicitly supported by address form
+  (`<agent>@<team>`) and must continue working under multi-team scale.
+- Namespace-qualified cross-computer addresses must remain supported where
+  bridge/transport plugins are enabled; isolation guarantees still apply to the
+  resolved team scope.
+- Repo-scoped plugin/state data must remain isolated by repo/root context.
+- No cross-team data bleed in outputs (`status`, `doctor`, `logs` filters) when
+  command scope is a single team.
+
+Scalability expectation:
+- Behavior for one team and many teams is semantically identical from the team
+  perspective (same correctness/isolation guarantees), independent of total
+  number of active teams.
+- Multi-team validation should use representative concurrency (multiple active
+  teams), not a fixed hardcoded team-count threshold.
+
 #### Required Acceptance Checks
 
 - Starting a second daemon while one is healthy must fail immediately with an
@@ -1054,7 +1233,8 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 
 #### Daemon Session Registry Contract
 
-R.1 handoff logic depends on daemon truth for active lead session identity and liveness.
+`teams resume` handoff logic depends on daemon truth for active lead session
+identity and liveness.
 
 - **Storage path**: `${ATM_HOME:-$HOME}/.claude/daemon/session-registry.json`
 - **Ownership**: daemon is sole writer; CLI reads via daemon socket API only.
@@ -1063,7 +1243,7 @@ R.1 handoff logic depends on daemon truth for active lead session identity and l
   - `hook-event` `session_end`: mark record dead (`state=dead`, `updated_at`)
   - daemon liveness sweeps may mark stale PIDs dead when process no longer exists
 - **Lookup semantics**:
-  - Team-scoped lead check for R.1 must resolve by `(team, agent=team-lead)`
+  - Team-scoped lead check must resolve by `(team, agent=team-lead)`
   - CLI `teams resume` refusal logic must use this team-scoped daemon result, not bare-name process lookup
 
 Minimum record shape:
@@ -1104,6 +1284,34 @@ Minimum record shape:
 - Use `std::process::Command`/Tokio process APIs only; no shell-specific assumptions.
 - Path handling must use `Path`/`PathBuf`; avoid hardcoded separators.
 - Readiness timeout/backoff defaults must be shared across platforms.
+
+#### Roster Seeding and Config Watcher Requirements
+
+- On daemon startup, roster state must be seeded from each team `config.json`.
+- Daemon must watch `config.json` changes and reconcile member adds/removes/updates.
+- Roster reconciliation must preserve mailbox/roster coupling invariants from
+  section 4.3.1.
+- Drift conditions (roster without mailbox, mailbox without roster) must be
+  surfaced to diagnostics (`atm doctor`) as actionable findings.
+
+Acceptance checks:
+- Starting daemon with pre-populated team config yields matching in-memory roster.
+- Editing `config.json` to add/remove a member updates daemon roster within one
+  watch cycle.
+- Drift injection is detected and reported by diagnostics.
+
+#### Agent State Transition Requirements
+
+- Agent state must transition based on lifecycle events plus PID liveness checks.
+- Supported baseline states: `unknown`, `active`, `idle`, `offline`.
+- State transitions must record `reason` and `source` for troubleshooting.
+- Team/status outputs must reflect reconciled state within one poll window.
+
+Acceptance checks:
+- `session_start` drives `unknown/offline -> active`.
+- `teammate_idle` drives `active -> idle`.
+- PID death drives `active/idle -> offline` when lifecycle end is missing.
+- Conflicting signals resolve deterministically (latest valid event with liveness guard).
 
 ### 4.8 MCP Server Setup (`atm mcp`)
 
@@ -1321,6 +1529,27 @@ Install atm-agent-mcp with:
 - Validation that `atm-agent-mcp serve` actually starts successfully
 - `atm mcp test` — run a quick connectivity check against configured servers
 
+#### 4.8.6 CLI Crate Publishability Requirements
+
+`agent-team-mail` CLI crate must be publishable and installable via crates.io
+without relying on repository-external paths.
+
+Required constraints:
+- Crate code must not use compile-time file includes (`include_str!`,
+  `include_bytes!`, or equivalent) that reference files outside the crate
+  publish boundary.
+- Release workflows must fail hard on publish failures for required artifacts.
+  Failure masking through shell fallbacks is not allowed.
+- Publish validation must run before release completion and must include:
+  - package manifest validation,
+  - build from packaged sources,
+  - version installability check (`cargo install` path for released version).
+
+Acceptance checks:
+- `cargo package` and `cargo publish --dry-run` succeed for CLI crate in CI.
+- Simulated publish failure causes workflow failure (non-zero overall status).
+- Post-release install validation resolves the expected CLI version.
+
 ### 4.9 Team Hook Setup (`atm init`)
 
 The `atm init` command installs and validates Claude Code hook wiring for ATM
@@ -1457,7 +1686,7 @@ Plugins access shared system info (repo name, git provider, claude version) via 
 - Plugin state, caches, and report outputs must be scoped by repo/root context.
 - When `repo` is missing, plugins should fall back to `root` for storage and either disable or degrade gracefully if git context is required.
 
-**Proposed direction (from Phase 6 review)**:
+**Proposed direction**:
 - Single daemon per machine, started on first plugin activation.
 - Plugins maintain repo registries and agent subscriptions (per repo).
 - CI Monitor supports multiple agents per repo, potentially branch-scoped subscriptions.
@@ -1792,7 +2021,7 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 - [ ] Human chat interface plugin
 - [ ] Dynamic plugin loading (`.so` / `.dylib`)
 - [ ] Task management commands
-- [ ] `atm mcp` command group (MCP server setup — Phase Q, section 4.8)
+- [ ] `atm mcp` command group (MCP server setup — section 4.8)
 
 ---
 
