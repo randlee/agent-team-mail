@@ -140,7 +140,13 @@ fn execute_agent_cleanup(
         anyhow::bail!("team-lead is protected and cannot be removed by cleanup");
     }
 
-    if daemon_is_running() {
+    let daemon_available = if daemon_is_running() {
+        true
+    } else {
+        ensure_daemon_running().is_ok() && daemon_is_running()
+    };
+
+    if daemon_available {
         let session = query_session_for_team(team_name, agent_name);
         match session {
             Ok(Some(info)) if info.alive => {
@@ -235,6 +241,18 @@ fn query_session_for_team(
         };
     }
     agent_team_mail_core::daemon_client::query_session_for_team(team_name, agent_name)
+}
+
+fn ensure_daemon_running() -> Result<()> {
+    #[cfg(test)]
+    if let Some(state) = test_daemon_state::snapshot() {
+        return if state.running {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("daemon is not running"))
+        };
+    }
+    agent_team_mail_core::daemon_client::ensure_daemon_running()
 }
 
 fn send_shutdown_request(home_dir: &Path, team_name: &str, agent_name: &str) -> Result<()> {

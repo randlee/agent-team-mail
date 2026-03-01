@@ -300,6 +300,42 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
 }
 
 #[test]
+#[cfg(unix)]
+#[serial]
+fn test_status_reports_actionable_error_when_autostart_binary_missing() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let team = "team-missing-bin";
+    write_team_config(home, team);
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    let output = cmd
+        .env("ATM_HOME", home)
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", "/definitely-missing-atm-daemon-binary")
+        .arg("status")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "status should fail when auto-start binary is missing"
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("failed to auto-start daemon")
+            || combined.contains("not found in PATH"),
+        "expected actionable auto-start failure message, got: {combined}"
+    );
+}
+
+#[test]
 #[cfg(windows)]
 fn windows_compile_check() {
     // Compile-check placeholder for Windows targets: unix-only tests/helpers are

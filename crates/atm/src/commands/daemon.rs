@@ -61,6 +61,10 @@ pub fn execute(args: DaemonArgs) -> Result<()> {
 
 fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> Result<()> {
     if !agent_team_mail_core::daemon_client::daemon_is_running() {
+        agent_team_mail_core::daemon_client::ensure_daemon_running()
+            .context("failed to auto-start daemon for --kill")?;
+    }
+    if !agent_team_mail_core::daemon_client::daemon_is_running() {
         anyhow::bail!("daemon is not running");
     }
 
