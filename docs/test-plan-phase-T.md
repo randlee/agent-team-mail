@@ -19,6 +19,10 @@ Phase T candidate execution order.
 4. T.3: #282 Gemini end-to-end spawn wiring
 5. T.4: #281 Gemini resume correctness
 
+`T.6` (test coverage closure for `U.1`-`U.4`) is independent of the
+`T.1`-`T.5*` sequence and may be scheduled at any point once acceptance
+criteria are fully scoped.
+
 ---
 
 ## T.1 — Daemon Auto-Start + Single-Instance (#181)
@@ -313,6 +317,7 @@ These placeholders roll up into execution sprint `T.6` (test coverage closure).
 
 - Requirement: `requirements.md` section 4.6 logging diagnostics surface requirements.
 - Status: Deferred post-Phase T pending logging field implementation.
+- Scheduling: rolls up into `T.6`.
 - Acceptance (when scheduled): status JSON includes logging health payload from
   shared evaluator contract.
 
