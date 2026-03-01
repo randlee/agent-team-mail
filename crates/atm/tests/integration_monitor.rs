@@ -235,6 +235,7 @@ fn test_monitor_reintroduced_fault_emits_new_alert() {
     // Run 1: initial fault detection — expect 1 alert.
     let mut cmd1 = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd1, &temp_dir);
+    cmd1.env("ATM_DAEMON_AUTOSTART", "0");
     cmd1.arg("monitor")
         .arg("--team")
         .arg("test-team")
@@ -259,6 +260,7 @@ fn test_monitor_reintroduced_fault_emits_new_alert() {
     // A new process treats every finding as fresh, so a second alert is emitted.
     let mut cmd2 = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd2, &temp_dir);
+    cmd2.env("ATM_DAEMON_AUTOSTART", "0");
     cmd2.arg("monitor")
         .arg("--team")
         .arg("test-team")
