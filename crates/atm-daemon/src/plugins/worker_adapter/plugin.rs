@@ -247,6 +247,8 @@ impl WorkerAdapterPlugin {
         config: &LaunchConfig,
         runtime: &str,
     ) -> (String, &'static str, Option<String>) {
+        let resume_requested = config.command.contains("--resume");
+
         if let Some(explicit) = config
             .resume_session_id
             .as_ref()
@@ -296,7 +298,15 @@ impl WorkerAdapterPlugin {
             );
         }
 
-        (format!("{runtime}-{}", Uuid::new_v4()), "fresh", None)
+        let warning = if resume_requested {
+            Some(format!(
+                "resume fallback: no prior session record for {}/{} ({runtime})",
+                config.team, config.agent
+            ))
+        } else {
+            None
+        };
+        (format!("{runtime}-{}", Uuid::new_v4()), "fresh", warning)
     }
 
     fn resolve_team_name<'a>(
@@ -1895,6 +1905,94 @@ mod tests {
         assert!(
             chosen.starts_with("gemini-"),
             "fallback must generate deterministic runtime-prefixed id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_requested_with_no_registry_record_emits_warning() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        plugin.set_session_registry(registry);
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --resume".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: None,
+        };
+
+        let result = plugin.handle_launch(config).await.expect("launch succeeds");
+        let warning = result.warning.expect("warning expected");
+        assert!(warning.contains("no prior session record"));
+    }
+
+    #[tokio::test]
+    async fn test_gemini_fresh_spawn_then_resume_uses_persisted_session() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        plugin.set_session_registry(registry.clone());
+
+        let fresh = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --prompt-interactive".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: None,
+        };
+        plugin
+            .handle_launch(fresh)
+            .await
+            .expect("fresh spawn succeeds");
+
+        let captured_session = registry
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .and_then(|r| r.runtime_session_id.clone())
+            .expect("first launch must persist runtime session id");
+
+        let resume = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --resume".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: Some(captured_session.clone()),
+        };
+        plugin
+            .handle_launch(resume)
+            .await
+            .expect("resume launch succeeds");
+
+        let last_env = backend
+            .get_calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+                _ => None,
+            })
+            .last()
+            .expect("second spawn_with_env must exist");
+        assert_eq!(
+            last_env.get("ATM_RUNTIME_SESSION_ID").map(String::as_str),
+            Some(captured_session.as_str())
         );
     }
 }
