@@ -740,7 +740,12 @@ mod tests {
 
     #[test]
     fn session_filter_rejects_stale_session_scoped_messages() {
-        let mut msg = make_msg("sender", r#"{"session_id":"old-session"}"#, false, Some("id-1"));
+        let mut msg = make_msg(
+            "sender",
+            r#"{"session_id":"old-session"}"#,
+            false,
+            Some("id-1"),
+        );
         msg.unknown_fields
             .insert("session_id".to_string(), serde_json::json!("old-session"));
 

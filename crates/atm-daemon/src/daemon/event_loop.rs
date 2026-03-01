@@ -519,9 +519,7 @@ fn reconcile_team_member_activity(
             let alive = record.state == crate::daemon::session_registry::SessionState::Active
                 && record.is_process_alive();
 
-            if !alive
-                && record.state == crate::daemon::session_registry::SessionState::Active
-            {
+            if !alive && record.state == crate::daemon::session_registry::SessionState::Active {
                 session_registry
                     .lock()
                     .unwrap()
@@ -1067,9 +1065,7 @@ async fn get_active_teams(ctx: &PluginContext) -> Vec<String> {
 fn format_timestamp(time: SystemTime) -> String {
     use chrono::{DateTime, Utc};
 
-    let duration = time
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
+    let duration = time.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
 

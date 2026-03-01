@@ -327,13 +327,22 @@ fn install_claude(binary: &str, scope: &Scope) -> Result<()> {
     // Idempotency check
     if let Some(existing) = config.get("mcpServers").and_then(|s| s.get("atm")) {
         if json_server_entry_matches(existing, binary, true) {
-            println!("atm MCP server already configured for Claude Code ({}).", scope_label(scope));
+            println!(
+                "atm MCP server already configured for Claude Code ({}).",
+                scope_label(scope)
+            );
             println!("  Config: {}", path.display());
             println!("  No changes made.");
             return Ok(());
         }
-        let old_cmd = existing.get("command").and_then(|v| v.as_str()).unwrap_or("(unknown)");
-        println!("Updating existing atm MCP server entry for Claude Code ({}).", scope_label(scope));
+        let old_cmd = existing
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)");
+        println!(
+            "Updating existing atm MCP server entry for Claude Code ({}).",
+            scope_label(scope)
+        );
         println!("  Old binary: {old_cmd}");
         println!("  New binary: {binary}");
     }
@@ -351,7 +360,10 @@ fn install_claude(binary: &str, scope: &Scope) -> Result<()> {
 
     write_json(&path, &config)?;
 
-    println!("Installed atm MCP server for Claude Code ({})", scope_label(scope));
+    println!(
+        "Installed atm MCP server for Claude Code ({})",
+        scope_label(scope)
+    );
     println!("  Config: {}", path.display());
     println!("  Binary: {binary}");
     println!("\nRestart Claude Code to pick up the new configuration.");
@@ -392,9 +404,7 @@ fn install_codex(binary: &str, scope: &Scope) -> Result<()> {
             let existing_cmd = atm_entry.get("command").and_then(|v| v.as_str());
             let existing_args = atm_entry.get("args").and_then(|v| v.as_array());
             let args_match = existing_args
-                .map(|a| {
-                    a.len() == 1 && a.first().and_then(|v| v.as_str()) == Some("serve")
-                })
+                .map(|a| a.len() == 1 && a.first().and_then(|v| v.as_str()) == Some("serve"))
                 .unwrap_or(false);
 
             if existing_cmd == Some(binary) && args_match {
@@ -487,7 +497,10 @@ fn install_gemini(binary: &str, scope: &Scope) -> Result<()> {
             println!("  No changes made.");
             return Ok(());
         }
-        let old_cmd = existing.get("command").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+        let old_cmd = existing
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)");
         println!(
             "Updating existing atm MCP server entry for Gemini CLI ({}).",
             scope_label(scope)
@@ -541,7 +554,11 @@ fn uninstall_gemini(scope: &Scope) -> Result<()> {
 /// Returns an error when JSON read/parse/write fails.
 fn uninstall_json_client(client_name: &str, path: &Path, scope: &Scope) -> Result<()> {
     if !path.exists() {
-        println!("atm MCP server not present for {} ({}).", client_name, scope_label(scope));
+        println!(
+            "atm MCP server not present for {} ({}).",
+            client_name,
+            scope_label(scope)
+        );
         println!("  Config: {} (file does not exist)", path.display());
         return Ok(());
     }
@@ -558,14 +575,22 @@ fn uninstall_json_client(client_name: &str, path: &Path, scope: &Scope) -> Resul
         .unwrap_or(false);
 
     if !removed {
-        println!("atm MCP server not present for {} ({}).", client_name, scope_label(scope));
+        println!(
+            "atm MCP server not present for {} ({}).",
+            client_name,
+            scope_label(scope)
+        );
         println!("  Config: {}", path.display());
         return Ok(());
     }
 
     write_json(path, &config)?;
 
-    println!("Removed atm MCP server from {} ({}).", client_name, scope_label(scope));
+    println!(
+        "Removed atm MCP server from {} ({}).",
+        client_name,
+        scope_label(scope)
+    );
     println!("  Config: {}", path.display());
     println!("\nRestart {} to pick up the change.", client_name);
 
@@ -658,25 +683,32 @@ fn execute_status() -> Result<()> {
     println!("=====================");
     println!();
     println!("Binary: {binary_path}");
-    println!(
-        "Available: {}",
-        if binary_available { "yes" } else { "no" }
-    );
+    println!("Available: {}", if binary_available { "yes" } else { "no" });
     println!();
 
-    print_client_status("Claude Code", StatusClient::Claude, &[
-        ("User   ", claude_config_path(&Scope::Global).ok()),
-        ("Project", claude_config_path(&Scope::Local).ok()),
-    ]);
+    print_client_status(
+        "Claude Code",
+        StatusClient::Claude,
+        &[
+            ("User   ", claude_config_path(&Scope::Global).ok()),
+            ("Project", claude_config_path(&Scope::Local).ok()),
+        ],
+    );
 
-    print_client_status("Codex", StatusClient::Codex, &[
-        ("Global ", codex_config_path().ok()),
-    ]);
+    print_client_status(
+        "Codex",
+        StatusClient::Codex,
+        &[("Global ", codex_config_path().ok())],
+    );
 
-    print_client_status("Gemini CLI", StatusClient::Gemini, &[
-        ("User   ", gemini_config_path(&Scope::Global).ok()),
-        ("Project", gemini_config_path(&Scope::Local).ok()),
-    ]);
+    print_client_status(
+        "Gemini CLI",
+        StatusClient::Gemini,
+        &[
+            ("User   ", gemini_config_path(&Scope::Global).ok()),
+            ("Project", gemini_config_path(&Scope::Local).ok()),
+        ],
+    );
 
     if !binary_available {
         println!();

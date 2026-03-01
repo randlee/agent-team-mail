@@ -183,9 +183,16 @@ mod tests {
         // Clean up before asserting so we don't leave the file around.
         let _ = std::fs::remove_file(&hook_path);
 
-        assert!(result.is_err(), "expected Err for stale file, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "expected Err for stale file, got {:?}",
+            result
+        );
         let err_str = result.unwrap_err().to_string();
-        assert!(err_str.contains("stale"), "error should mention 'stale': {err_str}");
+        assert!(
+            err_str.contains("stale"),
+            "error should mention 'stale': {err_str}"
+        );
     }
 
     #[test]
@@ -212,7 +219,9 @@ mod tests {
         let result = read_hook_file();
         let _ = std::fs::remove_file(&hook_path);
 
-        let data = result.expect("expected Ok(Some(...)) for fresh file").expect("expected Some");
+        let data = result
+            .expect("expected Ok(Some(...)) for fresh file")
+            .expect("expected Some");
         assert_eq!(data.agent_name.as_deref(), Some("team-lead"));
         assert_eq!(data.session_id, "test-session-fresh");
     }

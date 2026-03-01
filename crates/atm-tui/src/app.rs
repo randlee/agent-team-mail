@@ -571,7 +571,9 @@ fn first_string(value: &serde_json::Value, paths: &[&str]) -> Option<String> {
 }
 
 fn first_f64(value: &serde_json::Value, paths: &[&str]) -> Option<f64> {
-    paths.iter().find_map(|path| value.pointer(path).and_then(|v| v.as_f64()))
+    paths
+        .iter()
+        .find_map(|path| value.pointer(path).and_then(|v| v.as_f64()))
 }
 
 #[cfg(test)]

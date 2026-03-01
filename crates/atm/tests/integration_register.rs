@@ -33,9 +33,7 @@ fn write_atm_toml(temp_dir: &TempDir, identity: &str) {
     fs::create_dir_all(&workdir).ok();
     fs::write(
         workdir.join(".atm.toml"),
-        format!(
-            "[core]\nidentity = \"{identity}\"\ndefault_team = \"test-team\"\n"
-        ),
+        format!("[core]\nidentity = \"{identity}\"\ndefault_team = \"test-team\"\n"),
     )
     .unwrap();
 }
@@ -119,9 +117,7 @@ fn test_register_team_lead_with_session_id_env() {
         .stderr(predicate::str::contains("WARNING: hook file not found"));
 
     // Verify leadSessionId was updated in config.json.
-    let config_path = temp_dir
-        .path()
-        .join(".claude/teams/my-team/config.json");
+    let config_path = temp_dir.path().join(".claude/teams/my-team/config.json");
     let config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(config["leadSessionId"], "test-session-lead-001");
@@ -137,17 +133,11 @@ fn test_register_teammate_with_session_id_env() {
     );
 
     // Provide an existing leadSessionId so no warning is printed.
-    let config_path = temp_dir
-        .path()
-        .join(".claude/teams/my-team/config.json");
+    let config_path = temp_dir.path().join(".claude/teams/my-team/config.json");
     let mut config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     config["leadSessionId"] = serde_json::json!("existing-lead-session");
-    fs::write(
-        &config_path,
-        serde_json::to_string_pretty(&config).unwrap(),
-    )
-    .unwrap();
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     configure_cmd(&mut cmd, &temp_dir);
@@ -199,11 +189,7 @@ fn test_register_unknown_name_fails() {
 fn test_register_warns_when_lead_not_registered() {
     let temp_dir = TempDir::new().unwrap();
     // Team with no leadSessionId set (empty string as created by create_test_team).
-    create_test_team(
-        &temp_dir,
-        "my-team",
-        &[("team-lead", true), ("bob", false)],
-    );
+    create_test_team(&temp_dir, "my-team", &[("team-lead", true), ("bob", false)]);
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     configure_cmd(&mut cmd, &temp_dir);
@@ -311,9 +297,7 @@ fn test_register_invalid_hook_file_does_not_fallback_to_env() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "hook file validation failed",
-        ));
+        .stderr(predicate::str::contains("hook file validation failed"));
 }
 
 #[test]
@@ -327,17 +311,11 @@ fn test_register_conflicting_lead_session_blocks_without_force_when_daemon_unrea
     write_atm_toml(&temp_dir, "team-lead");
 
     // Pre-populate leadSessionId to simulate an existing lead claim.
-    let config_path = temp_dir
-        .path()
-        .join(".claude/teams/my-team/config.json");
+    let config_path = temp_dir.path().join(".claude/teams/my-team/config.json");
     let mut config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     config["leadSessionId"] = serde_json::json!("existing-live-session-xyz");
-    fs::write(
-        &config_path,
-        serde_json::to_string_pretty(&config).unwrap(),
-    )
-    .unwrap();
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     configure_cmd(&mut cmd, &temp_dir);
@@ -364,17 +342,11 @@ fn test_register_conflicting_lead_session_allows_force_when_daemon_unreachable()
     );
     write_atm_toml(&temp_dir, "team-lead");
 
-    let config_path = temp_dir
-        .path()
-        .join(".claude/teams/my-team/config.json");
+    let config_path = temp_dir.path().join(".claude/teams/my-team/config.json");
     let mut config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     config["leadSessionId"] = serde_json::json!("existing-live-session-xyz");
-    fs::write(
-        &config_path,
-        serde_json::to_string_pretty(&config).unwrap(),
-    )
-    .unwrap();
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     configure_cmd(&mut cmd, &temp_dir);
