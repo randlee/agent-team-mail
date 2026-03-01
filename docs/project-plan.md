@@ -84,6 +84,7 @@ uncommitted until planning gates are completed:
 | Gemini end-to-end spawn wiring | T.3 / #282 | Candidate only |
 | S.2a/S.1 deliverable accuracy cleanup | T.16 / #283 | Candidate only |
 | CLI crate publish failure (`include_str!` packaging) | T.5a / #284 | Candidate only |
+| Test coverage closure for unscheduled backlog (`U.1`-`U.4`) | T.6 | Candidate only |
 
 ## Open Issues Source Of Truth
 

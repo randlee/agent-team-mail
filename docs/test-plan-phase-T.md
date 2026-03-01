@@ -292,6 +292,8 @@ Phase T candidate execution order.
 These issues are tracked but not in the first execution slice. Coverage is
 defined now so they are not left unspecified.
 
+These placeholders roll up into execution sprint `T.6` (test coverage closure).
+
 ### U.1 — TUI Panel Consistency (#184)
 
 - Acceptance: right/left panel state cannot contradict for same agent snapshot.
