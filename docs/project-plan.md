@@ -1072,13 +1072,33 @@ Moved from Phase S. Deferred pending resolution of backend strategy (CLI-pane vs
 
 Inject sentinel markers into tmux panes for reliable output boundary detection.
 
+### T.5c — Availability Signaling *(enhancement, [#295](https://github.com/randlee/agent-team-mail/pull/295))*
+
+**Status**: COMPLETE. PR [#295](https://github.com/randlee/agent-team-mail/pull/295) — branch `feature/pT-s5c-availability-signaling`.
+
+End-to-end availability signaling pipeline: `atm-hook-relay.sh` enriches Codex
+`AfterAgent` events with the T.5c canonical payload (`team`, `agent`, `state`,
+`timestamp`, `idempotency_key`) and appends them to `events.jsonl`. The
+`HookWatcher` in `atm-daemon` watches the file, reads new lines incrementally,
+deduplicates via `idempotency_key`, and transitions `AgentStateTracker` to
+`Idle`. A 200 ms reconcile-tick polling fallback ensures convergence even when
+filesystem notifications are dropped by the OS.
+
+This sprint supersedes T.12 and T.13 (see below).
+
 ### T.12 — Codex Idle Detection via Notify Hook *(enhancement, [#46](https://github.com/randlee/agent-team-mail/issues/46))*
 
-Detect Codex agent idle state via notify hook mechanism.
+> **Superseded by T.5c.** Idle detection via the `AfterAgent` notify hook was
+> delivered as part of Sprint T.5c (`atm-hook-relay.sh` + `HookWatcher`).
+> Issue [#46](https://github.com/randlee/agent-team-mail/issues/46) should be
+> closed.
 
 ### T.13 — Ephemeral Pub/Sub for Agent Availability *(enhancement, [#47](https://github.com/randlee/agent-team-mail/issues/47))*
 
-Lightweight pub/sub mechanism for agent availability announcements.
+> **Superseded by T.5c.** Lightweight pub/sub for availability announcements was
+> delivered as part of Sprint T.5c (`PubSub` fanout in `pubsub.rs` driven by
+> `HookWatcher` state transitions). Issue
+> [#47](https://github.com/randlee/agent-team-mail/issues/47) should be closed.
 
 ### T.14 — Gemini adapter resume flag fix *(bug fix, [#281](https://github.com/randlee/agent-team-mail/issues/281))*
 
@@ -1106,14 +1126,15 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.3 | Agent state transitions | T.1 | M | PLANNED | [#183](https://github.com/randlee/agent-team-mail/issues/183) |
 | T.4 | TUI panel consistency (stdin fix) | T.3 | S | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184) |
 | T.5 | TUI message viewing | T.1 | M | PLANNED | [#185](https://github.com/randlee/agent-team-mail/issues/185) |
+| T.5c | Availability Signaling | — | M | COMPLETE | [#295](https://github.com/randlee/agent-team-mail/pull/295) |
 | T.6 | TUI header version | — | XS | PLANNED | [#187](https://github.com/randlee/agent-team-mail/issues/187) |
 | T.7 | `atm init --check` + upgrade validation | S.2a | S | PLANNED | — |
 | T.8 | `atm teams resume` session handoff | S.1 | M | PLANNED | — |
 | T.9 | OpenCode baseline adapter | S.1 | L | DEFERRED | — |
 | T.10 | Operational health agent / continuous doctor | T.2, T.3 | M | PLANNED | — |
 | T.11 | Tmux Sentinel Injection | — | M | PLANNED | [#45](https://github.com/randlee/agent-team-mail/issues/45) |
-| T.12 | Codex Idle Detection via Notify Hook | — | M | PLANNED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
-| T.13 | Ephemeral Pub/Sub for Agent Availability | — | M | PLANNED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
+| T.12 | Codex Idle Detection via Notify Hook | — | M | SUPERSEDED by T.5c | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
+| T.13 | Ephemeral Pub/Sub for Agent Availability | — | M | SUPERSEDED by T.5c | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
 | T.14 | Gemini adapter resume flag fix | — | XS | PLANNED | [#281](https://github.com/randlee/agent-team-mail/issues/281) |
 | T.15 | Gemini adapter end-to-end spawn wiring | T.14 | L | PLANNED | [#282](https://github.com/randlee/agent-team-mail/issues/282) |
 | T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | PLANNED | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
@@ -1302,8 +1323,8 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | [#187](https://github.com/randlee/agent-team-mail/issues/187) | TUI header missing version number | T.6 | Quick fix |
 | [#188](https://github.com/randlee/agent-team-mail/issues/188) | Logging overhaul prerequisite | — | May be addressed by Phase L — **needs verification** |
 | [#45](https://github.com/randlee/agent-team-mail/issues/45) | Tmux Sentinel Injection | T.10 | Enhancement |
-| [#46](https://github.com/randlee/agent-team-mail/issues/46) | Codex Idle Detection via Notify Hook | T.11 | Enhancement |
-| [#47](https://github.com/randlee/agent-team-mail/issues/47) | Ephemeral Pub/Sub for Agent Availability | T.12 | Enhancement |
+| [#46](https://github.com/randlee/agent-team-mail/issues/46) | Codex Idle Detection via Notify Hook | T.12 | Superseded by T.5c — close this issue |
+| [#47](https://github.com/randlee/agent-team-mail/issues/47) | Ephemeral Pub/Sub for Agent Availability | T.13 | Superseded by T.5c — close this issue |
 
 ---
 

@@ -66,7 +66,7 @@ mkdir -p "$(dirname "$EVENTS_FILE")"
 RECEIVED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 PAYLOAD_TYPE=$(echo "$JSON_PAYLOAD" | jq -r '.type // "agent-turn-complete"')
 TURN_ID=$(echo "$JSON_PAYLOAD" | jq -r '.["turn-id"] // "no-turn"')
-IDEMPOTENCY_KEY="${TEAM}:${AGENT}:${TURN_ID}:${RECEIVED_AT}"
+IDEMPOTENCY_KEY="${TEAM}:${AGENT}:${TURN_ID}"
 
 # Build canonical top-level event JSON expected by daemon hook watcher.
 ENRICHED_EVENT=$(echo "$JSON_PAYLOAD" | jq -c \

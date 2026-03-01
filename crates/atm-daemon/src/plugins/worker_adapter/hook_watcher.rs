@@ -1211,4 +1211,74 @@ mod tests {
         assert_eq!(after_a["members"][0]["sessionId"].as_str(), Some("new-a"));
         assert_eq!(after_b["members"][0]["sessionId"].as_str(), Some("old-b"));
     }
+
+    // ── reconcile_tick convergence ────────────────────────────────────────
+
+    /// Verify that calling `read_new_events` directly (the same logic executed
+    /// by the 200 ms `reconcile_tick` arm inside `HookWatcher::run`) picks up
+    /// an event file and transitions agent state, independently of any
+    /// filesystem notification.
+    ///
+    /// This exercises the polling-fallback path: even when the OS-level
+    /// `notify` watcher drops a filesystem event, the periodic tick drives
+    /// convergence by re-reading the file at the current offset.
+    #[test]
+    fn test_reconcile_tick_drives_convergence_without_fs_event() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+
+        // Set up state tracker with agent in Busy state.
+        let state = make_state();
+        state.lock().unwrap().register_agent("arch-ctm");
+        state
+            .lock()
+            .unwrap()
+            .set_state("arch-ctm", AgentState::Busy);
+
+        // Write an availability event directly — no HookWatcher running,
+        // no filesystem notification involved.
+        let line = "{\"type\":\"agent-turn-complete\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\",\
+                    \"state\":\"idle\",\"timestamp\":\"2026-03-01T12:00:00Z\",\
+                    \"idempotency_key\":\"atm-dev:arch-ctm:reconcile-tick-test\"}\n";
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(line.as_bytes()).unwrap();
+        }
+
+        // Simulate exactly what the reconcile_tick arm does: call
+        // read_new_events with the current offset (0).
+        let mut deduper = make_deduper();
+        let new_offset = read_new_events(&path, 0, &state, None, None, &mut deduper);
+
+        // Offset should have advanced past the line we wrote.
+        assert_eq!(
+            new_offset,
+            line.len() as u64,
+            "reconcile_tick read should consume the full event line"
+        );
+
+        // Agent must have transitioned to Idle via the polling path alone.
+        assert_eq!(
+            state.lock().unwrap().get_state("arch-ctm"),
+            Some(AgentState::Idle),
+            "reconcile_tick convergence: arch-ctm should be Idle after read_new_events call"
+        );
+
+        // A second reconcile_tick call with the advanced offset must be a
+        // no-op (idempotency_key deduplication).
+        let state_before_second = state.lock().unwrap().get_state("arch-ctm");
+        let new_offset2 = read_new_events(&path, new_offset, &state, None, None, &mut deduper);
+        assert_eq!(new_offset2, new_offset, "no new bytes at EOF");
+        assert_eq!(
+            state.lock().unwrap().get_state("arch-ctm"),
+            state_before_second,
+            "second reconcile_tick call must not alter state"
+        );
+    }
 }
