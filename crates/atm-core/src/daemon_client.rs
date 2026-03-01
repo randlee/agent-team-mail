@@ -1847,6 +1847,246 @@ sleep 2
         );
     }
 
+    // ── Windows-specific tests ───────────────────────────────────────────────
+    //
+    // These tests validate the Windows code paths for daemon auto-start readiness
+    // and lock behavior. On Windows, all daemon socket communication is intentionally
+    // unavailable (Unix domain sockets only), so the contract is that every public
+    // function returns `Ok(None)` or `false` without panicking or returning an error.
+    //
+    // Requirement: requirements.md §T.1 cross-platform row — "Windows CI coverage
+    // must validate spawn/readiness/lock behavior".
+
+    /// On Windows, `query_daemon` must return `Ok(None)` for any request.
+    ///
+    /// The daemon uses Unix domain sockets which are unavailable on Windows.
+    /// The graceful fallback ensures the CLI degrades silently rather than
+    /// failing with a platform-specific error.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_query_daemon_returns_ok_none() {
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-win-test".to_string(),
+            command: "agent-state".to_string(),
+            payload: serde_json::json!({ "agent": "arch-ctm", "team": "atm-dev" }),
+        };
+        let result = query_daemon(&req);
+        assert!(
+            result.is_ok(),
+            "query_daemon must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "query_daemon must return Ok(None) on Windows (no Unix socket available)"
+        );
+    }
+
+    /// On Windows, `daemon_is_running` must return `false` without panicking.
+    ///
+    /// The PID-file check uses Unix `kill(pid, 0)` which is unavailable on Windows.
+    /// The Windows branch always returns `false` — validated here so CI catches
+    /// any accidental regression that re-introduces a Unix-only code path.
+    #[cfg(windows)]
+    #[test]
+    fn windows_daemon_is_running_returns_false() {
+        // No daemon can be running on Windows (no Unix socket / PID-kill support).
+        assert!(
+            !daemon_is_running(),
+            "daemon_is_running must return false on Windows"
+        );
+    }
+
+    /// On Windows, `subscribe_stream_events` must return `Ok(None)`.
+    ///
+    /// Stream subscriptions require a long-lived Unix domain socket connection.
+    /// The Windows branch short-circuits to `Ok(None)` so callers can treat the
+    /// absence of stream events as equivalent to a daemon that is not running.
+    #[cfg(windows)]
+    #[test]
+    fn windows_subscribe_stream_events_returns_ok_none() {
+        let result = subscribe_stream_events();
+        assert!(
+            result.is_ok(),
+            "subscribe_stream_events must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "subscribe_stream_events must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, `query_agent_state` must return `Ok(None)`.
+    ///
+    /// Exercises the full call path (including payload serialisation) to confirm
+    /// that the Windows `Ok(None)` short-circuit in `query_daemon` propagates
+    /// correctly through the higher-level wrapper.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_query_agent_state_returns_ok_none() {
+        let result = query_agent_state("arch-ctm", "atm-dev");
+        assert!(
+            result.is_ok(),
+            "query_agent_state must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "query_agent_state must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, `query_session` must return `Ok(None)`.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_query_session_returns_ok_none() {
+        let result = query_session("team-lead");
+        assert!(
+            result.is_ok(),
+            "query_session must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "query_session must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, `launch_agent` must return `Ok(None)`.
+    ///
+    /// Confirms that the auto-start path (which requires Unix `fork`/`exec`
+    /// semantics) never executes on Windows and the call degrades gracefully.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_launch_agent_returns_ok_none() {
+        let config = LaunchConfig {
+            agent: "test-agent".to_string(),
+            team: "test-team".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 5,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("codex".to_string()),
+            resume_session_id: None,
+        };
+        let result = launch_agent(&config);
+        assert!(
+            result.is_ok(),
+            "launch_agent must not return Err on Windows (no daemon socket)"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "launch_agent must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, the startup lock (`acquire_lock`) must be acquirable and
+    /// automatically released on drop.
+    ///
+    /// The `ensure_daemon_running_unix` function is gated `#[cfg(unix)]` and
+    /// never runs on Windows, but the startup-lock path (`fs2::LockFileEx`) is
+    /// the same cross-platform primitive used throughout atm-core.  This test
+    /// confirms the Windows lock backend works correctly in the context of the
+    /// daemon startup directory layout.
+    #[cfg(windows)]
+    #[test]
+    fn windows_startup_lock_acquires_and_releases() {
+        use crate::io::lock::acquire_lock;
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_dir = tmp.path().join("config").join("atm");
+        fs::create_dir_all(&lock_dir).unwrap();
+        let lock_path = lock_dir.join("daemon-start.lock");
+
+        // Acquire the lock — mirrors what ensure_daemon_running_unix does.
+        let lock = acquire_lock(&lock_path, 3);
+        assert!(
+            lock.is_ok(),
+            "startup lock must be acquirable on Windows: {:?}",
+            lock.err()
+        );
+
+        // Explicit drop releases the lock (Windows holds handles; explicit drop
+        // ensures the LockFileEx unlock fires before we try to re-acquire).
+        drop(lock.unwrap());
+
+        // Re-acquire to confirm the lock was actually released.
+        let lock2 = acquire_lock(&lock_path, 1);
+        assert!(
+            lock2.is_ok(),
+            "startup lock must be re-acquirable after release on Windows"
+        );
+    }
+
+    /// On Windows, `daemon_socket_path` must produce a path ending with the
+    /// expected suffix regardless of the underlying home-directory resolver.
+    #[cfg(windows)]
+    #[test]
+    fn windows_daemon_socket_path_has_correct_suffix() {
+        let path = daemon_socket_path().unwrap();
+        let s = path.to_string_lossy();
+        assert!(
+            s.ends_with("atm-daemon.sock"),
+            "daemon_socket_path must end with 'atm-daemon.sock' on Windows, got: {s}"
+        );
+        assert!(
+            s.contains(".claude") && s.contains("daemon"),
+            "daemon_socket_path must contain '.claude/daemon' on Windows, got: {s}"
+        );
+    }
+
+    /// On Windows, `daemon_pid_path` must produce a path ending with the
+    /// expected suffix.
+    #[cfg(windows)]
+    #[test]
+    fn windows_daemon_pid_path_has_correct_suffix() {
+        let path = daemon_pid_path().unwrap();
+        let s = path.to_string_lossy();
+        assert!(
+            s.ends_with("atm-daemon.pid"),
+            "daemon_pid_path must end with 'atm-daemon.pid' on Windows, got: {s}"
+        );
+        assert!(
+            s.contains(".claude") && s.contains("daemon"),
+            "daemon_pid_path must contain '.claude/daemon' on Windows, got: {s}"
+        );
+    }
+
+    /// On Windows, `send_control` must return `Err` (not panic) when the daemon
+    /// is not reachable, because `send_control` intentionally propagates absence
+    /// as an error (unlike the `Ok(None)` contract of other public functions).
+    #[cfg(windows)]
+    #[test]
+    fn windows_send_control_no_daemon_returns_err() {
+        use crate::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
+
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: "req-win-ctrl".to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
+            sent_at: "2026-02-21T00:00:00Z".to_string(),
+            team: "atm-dev".to_string(),
+            session_id: String::new(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "tui".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("hello".to_string()),
+            content_ref: None,
+            elicitation_id: None,
+            decision: None,
+        };
+
+        let result = send_control(&req);
+        assert!(
+            result.is_err(),
+            "send_control must return Err on Windows when daemon is not reachable"
+        );
+    }
+
     #[test]
     fn test_send_control_builds_correct_socket_request() {
         // Verify the SocketRequest built inside send_control has the right shape
