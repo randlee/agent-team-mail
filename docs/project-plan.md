@@ -1032,7 +1032,7 @@ Moved from Phase S. Old R.1. Requires pre-flight guard design to avoid disruptin
 
 Moved from Phase S. Deferred pending resolution of backend strategy (CLI-pane vs server/API control model). Key finding from research: `opencode serve` + REST API is the correct control model.
 
-### T.10 — `atm-monitor` agent: status polling + log watcher + alerting *(enhancement)*
+### T.5b — `atm-monitor` agent: status polling + alerting *(enhancement)*
 
 **Problem**: No continuous system health monitoring. Issues (stale sessions, config/mailbox drift, daemon errors) go undetected until someone manually runs `atm doctor`. Existing `log-monitor` agent (`.claude/agents/log-monitor.md`) can tail logs but doesn't poll status or alert proactively.
 
@@ -1043,19 +1043,21 @@ Moved from Phase S. Deferred pending resolution of backend strategy (CLI-pane vs
 - **Debug mode**: runs as a full named teammate you can query interactively ("what happened 5 minutes ago?", "watch for the next session-start event", "why did arch-ctm go offline?")
 - **Production mode**: runs as a background agent spun up on-demand when debugging issues
 
-**Deliverables**:
+**Deliverables (implemented in this sprint)**:
 1. Consolidated `atm-monitor` Claude Code agent definition (`.claude/agents/atm-monitor.md`) replacing/merging `log-monitor`.
-2. Status polling loop: runs `atm doctor --json` on interval (e.g. 60s), diffs against previous state, alerts on new findings.
-3. Log watcher: tails unified log (`atm.log.jsonl`) + hook events (`events.jsonl`) with configurable severity filter (default: warn+error).
-4. Alert dispatch: sends `atm send team-lead "[monitor] <finding>"` on new issues. Deduplicates repeat alerts (same finding within cooldown window).
-5. Interactive query support: when run as named teammate, responds to questions about recent events, agent state history, log excerpts.
-6. `atm monitor start` / `atm monitor stop` CLI subcommands to launch/stop as background process (future — may defer to T+1).
+2. `atm monitor` CLI subcommand: status polling loop that runs `atm doctor --json` on interval, diffs against previous state, alerts on new findings.
+3. Alert dispatch: writes directly to recipient inbox files. Deduplicates repeat alerts (same finding within cooldown window). Supports `--once` and `--max-iterations` flags.
+4. Integration tests: polling loop liveness, fault-within-2-cycles alerting, deduplication, daemon-unavailable resilience.
 
-**Acceptance criteria**:
+**Deferred to a future sprint**:
+- Log watcher: tailing unified log (`atm.log.jsonl`) + hook events (`events.jsonl`) with configurable severity filter (default: warn+error). *Deferred — not implemented in T.5b.*
+- Interactive query support: when run as named teammate, responds to questions about recent events, agent state history, log excerpts. *Deferred — not implemented in T.5b.*
+- `atm monitor start` / `atm monitor stop` CLI subcommands to launch/stop as background process. *Deferred — not implemented in T.5b.*
+
+**Acceptance criteria (T.5b)**:
 - Running `atm-monitor` as background agent detects a deliberately killed agent PID and sends alert to team-lead within 2 poll cycles.
-- Log watcher catches a warn-level event and alerts within 10s.
 - Duplicate alerts for same finding are suppressed within cooldown window.
-- As named teammate, responds to "what errors in the last 5 minutes?" with log excerpts.
+- Monitor loop does not exit/panic when daemon is unavailable — continues polling for all requested iterations.
 
 ### T.11 — Tmux Sentinel Injection *(enhancement, [#45](https://github.com/randlee/agent-team-mail/issues/45))*
 
@@ -1098,7 +1100,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.7 | `atm init --check` + upgrade validation | S.2a | S | PLANNED | — |
 | T.8 | `atm teams resume` session handoff | S.1 | M | PLANNED | — |
 | T.9 | OpenCode baseline adapter | S.1 | L | DEFERRED | — |
-| T.10 | Operational health agent / continuous doctor | T.2 | M | PLANNED | — |
+| T.5b | Operational health agent / continuous doctor | T.2, T.3 | M | COMPLETE | — |
 | T.11 | Tmux Sentinel Injection | — | M | PLANNED | [#45](https://github.com/randlee/agent-team-mail/issues/45) |
 | T.12 | Codex Idle Detection via Notify Hook | — | M | PLANNED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
 | T.13 | Ephemeral Pub/Sub for Agent Availability | — | M | PLANNED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
@@ -1289,9 +1291,9 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | [#186](https://github.com/randlee/agent-team-mail/issues/186) | Per-agent output.log never written | — | May be superseded by Phase L unified logging — **needs verification** |
 | [#187](https://github.com/randlee/agent-team-mail/issues/187) | TUI header missing version number | T.6 | Quick fix |
 | [#188](https://github.com/randlee/agent-team-mail/issues/188) | Logging overhaul prerequisite | — | May be addressed by Phase L — **needs verification** |
-| [#45](https://github.com/randlee/agent-team-mail/issues/45) | Tmux Sentinel Injection | T.10 | Enhancement |
-| [#46](https://github.com/randlee/agent-team-mail/issues/46) | Codex Idle Detection via Notify Hook | T.11 | Enhancement |
-| [#47](https://github.com/randlee/agent-team-mail/issues/47) | Ephemeral Pub/Sub for Agent Availability | T.12 | Enhancement |
+| [#45](https://github.com/randlee/agent-team-mail/issues/45) | Tmux Sentinel Injection | T.11 | Enhancement |
+| [#46](https://github.com/randlee/agent-team-mail/issues/46) | Codex Idle Detection via Notify Hook | T.12 | Enhancement |
+| [#47](https://github.com/randlee/agent-team-mail/issues/47) | Ephemeral Pub/Sub for Agent Availability | T.13 | Enhancement |
 
 ---
 
