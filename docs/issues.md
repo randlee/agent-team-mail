@@ -1,6 +1,6 @@
 # Known Issues
 
-Last updated: 2026-02-28
+Last updated: 2026-03-01
 
 ## Open GitHub Issues
 
@@ -19,6 +19,7 @@ Last updated: 2026-02-28
 | [#282](https://github.com/randlee/agent-team-mail/issues/282) | Gemini end-to-end spawn wiring | Enhancement | Open | High | T.3 | Runtime integration completeness baseline |
 | [#283](https://github.com/randlee/agent-team-mail/issues/283) | S.2a/S.1 plan deliverable accuracy | Documentation | Open | Medium | T.16 | Planning/doc alignment |
 | [#284](https://github.com/randlee/agent-team-mail/issues/284) | CLI crate fails to publish (`include_str!` paths outside crate) | Bug | Open | High | T.5a | Parallel publishability tranche |
+| [#286](https://github.com/randlee/agent-team-mail/issues/286) | `atm-monitor` operational health monitor implementation | Enhancement | Open | High | T.5b | Health monitoring implementation tracker |
 
 ## Closed / Superseded (Tracked for Context)
 
@@ -32,7 +33,6 @@ Last updated: 2026-02-28
 | Item | Type | Status | Priority | Notes |
 |---|---|---|---|---|
 | Keep provisional sprint mappings synchronized across planning docs | Documentation | Open | Medium | Source-of-truth sequencing for current draft is `docs/test-plan-phase-T.md`; update `project-plan.md` + `issues.md` together on mapping changes |
-| Create GitHub tracking issue for `atm-monitor` (`T.5b`) | Process | Open | High | Required before committing `T.5b` execution scope |
 
 ## Recently Resolved (No Longer Open)
 
