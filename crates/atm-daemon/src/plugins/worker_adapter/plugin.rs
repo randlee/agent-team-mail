@@ -1988,7 +1988,7 @@ mod tests {
                 MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
                 _ => None,
             })
-            .last()
+            .next_back()
             .expect("second spawn_with_env must exist");
         assert_eq!(
             last_env.get("ATM_RUNTIME_SESSION_ID").map(String::as_str),
