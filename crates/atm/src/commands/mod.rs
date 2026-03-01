@@ -15,6 +15,7 @@ pub mod launch;
 mod logs;
 mod mcp;
 mod members;
+mod monitor;
 mod read;
 mod register;
 mod request;
@@ -68,6 +69,9 @@ enum Commands {
     /// Run daemon/team health diagnostics
     Doctor(doctor::DoctorArgs),
 
+    /// Run continuous operational health monitor and send ATM alerts
+    Monitor(monitor::MonitorArgs),
+
     /// Show effective configuration
     Config(config_cmd::ConfigArgs),
 
@@ -118,6 +122,7 @@ impl Cli {
             Commands::Members(args) => members::execute(args),
             Commands::Status(args) => status::execute(args),
             Commands::Doctor(args) => doctor::execute(args),
+            Commands::Monitor(args) => monitor::execute(args),
             Commands::Config(args) => config_cmd::execute(args),
             Commands::Cleanup(args) => cleanup::execute(args),
             Commands::Bridge(args) => bridge::execute(args),
