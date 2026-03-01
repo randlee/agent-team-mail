@@ -2466,13 +2466,11 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     struct EnvGuard {
         key: &'static str,
         previous: Option<String>,
     }
 
-    #[cfg(unix)]
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var(key).ok();
@@ -2484,7 +2482,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             // SAFETY: test-only env mutation, guarded by #[serial] on callers.
@@ -2497,13 +2494,11 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     struct HookAuthFixture {
         _temp: TempDir,
         _atm_home_guard: EnvGuard,
     }
 
-    #[cfg(unix)]
     fn write_hook_auth_team_config(
         home_dir: &std::path::Path,
         team: &str,
@@ -2539,7 +2534,6 @@ mod tests {
         .unwrap();
     }
 
-    #[cfg(unix)]
     fn setup_hook_auth_fixture(team: &str, lead: &str, members: &[&str]) -> HookAuthFixture {
         let temp = TempDir::new().unwrap();
         let atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
