@@ -29,13 +29,11 @@ use std::path::{Path, PathBuf};
 // Embedded hook script bodies (compile-time)
 // ---------------------------------------------------------------------------
 
-const SESSION_START_PY: &str = include_str!("../../../../.claude/scripts/session-start.py");
-const ATM_IDENTITY_WRITE_PY: &str =
-    include_str!("../../../../.claude/scripts/atm-identity-write.py");
-const ATM_IDENTITY_CLEANUP_PY: &str =
-    include_str!("../../../../.claude/scripts/atm-identity-cleanup.py");
-const GATE_AGENT_SPAWNS_PY: &str = include_str!("../../../../.claude/scripts/gate-agent-spawns.py");
-const ATM_HOOK_LIB_PY: &str = include_str!("../../../../.claude/scripts/atm_hook_lib.py");
+const SESSION_START_PY: &str = include_str!("../../scripts/session-start.py");
+const ATM_IDENTITY_WRITE_PY: &str = include_str!("../../scripts/atm-identity-write.py");
+const ATM_IDENTITY_CLEANUP_PY: &str = include_str!("../../scripts/atm-identity-cleanup.py");
+const GATE_AGENT_SPAWNS_PY: &str = include_str!("../../scripts/gate-agent-spawns.py");
+const ATM_HOOK_LIB_PY: &str = include_str!("../../scripts/atm_hook_lib.py");
 
 // ---------------------------------------------------------------------------
 // Hook command templates

@@ -38,6 +38,7 @@ use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::schema::TeamConfig;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -68,6 +69,16 @@ pub struct HookEvent {
     pub turn_id: Option<String>,
     /// ISO-8601 timestamp added by the relay script.
     pub received_at: Option<String>,
+    /// Canonical availability state for signaling contract payloads.
+    ///
+    /// Expected value for AfterAgent lifecycle updates is `"idle"`.
+    pub state: Option<String>,
+    /// Canonical availability timestamp (ISO-8601).
+    ///
+    /// When absent, `received_at` is used as the timestamp source.
+    pub timestamp: Option<String>,
+    /// Stable idempotency key for availability dedup.
+    pub idempotency_key: Option<String>,
     /// Claude Code session UUID (present on `session-start` and `session-end`).
     ///
     /// Field name in JSON is `sessionId` (camelCase), but we use `#[serde(rename)]`
@@ -79,6 +90,74 @@ pub struct HookEvent {
     /// Field name in JSON is `processId` (camelCase).
     #[serde(rename = "processId")]
     pub process_id: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct AvailabilitySignal {
+    agent: String,
+    team: String,
+    state: String,
+    timestamp: String,
+    idempotency_key: String,
+}
+
+#[derive(Debug, Default)]
+struct AvailabilityDeduper {
+    seen_keys: HashSet<String>,
+}
+
+impl AvailabilityDeduper {
+    fn should_process(&mut self, key: &str) -> bool {
+        self.seen_keys.insert(key.to_string())
+    }
+}
+
+impl HookEvent {
+    fn normalized_availability_signal(&self) -> Option<AvailabilitySignal> {
+        if self.event_type != "agent-turn-complete" {
+            return None;
+        }
+
+        let agent = self.agent.as_ref()?.trim();
+        let team = self.team.as_ref()?.trim();
+        if agent.is_empty() || team.is_empty() {
+            return None;
+        }
+
+        let state = self
+            .state
+            .as_deref()
+            .unwrap_or("idle")
+            .trim()
+            .to_ascii_lowercase();
+
+        let timestamp = self
+            .timestamp
+            .as_ref()
+            .or(self.received_at.as_ref())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())?;
+
+        // Backward-compatible derivation for older relays that do not yet send
+        // idempotency_key explicitly.
+        let idempotency_key = self
+            .idempotency_key
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let turn = self.turn_id.as_deref().unwrap_or("no-turn");
+                format!("{}:{}:{}", team, agent, turn)
+            });
+
+        Some(AvailabilitySignal {
+            agent: agent.to_string(),
+            team: team.to_string(),
+            state,
+            timestamp,
+            idempotency_key,
+        })
+    }
 }
 
 /// Watches `events.jsonl` for new hook events and updates [`AgentStateTracker`]
@@ -150,6 +229,8 @@ impl HookWatcher {
     /// reads new lines from the last-known byte offset and processes each event.
     pub async fn run(self, cancel: CancellationToken) {
         let (tx, mut rx) = mpsc::unbounded_channel::<notify::Event>();
+        let mut availability_deduper = AvailabilityDeduper::default();
+        let mut reconcile_tick = tokio::time::interval(std::time::Duration::from_millis(200));
 
         // Create notify watcher. The callback sends events through an unbounded
         // channel. UnboundedSender::send is safe to call from any thread.
@@ -196,6 +277,7 @@ impl HookWatcher {
             &self.state,
             self.session_registry.as_ref(),
             self.claude_root.as_deref(),
+            &mut availability_deduper,
         );
 
         loop {
@@ -212,8 +294,21 @@ impl HookWatcher {
                             &self.state,
                             self.session_registry.as_ref(),
                             self.claude_root.as_deref(),
+                            &mut availability_deduper,
                         );
                     }
+                }
+                _ = reconcile_tick.tick() => {
+                    // Polling fallback: converge state even if a filesystem
+                    // notification is dropped by the OS watcher.
+                    offset = read_new_events(
+                        &self.path,
+                        offset,
+                        &self.state,
+                        self.session_registry.as_ref(),
+                        self.claude_root.as_deref(),
+                        &mut availability_deduper,
+                    );
                 }
             }
         }
@@ -265,6 +360,7 @@ fn read_new_events(
     state: &Arc<Mutex<AgentStateTracker>>,
     session_registry: Option<&SharedSessionRegistry>,
     claude_root: Option<&Path>,
+    availability_deduper: &mut AvailabilityDeduper,
 ) -> u64 {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -303,7 +399,13 @@ fn read_new_events(
                 new_offset += n as u64;
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
-                    process_hook_line(trimmed, state, session_registry, claude_root);
+                    process_hook_line(
+                        trimmed,
+                        state,
+                        session_registry,
+                        claude_root,
+                        availability_deduper,
+                    );
                 }
             }
             Err(e) => {
@@ -322,6 +424,7 @@ fn process_hook_line(
     state: &Arc<Mutex<AgentStateTracker>>,
     session_registry: Option<&SharedSessionRegistry>,
     claude_root: Option<&Path>,
+    availability_deduper: &mut AvailabilityDeduper,
 ) {
     let event: HookEvent = match serde_json::from_str(line) {
         Ok(e) => e,
@@ -331,7 +434,13 @@ fn process_hook_line(
         }
     };
 
-    apply_hook_event(&event, state, session_registry, claude_root);
+    apply_hook_event(
+        &event,
+        state,
+        session_registry,
+        claude_root,
+        availability_deduper,
+    );
 }
 
 /// Apply the semantic effect of a hook event to the state tracker and session
@@ -347,19 +456,32 @@ fn apply_hook_event(
     state: &Arc<Mutex<AgentStateTracker>>,
     session_registry: Option<&SharedSessionRegistry>,
     claude_root: Option<&Path>,
+    availability_deduper: &mut AvailabilityDeduper,
 ) {
     match event.event_type.as_str() {
         "agent-turn-complete" => {
-            let agent_id = match &event.agent {
-                Some(id) => id.clone(),
-                None => {
-                    warn!("agent-turn-complete event missing 'agent' field, skipping");
-                    return;
-                }
+            let Some(signal) = event.normalized_availability_signal() else {
+                warn!("agent-turn-complete event missing required availability fields, skipping");
+                return;
             };
+            if signal.state != "idle" {
+                debug!(
+                    "Skipping availability event with unsupported state '{}' for {}/{}",
+                    signal.state, signal.team, signal.agent
+                );
+                return;
+            }
+            if !availability_deduper.should_process(&signal.idempotency_key) {
+                debug!(
+                    "Skipping duplicate availability event for {}/{} key={}",
+                    signal.team, signal.agent, signal.idempotency_key
+                );
+                return;
+            }
+            let agent_id = signal.agent;
             debug!(
-                "AfterAgent hook received for {agent_id} (turn: {:?})",
-                event.turn_id
+                "AfterAgent hook received for {agent_id} (turn: {:?}, ts: {}, key: {})",
+                event.turn_id, signal.timestamp, signal.idempotency_key
             );
             let mut tracker = state.lock().unwrap();
             // Transition Launching → Idle (first hook) or Busy → Idle.
@@ -557,6 +679,10 @@ mod tests {
         Arc::new(Mutex::new(AgentStateTracker::new()))
     }
 
+    fn make_deduper() -> AvailabilityDeduper {
+        AvailabilityDeduper::default()
+    }
+
     // ── hook event parsing ────────────────────────────────────────────────
 
     #[test]
@@ -594,10 +720,11 @@ mod tests {
     #[test]
     fn test_malformed_json_does_not_panic() {
         let state = make_state();
+        let mut deduper = make_deduper();
         // Should log a warning and return without panicking.
-        process_hook_line("not json at all", &state, None, None);
-        process_hook_line("{broken", &state, None, None);
-        process_hook_line("", &state, None, None);
+        process_hook_line("not json at all", &state, None, None, &mut deduper);
+        process_hook_line("{broken", &state, None, None, &mut deduper);
+        process_hook_line("", &state, None, None, &mut deduper);
         // State should be unchanged.
         assert!(state.lock().unwrap().all_states().is_empty());
     }
@@ -605,14 +732,15 @@ mod tests {
     #[test]
     fn test_agent_turn_complete_transitions_to_idle() {
         let state = make_state();
+        let mut deduper = make_deduper();
         state.lock().unwrap().register_agent("arch-ctm");
         state
             .lock()
             .unwrap()
             .set_state("arch-ctm", AgentState::Unknown);
 
-        let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev"}"#;
-        process_hook_line(json, &state, None, None);
+        let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev","state":"idle","timestamp":"2026-03-01T00:00:00Z","idempotency_key":"k1"}"#;
+        process_hook_line(json, &state, None, None, &mut deduper);
 
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -623,14 +751,15 @@ mod tests {
     #[test]
     fn test_busy_to_idle_via_hook() {
         let state = make_state();
+        let mut deduper = make_deduper();
         state.lock().unwrap().register_agent("arch-ctm");
         state
             .lock()
             .unwrap()
             .set_state("arch-ctm", AgentState::Active);
 
-        let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev"}"#;
-        process_hook_line(json, &state, None, None);
+        let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev","state":"idle","timestamp":"2026-03-01T00:00:00Z","idempotency_key":"k2"}"#;
+        process_hook_line(json, &state, None, None, &mut deduper);
 
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -641,9 +770,10 @@ mod tests {
     #[test]
     fn test_auto_register_on_hook_for_unknown_agent() {
         let state = make_state();
+        let mut deduper = make_deduper();
         // Agent not pre-registered.
-        let json = r#"{"type":"agent-turn-complete","agent":"new-agent","team":"atm-dev"}"#;
-        process_hook_line(json, &state, None, None);
+        let json = r#"{"type":"agent-turn-complete","agent":"new-agent","team":"atm-dev","state":"idle","timestamp":"2026-03-01T00:00:00Z","idempotency_key":"k3"}"#;
+        process_hook_line(json, &state, None, None, &mut deduper);
 
         assert_eq!(
             state.lock().unwrap().get_state("new-agent"),
@@ -654,9 +784,10 @@ mod tests {
     #[test]
     fn test_missing_agent_field_does_not_panic() {
         let state = make_state();
+        let mut deduper = make_deduper();
         // event_type present but agent field missing
-        let json = r#"{"type":"agent-turn-complete","team":"atm-dev"}"#;
-        process_hook_line(json, &state, None, None);
+        let json = r#"{"type":"agent-turn-complete","team":"atm-dev","state":"idle","timestamp":"2026-03-01T00:00:00Z","idempotency_key":"k4"}"#;
+        process_hook_line(json, &state, None, None, &mut deduper);
         // Nothing should be added to state.
         assert!(state.lock().unwrap().all_states().is_empty());
     }
@@ -664,8 +795,9 @@ mod tests {
     #[test]
     fn test_unknown_event_type_ignored() {
         let state = make_state();
+        let mut deduper = make_deduper();
         let json = r#"{"type":"after-tool-use","agent":"arch-ctm"}"#;
-        process_hook_line(json, &state, None, None);
+        process_hook_line(json, &state, None, None, &mut deduper);
         assert!(state.lock().unwrap().all_states().is_empty());
     }
 
@@ -674,10 +806,11 @@ mod tests {
     #[test]
     fn test_session_start_calls_upsert_on_registry() {
         let state = make_state();
+        let mut deduper = make_deduper();
         let registry = new_session_registry();
 
         let json = r#"{"type":"session-start","agent":"arch-ctm","sessionId":"sess-abc","processId":4242}"#;
-        process_hook_line(json, &state, Some(&registry), None);
+        process_hook_line(json, &state, Some(&registry), None, &mut deduper);
 
         let reg = registry.lock().unwrap();
         let record = reg
@@ -692,6 +825,7 @@ mod tests {
     #[test]
     fn test_session_end_calls_mark_dead_on_registry() {
         let state = make_state();
+        let mut deduper = make_deduper();
         let registry = new_session_registry();
 
         // First register via session-start
@@ -701,7 +835,7 @@ mod tests {
             .upsert("arch-ctm", "sess-abc", 4242);
 
         let json = r#"{"type":"session-end","agent":"arch-ctm","sessionId":"sess-abc"}"#;
-        process_hook_line(json, &state, Some(&registry), None);
+        process_hook_line(json, &state, Some(&registry), None, &mut deduper);
 
         let reg = registry.lock().unwrap();
         let record = reg
@@ -714,10 +848,11 @@ mod tests {
     #[test]
     fn test_session_start_without_registry_does_not_panic() {
         let state = make_state();
+        let mut deduper = make_deduper();
         // No registry provided — should not panic.
         let json =
             r#"{"type":"session-start","agent":"arch-ctm","sessionId":"sess-abc","processId":1}"#;
-        process_hook_line(json, &state, None, None);
+        process_hook_line(json, &state, None, None, &mut deduper);
         // State tracker should not be affected.
         assert!(state.lock().unwrap().all_states().is_empty());
     }
@@ -725,9 +860,10 @@ mod tests {
     #[test]
     fn test_session_start_missing_session_id_skips() {
         let state = make_state();
+        let mut deduper = make_deduper();
         let registry = new_session_registry();
         let json = r#"{"type":"session-start","agent":"arch-ctm"}"#;
-        process_hook_line(json, &state, Some(&registry), None);
+        process_hook_line(json, &state, Some(&registry), None, &mut deduper);
         // Registry should remain empty because sessionId is missing.
         assert!(registry.lock().unwrap().is_empty());
     }
@@ -735,9 +871,10 @@ mod tests {
     #[test]
     fn test_session_start_missing_agent_skips() {
         let state = make_state();
+        let mut deduper = make_deduper();
         let registry = new_session_registry();
         let json = r#"{"type":"session-start","sessionId":"sess-abc","processId":1}"#;
-        process_hook_line(json, &state, Some(&registry), None);
+        process_hook_line(json, &state, Some(&registry), None, &mut deduper);
         assert!(registry.lock().unwrap().is_empty());
     }
 
@@ -746,26 +883,27 @@ mod tests {
     #[test]
     fn test_read_new_events_empty_file() {
         let state = make_state();
+        let mut deduper = make_deduper();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
         std::fs::write(&path, b"").unwrap();
 
-        let new_offset = read_new_events(&path, 0, &state, None, None);
+        let new_offset = read_new_events(&path, 0, &state, None, None, &mut deduper);
         assert_eq!(new_offset, 0);
     }
 
     #[test]
     fn test_read_new_events_processes_lines() {
         let state = make_state();
+        let mut deduper = make_deduper();
         state.lock().unwrap().register_agent("arch-ctm");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        let line =
-            "{\"type\":\"agent-turn-complete\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\"}\n";
+        let line = "{\"type\":\"agent-turn-complete\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\",\"state\":\"idle\",\"timestamp\":\"2026-03-01T00:00:00Z\",\"idempotency_key\":\"k5\"}\n";
         std::fs::write(&path, line.as_bytes()).unwrap();
 
-        let new_offset = read_new_events(&path, 0, &state, None, None);
+        let new_offset = read_new_events(&path, 0, &state, None, None, &mut deduper);
         assert_eq!(new_offset, line.len() as u64);
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -776,17 +914,17 @@ mod tests {
     #[test]
     fn test_read_new_events_incremental() {
         let state = make_state();
+        let mut deduper = make_deduper();
         state.lock().unwrap().register_agent("arch-ctm");
         state.lock().unwrap().register_agent("agent-b");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        let line1 =
-            "{\"type\":\"agent-turn-complete\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\"}\n";
+        let line1 = "{\"type\":\"agent-turn-complete\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\",\"state\":\"idle\",\"timestamp\":\"2026-03-01T00:00:00Z\",\"idempotency_key\":\"k6\"}\n";
         std::fs::write(&path, line1.as_bytes()).unwrap();
 
         // First read
-        let offset1 = read_new_events(&path, 0, &state, None, None);
+        let offset1 = read_new_events(&path, 0, &state, None, None, &mut deduper);
         assert_eq!(offset1, line1.len() as u64);
         assert_eq!(
             state.lock().unwrap().get_state("arch-ctm"),
@@ -794,8 +932,7 @@ mod tests {
         );
 
         // Append second event
-        let line2 =
-            "{\"type\":\"agent-turn-complete\",\"agent\":\"agent-b\",\"team\":\"atm-dev\"}\n";
+        let line2 = "{\"type\":\"agent-turn-complete\",\"agent\":\"agent-b\",\"team\":\"atm-dev\",\"state\":\"idle\",\"timestamp\":\"2026-03-01T00:00:01Z\",\"idempotency_key\":\"k7\"}\n";
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -804,7 +941,7 @@ mod tests {
         drop(file);
 
         // Second read should only process line2
-        let offset2 = read_new_events(&path, offset1, &state, None, None);
+        let offset2 = read_new_events(&path, offset1, &state, None, None, &mut deduper);
         assert_eq!(offset2, (line1.len() + line2.len()) as u64);
         assert_eq!(
             state.lock().unwrap().get_state("agent-b"),
@@ -815,16 +952,16 @@ mod tests {
     #[test]
     fn test_read_new_events_handles_truncation() {
         let state = make_state();
+        let mut deduper = make_deduper();
         state.lock().unwrap().register_agent("arch-ctm");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        let line =
-            "{\"type\":\"agent-turn-complete\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\"}\n";
+        let line = "{\"type\":\"agent-turn-complete\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\",\"state\":\"idle\",\"timestamp\":\"2026-03-01T00:00:00Z\",\"idempotency_key\":\"k8\"}\n";
         std::fs::write(&path, line.as_bytes()).unwrap();
 
         // offset beyond file size (simulating truncation)
-        let new_offset = read_new_events(&path, 9999, &state, None, None);
+        let new_offset = read_new_events(&path, 9999, &state, None, None, &mut deduper);
         // Should re-read from 0, process the line, and return correct offset
         assert_eq!(new_offset, line.len() as u64);
         assert_eq!(
@@ -836,8 +973,9 @@ mod tests {
     #[test]
     fn test_read_new_events_file_not_found() {
         let state = make_state();
+        let mut deduper = make_deduper();
         let path = std::path::PathBuf::from("/nonexistent/path/events.jsonl");
-        let new_offset = read_new_events(&path, 42, &state, None, None);
+        let new_offset = read_new_events(&path, 42, &state, None, None, &mut deduper);
         // Should return the same offset unchanged
         assert_eq!(new_offset, 42);
     }
@@ -845,6 +983,7 @@ mod tests {
     #[test]
     fn test_read_new_events_session_start_updates_registry() {
         let state = make_state();
+        let mut deduper = make_deduper();
         let registry = new_session_registry();
 
         let dir = tempfile::tempdir().unwrap();
@@ -852,13 +991,50 @@ mod tests {
         let line = "{\"type\":\"session-start\",\"agent\":\"arch-ctm\",\"sessionId\":\"sess-xyz\",\"processId\":999}\n";
         std::fs::write(&path, line.as_bytes()).unwrap();
 
-        let new_offset = read_new_events(&path, 0, &state, Some(&registry), None);
+        let new_offset = read_new_events(&path, 0, &state, Some(&registry), None, &mut deduper);
         assert_eq!(new_offset, line.len() as u64);
 
         let reg = registry.lock().unwrap();
         let record = reg.query("arch-ctm").expect("agent should be in registry");
         assert_eq!(record.session_id, "sess-xyz");
         assert_eq!(record.process_id, 999);
+    }
+
+    #[test]
+    fn test_duplicate_availability_event_idempotency_key_is_deduped() {
+        let state = make_state();
+        let mut deduper = make_deduper();
+        state.lock().unwrap().register_agent("arch-ctm");
+        state
+            .lock()
+            .unwrap()
+            .set_state("arch-ctm", AgentState::Active);
+
+        let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev","state":"idle","timestamp":"2026-03-01T00:00:00Z","idempotency_key":"dup-key"}"#;
+        process_hook_line(json, &state, None, None, &mut deduper);
+        assert_eq!(
+            state.lock().unwrap().get_state("arch-ctm"),
+            Some(AgentState::Idle)
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let elapsed_before = state
+            .lock()
+            .unwrap()
+            .time_since_transition("arch-ctm")
+            .expect("elapsed should exist");
+
+        process_hook_line(json, &state, None, None, &mut deduper);
+
+        let elapsed_after = state
+            .lock()
+            .unwrap()
+            .time_since_transition("arch-ctm")
+            .expect("elapsed should exist");
+        assert!(
+            elapsed_after >= elapsed_before,
+            "duplicate replay should not create a new transition"
+        );
     }
 
     // ── auto_update_member_session_id unit tests ──────────────────────────
@@ -1044,5 +1220,75 @@ mod tests {
 
         assert_eq!(after_a["members"][0]["sessionId"].as_str(), Some("new-a"));
         assert_eq!(after_b["members"][0]["sessionId"].as_str(), Some("old-b"));
+    }
+
+    // ── reconcile_tick convergence ────────────────────────────────────────
+
+    /// Verify that calling `read_new_events` directly (the same logic executed
+    /// by the 200 ms `reconcile_tick` arm inside `HookWatcher::run`) picks up
+    /// an event file and transitions agent state, independently of any
+    /// filesystem notification.
+    ///
+    /// This exercises the polling-fallback path: even when the OS-level
+    /// `notify` watcher drops a filesystem event, the periodic tick drives
+    /// convergence by re-reading the file at the current offset.
+    #[test]
+    fn test_reconcile_tick_drives_convergence_without_fs_event() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+
+        // Set up state tracker with agent in Busy state.
+        let state = make_state();
+        state.lock().unwrap().register_agent("arch-ctm");
+        state
+            .lock()
+            .unwrap()
+            .set_state("arch-ctm", AgentState::Active);
+
+        // Write an availability event directly — no HookWatcher running,
+        // no filesystem notification involved.
+        let line = "{\"type\":\"agent-turn-complete\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\",\
+                    \"state\":\"idle\",\"timestamp\":\"2026-03-01T12:00:00Z\",\
+                    \"idempotency_key\":\"atm-dev:arch-ctm:reconcile-tick-test\"}\n";
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(line.as_bytes()).unwrap();
+        }
+
+        // Simulate exactly what the reconcile_tick arm does: call
+        // read_new_events with the current offset (0).
+        let mut deduper = make_deduper();
+        let new_offset = read_new_events(&path, 0, &state, None, None, &mut deduper);
+
+        // Offset should have advanced past the line we wrote.
+        assert_eq!(
+            new_offset,
+            line.len() as u64,
+            "reconcile_tick read should consume the full event line"
+        );
+
+        // Agent must have transitioned to Idle via the polling path alone.
+        assert_eq!(
+            state.lock().unwrap().get_state("arch-ctm"),
+            Some(AgentState::Idle),
+            "reconcile_tick convergence: arch-ctm should be Idle after read_new_events call"
+        );
+
+        // A second reconcile_tick call with the advanced offset must be a
+        // no-op (idempotency_key deduplication).
+        let state_before_second = state.lock().unwrap().get_state("arch-ctm");
+        let new_offset2 = read_new_events(&path, new_offset, &state, None, None, &mut deduper);
+        assert_eq!(new_offset2, new_offset, "no new bytes at EOF");
+        assert_eq!(
+            state.lock().unwrap().get_state("arch-ctm"),
+            state_before_second,
+            "second reconcile_tick call must not alter state"
+        );
     }
 }
