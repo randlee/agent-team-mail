@@ -108,6 +108,48 @@ async fn read_all_responses(
     results
 }
 
+/// Read messages from the proxy, collecting all of them, until a response
+/// matching `target_id` is received (or the deadline elapses).
+///
+/// Unlike [`read_all_responses`], this helper is ID-targeted: it stops as
+/// soon as the expected response arrives rather than waiting for a fixed
+/// duration. This eliminates the two common flakiness patterns:
+///
+/// 1. **Premature termination** — a single per-message timeout firing before
+///    all messages have arrived causes `read_all_responses` to return early,
+///    missing later events.
+/// 2. **Message leakage** — leftover buffered messages from one logical
+///    exchange are then picked up by the next `read_response` call,
+///    corrupting the subsequent assertion.
+///
+/// All messages received before and including the target response are
+/// returned in arrival order.
+async fn collect_until_id(
+    reader: &mut BufReader<DuplexStream>,
+    target_id: serde_json::Value,
+    timeout_duration: Duration,
+) -> Vec<Value> {
+    let mut results = Vec::new();
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, read_response(reader)).await {
+            Ok(Some(msg)) => {
+                let is_target = msg.get("id") == Some(&target_id);
+                results.push(msg);
+                if is_target {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    results
+}
+
 /// Helper: run a proxy with a pair of duplex streams.
 ///
 /// Returns (write_end, read_end, join_handle) where:
@@ -279,7 +321,10 @@ async fn test_tools_list_preserves_codex_tools() {
 async fn test_multiple_synthetic_tools_count() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
-    // Spawn child
+    // Spawn child.  Use collect_until_id to drain ALL messages for this
+    // request (events + final response) before sending the next request.
+    // This prevents leftover buffered messages from leaking into the
+    // subsequent tools/list read, which was the primary flakiness vector.
     let codex_req = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -287,7 +332,7 @@ async fn test_multiple_synthetic_tools_count() {
         "params": {"name": "codex", "arguments": {"prompt": "init"}}
     });
     send_newline(&mut writer, &codex_req).await;
-    let _ = read_all_responses(&mut reader, Duration::from_secs(5)).await;
+    let _ = collect_until_id(&mut reader, json!(1), Duration::from_secs(15)).await;
 
     let list_req = json!({
         "jsonrpc": "2.0",
@@ -296,8 +341,13 @@ async fn test_multiple_synthetic_tools_count() {
     });
     send_newline(&mut writer, &list_req).await;
 
-    let resp = read_response(&mut reader)
-        .await
+    // Wait specifically for the id:30 response — discards any stray
+    // notifications rather than relying on a raw read_response that might
+    // pick up a leftover message from the previous exchange.
+    let all = collect_until_id(&mut reader, json!(30), Duration::from_secs(10)).await;
+    let resp = all
+        .into_iter()
+        .find(|r| r.get("id") == Some(&json!(30)))
         .expect("tools/list response");
     let tools = resp["result"]["tools"].as_array().expect("tools array");
 
@@ -597,7 +647,9 @@ async fn test_timeout_includes_proxy_source() {
 async fn test_codex_event_forwarded_to_upstream() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
-    // Codex call triggers 2 events before the response
+    // Codex call triggers 2 events before the response.
+    // Use collect_until_id so we don't stop early due to per-message
+    // buffering races on slow CI machines.
     let req = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -606,7 +658,10 @@ async fn test_codex_event_forwarded_to_upstream() {
     });
     send_newline(&mut writer, &req).await;
 
-    let responses = read_all_responses(&mut reader, Duration::from_secs(5)).await;
+    // Collect everything up to and including the id:1 response.  This
+    // guarantees we see all notifications emitted before the final reply
+    // rather than stopping at an arbitrary time boundary.
+    let responses = collect_until_id(&mut reader, json!(1), Duration::from_secs(15)).await;
 
     let events: Vec<&Value> = responses
         .iter()
