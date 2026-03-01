@@ -4,6 +4,7 @@
 //! from it; the refresh loop writes to it. No I/O is performed in this module.
 
 use agent_team_mail_core::daemon_client::AgentSummary;
+use agent_team_mail_core::schema::InboxMessage;
 use std::path::PathBuf;
 
 use crate::config::TuiConfig;
@@ -47,6 +48,13 @@ pub enum PendingControl {
         decision: String,
         text: Option<String>,
     },
+    /// Mark an inbox message as read for the selected agent.
+    MarkInboxRead {
+        agent: String,
+        message_id: Option<String>,
+        from: String,
+        timestamp: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +83,12 @@ pub struct App {
     pub members: Vec<MemberRow>,
     /// Recent inbox message previews for the selected agent.
     pub inbox_preview: Vec<String>,
+    /// Recent inbox messages for the selected agent (newest first).
+    pub inbox_messages: Vec<InboxMessage>,
+    /// Index into [`inbox_messages`](Self::inbox_messages).
+    pub selected_message_index: usize,
+    /// Whether the inbox detail view is open for the selected message.
+    pub inbox_detail_open: bool,
     /// Index into [`members`](Self::members) of the currently selected agent.
     pub selected_index: usize,
     /// Raw agent list returned by the daemon `list-agents` command.
@@ -193,6 +207,9 @@ impl App {
             team,
             members: Vec::new(),
             inbox_preview: Vec::new(),
+            inbox_messages: Vec::new(),
+            selected_message_index: 0,
+            inbox_detail_open: false,
             selected_index: 0,
             agent_list: Vec::new(),
             stream_lines: Vec::new(),
@@ -243,6 +260,11 @@ impl App {
             .map(|r| r.agent.as_str())
     }
 
+    /// Return the currently selected inbox message, if any.
+    pub fn selected_message(&self) -> Option<&InboxMessage> {
+        self.inbox_messages.get(self.selected_message_index)
+    }
+
     /// Move selection up one row (wraps).
     pub fn select_previous(&mut self) {
         if self.members.is_empty() {
@@ -261,6 +283,26 @@ impl App {
             return;
         }
         self.selected_index = (self.selected_index + 1) % self.members.len();
+    }
+
+    /// Move selected inbox message down one row (wraps).
+    pub fn select_next_message(&mut self) {
+        if self.inbox_messages.is_empty() {
+            return;
+        }
+        self.selected_message_index = (self.selected_message_index + 1) % self.inbox_messages.len();
+    }
+
+    /// Move selected inbox message up one row (wraps).
+    pub fn select_previous_message(&mut self) {
+        if self.inbox_messages.is_empty() {
+            return;
+        }
+        if self.selected_message_index == 0 {
+            self.selected_message_index = self.inbox_messages.len() - 1;
+        } else {
+            self.selected_message_index -= 1;
+        }
     }
 
     /// Cycle focus: Dashboard → AgentTerminal → LogViewer → Dashboard.

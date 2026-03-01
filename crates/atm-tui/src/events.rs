@@ -287,9 +287,47 @@ fn handle_agent_terminal_key(code: &KeyCode, modifiers: &KeyModifiers, app: &mut
 /// The Dashboard currently has no compose workflow: character input is ignored
 /// here. Navigation keys are handled globally before this function is reached.
 fn handle_dashboard_key(code: &KeyCode, app: &mut App) -> bool {
-    if let KeyCode::Char('q') = code {
-        app.should_quit = true;
-        return true;
+    match code {
+        KeyCode::Char('q') => {
+            app.should_quit = true;
+            return true;
+        }
+        KeyCode::Char('j') => {
+            app.select_next_message();
+            return false;
+        }
+        KeyCode::Char('k') => {
+            app.select_previous_message();
+            return false;
+        }
+        KeyCode::Enter => {
+            if app.selected_message().is_some() {
+                app.inbox_detail_open = true;
+            }
+            return false;
+        }
+        KeyCode::Esc => {
+            app.inbox_detail_open = false;
+            return false;
+        }
+        KeyCode::Char('r') => {
+            if let Some((message_id, from, timestamp)) = app.selected_message().map(|msg| {
+                (
+                    msg.message_id.clone(),
+                    msg.from.clone(),
+                    msg.timestamp.clone(),
+                )
+            }) {
+                app.pending_control = Some(PendingControl::MarkInboxRead {
+                    agent: app.selected_agent().unwrap_or_default().to_string(),
+                    message_id,
+                    from,
+                    timestamp,
+                });
+            }
+            return false;
+        }
+        _ => {}
     }
     false
 }
@@ -343,6 +381,32 @@ mod tests {
                 agent: "c".into(),
                 state: "idle".into(),
                 inbox_count: 2,
+            },
+        ];
+        app
+    }
+
+    fn app_with_inbox_messages() -> App {
+        let mut app = app_with_members();
+        app.selected_index = 0;
+        app.inbox_messages = vec![
+            agent_team_mail_core::schema::InboxMessage {
+                from: "team-lead".to_string(),
+                text: "review this change".to_string(),
+                timestamp: "2026-03-01T00:00:00Z".to_string(),
+                read: false,
+                summary: Some("review".to_string()),
+                message_id: Some("m-1".to_string()),
+                unknown_fields: std::collections::HashMap::new(),
+            },
+            agent_team_mail_core::schema::InboxMessage {
+                from: "arch-atm".to_string(),
+                text: "follow-up".to_string(),
+                timestamp: "2026-03-01T00:01:00Z".to_string(),
+                read: true,
+                summary: Some("follow-up".to_string()),
+                message_id: Some("m-2".to_string()),
+                unknown_fields: std::collections::HashMap::new(),
             },
         ];
         app
@@ -430,6 +494,39 @@ mod tests {
         let quit = handle_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE), &mut app);
         assert!(!quit);
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_dashboard_message_list_detail_mark_read_flow() {
+        let mut app = app_with_inbox_messages();
+        app.focus = FocusPanel::Dashboard;
+
+        // j selects next message in the inbox list.
+        assert!(!handle_event(
+            &key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut app
+        ));
+        assert_eq!(app.selected_message_index, 1);
+
+        // Enter opens detail view for selected message.
+        assert!(!handle_event(
+            &key_event(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app
+        ));
+        assert!(app.inbox_detail_open);
+
+        // r creates a mark-read pending action.
+        assert!(!handle_event(
+            &key_event(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut app
+        ));
+        assert!(
+            matches!(
+                app.pending_control,
+                Some(PendingControl::MarkInboxRead { .. })
+            ),
+            "expected mark-read pending control"
+        );
     }
 
     // ── Follow mode toggle ────────────────────────────────────────────────────
