@@ -13,6 +13,10 @@ mod util;
 use commands::Cli;
 
 fn main() {
+    // Enable daemon auto-start for daemon-backed ATM commands.
+    // SAFETY: process-local env mutation at startup before command execution.
+    unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "1") };
+
     let _guards = logging::init_unified(
         "atm",
         logging::UnifiedLogMode::ProducerFanIn {

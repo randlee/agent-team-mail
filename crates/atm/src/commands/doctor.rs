@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    daemon_is_running, daemon_pid_path, daemon_socket_path, query_list_agents, query_session_for_team,
+    daemon_is_running, daemon_pid_path, daemon_socket_path, query_list_agents,
+    query_session_for_team,
 };
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::schema::TeamConfig;
@@ -99,6 +100,9 @@ struct DoctorState {
 }
 
 pub fn execute(args: DoctorArgs) -> Result<()> {
+    // Prime daemon connectivity early so doctor reflects post-autostart health.
+    let _ = query_list_agents()?;
+
     let current_dir = std::env::current_dir()?;
     let home_dir = get_home_dir()?;
 
@@ -173,9 +177,15 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     findings.extend(check_config_runtime_drift(team, &args.team));
 
     // Check 6: unified log diagnostics
-    let (window_start, mode) = compute_log_window_start(home_dir, team, team_config.as_ref(), args)?;
+    let (window_start, mode) =
+        compute_log_window_start(home_dir, team, team_config.as_ref(), args)?;
     let window_end = now;
-    findings.extend(check_log_diagnostics(home_dir, window_start, window_end, args.errors_only));
+    findings.extend(check_log_diagnostics(
+        home_dir,
+        window_start,
+        window_end,
+        args.errors_only,
+    ));
 
     findings.sort_by_key(|f| match f.severity {
         Severity::Critical => 0,
@@ -218,8 +228,10 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     let running = daemon_is_running();
-    let socket_path = daemon_socket_path().unwrap_or_else(|_| home_dir.join(".claude/daemon/atm-daemon.sock"));
-    let pid_path = daemon_pid_path().unwrap_or_else(|_| home_dir.join(".claude/daemon/atm-daemon.pid"));
+    let socket_path =
+        daemon_socket_path().unwrap_or_else(|_| home_dir.join(".claude/daemon/atm-daemon.sock"));
+    let pid_path =
+        daemon_pid_path().unwrap_or_else(|_| home_dir.join(".claude/daemon/atm-daemon.pid"));
     let lock_path = home_dir.join(".config/atm/daemon.lock");
     let status_path = home_dir.join(".claude/daemon/status.json");
 
@@ -237,7 +249,10 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
             Severity::Warn,
             "daemon_health",
             "STALE_SOCKET",
-            format!("Socket exists but daemon not running: {}", socket_path.display()),
+            format!(
+                "Socket exists but daemon not running: {}",
+                socket_path.display()
+            ),
         ));
     }
 
@@ -246,7 +261,10 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
             Severity::Warn,
             "daemon_health",
             "SOCKET_MISSING",
-            format!("Daemon appears running but socket missing: {}", socket_path.display()),
+            format!(
+                "Daemon appears running but socket missing: {}",
+                socket_path.display()
+            ),
         ));
     }
 
@@ -449,7 +467,9 @@ fn check_log_diagnostics(
     let since_std = if delta < Duration::zero() {
         std::time::Duration::from_secs(0)
     } else {
-        delta.to_std().unwrap_or_else(|_| std::time::Duration::from_secs(0))
+        delta
+            .to_std()
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
     };
 
     let filter = LogFilter {
@@ -641,7 +661,8 @@ fn build_recommendations(team: &str, findings: &[Finding]) -> Vec<Recommendation
     if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") {
         recs.push(Recommendation {
             command: format!("atm register {team}"),
-            reason: "Refresh team-lead/session state before additional lifecycle actions".to_string(),
+            reason: "Refresh team-lead/session state before additional lifecycle actions"
+                .to_string(),
         });
     }
 
@@ -656,7 +677,10 @@ fn print_human(report: &DoctorReport) {
         "Findings: critical={} warn={} info={}",
         report.summary.counts.critical, report.summary.counts.warn, report.summary.counts.info
     );
-    println!("Log window: {} -> {} ({})", report.log_window.start, report.log_window.end, report.log_window.mode);
+    println!(
+        "Log window: {} -> {} ({})",
+        report.log_window.start, report.log_window.end, report.log_window.mode
+    );
     println!();
 
     if report.findings.is_empty() {
@@ -755,10 +779,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let team = "atm-dev";
         let mut state = DoctorState::default();
-        state.last_call_by_team.insert(
-            team.to_string(),
-            "2026-02-27T21:00:00Z".to_string(),
-        );
+        state
+            .last_call_by_team
+            .insert(team.to_string(), "2026-02-27T21:00:00Z".to_string());
         let state_path = tmp.path().join(".config/atm/doctor-state.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();

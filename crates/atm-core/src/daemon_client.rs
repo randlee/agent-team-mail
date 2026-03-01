@@ -764,10 +764,26 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
 
     let socket_path = daemon_socket_path()?;
 
-    // Attempt connection — return None if socket not present or connection refused
+    // First attempt connection directly.
     let stream = match UnixStream::connect(&socket_path) {
         Ok(s) => s,
-        Err(_) => return Ok(None),
+        Err(_) => {
+            // Optional daemon auto-start path, enabled by ATM_DAEMON_AUTOSTART.
+            if daemon_autostart_enabled() {
+                ensure_daemon_running_unix()?;
+                match UnixStream::connect(&socket_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        anyhow::bail!(
+                            "daemon auto-start attempted but socket remained unavailable at {}: {e}",
+                            socket_path.display()
+                        )
+                    }
+                }
+            } else {
+                return Ok(None);
+            }
+        }
     };
 
     // Set a short timeout so a stale/hung daemon does not block the CLI
@@ -799,6 +815,143 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
     };
 
     Ok(Some(response))
+}
+
+#[cfg(unix)]
+fn daemon_autostart_enabled() -> bool {
+    matches!(
+        std::env::var("ATM_DAEMON_AUTOSTART").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
+
+#[cfg(unix)]
+fn resolve_daemon_binary() -> std::ffi::OsString {
+    if let Some(override_bin) = std::env::var_os("ATM_DAEMON_BIN")
+        && !override_bin.is_empty()
+    {
+        return override_bin;
+    }
+
+    let mut name = std::ffi::OsString::from("atm-daemon");
+    if cfg!(windows) {
+        name.push(".exe");
+    }
+
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(dir) = current_exe.parent()
+    {
+        let sibling = dir.join(std::path::Path::new(&name));
+        if sibling.exists() {
+            return sibling.into_os_string();
+        }
+    }
+
+    name
+}
+
+#[cfg(unix)]
+fn ensure_daemon_running_unix() -> anyhow::Result<()> {
+    use crate::io::InboxError;
+    use std::io::ErrorKind;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    if daemon_is_running() {
+        return Ok(());
+    }
+
+    let home = crate::home::get_home_dir()?;
+    cleanup_stale_daemon_runtime_files(&home);
+
+    let startup_lock_path = home.join(".config/atm/daemon-start.lock");
+    if let Some(parent) = startup_lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Serialize daemon startup across concurrent CLI processes.
+    let _startup_lock = match crate::io::lock::acquire_lock(&startup_lock_path, 3) {
+        Ok(lock) => Some(lock),
+        Err(InboxError::LockTimeout { .. }) => None,
+        Err(e) => anyhow::bail!(
+            "failed to acquire daemon startup lock {}: {e}",
+            startup_lock_path.display()
+        ),
+    };
+
+    if daemon_is_running() || daemon_socket_connectable(&home) {
+        return Ok(());
+    }
+
+    let daemon_bin = resolve_daemon_binary();
+    let mut child = Command::new(&daemon_bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "failed to auto-start daemon: binary '{}' not found in PATH (or ATM_DAEMON_BIN override)",
+                    std::path::PathBuf::from(&daemon_bin).display()
+                )
+            } else {
+                anyhow::anyhow!(
+                    "failed to auto-start daemon via '{}': {e}",
+                    std::path::PathBuf::from(&daemon_bin).display()
+                )
+            }
+        })?;
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < deadline {
+        if daemon_is_running() || daemon_socket_connectable(&home) {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("daemon process exited during startup with status {status}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    anyhow::bail!(
+        "daemon startup timed out; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+        pid_path.exists(),
+        socket_path.exists(),
+        pid_path.display(),
+        socket_path.display()
+    )
+}
+
+#[cfg(unix)]
+fn daemon_socket_connectable(home: &std::path::Path) -> bool {
+    use std::os::unix::net::UnixStream;
+    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    UnixStream::connect(socket_path).is_ok()
+}
+
+#[cfg(unix)]
+fn cleanup_stale_daemon_runtime_files(home: &std::path::Path) {
+    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+
+    if pid_path.exists() {
+        let stale_pid = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .map(|pid| !pid_alive(pid))
+            .unwrap_or(true);
+        if stale_pid {
+            let _ = std::fs::remove_file(&pid_path);
+        }
+    }
+
+    // Remove stale socket only when daemon is clearly not alive.
+    if socket_path.exists() && !daemon_is_running() && !daemon_socket_connectable(home) {
+        let _ = std::fs::remove_file(&socket_path);
+    }
 }
 
 #[cfg(unix)]
@@ -910,6 +1063,7 @@ fn pid_alive(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_socket_request_serialization() {
@@ -985,6 +1139,150 @@ mod tests {
         let result = query_daemon(&req);
         assert!(result.is_ok());
         // If daemon happens to be running, we just check the call didn't panic.
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_daemon_autostart_flag_parsing() {
+        let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "1") };
+        assert!(daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "true") };
+        assert!(daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "0") };
+        assert!(!daemon_autostart_enabled());
+
+        // SAFETY: serialized env mutation in test.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_resolve_daemon_binary_honors_override() {
+        let old = std::env::var("ATM_DAEMON_BIN").ok();
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_BIN", "/tmp/custom-atm-daemon") };
+        let resolved = resolve_daemon_binary();
+        assert_eq!(
+            std::path::PathBuf::from(resolved),
+            std::path::PathBuf::from("/tmp/custom-atm-daemon")
+        );
+        // SAFETY: serialized env mutation in test.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_runtime_files_removes_dead_pid_file() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+
+        let pid_path = daemon_dir.join("atm-daemon.pid");
+        fs::write(&pid_path, "999999\n").unwrap();
+        assert!(pid_path.exists());
+
+        cleanup_stale_daemon_runtime_files(home);
+        assert!(
+            !pid_path.exists(),
+            "stale PID file should be removed when PID is not alive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_serializes_concurrent_start() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let script_path = home.join("fake-daemon.sh");
+
+        let script = r#"#!/bin/sh
+set -eu
+home="${ATM_HOME:?}"
+mkdir -p "$home/.claude/daemon"
+mkdir -p "$home/spawn-markers"
+touch "$home/spawn-markers/spawn.$$"
+echo $$ > "$home/.claude/daemon/atm-daemon.pid"
+sleep 2
+"#;
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_BIN", &script_path);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+
+        let mut handles = Vec::new();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        for _ in 0..2 {
+            let b = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                b.wait();
+                ensure_daemon_running_unix().unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let count = fs::read_dir(home.join("spawn-markers"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .count();
+        assert_eq!(
+            count, 1,
+            "concurrent startup attempts should spawn at most one daemon process"
+        );
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
     }
 
     #[test]
