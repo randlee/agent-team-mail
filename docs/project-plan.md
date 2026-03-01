@@ -978,6 +978,8 @@ Old R.1. Deferred for further design review. The flow risks disrupting active no
 
 ### T.2 — Agent roster seeding + state transitions consolidation *(bug fix, [#182](https://github.com/randlee/agent-team-mail/issues/182), [#183](https://github.com/randlee/agent-team-mail/issues/183))*
 
+> **Note**: T.2 and T.3 were combined into a single sprint execution. Issue #183 (agent state never transitions) was originally planned as T.3 but was folded into T.2 due to the tight coupling between roster seeding and state transition logic. The sprint table reflects this consolidation — T.3 does not appear as a separate entry.
+
 **Problem**: Agent roster is not seeded from team `config.json` on daemon startup. Daemon starts with empty roster even when agents are configured. The daemon's filesystem watcher watches `inboxes/` but ignores `config.json`, so member adds/removes are invisible to the daemon.
 
 **Deliverables**:
