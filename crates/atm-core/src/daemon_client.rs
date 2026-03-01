@@ -1229,13 +1229,13 @@ mod tests {
     #[serial]
     fn test_resolve_daemon_binary_honors_override() {
         let old = std::env::var("ATM_DAEMON_BIN").ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("custom-atm-daemon");
+        std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
         // SAFETY: serialized env mutation in test.
-        unsafe { std::env::set_var("ATM_DAEMON_BIN", "/tmp/custom-atm-daemon") };
+        unsafe { std::env::set_var("ATM_DAEMON_BIN", &custom) };
         let resolved = resolve_daemon_binary();
-        assert_eq!(
-            std::path::PathBuf::from(resolved),
-            std::path::PathBuf::from("/tmp/custom-atm-daemon")
-        );
+        assert_eq!(std::path::PathBuf::from(resolved), custom);
         // SAFETY: serialized env mutation in test.
         unsafe {
             match old {
