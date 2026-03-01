@@ -114,6 +114,83 @@ pub fn read_inbox_preview(home: &Path, team: &str, agent: &str, max_items: usize
         .collect()
 }
 
+/// Read recent inbox messages for an agent (newest first).
+pub fn read_inbox_messages(
+    home: &Path,
+    team: &str,
+    agent: &str,
+    max_items: usize,
+) -> Vec<InboxMessage> {
+    let inbox_path = home
+        .join(".claude/teams")
+        .join(team)
+        .join("inboxes")
+        .join(format!("{agent}.json"));
+    let lock_path = inbox_path.with_extension("lock");
+    let _lock = match acquire_lock(&lock_path, 5) {
+        Ok(lock) => lock,
+        Err(_) => return Vec::new(),
+    };
+    let content = match std::fs::read(&inbox_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let messages: Vec<InboxMessage> = match serde_json::from_slice(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    messages.into_iter().rev().take(max_items).collect()
+}
+
+/// Mark a message as read in an agent inbox file.
+///
+/// Returns:
+/// - `Ok(true)` when message read-state changed from unread -> read.
+/// - `Ok(false)` when target message was already read or not found.
+/// - `Err(...)` on lock/read/parse/write failure.
+pub fn mark_inbox_message_read(
+    home: &Path,
+    team: &str,
+    agent: &str,
+    message_id: Option<&str>,
+    from: &str,
+    timestamp: &str,
+) -> Result<bool, String> {
+    let inbox_path = home
+        .join(".claude/teams")
+        .join(team)
+        .join("inboxes")
+        .join(format!("{agent}.json"));
+    let lock_path = inbox_path.with_extension("lock");
+    let _lock = acquire_lock(&lock_path, 5).map_err(|e| format!("lock failed: {e}"))?;
+    let content = std::fs::read(&inbox_path).map_err(|e| format!("read failed: {e}"))?;
+    let mut messages: Vec<InboxMessage> =
+        serde_json::from_slice(&content).map_err(|e| format!("parse failed: {e}"))?;
+
+    let mut changed = false;
+    for msg in &mut messages {
+        let is_match = if let Some(mid) = message_id {
+            msg.message_id.as_deref() == Some(mid)
+        } else {
+            msg.from == from && msg.timestamp == timestamp
+        };
+        if is_match {
+            if !msg.read {
+                msg.read = true;
+                changed = true;
+            }
+            break;
+        }
+    }
+
+    if changed {
+        let payload =
+            serde_json::to_vec_pretty(&messages).map_err(|e| format!("serialize failed: {e}"))?;
+        std::fs::write(&inbox_path, payload).map_err(|e| format!("write failed: {e}"))?;
+    }
+    Ok(changed)
+}
+
 /// Construct the expected path for an agent's raw Claude Code session transcript.
 ///
 /// This path is consumed by the **Agent Terminal** panel to display the raw
@@ -252,6 +329,54 @@ mod tests {
 
             let preview = read_inbox_preview(home, "atm-dev", "arch-ctm", 2);
             assert_eq!(preview, vec!["c: three", "b: two"]);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_read_inbox_messages_returns_recent_first() {
+        with_tmp_home(|home| {
+            let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");
+            fs::create_dir_all(&inbox_dir).unwrap();
+            fs::write(
+                inbox_dir.join("arch-ctm.json"),
+                r#"[{"from":"a","text":"one","timestamp":"2026-01-01T00:00:00Z","read":false},{"from":"b","text":"two","timestamp":"2026-01-01T00:00:01Z","read":true},{"from":"c","text":"three","timestamp":"2026-01-01T00:00:02Z","read":false}]"#,
+            )
+            .unwrap();
+
+            let messages = read_inbox_messages(home, "atm-dev", "arch-ctm", 2);
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[0].from, "c");
+            assert_eq!(messages[1].from, "b");
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_mark_inbox_message_read_updates_file() {
+        with_tmp_home(|home| {
+            let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");
+            fs::create_dir_all(&inbox_dir).unwrap();
+            fs::write(
+                inbox_dir.join("arch-ctm.json"),
+                r#"[{"from":"a","text":"one","timestamp":"2026-01-01T00:00:00Z","read":false,"message_id":"m1"},{"from":"b","text":"two","timestamp":"2026-01-01T00:00:01Z","read":false,"message_id":"m2"}]"#,
+            )
+            .unwrap();
+
+            let changed = mark_inbox_message_read(
+                home,
+                "atm-dev",
+                "arch-ctm",
+                Some("m2"),
+                "b",
+                "2026-01-01T00:00:01Z",
+            )
+            .unwrap();
+            assert!(changed);
+
+            let after = read_inbox_messages(home, "atm-dev", "arch-ctm", 10);
+            let marked = after.iter().find(|m| m.message_id.as_deref() == Some("m2"));
+            assert!(marked.is_some_and(|m| m.read));
         });
     }
 }
