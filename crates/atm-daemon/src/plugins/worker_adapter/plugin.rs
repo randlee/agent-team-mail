@@ -524,7 +524,7 @@ impl WorkerAdapterPlugin {
         // Mark agent as Busy now that we've sent a message
         {
             let mut state = self.agent_state.lock().unwrap();
-            state.set_state(&member_name, AgentState::Busy);
+            state.set_state(&member_name, AgentState::Active);
         }
 
         // Record activity after successful message send
@@ -714,9 +714,9 @@ impl WorkerAdapterPlugin {
                 // PID is gone — transition to Killed if not already
                 let mut state = self.agent_state.lock().unwrap();
                 let current = state.get_state(&member_name);
-                if !matches!(current, Some(AgentState::Killed) | None) {
+                if !matches!(current, Some(AgentState::Offline) | None) {
                     warn!("Worker {member_name} PID gone — marking as Killed");
-                    state.set_state(&member_name, AgentState::Killed);
+                    state.set_state(&member_name, AgentState::Offline);
                 }
             }
         }
@@ -903,7 +903,7 @@ impl WorkerAdapterPlugin {
         {
             let mut state = self.agent_state.lock().unwrap();
             state.register_agent(&config.agent);
-            state.set_state(&config.agent, AgentState::Launching);
+            state.set_state(&config.agent, AgentState::Unknown);
         }
         self.workers.insert(config.agent.clone(), handle.clone());
 
@@ -1011,7 +1011,7 @@ impl WorkerAdapterPlugin {
                 .unwrap()
                 .get_state(&config.agent)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| "launching".to_string())
+                .unwrap_or_else(|| "unknown".to_string())
         };
 
         let mut warnings = Vec::new();

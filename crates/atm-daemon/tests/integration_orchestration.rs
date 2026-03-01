@@ -43,17 +43,17 @@ fn test_state_tracker_lifecycle() {
     assert!(tracker.get_state("arch-ctm").is_some());
 
     // Transition through valid states
-    tracker.set_state("arch-ctm", AgentState::Launching);
-    assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Launching));
+    tracker.set_state("arch-ctm", AgentState::Unknown);
+    assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Unknown));
 
-    tracker.set_state("arch-ctm", AgentState::Busy);
-    assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Busy));
+    tracker.set_state("arch-ctm", AgentState::Active);
+    assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Active));
 
     tracker.set_state("arch-ctm", AgentState::Idle);
     assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
 
-    tracker.set_state("arch-ctm", AgentState::Killed);
-    assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Killed));
+    tracker.set_state("arch-ctm", AgentState::Offline);
+    assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Offline));
 }
 
 #[test]
@@ -65,15 +65,15 @@ fn test_state_tracker_multiple_agents() {
     tracker.register_agent("agent-c");
 
     tracker.set_state("agent-a", AgentState::Idle);
-    tracker.set_state("agent-b", AgentState::Busy);
-    tracker.set_state("agent-c", AgentState::Launching);
+    tracker.set_state("agent-b", AgentState::Active);
+    tracker.set_state("agent-c", AgentState::Unknown);
 
     let states = tracker.all_states();
     assert_eq!(states.len(), 3);
 
     assert_eq!(tracker.get_state("agent-a"), Some(AgentState::Idle));
-    assert_eq!(tracker.get_state("agent-b"), Some(AgentState::Busy));
-    assert_eq!(tracker.get_state("agent-c"), Some(AgentState::Launching));
+    assert_eq!(tracker.get_state("agent-b"), Some(AgentState::Active));
+    assert_eq!(tracker.get_state("agent-c"), Some(AgentState::Unknown));
 }
 
 #[test]
@@ -515,8 +515,8 @@ fn test_pubsub_no_match_for_different_event() {
         .subscribe("team-lead", "arch-ctm", vec!["idle".to_string()])
         .unwrap();
 
-    // subscribed to "idle" but querying "busy"
-    let matches = pubsub.matching_subscribers("arch-ctm", "busy");
+    // subscribed to "idle" but querying "active"
+    let matches = pubsub.matching_subscribers("arch-ctm", "active");
     assert!(matches.is_empty());
 }
 
