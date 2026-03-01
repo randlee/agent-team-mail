@@ -404,7 +404,9 @@ fn render_parsed_line(parsed: &ParsedLine, max_width: usize) -> Vec<Line<'static
                 .add_modifier(Modifier::BOLD),
         ),
         RenderClass::MarkdownBullet => render_bullet_line(&parsed.body, max_width),
-        RenderClass::ReasoningSectionBreak => render_reasoning_section_break(&parsed.body, max_width),
+        RenderClass::ReasoningSectionBreak => {
+            render_reasoning_section_break(&parsed.body, max_width)
+        }
         class => render_class_line(class, &parsed.body, max_width),
     }
 }
@@ -887,9 +889,7 @@ fn render_spec(class: RenderClass, body: &str) -> RenderSpec {
         },
         RenderClass::StreamErrorFatal => RenderSpec {
             icon: "✖ ",
-            icon_style: Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            icon_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             label: "Fatal stream error ",
             label_style: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             body_style: Style::default().add_modifier(Modifier::BOLD),
