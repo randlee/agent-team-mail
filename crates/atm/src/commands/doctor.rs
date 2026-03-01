@@ -133,6 +133,22 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
     Ok(())
 }
 
+/// Build a doctor report JSON snapshot for monitor consumers.
+///
+/// This reuses the same evaluation path as `atm doctor` without terminal UI
+/// side effects, so monitor logic does not duplicate health checks.
+pub(crate) fn monitor_report_json(home_dir: &Path, team: &str) -> Result<serde_json::Value> {
+    let args = DoctorArgs {
+        team: Some(team.to_string()),
+        json: true,
+        since: None,
+        errors_only: false,
+        full: false,
+    };
+    let report = build_report(home_dir, team, &args)?;
+    Ok(serde_json::to_value(report)?)
+}
+
 fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<DoctorReport> {
     let now = Utc::now();
     let team_dir = home_dir.join(".claude/teams").join(team);
