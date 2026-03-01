@@ -1126,13 +1126,13 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 
 | Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
-| T.1 | Daemon auto-start on CLI usage | — | M | PLANNED | [#181](https://github.com/randlee/agent-team-mail/issues/181) |
-| T.2 | Agent roster seeding + state transitions | T.1 | M | PLANNED | [#182](https://github.com/randlee/agent-team-mail/issues/182), [#183](https://github.com/randlee/agent-team-mail/issues/183) |
+| T.1 | Daemon auto-start on CLI usage | — | M | COMPLETE | [#181](https://github.com/randlee/agent-team-mail/issues/181) — PR #288 |
+| T.2 | Agent roster seeding + state transitions | T.1 | M | COMPLETE | [#182](https://github.com/randlee/agent-team-mail/issues/182), [#183](https://github.com/randlee/agent-team-mail/issues/183) — PR #289 |
 | T.4 | TUI panel consistency (stdin fix) | T.2 | S | COMPLETE | [#184](https://github.com/randlee/agent-team-mail/issues/184) — delivered in T.6 combined sprint (PR #299) |
 | T.5 | TUI message viewing | T.1 | M | COMPLETE | [#185](https://github.com/randlee/agent-team-mail/issues/185) — delivered in T.6 combined sprint (PR #299) |
 | T.5a | CLI crate publishability hardening | T.2 | S | COMPLETE | [#284](https://github.com/randlee/agent-team-mail/issues/284) |
 | T.6 | TUI coverage closure (#184 + #185 + #187) | — | M | COMPLETE | [#184](https://github.com/randlee/agent-team-mail/issues/184), [#185](https://github.com/randlee/agent-team-mail/issues/185), [#187](https://github.com/randlee/agent-team-mail/issues/187) — PR #299 |
-| T.7 | Permanent publishing process hardening + strengthened `publisher` role | T.5a | S | PLANNED | — |
+| T.7 | Permanent publishing process hardening + strengthened `publisher` role | T.5a | S | COMPLETE | — PR #298 |
 | T.8 | `atm teams resume` session handoff | S.1 | M | PLANNED | — |
 | T.9 | OpenCode baseline adapter | S.1 | L | DEFERRED | — |
 | T.5b | Operational health agent / continuous doctor | T.2 | M | COMPLETE | — |
