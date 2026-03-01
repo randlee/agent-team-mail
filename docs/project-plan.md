@@ -1029,9 +1029,32 @@ numbering confusion.
 5. Display ATM version in TUI header bar, sourced from compile-time `CARGO_PKG_VERSION` — *from #187*.
 6. Test coverage closure for all three issues via TUI test harness.
 
-### T.7 — `atm init --check` + upgrade validation *(was S.2b)*
+### T.7 — Permanent publishing process hardening + strengthened `publisher` role
 
-Moved from Phase S. See S.2b description above.
+**Problem**: Release publication checks and evidence are not yet enforced as a
+single permanent process gate across all future releases.
+
+**Deliverables**:
+1. Strengthen `publisher` role responsibilities as the permanent release-quality
+   gate owner (pre-publish audit, inventory completeness, post-publish
+   verification evidence, residual risk reporting).
+2. Require a formal release inventory per release with required fields:
+   artifact identifier, version, source reference, publish target, verification
+   command(s), and required/optional status.
+3. Require post-publish verification for every required inventory item, with
+   pass/fail evidence and remediation notes for failures.
+4. Define completion gating: release is complete only when all required
+   inventory items verify or explicit waivers are documented with approver and
+   rationale.
+5. Document this as default publishing procedure for subsequent releases.
+
+**Acceptance criteria**:
+- Missing required inventory fields, duplicate entries, or non-deterministic
+  ordering fail release readiness validation.
+- Required artifact verification failures block release completion unless waiver
+  criteria are met.
+- Publisher report includes audit summary, inventory location, verification
+  outcomes, and residual risk list.
 
 ### T.8 — `atm teams resume` session handoff *(was S.4)*
 
@@ -1107,11 +1130,12 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.2 | Agent roster seeding + state transitions | T.1 | M | PLANNED | [#182](https://github.com/randlee/agent-team-mail/issues/182), [#183](https://github.com/randlee/agent-team-mail/issues/183) |
 | T.4 | TUI panel consistency (stdin fix) | T.2 | S | COMPLETE | [#184](https://github.com/randlee/agent-team-mail/issues/184) — delivered in T.6 combined sprint (PR #299) |
 | T.5 | TUI message viewing | T.1 | M | COMPLETE | [#185](https://github.com/randlee/agent-team-mail/issues/185) — delivered in T.6 combined sprint (PR #299) |
-| T.6 | TUI coverage closure (#184 + #185 + #187) | — | M | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184), [#185](https://github.com/randlee/agent-team-mail/issues/185), [#187](https://github.com/randlee/agent-team-mail/issues/187) |
-| T.7 | `atm init --check` + upgrade validation | S.2a | S | PLANNED | — |
+| T.5a | CLI crate publishability hardening | T.2 | S | COMPLETE | [#284](https://github.com/randlee/agent-team-mail/issues/284) |
+| T.6 | TUI coverage closure (#184 + #185 + #187) | — | M | COMPLETE | [#184](https://github.com/randlee/agent-team-mail/issues/184), [#185](https://github.com/randlee/agent-team-mail/issues/185), [#187](https://github.com/randlee/agent-team-mail/issues/187) — PR #299 |
+| T.7 | Permanent publishing process hardening + strengthened `publisher` role | T.5a | S | PLANNED | — |
 | T.8 | `atm teams resume` session handoff | S.1 | M | PLANNED | — |
 | T.9 | OpenCode baseline adapter | S.1 | L | DEFERRED | — |
-| T.5b | Operational health agent / continuous doctor | T.2, T.3 | M | COMPLETE | — |
+| T.5b | Operational health agent / continuous doctor | T.2 | M | COMPLETE | — |
 | T.5c | Availability signaling clarification | T.2 | S | COMPLETE | [#46](https://github.com/randlee/agent-team-mail/issues/46), [#47](https://github.com/randlee/agent-team-mail/issues/47) |
 | T.11 | Tmux Sentinel Injection | — | M | PLANNED | [#45](https://github.com/randlee/agent-team-mail/issues/45) |
 | T.12 | Codex Idle Detection via Notify Hook *(superseded by T.5c)* | — | M | SUPERSEDED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |

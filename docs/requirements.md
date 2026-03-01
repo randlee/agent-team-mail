@@ -1594,11 +1594,24 @@ Required constraints:
   - package manifest validation,
   - build from packaged sources,
   - version installability check (`cargo install` path for released version).
+- Every release must produce a machine-readable artifact inventory that includes,
+  at minimum, artifact identifier, version, source reference, publish target,
+  and verification command(s).
+- Post-publish verification must run for every required inventory item and record
+  pass/fail evidence for each item.
+- Release completion is permitted only when all required inventory items verify
+  successfully, or when explicit waivers are recorded with approver and reason.
+- The publishing process above is the default release procedure for all future
+  releases, not a one-off phase policy.
 
 Acceptance checks:
 - `cargo package` and `cargo publish --dry-run` succeed for CLI crate in CI.
 - Simulated publish failure causes workflow failure (non-zero overall status).
 - Post-release install validation resolves the expected CLI version.
+- Inventory validation fails when required fields are missing, artifact entries
+  are duplicated, or ordering is non-deterministic.
+- Post-publish verification failure for any required item fails the release gate
+  unless a documented waiver is present.
 
 ### 4.9 Team Hook Setup (`atm init`)
 

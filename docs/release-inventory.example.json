@@ -1,0 +1,74 @@
+{
+  "releaseVersion": "0.25.0",
+  "releaseTag": "v0.25.0",
+  "releaseCommit": "0123456789abcdef0123456789abcdef01234567",
+  "generatedAt": "2026-03-01T00:00:00Z",
+  "items": [
+    {
+      "artifact": "agent-team-mail",
+      "version": "0.25.0",
+      "sourceRef": "refs/tags/v0.25.0",
+      "publishTarget": "crates.io",
+      "verifyCommands": [
+        "cargo publish -p agent-team-mail --dry-run --locked",
+        "cargo install agent-team-mail --version 0.25.0 --locked --force"
+      ],
+      "verification": {
+        "status": "pass",
+        "evidence": "release workflow logs"
+      }
+    },
+    {
+      "artifact": "agent-team-mail-core",
+      "version": "0.25.0",
+      "sourceRef": "refs/tags/v0.25.0",
+      "publishTarget": "crates.io",
+      "verifyCommands": [
+        "cargo publish -p agent-team-mail-core --dry-run --locked"
+      ],
+      "verification": {
+        "status": "pass",
+        "evidence": "release workflow logs"
+      }
+    },
+    {
+      "artifact": "agent-team-mail-daemon",
+      "version": "0.25.0",
+      "sourceRef": "refs/tags/v0.25.0",
+      "publishTarget": "crates.io",
+      "verifyCommands": [
+        "cargo publish -p agent-team-mail-daemon --dry-run --locked"
+      ],
+      "verification": {
+        "status": "pass",
+        "evidence": "release workflow logs"
+      }
+    },
+    {
+      "artifact": "agent-team-mail-mcp",
+      "version": "0.25.0",
+      "sourceRef": "refs/tags/v0.25.0",
+      "publishTarget": "crates.io",
+      "verifyCommands": [
+        "cargo publish -p agent-team-mail-mcp --dry-run --locked"
+      ],
+      "verification": {
+        "status": "pass",
+        "evidence": "release workflow logs"
+      }
+    },
+    {
+      "artifact": "agent-team-mail-tui",
+      "version": "0.25.0",
+      "sourceRef": "refs/tags/v0.25.0",
+      "publishTarget": "crates.io",
+      "verifyCommands": [
+        "cargo publish -p agent-team-mail-tui --dry-run --locked"
+      ],
+      "verification": {
+        "status": "pass",
+        "evidence": "release workflow logs"
+      }
+    }
+  ]
+}
