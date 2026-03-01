@@ -1187,6 +1187,31 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 - Daemon MUST NOT remove an existing socket file unless lock ownership has already
   been acquired by the current process.
 
+#### Team/Repo Isolation Contract
+
+Single daemon process does not imply shared team behavior. Runtime behavior must
+remain isolated per team/repo scope.
+
+Required isolation rules:
+- Team state is namespace-isolated by team identifier for:
+  - roster/session queries
+  - lifecycle state transitions
+  - inbox/mailbox integrity checks
+  - diagnostics findings and recommendations
+- Command scope defaults are single-team:
+  - `atm broadcast` targets one team only (resolved team scope), never all teams.
+  - `atm doctor` analyzes one team by default.
+- Cross-team/global operations must be explicit opt-in flags and must not be
+  implicit side effects.
+- Repo-scoped plugin/state data must remain isolated by repo/root context.
+- No cross-team data bleed in outputs (`status`, `doctor`, `logs` filters) when
+  command scope is a single team.
+
+Scalability expectation:
+- Behavior for one team and many teams is semantically identical from the team
+  perspective (same correctness/isolation guarantees), independent of total
+  number of active teams.
+
 #### Required Acceptance Checks
 
 - Starting a second daemon while one is healthy must fail immediately with an
