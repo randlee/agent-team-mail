@@ -992,10 +992,6 @@ Old R.1. Deferred for further design review. The flow risks disrupting active no
 - Adding a member to config.json (e.g. via `atm teams add-member`) is reflected in daemon roster within one watch cycle.
 - Removing a member from config.json triggers mailbox cleanup (or at minimum flags the orphan).
 
-### T.3 — Reserved
-
-State transition work from #183 is consolidated into T.2 for Phase T execution.
-
 ### T.4 — TUI panel consistency *(bug fix, [#184](https://github.com/randlee/agent-team-mail/issues/184))*
 
 **Problem**: TUI right panel status contradicts left panel + stream panel empty.
@@ -1094,14 +1090,13 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 |--------|------|------------|------|--------|-------|
 | T.1 | Daemon auto-start on CLI usage | — | M | PLANNED | [#181](https://github.com/randlee/agent-team-mail/issues/181) |
 | T.2 | Agent roster seeding + state transitions | T.1 | M | PLANNED | [#182](https://github.com/randlee/agent-team-mail/issues/182), [#183](https://github.com/randlee/agent-team-mail/issues/183) |
-| T.3 | Reserved (consolidated into T.2) | T.1 | XS | PLANNED | [#183](https://github.com/randlee/agent-team-mail/issues/183) |
-| T.4 | TUI panel consistency (stdin fix) | T.3 | S | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184) |
+| T.4 | TUI panel consistency (stdin fix) | T.2 | S | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184) |
 | T.5 | TUI message viewing | T.1 | M | PLANNED | [#185](https://github.com/randlee/agent-team-mail/issues/185) |
 | T.6 | TUI header version | — | XS | PLANNED | [#187](https://github.com/randlee/agent-team-mail/issues/187) |
 | T.7 | `atm init --check` + upgrade validation | S.2a | S | PLANNED | — |
 | T.8 | `atm teams resume` session handoff | S.1 | M | PLANNED | — |
 | T.9 | OpenCode baseline adapter | S.1 | L | DEFERRED | — |
-| T.10 | Operational health agent / continuous doctor | T.2, T.3 | M | PLANNED | — |
+| T.10 | Operational health agent / continuous doctor | T.2 | M | PLANNED | — |
 | T.11 | Tmux Sentinel Injection | — | M | PLANNED | [#45](https://github.com/randlee/agent-team-mail/issues/45) |
 | T.12 | Codex Idle Detection via Notify Hook | — | M | PLANNED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
 | T.13 | Ephemeral Pub/Sub for Agent Availability | — | M | PLANNED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
