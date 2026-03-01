@@ -283,6 +283,8 @@ sprints/releases through the existing `publisher` team-member role
 - Documented source-of-truth ownership: daemon state is authoritative.
 - Hook events and pub/sub roles are explicitly bounded.
 - Event payload contract includes idempotency key and required fields.
+- Availability payload fields are explicitly named and validated:
+  `agent`, `team`, `state`, `timestamp`, `idempotency_key`.
 
 ### Test Matrix
 
