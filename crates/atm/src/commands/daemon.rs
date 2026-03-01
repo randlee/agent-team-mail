@@ -135,19 +135,34 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
     } else {
         #[cfg(unix)]
         {
-            // SAFETY: SIGKILL force-terminates process that ignored prior shutdown attempts.
-            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+            // SAFETY: SIGTERM requests cooperative shutdown after SIGINT timeout.
+            let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
         }
-        if wait_for_session_dead(team_name, agent, 3) {
+        if wait_for_session_dead(team_name, agent, 10) {
             crate::commands::teams::cleanup_single_agent(
                 team_name.to_string(),
                 agent.to_string(),
                 true,
             )?;
-            println!("SIGKILL termination + teardown cleanup complete for {agent}@{team_name}");
+            println!("SIGTERM termination + teardown cleanup complete for {agent}@{team_name}");
             Ok(())
         } else {
-            anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+            #[cfg(unix)]
+            {
+                // SAFETY: SIGKILL force-terminates process that ignored prior shutdown attempts.
+                let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            if wait_for_session_dead(team_name, agent, 3) {
+                crate::commands::teams::cleanup_single_agent(
+                    team_name.to_string(),
+                    agent.to_string(),
+                    true,
+                )?;
+                println!("SIGKILL termination + teardown cleanup complete for {agent}@{team_name}");
+                Ok(())
+            } else {
+                anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+            }
         }
     }
 }

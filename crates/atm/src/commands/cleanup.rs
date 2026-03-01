@@ -181,14 +181,21 @@ fn execute_agent_cleanup(
                     if !wait_for_session_dead(team_name, agent_name, 10) {
                         #[cfg(unix)]
                         {
-                            // SAFETY: SIGKILL force-terminates process after graceful attempts.
-                            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+                            // SAFETY: SIGTERM requests cooperative shutdown after SIGINT timeout.
+                            let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
                         }
-                        if !wait_for_session_dead(team_name, agent_name, 3) {
-                            anyhow::bail!(
-                                "failed to terminate '{}' within timeout; cleanup aborted",
-                                agent_name
-                            );
+                        if !wait_for_session_dead(team_name, agent_name, 10) {
+                            #[cfg(unix)]
+                            {
+                                // SAFETY: SIGKILL force-terminates process after graceful attempts.
+                                let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+                            }
+                            if !wait_for_session_dead(team_name, agent_name, 3) {
+                                anyhow::bail!(
+                                    "failed to terminate '{}' within timeout; cleanup aborted",
+                                    agent_name
+                                );
+                            }
                         }
                     }
                 }
