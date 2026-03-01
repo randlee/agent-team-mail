@@ -88,12 +88,20 @@ pub struct AgentPaneInfo {
     pub log_path: PathBuf,
 }
 
+/// Human-readable transition metadata for troubleshooting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionMeta {
+    pub reason: String,
+    pub source: String,
+}
+
 /// Tracks per-agent turn-level state.
 ///
 /// Thread-safe via external `Arc<Mutex<AgentStateTracker>>` wrapping.
 pub struct AgentStateTracker {
     states: HashMap<String, AgentState>,
     last_transition: HashMap<String, Instant>,
+    transition_meta: HashMap<String, TransitionMeta>,
     /// Pane and log path information per agent, stored for socket queries.
     pane_info: HashMap<String, AgentPaneInfo>,
 }
@@ -104,13 +112,19 @@ impl AgentStateTracker {
         Self {
             states: HashMap::new(),
             last_transition: HashMap::new(),
+            transition_meta: HashMap::new(),
             pane_info: HashMap::new(),
         }
     }
 
     /// Register a newly spawned agent in `Launching` state.
     pub fn register_agent(&mut self, agent_id: &str) {
-        self.set_state_inner(agent_id, AgentState::Launching);
+        self.set_state_inner(
+            agent_id,
+            AgentState::Launching,
+            "initial registration",
+            "daemon",
+        );
         debug!("Agent {agent_id} registered (state: Launching)");
     }
 
@@ -118,24 +132,47 @@ impl AgentStateTracker {
     pub fn unregister_agent(&mut self, agent_id: &str) {
         self.states.remove(agent_id);
         self.last_transition.remove(agent_id);
+        self.transition_meta.remove(agent_id);
         self.pane_info.remove(agent_id);
         debug!("Agent {agent_id} unregistered from state tracker");
     }
 
     /// Transition an agent to a new state, logging the transition at DEBUG.
     pub fn set_state(&mut self, agent_id: &str, new_state: AgentState) {
+        self.set_state_with_context(agent_id, new_state, "unspecified", "daemon");
+    }
+
+    /// Transition an agent with explicit reason/source metadata.
+    pub fn set_state_with_context(
+        &mut self,
+        agent_id: &str,
+        new_state: AgentState,
+        reason: &str,
+        source: &str,
+    ) {
         let old = self.states.get(agent_id).copied();
-        self.set_state_inner(agent_id, new_state);
+        self.set_state_inner(agent_id, new_state, reason, source);
         match old {
-            Some(old_state) => debug!("Agent {agent_id}: {old_state} → {new_state}"),
-            None => debug!("Agent {agent_id}: (new) → {new_state}"),
+            Some(old_state) => debug!(
+                "Agent {agent_id}: {old_state} → {new_state} (reason={reason}, source={source})"
+            ),
+            None => debug!(
+                "Agent {agent_id}: (new) → {new_state} (reason={reason}, source={source})"
+            ),
         }
     }
 
-    fn set_state_inner(&mut self, agent_id: &str, state: AgentState) {
+    fn set_state_inner(&mut self, agent_id: &str, state: AgentState, reason: &str, source: &str) {
         self.states.insert(agent_id.to_string(), state);
         self.last_transition
             .insert(agent_id.to_string(), Instant::now());
+        self.transition_meta.insert(
+            agent_id.to_string(),
+            TransitionMeta {
+                reason: reason.to_string(),
+                source: source.to_string(),
+            },
+        );
     }
 
     /// Get the current state of an agent.
@@ -146,6 +183,11 @@ impl AgentStateTracker {
     /// Get the duration since the last state transition for an agent.
     pub fn time_since_transition(&self, agent_id: &str) -> Option<std::time::Duration> {
         self.last_transition.get(agent_id).map(|t| t.elapsed())
+    }
+
+    /// Get transition metadata for an agent.
+    pub fn transition_meta(&self, agent_id: &str) -> Option<&TransitionMeta> {
+        self.transition_meta.get(agent_id)
     }
 
     /// Snapshot of all current agent states.

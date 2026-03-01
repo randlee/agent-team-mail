@@ -38,7 +38,7 @@ pub mod tmux_sender;
 pub mod trait_def;
 
 pub use activity::ActivityTracker;
-pub use agent_state::{AgentPaneInfo, AgentState, AgentStateTracker};
+pub use agent_state::{AgentPaneInfo, AgentState, AgentStateTracker, TransitionMeta};
 pub use capture::{CaptureConfig, CapturedResponse, LogTailer};
 pub use codex_tmux::CodexTmuxBackend;
 pub use config::{AgentConfig, DEFAULT_COMMAND, DEFAULT_NUDGE_TEXT, NudgeConfig, WorkersConfig};

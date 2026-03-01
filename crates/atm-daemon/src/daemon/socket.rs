@@ -1025,8 +1025,22 @@ async fn handle_hook_event_command(
                 .upsert_for_team(&team, &agent, &session_id, pid);
             {
                 let mut tracker = state_store.lock().unwrap();
-                if tracker.get_state(&agent).is_none() {
+                let current = tracker.get_state(&agent);
+                if current.is_none() {
                     tracker.register_agent(&agent);
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Busy,
+                        "session_start lifecycle",
+                        "hook_event",
+                    );
+                } else if matches!(current, Some(AgentState::Killed | AgentState::Launching)) {
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Busy,
+                        "session_start lifecycle revive",
+                        "hook_event",
+                    );
                 }
             }
             info!(agent = %agent, session_id = %session_id, "hook_event.session_start");
@@ -1035,10 +1049,20 @@ async fn handle_hook_event_command(
             {
                 let mut tracker = state_store.lock().unwrap();
                 if tracker.get_state(&agent).is_some() {
-                    tracker.set_state(&agent, AgentState::Idle);
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Idle,
+                        "teammate_idle lifecycle",
+                        "hook_event",
+                    );
                 } else {
                     tracker.register_agent(&agent);
-                    tracker.set_state(&agent, AgentState::Idle);
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Idle,
+                        "teammate_idle lifecycle (auto-register)",
+                        "hook_event",
+                    );
                 }
             }
             info!("hook_event teammate_idle: agent={agent}");
@@ -1059,7 +1083,12 @@ async fn handle_hook_event_command(
             {
                 let mut tracker = state_store.lock().unwrap();
                 if tracker.get_state(&agent).is_some() {
-                    tracker.set_state(&agent, AgentState::Killed);
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Killed,
+                        "session_end lifecycle",
+                        "hook_event",
+                    );
                 }
             }
             info!("hook_event session_end: agent={agent}");
@@ -1718,8 +1747,8 @@ fn parse_and_dispatch(
     }
 
     let response = match request.command.as_str() {
-        "agent-state" => handle_agent_state(&request, state_store),
-        "list-agents" => handle_list_agents(&request, state_store),
+        "agent-state" => handle_agent_state(&request, state_store, session_registry),
+        "list-agents" => handle_list_agents(&request, state_store, session_registry),
         "agent-pane" => handle_agent_pane(&request, state_store),
         "subscribe" => handle_subscribe(&request, pubsub_store),
         "unsubscribe" => handle_unsubscribe(&request, pubsub_store),
@@ -1945,6 +1974,7 @@ fn handle_session_query_team(
 fn handle_agent_state(
     request: &agent_team_mail_core::daemon_client::SocketRequest,
     state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
 ) -> SocketResponse {
     let agent = request
         .payload
@@ -1961,27 +1991,77 @@ fn handle_agent_state(
         );
     }
 
-    let tracker = state_store.lock().unwrap();
-    match tracker.get_state(&agent) {
-        Some(state) => {
-            let last_transition = tracker
-                .time_since_transition(&agent)
-                .map(format_elapsed_as_iso8601);
+    let team = request
+        .payload
+        .get("team")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if team.is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'team'",
+        );
+    }
 
-            make_ok_response(
+    let home = match agent_team_mail_core::home::get_home_dir() {
+        Ok(h) => h,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INTERNAL_ERROR",
+                &format!("Failed to resolve ATM home: {e}"),
+            );
+        }
+    };
+    let tracker = state_store.lock().unwrap();
+    let tracker_state = tracker.get_state(&agent);
+    let last_transition = tracker
+        .time_since_transition(&agent)
+        .map(format_elapsed_as_iso8601);
+    let tracker_meta = tracker.transition_meta(&agent).cloned();
+    drop(tracker);
+
+    let Some(member) = load_team_member(&home, &team, &agent) else {
+        return match tracker_state {
+            Some(state) => make_ok_response(
                 &request.request_id,
                 serde_json::json!({
                     "state": state.to_string(),
                     "last_transition": last_transition,
+                    "reason": tracker_meta.as_ref().map(|m| m.reason.clone()).unwrap_or_else(|| "tracker-only fallback".to_string()),
+                    "source": tracker_meta.as_ref().map(|m| m.source.clone()).unwrap_or_else(|| "state_tracker".to_string()),
                 }),
-            )
-        }
-        None => make_error_response(
-            &request.request_id,
-            "AGENT_NOT_FOUND",
-            &format!("Agent '{agent}' is not tracked"),
-        ),
-    }
+            ),
+            None => make_error_response(
+                &request.request_id,
+                "AGENT_NOT_FOUND",
+                &format!("Agent '{agent}' is not in team '{team}'"),
+            ),
+        };
+    };
+
+    let session = session_registry.lock().unwrap().query_for_team(&team, &agent).cloned();
+    let (canonical_state, reason, source) =
+        derive_canonical_state(&member, tracker_state, session.as_ref(), tracker_meta.as_ref());
+
+    let output_state = if canonical_state == "offline" && matches!(tracker_state, Some(AgentState::Killed)) {
+        "killed"
+    } else {
+        canonical_state
+    };
+
+    make_ok_response(
+        &request.request_id,
+        serde_json::json!({
+            "state": output_state,
+            "baseline_state": canonical_state,
+            "last_transition": last_transition,
+            "reason": reason,
+            "source": source,
+        }),
+    )
 }
 
 /// Handle the `list-agents` command.
@@ -1991,20 +2071,167 @@ fn handle_agent_state(
 fn handle_list_agents(
     request: &agent_team_mail_core::daemon_client::SocketRequest,
     state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
 ) -> SocketResponse {
+    let team = request.payload.get("team").and_then(|v| v.as_str());
+    if let Some(team_name) = team {
+        let home = match agent_team_mail_core::home::get_home_dir() {
+            Ok(h) => h,
+            Err(e) => {
+                return make_error_response(
+                    &request.request_id,
+                    "INTERNAL_ERROR",
+                    &format!("Failed to resolve ATM home: {e}"),
+                );
+            }
+        };
+        let members = load_team_members(&home, team_name).unwrap_or_default();
+        let tracker = state_store.lock().unwrap();
+        let session_guard = session_registry.lock().unwrap();
+        let agents: Vec<serde_json::Value> = members
+            .into_iter()
+            .map(|m| {
+                let tracker_state = tracker.get_state(&m.name);
+                let tracker_meta = tracker.transition_meta(&m.name);
+                let session = session_guard.query_for_team(team_name, &m.name);
+                let (state, reason, source) =
+                    derive_canonical_state(&m, tracker_state, session, tracker_meta);
+                serde_json::json!({
+                    "agent": m.name,
+                    "state": state,
+                    "reason": reason,
+                    "source": source,
+                })
+            })
+            .collect();
+        return make_ok_response(&request.request_id, serde_json::json!(agents));
+    }
+
     let tracker = state_store.lock().unwrap();
     let agents: Vec<serde_json::Value> = tracker
         .all_states()
-        .into_iter()
-        .map(|(agent, state)| {
-            serde_json::json!({
-                "agent": agent,
-                "state": state.to_string(),
-            })
+        .into_keys()
+        .map(|agent| {
+            let state = tracker
+                .get_state(&agent)
+                .map(|s| match s {
+                    AgentState::Idle => "idle",
+                    AgentState::Killed => "offline",
+                    AgentState::Busy => "active",
+                    AgentState::Launching => "unknown",
+                })
+                .unwrap_or("unknown");
+            serde_json::json!({ "agent": agent, "state": state })
         })
         .collect();
-
     make_ok_response(&request.request_id, serde_json::json!(agents))
+}
+
+fn load_team_members(home: &std::path::Path, team: &str) -> Option<Vec<agent_team_mail_core::schema::AgentMember>> {
+    let config_path = home.join(".claude/teams").join(team).join("config.json");
+    let content = std::fs::read_to_string(config_path).ok()?;
+    let config: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(&content).ok()?;
+    Some(config.members)
+}
+
+fn load_team_member(
+    home: &std::path::Path,
+    team: &str,
+    agent: &str,
+) -> Option<agent_team_mail_core::schema::AgentMember> {
+    let members = load_team_members(home, team)?;
+    members
+        .into_iter()
+        .find(|m| m.name == agent || m.agent_id == format!("{agent}@{team}"))
+}
+
+fn derive_canonical_state(
+    member: &agent_team_mail_core::schema::AgentMember,
+    tracker_state: Option<AgentState>,
+    session: Option<&crate::daemon::session_registry::SessionRecord>,
+    tracker_meta: Option<&crate::plugins::worker_adapter::TransitionMeta>,
+) -> (&'static str, String, String) {
+    if let Some(session) = session {
+        let session_alive = session.state == crate::daemon::session_registry::SessionState::Active
+            && session.is_process_alive();
+        if !session_alive {
+            return (
+                "offline",
+                "session inactive or pid dead".to_string(),
+                "session_registry".to_string(),
+            );
+        }
+        if matches!(tracker_state, Some(AgentState::Idle)) {
+            let reason = tracker_meta
+                .map(|m| m.reason.clone())
+                .unwrap_or_else(|| "idle lifecycle signal".to_string());
+            let source = tracker_meta
+                .map(|m| m.source.clone())
+                .unwrap_or_else(|| "hook_event".to_string());
+            return ("idle", reason, source);
+        }
+        return (
+            "active",
+            "session active with live pid".to_string(),
+            "session_registry".to_string(),
+        );
+    }
+
+    match tracker_state {
+        Some(AgentState::Idle) => (
+            "idle",
+            tracker_meta
+                .map(|m| m.reason.clone())
+                .unwrap_or_else(|| "idle tracker state".to_string()),
+            tracker_meta
+                .map(|m| m.source.clone())
+                .unwrap_or_else(|| "state_tracker".to_string()),
+        ),
+        Some(AgentState::Busy) => (
+            "active",
+            tracker_meta
+                .map(|m| m.reason.clone())
+                .unwrap_or_else(|| "busy tracker state".to_string()),
+            tracker_meta
+                .map(|m| m.source.clone())
+                .unwrap_or_else(|| "state_tracker".to_string()),
+        ),
+        Some(AgentState::Killed) => (
+            "offline",
+            tracker_meta
+                .map(|m| m.reason.clone())
+                .unwrap_or_else(|| "killed tracker state".to_string()),
+            tracker_meta
+                .map(|m| m.source.clone())
+                .unwrap_or_else(|| "state_tracker".to_string()),
+        ),
+        Some(AgentState::Launching) => (
+            "unknown",
+            tracker_meta
+                .map(|m| m.reason.clone())
+                .unwrap_or_else(|| "launching/no lifecycle yet".to_string()),
+            tracker_meta
+                .map(|m| m.source.clone())
+                .unwrap_or_else(|| "state_tracker".to_string()),
+        ),
+        None => match member.is_active {
+            Some(true) => (
+                "active",
+                "config isActive=true".to_string(),
+                "config".to_string(),
+            ),
+            Some(false) => (
+                "offline",
+                "config isActive=false".to_string(),
+                "config".to_string(),
+            ),
+            None => (
+                "unknown",
+                "no lifecycle/session evidence".to_string(),
+                "config".to_string(),
+            ),
+        },
+    }
 }
 
 /// Handle the `agent-pane` command.
@@ -2326,12 +2553,14 @@ mod tests {
 
     #[test]
     fn test_agent_state_not_found() {
+        let _fixture = setup_hook_auth_fixture("t", "team-lead", &["team-lead"]);
         let store = make_store();
+        let sr = make_sr();
         let req = make_request(
             "agent-state",
             serde_json::json!({"agent": "ghost", "team": "t"}),
         );
-        let resp = handle_agent_state(&req, &store);
+        let resp = handle_agent_state(&req, &store, &sr);
         assert_eq!(resp.status, "error");
         let err = resp.error.unwrap();
         assert_eq!(err.code, "AGENT_NOT_FOUND");
@@ -2341,7 +2570,9 @@ mod tests {
     fn test_agent_state_found() {
         use crate::plugins::worker_adapter::AgentState;
 
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
+        let sr = make_sr();
         {
             let mut tracker = store.lock().unwrap();
             tracker.register_agent("arch-ctm");
@@ -2352,7 +2583,7 @@ mod tests {
             "agent-state",
             serde_json::json!({"agent": "arch-ctm", "team": "atm-dev"}),
         );
-        let resp = handle_agent_state(&req, &store);
+        let resp = handle_agent_state(&req, &store, &sr);
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert_eq!(payload["state"].as_str().unwrap(), "idle");
@@ -2361,8 +2592,9 @@ mod tests {
     #[test]
     fn test_list_agents_empty() {
         let store = make_store();
+        let sr = make_sr();
         let req = make_request("list-agents", serde_json::json!({}));
-        let resp = handle_list_agents(&req, &store);
+        let resp = handle_list_agents(&req, &store, &sr);
         assert_eq!(resp.status, "ok");
         let agents = resp.payload.unwrap();
         assert!(agents.as_array().unwrap().is_empty());
@@ -2373,6 +2605,7 @@ mod tests {
         use crate::plugins::worker_adapter::AgentState;
 
         let store = make_store();
+        let sr = make_sr();
         {
             let mut tracker = store.lock().unwrap();
             tracker.register_agent("arch-ctm");
@@ -2381,7 +2614,7 @@ mod tests {
         }
 
         let req = make_request("list-agents", serde_json::json!({}));
-        let resp = handle_list_agents(&req, &store);
+        let resp = handle_list_agents(&req, &store, &sr);
         assert_eq!(resp.status, "ok");
         let agents = resp.payload.unwrap();
         let arr = agents.as_array().unwrap();
@@ -2472,8 +2705,9 @@ mod tests {
     #[test]
     fn test_agent_state_missing_agent_field() {
         let store = make_store();
+        let sr = make_sr();
         let req = make_request("agent-state", serde_json::json!({}));
-        let resp = handle_agent_state(&req, &store);
+        let resp = handle_agent_state(&req, &store, &sr);
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
     }

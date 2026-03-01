@@ -6,6 +6,7 @@ use crate::daemon::{
     SharedSessionRegistry, SharedStateStore, SharedStreamEventSender, graceful_shutdown,
     spool_drain_loop, start_socket_server, watch_inboxes,
 };
+use crate::plugins::worker_adapter::AgentState;
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
@@ -143,7 +144,7 @@ pub async fn run(
     let socket_cancel = cancel.clone();
     let _socket_server_handle = match start_socket_server(
         socket_home_dir,
-        state_store,
+        state_store.clone(),
         pubsub_store,
         launch_tx,
         session_registry.clone(),
@@ -348,8 +349,15 @@ pub async fn run(
     let reconcile_cancel = cancel.clone();
     let reconcile_ctx = ctx.clone();
     let reconcile_registry = session_registry.clone();
+    let reconcile_state_store = state_store.clone();
     let reconcile_task = tokio::spawn(async move {
-        reconcile_loop(reconcile_ctx, reconcile_registry, reconcile_cancel).await;
+        reconcile_loop(
+            reconcile_ctx,
+            reconcile_registry,
+            reconcile_state_store,
+            reconcile_cancel,
+        )
+        .await;
     });
 
     info!("Daemon event loop running. Waiting for cancellation signal...");
@@ -403,6 +411,7 @@ pub async fn run(
 async fn reconcile_loop(
     ctx: PluginContext,
     session_registry: SharedSessionRegistry,
+    state_store: SharedStateStore,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -414,8 +423,9 @@ async fn reconcile_loop(
             _ = interval.tick() => {
                 let claude_root = ctx.system.claude_root.clone();
                 let session_registry = session_registry.clone();
+                let state_store = state_store.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    reconcile_team_member_activity(&claude_root, &session_registry)
+                    reconcile_team_member_activity(&claude_root, &session_registry, &state_store)
                 }).await;
 
                 match result {
@@ -431,11 +441,14 @@ async fn reconcile_loop(
 fn reconcile_team_member_activity(
     claude_root: &std::path::Path,
     session_registry: &SharedSessionRegistry,
+    state_store: &SharedStateStore,
 ) -> Result<()> {
     let teams_root = claude_root.join("teams");
     if !teams_root.exists() {
         return Ok(());
     }
+
+    let mut desired_agent_names = std::collections::HashSet::new();
 
     for entry in std::fs::read_dir(&teams_root)? {
         let Ok(entry) = entry else { continue };
@@ -465,10 +478,39 @@ fn reconcile_team_member_activity(
         let team_name = config.name.clone();
         let mut changed = false;
         for member in &mut config.members {
+            desired_agent_names.insert(member.name.clone());
             let record = {
                 let reg = session_registry.lock().unwrap();
                 reg.query_for_team(&team_name, &member.name).cloned()
             };
+
+            {
+                // Keep daemon state store seeded from config and lifecycle truth.
+                let mut tracker = state_store.lock().unwrap();
+                if tracker.get_state(&member.name).is_none() {
+                    tracker.register_agent(&member.name);
+                }
+                match member.is_active {
+                    Some(false) => tracker.set_state_with_context(
+                        &member.name,
+                        AgentState::Killed,
+                        "config isActive=false",
+                        "config_watcher",
+                    ),
+                    Some(true) => tracker.set_state_with_context(
+                        &member.name,
+                        AgentState::Busy,
+                        "config isActive=true",
+                        "config_watcher",
+                    ),
+                    None => tracker.set_state_with_context(
+                        &member.name,
+                        AgentState::Launching,
+                        "config isActive missing",
+                        "config_watcher",
+                    ),
+                }
+            }
 
             let Some(record) = record else {
                 continue;
@@ -493,7 +535,19 @@ fn reconcile_team_member_activity(
 
                 if alive {
                     member.last_active = Some(now_ms);
+                    state_store.lock().unwrap().set_state_with_context(
+                        &member.name,
+                        AgentState::Busy,
+                        "session active + pid alive",
+                        "session_reconcile",
+                    );
                 } else if was_active {
+                    state_store.lock().unwrap().set_state_with_context(
+                        &member.name,
+                        AgentState::Killed,
+                        "pid not alive during reconcile",
+                        "session_reconcile",
+                    );
                     archive_member_inbox(&team_dir, &member.name)?;
                 }
             }
@@ -501,6 +555,17 @@ fn reconcile_team_member_activity(
 
         if changed {
             write_team_config_atomic(&config_path, &config)?;
+        }
+    }
+
+    // Remove state entries for members no longer present in team configs.
+    {
+        let mut tracker = state_store.lock().unwrap();
+        let tracked: Vec<String> = tracker.all_states().into_keys().collect();
+        for name in tracked {
+            if !desired_agent_names.contains(&name) {
+                tracker.unregister_agent(&name);
+            }
         }
     }
 
@@ -1014,9 +1079,13 @@ fn format_timestamp(time: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{InboxCursor, read_new_inbox_messages};
+    use super::{InboxCursor, read_new_inbox_messages, reconcile_team_member_activity};
+    use crate::daemon::session_registry::new_session_registry;
+    use crate::daemon::socket::new_state_store;
+    use crate::plugins::worker_adapter::AgentState;
     use agent_team_mail_core::schema::InboxMessage;
     use std::collections::HashMap;
+    use std::fs as stdfs;
     use tempfile::TempDir;
     use tokio::fs;
 
@@ -1120,5 +1189,117 @@ mod tests {
         let new_msgs = read_new_inbox_messages(&path, &mut cursor).await.unwrap();
         assert_eq!(new_msgs.len(), 1);
         assert_eq!(new_msgs[0].text, "first");
+    }
+
+    fn write_team_config(home: &std::path::Path, team: &str, members: serde_json::Value) {
+        let team_dir = home.join(".claude/teams").join(team);
+        stdfs::create_dir_all(&team_dir).unwrap();
+        let cfg = serde_json::json!({
+            "name": team,
+            "createdAt": 1739284800000u64,
+            "leadAgentId": format!("team-lead@{team}"),
+            "leadSessionId": "lead-session",
+            "members": members,
+        });
+        stdfs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string_pretty(&cfg).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_reconcile_seeds_state_store_from_config() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": "/tmp",
+                    "subscriptions": [],
+                    "isActive": true
+                },
+                {
+                    "agentId": "qa@atm-dev",
+                    "name": "qa",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": "/tmp",
+                    "subscriptions": []
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+
+        let tracker = state_store.lock().unwrap();
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Busy));
+        assert_eq!(tracker.get_state("qa"), Some(AgentState::Launching));
+    }
+
+    #[test]
+    fn test_reconcile_removes_deleted_member_from_state_store() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": "/tmp",
+                    "subscriptions": [],
+                    "isActive": true
+                },
+                {
+                    "agentId": "worker@atm-dev",
+                    "name": "worker",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": "/tmp",
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert!(state_store.lock().unwrap().get_state("worker").is_some());
+
+        // Remove worker from config and reconcile again.
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": "/tmp",
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert!(state_store.lock().unwrap().get_state("worker").is_none());
     }
 }

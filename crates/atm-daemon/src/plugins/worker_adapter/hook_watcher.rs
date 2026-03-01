@@ -365,12 +365,22 @@ fn apply_hook_event(
             // Transition Launching → Idle (first hook) or Busy → Idle.
             // Any registered state maps to Idle on AfterAgent.
             if tracker.get_state(&agent_id).is_some() {
-                tracker.set_state(&agent_id, AgentState::Idle);
+                tracker.set_state_with_context(
+                    &agent_id,
+                    AgentState::Idle,
+                    "agent-turn-complete hook",
+                    "hook_watcher",
+                );
             } else {
                 // Agent not yet registered — auto-register as Idle.
                 debug!("Auto-registering untracked agent {agent_id} as Idle");
                 tracker.register_agent(&agent_id);
-                tracker.set_state(&agent_id, AgentState::Idle);
+                tracker.set_state_with_context(
+                    &agent_id,
+                    AgentState::Idle,
+                    "agent-turn-complete hook (auto-register)",
+                    "hook_watcher",
+                );
             }
         }
         "session-start" => {
