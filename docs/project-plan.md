@@ -1012,13 +1012,17 @@ Old R.1. Deferred for further design review. The flow risks disrupting active no
 2. Message detail view with full content.
 3. Mark-as-read on view.
 
-### T.6 — TUI header version *(bug fix, [#187](https://github.com/randlee/agent-team-mail/issues/187))*
+### T.6 — TUI coverage closure *(combined sprint: [#184](https://github.com/randlee/agent-team-mail/issues/184) + [#185](https://github.com/randlee/agent-team-mail/issues/185) + [#187](https://github.com/randlee/agent-team-mail/issues/187))*
 
-**Problem**: TUI header missing version number.
+**Problem**: Three TUI issues delivered together: panel consistency (#184), message viewing (#185), and missing header version (#187). T.4 and T.5 deliverables were folded into this sprint (PR #299).
 
 **Deliverables**:
-1. Display ATM version in TUI header bar.
-2. Version sourced from compile-time `CARGO_PKG_VERSION`.
+1. Right panel state derived from same source as left panel (unified state store) — *from T.4 (#184)*.
+2. Stream panel shows live output when available — *from T.4 (#184)*.
+3. Message list view in TUI showing inbox messages — *from T.5 (#185)*.
+4. Message detail view with full content and mark-as-read on view — *from T.5 (#185)*.
+5. Display ATM version in TUI header bar, sourced from compile-time `CARGO_PKG_VERSION` — *from #187*.
+6. Test coverage closure for all three issues via TUI test harness.
 
 ### T.7 — `atm init --check` + upgrade validation *(was S.2b)*
 
@@ -1094,9 +1098,9 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 |--------|------|------------|------|--------|-------|
 | T.1 | Daemon auto-start on CLI usage | — | M | PLANNED | [#181](https://github.com/randlee/agent-team-mail/issues/181) |
 | T.2 | Agent roster seeding + state transitions | T.1 | M | PLANNED | [#182](https://github.com/randlee/agent-team-mail/issues/182), [#183](https://github.com/randlee/agent-team-mail/issues/183) |
-| T.4 | TUI panel consistency (stdin fix) | T.2 | S | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184) |
-| T.5 | TUI message viewing | T.1 | M | PLANNED | [#185](https://github.com/randlee/agent-team-mail/issues/185) |
-| T.6 | TUI header version | — | XS | PLANNED | [#187](https://github.com/randlee/agent-team-mail/issues/187) |
+| T.4 | TUI panel consistency (stdin fix) | T.2 | S | COMPLETE | [#184](https://github.com/randlee/agent-team-mail/issues/184) — delivered in T.6 combined sprint (PR #299) |
+| T.5 | TUI message viewing | T.1 | M | COMPLETE | [#185](https://github.com/randlee/agent-team-mail/issues/185) — delivered in T.6 combined sprint (PR #299) |
+| T.6 | TUI coverage closure (#184 + #185 + #187) | — | M | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184), [#185](https://github.com/randlee/agent-team-mail/issues/185), [#187](https://github.com/randlee/agent-team-mail/issues/187) |
 | T.7 | `atm init --check` + upgrade validation | S.2a | S | PLANNED | — |
 | T.8 | `atm teams resume` session handoff | S.1 | M | PLANNED | — |
 | T.9 | OpenCode baseline adapter | S.1 | L | DEFERRED | — |
