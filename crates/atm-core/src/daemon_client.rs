@@ -852,6 +852,7 @@ fn resolve_daemon_binary() -> std::ffi::OsString {
 
 #[cfg(unix)]
 fn ensure_daemon_running_unix() -> anyhow::Result<()> {
+    use crate::event_log::{EventFields, emit_event_best_effort};
     use crate::io::InboxError;
     use std::io::ErrorKind;
     use std::process::{Command, Stdio};
@@ -884,6 +885,14 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     }
 
     let daemon_bin = resolve_daemon_binary();
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "daemon_autostart_attempt",
+        result: Some("attempt".to_string()),
+        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        ..Default::default()
+    });
     let mut child = Command::new(&daemon_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -903,9 +912,17 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             }
         })?;
 
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if daemon_is_running() || daemon_socket_connectable(&home) {
+            emit_event_best_effort(EventFields {
+                level: "info",
+                source: "atm",
+                action: "daemon_autostart_success",
+                result: Some("ok".to_string()),
+                target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+                ..Default::default()
+            });
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
@@ -916,13 +933,23 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
 
     let socket_path = home.join(".claude/daemon/atm-daemon.sock");
     let pid_path = home.join(".claude/daemon/atm-daemon.pid");
-    anyhow::bail!(
-        "daemon startup timed out; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+    let timeout_error = format!(
+        "daemon startup timed out after 5s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
         pid_path.exists(),
         socket_path.exists(),
         pid_path.display(),
         socket_path.display()
-    )
+    );
+    emit_event_best_effort(EventFields {
+        level: "warn",
+        source: "atm",
+        action: "daemon_autostart_timeout",
+        result: Some("timeout".to_string()),
+        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        error: Some(timeout_error.clone()),
+        ..Default::default()
+    });
+    anyhow::bail!("{timeout_error}")
 }
 
 #[cfg(unix)]
@@ -937,20 +964,51 @@ fn cleanup_stale_daemon_runtime_files(home: &std::path::Path) {
     let socket_path = home.join(".claude/daemon/atm-daemon.sock");
     let pid_path = home.join(".claude/daemon/atm-daemon.pid");
 
-    if pid_path.exists() {
-        let stale_pid = std::fs::read_to_string(&pid_path)
-            .ok()
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .map(|pid| !pid_alive(pid))
-            .unwrap_or(true);
-        if stale_pid {
-            let _ = std::fs::remove_file(&pid_path);
-        }
+    let pid_state = read_daemon_pid_state(&pid_path);
+    if matches!(
+        pid_state,
+        PidState::Dead | PidState::Missing | PidState::Malformed
+    ) {
+        let _ = std::fs::remove_file(&pid_path);
     }
 
-    // Remove stale socket only when daemon is clearly not alive.
-    if socket_path.exists() && !daemon_is_running() && !daemon_socket_connectable(home) {
+    // Remove stale socket only when daemon ownership is known-dead.
+    let ownership_known_dead = matches!(
+        pid_state,
+        PidState::Dead | PidState::Missing | PidState::Malformed
+    );
+    if socket_path.exists() && ownership_known_dead && !daemon_socket_connectable(home) {
         let _ = std::fs::remove_file(&socket_path);
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PidState {
+    Missing,
+    Malformed,
+    Unreadable,
+    Dead,
+    Alive,
+}
+
+#[cfg(unix)]
+fn read_daemon_pid_state(pid_path: &std::path::Path) -> PidState {
+    if !pid_path.exists() {
+        return PidState::Missing;
+    }
+    let content = match std::fs::read_to_string(pid_path) {
+        Ok(s) => s,
+        Err(_) => return PidState::Unreadable,
+    };
+    let pid = match content.trim().parse::<i32>() {
+        Ok(pid) => pid,
+        Err(_) => return PidState::Malformed,
+    };
+    if pid_alive(pid) {
+        PidState::Alive
+    } else {
+        PidState::Dead
     }
 }
 
@@ -1207,6 +1265,125 @@ mod tests {
             !pid_path.exists(),
             "stale PID file should be removed when PID is not alive"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_runtime_files_handles_malformed_pid() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+
+        let pid_path = daemon_dir.join("atm-daemon.pid");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        fs::write(&pid_path, "not-a-pid\n").unwrap();
+        fs::write(&socket_path, "stale").unwrap();
+
+        cleanup_stale_daemon_runtime_files(home);
+
+        assert!(
+            !pid_path.exists(),
+            "malformed PID file should be removed during cleanup"
+        );
+        assert!(
+            !socket_path.exists(),
+            "stale socket should be removed when PID ownership is known-dead"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_runtime_files_unreadable_pid_does_not_remove_socket() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+
+        let pid_path = daemon_dir.join("atm-daemon.pid");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        fs::write(&pid_path, "123\n").unwrap();
+        fs::write(&socket_path, "stale").unwrap();
+        let mut perms = fs::metadata(&pid_path).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&pid_path, perms).unwrap();
+
+        cleanup_stale_daemon_runtime_files(home);
+        assert!(
+            socket_path.exists(),
+            "socket must not be removed when PID ownership cannot be read"
+        );
+
+        // Restore permissions so tempdir cleanup succeeds.
+        let mut restore = fs::metadata(&pid_path).unwrap().permissions();
+        restore.set_mode(0o600);
+        fs::set_permissions(&pid_path, restore).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_timeout_when_spawned_process_never_creates_runtime_files() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let script_path = home.join("fake-daemon-never-ready.sh");
+        let script = r#"#!/bin/sh
+set -eu
+sleep 10
+"#;
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_BIN", &script_path);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+
+        let err = ensure_daemon_running_unix().expect_err("startup should time out");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("daemon startup timed out after 5s"),
+            "timeout error should include actionable timeout details: {msg}"
+        );
+        assert!(
+            msg.contains("pid_path="),
+            "timeout error should include pid path"
+        );
+        assert!(
+            msg.contains("socket_path="),
+            "timeout error should include socket path"
+        );
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
     }
 
     #[cfg(unix)]
