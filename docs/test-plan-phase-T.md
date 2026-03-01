@@ -154,12 +154,14 @@ Phase T candidate execution order.
 
 ### Acceptance Criteria
 
+- `atm-monitor` runs as a background ATM teammate agent.
 - Monitor polls on interval and emits alerts for new critical findings.
 - Alert deduplication works within cooldown window.
 - Alerts contain severity/code/remediation context.
 - Health polling reuses the shared logging-health evaluator module; no health
   state computation logic is duplicated between `atm-monitor`, `atm doctor`,
   and `atm status` handlers.
+- Monitor sends ATM mail notifications to designated recipients when issues are detected.
 
 ### Test Matrix
 
@@ -167,6 +169,7 @@ Phase T candidate execution order.
   - dedupe window logic
   - finding diff logic
 - Integration:
+  - background teammate launch succeeds and polling loop remains active
   - injected daemon/session fault produces alert within 2 poll intervals
   - repeated fault within cooldown suppressed
   - fault clear + reintroduce produces new alert

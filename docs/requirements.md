@@ -718,11 +718,17 @@ ATM must support a continuous health monitor mode that detects and reports
 daemon/team regressions without manual polling.
 
 Required monitor behavior:
+- `atm-monitor` must operate as an ATM teammate agent (background-capable), not
+  only as an internal function call path.
+- As a teammate agent, it must be able to send ATM mail notifications to other
+  agents (for example `team-lead`) when actionable findings are detected.
 - Poll daemon/team health on a configurable interval (default: `60s`).
 - Consume the same checks as `atm doctor` and report only new findings by default.
 - Emit alerts via ATM messaging with severity, finding code, and remediation hint.
 - Deduplicate repeated alerts for the same finding within a configurable cooldown.
 - Preserve enough context in alerts to correlate back to unified logs.
+- It may reuse shared evaluator/software components, but agent behavior remains
+  the primary operational interface.
 
 Required monitor outputs:
 - Human-readable alert form for team operators.
@@ -733,6 +739,8 @@ Acceptance checks:
   two poll intervals.
 - Repeating the same fault within cooldown must not spam duplicate alerts.
 - Clearing and re-introducing the fault must emit a new alert.
+- Monitor can be launched as a background teammate and continues polling/sending
+  alerts without interactive prompting.
 
 ### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
 
