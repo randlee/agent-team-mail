@@ -175,6 +175,67 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Validate release inventory schema and example
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          schema_path = Path("docs/release-inventory-schema.json")
+          inventory_path = Path("docs/release-inventory.example.json")
+
+          schema = json.loads(schema_path.read_text(encoding="utf-8"))
+          inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+
+          required_top = ["releaseVersion", "releaseTag", "releaseCommit", "generatedAt", "items"]
+          for field in required_top:
+              if field not in inventory:
+                  raise SystemExit(f"inventory missing required top-level field: {field}")
+
+          items = inventory.get("items", [])
+          if not isinstance(items, list) or not items:
+              raise SystemExit("inventory.items must be a non-empty array")
+
+          required_item = ["artifact", "version", "sourceRef", "publishTarget", "verifyCommands"]
+          artifacts = []
+          for idx, item in enumerate(items):
+              if not isinstance(item, dict):
+                  raise SystemExit(f"inventory.items[{idx}] must be an object")
+              for field in required_item:
+                  if field not in item:
+                      raise SystemExit(f"inventory.items[{idx}] missing required field: {field}")
+              verify = item["verifyCommands"]
+              if not isinstance(verify, list) or not verify:
+                  raise SystemExit(f"inventory.items[{idx}].verifyCommands must be non-empty")
+              artifacts.append(item["artifact"])
+              waiver = item.get("waiver")
+              if waiver is not None:
+                  for wf in ["approver", "reason", "gateCheck"]:
+                      if not str(waiver.get(wf, "")).strip():
+                          raise SystemExit(
+                              f"inventory.items[{idx}].waiver.{wf} must be present and non-empty"
+                          )
+
+          if len(artifacts) != len(set(artifacts)):
+              raise SystemExit("inventory has duplicate artifact entries")
+          if artifacts != sorted(artifacts):
+              raise SystemExit("inventory items must be sorted by artifact for deterministic ordering")
+
+          # Ensure schema file itself exposes required item fields.
+          item_required = set(
+              schema["$defs"]["item"]["required"]
+          )
+          missing = set(required_item) - item_required
+          if missing:
+              raise SystemExit(
+                  f"schema missing required item fields: {', '.join(sorted(missing))}"
+              )
+
+          print("release inventory schema/example validation passed")
+          PY
+
       - name: Validate CLI crate packageability
         run: cargo package -p agent-team-mail --locked
 

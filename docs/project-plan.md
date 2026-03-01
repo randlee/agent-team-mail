@@ -1126,11 +1126,12 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.2 | Agent roster seeding + state transitions | T.1 | M | PLANNED | [#182](https://github.com/randlee/agent-team-mail/issues/182), [#183](https://github.com/randlee/agent-team-mail/issues/183) |
 | T.4 | TUI panel consistency (stdin fix) | T.2 | S | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184) |
 | T.5 | TUI message viewing | T.1 | M | PLANNED | [#185](https://github.com/randlee/agent-team-mail/issues/185) |
+| T.5a | CLI crate publishability hardening | T.2 | S | COMPLETE | [#284](https://github.com/randlee/agent-team-mail/issues/284) |
 | T.6 | TUI header version | — | XS | PLANNED | [#187](https://github.com/randlee/agent-team-mail/issues/187) |
 | T.7 | Permanent publishing process hardening + strengthened `publisher` role | T.5a | S | PLANNED | — |
 | T.8 | `atm teams resume` session handoff | S.1 | M | PLANNED | — |
 | T.9 | OpenCode baseline adapter | S.1 | L | DEFERRED | — |
-| T.5b | Operational health agent / continuous doctor | T.2, T.3 | M | COMPLETE | — |
+| T.5b | Operational health agent / continuous doctor | T.2 | M | COMPLETE | — |
 | T.5c | Availability signaling clarification | T.2 | S | COMPLETE | [#46](https://github.com/randlee/agent-team-mail/issues/46), [#47](https://github.com/randlee/agent-team-mail/issues/47) |
 | T.11 | Tmux Sentinel Injection | — | M | PLANNED | [#45](https://github.com/randlee/agent-team-mail/issues/45) |
 | T.12 | Codex Idle Detection via Notify Hook *(superseded by T.5c)* | — | M | SUPERSEDED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |

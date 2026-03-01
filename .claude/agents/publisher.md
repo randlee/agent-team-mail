@@ -54,6 +54,29 @@ If the gate fails: stop and report; do not workaround.
 - Homebrew formulas (`agent-team-mail.rb` and `atm.rb`) both match the released version and checksums.
 - Post-publish verification executed for every required inventory item, with
   pass/fail evidence and remediation notes for failures.
+- Waivers are allowed only when verification cannot pass for a required item;
+  each waiver must include approver, reason, and gate-check reference.
+
+## Waiver Record Format
+- Record waiver data directly in the machine-readable inventory entry:
+  - `waiver.approver` (required)
+  - `waiver.reason` (required)
+  - `waiver.gateCheck` (required, identifies which release gate was waived)
+- A waiver cannot be used to silently skip a failed check; the failed
+  verification and waiver must both be present in the release report.
+
+Example:
+```json
+{
+  "artifact": "agent-team-mail",
+  "verification": {"status": "fail", "evidence": "release job logs"},
+  "waiver": {
+    "approver": "team-lead",
+    "reason": "crates.io index outage during release window",
+    "gateCheck": "post_publish_verification"
+  }
+}
+```
 
 ## Communication
 - Receive tasks from `team-lead`.
@@ -64,11 +87,12 @@ If the gate fails: stop and report; do not workaround.
 - version
 - tag commit SHA
 - GitHub release URL
-- crates.io versions (all 4)
+- crates.io versions (all 5)
 - Homebrew commit SHA
 - pre-publish audit summary (scope/tests/requirements gaps)
 - artifact inventory location
 - post-publish verification summary
+- waiver summary (if any)
 - residual risks/issues
 
 ## Startup
