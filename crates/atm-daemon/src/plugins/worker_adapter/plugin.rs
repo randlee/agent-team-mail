@@ -242,6 +242,63 @@ impl WorkerAdapterPlugin {
             .join("home")
     }
 
+    fn resolve_runtime_session_id(
+        &self,
+        config: &LaunchConfig,
+        runtime: &str,
+    ) -> (String, &'static str, Option<String>) {
+        if let Some(explicit) = config
+            .resume_session_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return (explicit.to_string(), "resume", None);
+        }
+
+        if let Some(registry) = &self.session_registry
+            && let Some(record) = registry
+                .lock()
+                .unwrap()
+                .query_for_team(&config.team, &config.agent)
+                .cloned()
+        {
+            let runtime_matches = record.runtime.as_deref() == Some(runtime);
+            if runtime_matches {
+                if let Some(stored) = record
+                    .runtime_session_id
+                    .as_ref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    return (stored.to_string(), "resume", None);
+                }
+
+                return (
+                    format!("{runtime}-{}", Uuid::new_v4()),
+                    "fresh",
+                    Some(format!(
+                        "resume fallback: missing stored runtime_session_id for {}/{} ({runtime})",
+                        config.team, config.agent
+                    )),
+                );
+            }
+
+            return (
+                format!("{runtime}-{}", Uuid::new_v4()),
+                "fresh",
+                Some(format!(
+                    "resume fallback: stored runtime '{}' mismatch for {}/{}",
+                    record.runtime.unwrap_or_else(|| "unknown".to_string()),
+                    config.team,
+                    config.agent
+                )),
+            );
+        }
+
+        (format!("{runtime}-{}", Uuid::new_v4()), "fresh", None)
+    }
+
     fn resolve_team_name<'a>(
         &'a self,
         ctx: &'a PluginContext,
@@ -783,15 +840,8 @@ impl WorkerAdapterPlugin {
             .runtime
             .clone()
             .unwrap_or_else(|| "codex".to_string());
-        let spawn_mode = if config.resume_session_id.is_some() {
-            "resume"
-        } else {
-            "fresh"
-        };
-        let runtime_session_id = config
-            .resume_session_id
-            .clone()
-            .unwrap_or_else(|| format!("{runtime}-{}", Uuid::new_v4()));
+        let (runtime_session_id, spawn_mode, resume_warning) =
+            self.resolve_runtime_session_id(&config, &runtime);
 
         // Build env var map: ATM_IDENTITY + ATM_TEAM + extras
         let mut env_vars = config.env_vars.clone();
@@ -924,15 +974,16 @@ impl WorkerAdapterPlugin {
             tokio::time::sleep(poll_interval).await;
         }
 
-        let warning = if !reached_idle {
+        let readiness_warning = if !reached_idle {
+            let message = format!(
+                "Readiness timeout reached after {}s; agent may not be ready",
+                config.timeout_secs
+            );
             warn!(
                 "Agent '{}' did not reach Idle within {}s; proceeding with prompt send",
                 config.agent, config.timeout_secs
             );
-            Some(format!(
-                "Readiness timeout reached after {}s; agent may not be ready",
-                config.timeout_secs
-            ))
+            Some(message)
         } else {
             None
         };
@@ -963,11 +1014,23 @@ impl WorkerAdapterPlugin {
                 .unwrap_or_else(|| "launching".to_string())
         };
 
+        let mut warnings = Vec::new();
+        if let Some(w) = resume_warning {
+            warnings.push(w);
+        }
+        if let Some(w) = readiness_warning {
+            warnings.push(w);
+        }
+
         Ok(LaunchResult {
             agent: config.agent.clone(),
             pane_id,
             state: current_state,
-            warning,
+            warning: if warnings.is_empty() {
+                None
+            } else {
+                Some(warnings.join(" | "))
+            },
         })
     }
 
@@ -1617,6 +1680,221 @@ mod tests {
                 .query_for_team("atm-dev", "arch-ctm")
                 .is_none(),
             "registry must remain unchanged after launch failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_explicit_override_takes_precedence_over_registry() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        registry.lock().unwrap().upsert_runtime_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "sess-existing",
+            1234,
+            Some("gemini".to_string()),
+            Some("sess-existing".to_string()),
+            Some("%1".to_string()),
+            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+        );
+        plugin.set_session_registry(registry);
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --resume".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: Some("sess-override".to_string()),
+        };
+
+        let result = plugin.handle_launch(config).await.expect("launch succeeds");
+        assert!(
+            result
+                .warning
+                .as_deref()
+                .is_none_or(|w| !w.contains("resume fallback")),
+            "explicit override should not trigger resume fallback warning: {:?}",
+            result.warning
+        );
+
+        let env_vars = backend
+            .get_calls()
+            .into_iter()
+            .find_map(|c| match c {
+                MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+                _ => None,
+            })
+            .expect("spawn_with_env call must exist");
+        assert_eq!(
+            env_vars.get("ATM_RUNTIME_SESSION_ID").map(String::as_str),
+            Some("sess-override")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_defaults_to_registry_session_for_same_team_agent() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        registry.lock().unwrap().upsert_runtime_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "sess-existing",
+            1234,
+            Some("gemini".to_string()),
+            Some("sess-existing".to_string()),
+            Some("%1".to_string()),
+            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+        );
+        plugin.set_session_registry(registry);
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --resume".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: None,
+        };
+
+        let result = plugin.handle_launch(config).await.expect("launch succeeds");
+        assert!(
+            result
+                .warning
+                .as_deref()
+                .is_none_or(|w| !w.contains("resume fallback")),
+            "registry-based resume should not trigger fallback warning: {:?}",
+            result.warning
+        );
+
+        let env_vars = backend
+            .get_calls()
+            .into_iter()
+            .find_map(|c| match c {
+                MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+                _ => None,
+            })
+            .expect("spawn_with_env call must exist");
+        assert_eq!(
+            env_vars.get("ATM_RUNTIME_SESSION_ID").map(String::as_str),
+            Some("sess-existing")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_does_not_drift_to_session_from_other_runtime() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        registry.lock().unwrap().upsert_runtime_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "sess-codex",
+            1234,
+            Some("codex".to_string()),
+            Some("sess-codex".to_string()),
+            Some("%1".to_string()),
+            Some("/tmp/runtime/codex/atm-dev/arch-ctm/home".to_string()),
+        );
+        plugin.set_session_registry(registry);
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --resume".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: None,
+        };
+
+        let result = plugin.handle_launch(config).await.expect("launch succeeds");
+        let warning = result.warning.expect("fallback warning expected");
+        assert!(warning.contains("stored runtime"));
+
+        let env_vars = backend
+            .get_calls()
+            .into_iter()
+            .find_map(|c| match c {
+                MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+                _ => None,
+            })
+            .expect("spawn_with_env call must exist");
+        let chosen = env_vars
+            .get("ATM_RUNTIME_SESSION_ID")
+            .expect("runtime session env must be set");
+        assert_ne!(chosen, "sess-codex");
+        assert!(
+            chosen.starts_with("gemini-"),
+            "fallback must generate deterministic runtime-prefixed id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_missing_stored_session_id_falls_back_with_warning() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        registry.lock().unwrap().upsert_runtime_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "sess-no-runtime-id",
+            1234,
+            Some("gemini".to_string()),
+            None,
+            Some("%1".to_string()),
+            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+        );
+        plugin.set_session_registry(registry);
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --resume".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: None,
+        };
+
+        let result = plugin.handle_launch(config).await.expect("launch succeeds");
+        let warning = result.warning.expect("fallback warning expected");
+        assert!(warning.contains("missing stored runtime_session_id"));
+
+        let env_vars = backend
+            .get_calls()
+            .into_iter()
+            .find_map(|c| match c {
+                MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+                _ => None,
+            })
+            .expect("spawn_with_env call must exist");
+        let chosen = env_vars
+            .get("ATM_RUNTIME_SESSION_ID")
+            .expect("runtime session env must be set");
+        assert!(
+            chosen.starts_with("gemini-"),
+            "fallback must generate deterministic runtime-prefixed id"
         );
     }
 }
