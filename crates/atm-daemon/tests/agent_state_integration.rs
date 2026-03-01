@@ -240,7 +240,7 @@ async fn test_hook_watcher_duplicate_replay_does_not_double_transition() {
     state
         .lock()
         .unwrap()
-        .set_state("arch-ctm", AgentState::Busy);
+        .set_state("arch-ctm", AgentState::Active);
 
     let watcher = HookWatcher::new(events_path.clone(), Arc::clone(&state));
     let cancel = CancellationToken::new();
@@ -292,7 +292,7 @@ async fn test_hook_watcher_converges_without_pubsub_delivery() {
     state
         .lock()
         .unwrap()
-        .set_state("arch-ctm", AgentState::Busy);
+        .set_state("arch-ctm", AgentState::Active);
 
     let watcher = HookWatcher::new(events_path.clone(), Arc::clone(&state));
     let cancel = CancellationToken::new();

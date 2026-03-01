@@ -147,7 +147,7 @@ impl HookEvent {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| {
                 let turn = self.turn_id.as_deref().unwrap_or("no-turn");
-                format!("availability:{}:{}:{}:{}", team, agent, turn, timestamp)
+                format!("{}:{}:{}", team, agent, turn)
             });
 
         Some(AvailabilitySignal {
@@ -1008,7 +1008,7 @@ mod tests {
         state
             .lock()
             .unwrap()
-            .set_state("arch-ctm", AgentState::Busy);
+            .set_state("arch-ctm", AgentState::Active);
 
         let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev","state":"idle","timestamp":"2026-03-01T00:00:00Z","idempotency_key":"dup-key"}"#;
         process_hook_line(json, &state, None, None, &mut deduper);
@@ -1245,7 +1245,7 @@ mod tests {
         state
             .lock()
             .unwrap()
-            .set_state("arch-ctm", AgentState::Busy);
+            .set_state("arch-ctm", AgentState::Active);
 
         // Write an availability event directly — no HookWatcher running,
         // no filesystem notification involved.
