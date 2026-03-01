@@ -1780,6 +1780,41 @@ sleep 2
         assert!(!pid_alive(i32::MAX));
     }
 
+    /// When `ATM_DAEMON_BIN` is set to a nonexistent path, `ensure_daemon_running`
+    /// must return `Err` (spawn fails) rather than silently succeeding.
+    /// This confirms that the `ATM_DAEMON_BIN` env var is read by the public API.
+    ///
+    /// The test is skipped when a live daemon is already running to avoid
+    /// interfering with the running process.
+    ///
+    /// `#[serial]` is required because the test mutates the process environment.
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_reads_atm_daemon_bin() {
+        // Skip if a live daemon is already running.
+        if daemon_is_running() {
+            return;
+        }
+        unsafe {
+            std::env::set_var("ATM_DAEMON_BIN", "/nonexistent-bin-for-atm-test");
+        }
+        let result = ensure_daemon_running();
+        unsafe {
+            std::env::remove_var("ATM_DAEMON_BIN");
+        }
+        // On non-Unix the function is a no-op and always returns Ok(()).
+        #[cfg(unix)]
+        assert!(
+            result.is_err(),
+            "spawn of nonexistent binary must return Err on Unix"
+        );
+        #[cfg(not(unix))]
+        assert!(
+            result.is_ok(),
+            "ensure_daemon_running is a no-op on non-Unix"
+        );
+    }
+
     // ── LifecycleSource / LifecycleSourceKind ────────────────────────────────
 
     #[test]
