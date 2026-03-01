@@ -1110,8 +1110,8 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.5b | Operational health agent / continuous doctor | T.2, T.3 | M | COMPLETE | — |
 | T.5c | Availability signaling clarification | T.2 | S | COMPLETE | [#46](https://github.com/randlee/agent-team-mail/issues/46), [#47](https://github.com/randlee/agent-team-mail/issues/47) |
 | T.11 | Tmux Sentinel Injection | — | M | PLANNED | [#45](https://github.com/randlee/agent-team-mail/issues/45) |
-| T.12 | Codex Idle Detection via Notify Hook *(superseded by T.5c)* | — | M | PLANNED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
-| T.13 | Ephemeral Pub/Sub for Agent Availability *(superseded by T.5c)* | — | M | PLANNED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
+| T.12 | Codex Idle Detection via Notify Hook *(superseded by T.5c)* | — | M | SUPERSEDED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
+| T.13 | Ephemeral Pub/Sub for Agent Availability *(superseded by T.5c)* | — | M | SUPERSEDED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
 | T.14 | Gemini adapter resume flag fix | — | XS | COMPLETE (PR #297) | [#281](https://github.com/randlee/agent-team-mail/issues/281) |
 | T.15 | Gemini adapter end-to-end spawn wiring | T.14 | L | COMPLETE | [#282](https://github.com/randlee/agent-team-mail/issues/282) |
 | T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | PLANNED | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
