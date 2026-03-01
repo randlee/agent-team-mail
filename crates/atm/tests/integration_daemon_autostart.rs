@@ -1,14 +1,20 @@
-#![cfg(unix)]
-
 use assert_cmd::cargo;
+#[cfg(unix)]
 use serial_test::serial;
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
+#[cfg(unix)]
 use tempfile::TempDir;
 
+#[cfg(unix)]
 fn write_team_config(home: &Path, team: &str) {
     let team_dir = home.join(".claude/teams").join(team);
     let inboxes_dir = team_dir.join("inboxes");
@@ -38,6 +44,7 @@ fn write_team_config(home: &Path, team: &str) {
     .unwrap();
 }
 
+#[cfg(unix)]
 fn write_fake_daemon_script(home: &Path) -> PathBuf {
     let script = home.join("fake-daemon.py");
     let body = r#"#!/usr/bin/env python3
@@ -134,6 +141,7 @@ finally:
     script
 }
 
+#[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
     let socket = home.join(".claude/daemon/atm-daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -149,6 +157,7 @@ fn wait_for_daemon_socket(home: &Path) {
     );
 }
 
+#[cfg(unix)]
 fn spawn_count(home: &Path) -> usize {
     fs::read_dir(home.join("spawn-markers"))
         .ok()
@@ -158,6 +167,7 @@ fn spawn_count(home: &Path) -> usize {
         .count()
 }
 
+#[cfg(unix)]
 fn kill_pid_from_file(home: &Path) {
     let pid_path = home.join(".claude/daemon/atm-daemon.pid");
     if let Ok(content) = fs::read_to_string(pid_path)
@@ -169,6 +179,7 @@ fn kill_pid_from_file(home: &Path) {
 }
 
 #[test]
+#[cfg(unix)]
 #[serial]
 fn test_status_autostarts_daemon_when_absent() {
     let temp = TempDir::new().unwrap();
@@ -203,6 +214,7 @@ fn test_status_autostarts_daemon_when_absent() {
 }
 
 #[test]
+#[cfg(unix)]
 #[serial]
 fn test_status_noops_when_daemon_already_healthy() {
     let temp = TempDir::new().unwrap();
@@ -242,6 +254,7 @@ fn test_status_noops_when_daemon_already_healthy() {
 }
 
 #[test]
+#[cfg(unix)]
 #[serial]
 fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
     let temp = TempDir::new().unwrap();
@@ -284,4 +297,12 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
         "concurrent daemon-backed commands across teams must share one daemon"
     );
     kill_pid_from_file(home);
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_compile_check() {
+    // Compile-check placeholder for Windows targets: unix-only tests/helpers are
+    // gated per-function to keep this integration test file cross-platform.
+    let _ = cargo::cargo_bin("atm");
 }

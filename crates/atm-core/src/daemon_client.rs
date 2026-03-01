@@ -307,6 +307,61 @@ pub fn daemon_is_running() -> bool {
     }
 }
 
+/// Ensure the ATM daemon is running, starting it if needed.
+///
+/// On Unix:
+/// - Returns immediately when [`daemon_is_running`] is already `true`.
+/// - Spawns daemon binary from `ATM_DAEMON_BIN` env var or `atm-daemon`.
+/// - Polls up to 2 seconds (20 x 100ms) for both socket and PID liveness.
+///
+/// On non-Unix platforms this is a no-op and returns `Ok(())`.
+pub fn ensure_daemon_running() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        if daemon_is_running() {
+            return Ok(());
+        }
+
+        let daemon_bin =
+            std::env::var("ATM_DAEMON_BIN").unwrap_or_else(|_| "atm-daemon".to_string());
+        let socket_path = daemon_socket_path()?;
+        let spawn_lock_path = daemon_pid_path()?.with_extension("spawn.lock");
+
+        // Serialize daemon bootstrap across concurrent CLI processes so only one
+        // caller performs the spawn while others wait/re-check liveness.
+        let _spawn_lock = crate::io::lock::acquire_lock(&spawn_lock_path, 10)
+            .map_err(|e| anyhow::anyhow!("failed to acquire daemon spawn lock: {e}"))?;
+
+        if daemon_is_running() && socket_path.exists() {
+            return Ok(());
+        }
+
+        std::process::Command::new(&daemon_bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to spawn daemon '{daemon_bin}': {e}"))?;
+
+        for _ in 0..20 {
+            if socket_path.exists() && daemon_is_running() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        anyhow::bail!(
+            "daemon did not become ready within 2s (socket: {})",
+            socket_path.display()
+        );
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
 /// Send a single request to the daemon and return the parsed response.
 ///
 /// Returns `Ok(None)` when the daemon is not running or the socket cannot be
