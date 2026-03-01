@@ -82,9 +82,9 @@ fn test_send_defaults_to_human_when_no_identity() {
         .arg("alice")
         .arg("Hello from human");
 
-    cmd.assert()
-        .failure()
-        .stderr(predicates::str::contains("Cannot determine sender identity"));
+    cmd.assert().failure().stderr(predicates::str::contains(
+        "Cannot determine sender identity",
+    ));
 }
 
 #[test]
@@ -187,9 +187,9 @@ fn test_send_without_team_context_defaults_to_human() {
         .arg("alice")
         .arg("Message from outside");
 
-    cmd.assert()
-        .failure()
-        .stderr(predicates::str::contains("Cannot determine sender identity"));
+    cmd.assert().failure().stderr(predicates::str::contains(
+        "Cannot determine sender identity",
+    ));
 }
 
 #[test]

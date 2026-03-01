@@ -703,9 +703,9 @@ fn test_read_own_inbox_no_identity_rejects() {
         .arg("read")
         .arg("--no-since-last-seen");
 
-    cmd.assert()
-        .failure()
-        .stderr(predicates::str::contains("Cannot determine reader identity"));
+    cmd.assert().failure().stderr(predicates::str::contains(
+        "Cannot determine reader identity",
+    ));
 }
 
 /// Test: `atm read --as myname` with no hook file → succeeds using explicit identity
