@@ -28,6 +28,18 @@ Last updated: 2026-03-01
 | [#186](https://github.com/randlee/agent-team-mail/issues/186) | Closed (superseded) | N/A | Superseded by Phase L unified logging |
 | [#188](https://github.com/randlee/agent-team-mail/issues/188) | Closed (superseded) | N/A | Superseded by Phase L logging overhaul |
 
+## In-Flight Fix Branches (No GitHub Issue Yet)
+
+| Item | Type | Branch | Priority | Notes |
+|---|---|---|---|---|
+| Flaky MCP proxy integration tests (`test_codex_event_forwarded_to_upstream`, `test_multiple_synthetic_tools_count`) | Bug | `fix/mcp-proxy-flaky-tests` | High | Pre-existing on `develop`; root-caused by rust-architect: real OS process spawn latency + time-bounded response drain; fix: ID-targeted response reading in `crates/atm-agent-mcp/tests/proxy_integration.rs`. **MERGED (PR #291).** |
+
+## Deferred Technical Debt
+
+| Item | Type | Priority | Notes |
+|---|---|---|---|
+| Pre-existing env-var serial violations in daemon integration tests | Bug | Medium | `crates/atm-daemon/tests/`: `issues_error_tests.rs` (8 tests), `ci_monitor_error_tests.rs` (10 tests), `issues_integration.rs` (9 tests) all call `set_var("ATM_HOME", ...)` in shared helpers from `#[tokio::test]` without `#[serial]`. Not T.2 regressions — pre-existing flakiness risk. Cleanup sprint deferred. |
+
 ## Non-GitHub Planning Gap
 
 | Item | Type | Status | Priority | Notes |
