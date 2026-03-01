@@ -3947,6 +3947,40 @@ mod tests {
         assert!(!payload["alive"].as_bool().unwrap());
     }
 
+    #[test]
+    fn test_session_query_includes_runtime_metadata_fields() {
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_runtime_for_team(
+                "atm-dev",
+                "arch-ctm",
+                "sess-gem-1",
+                4242,
+                Some("gemini".to_string()),
+                Some("gemini-session-123".to_string()),
+                Some("%42".to_string()),
+                Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+            );
+        }
+        let req = make_request(
+            "session-query",
+            serde_json::json!({"name": "arch-ctm", "team": "atm-dev"}),
+        );
+        let resp = handle_session_query(&req, &sr);
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["runtime"].as_str(), Some("gemini"));
+        assert_eq!(
+            payload["runtime_session_id"].as_str(),
+            Some("gemini-session-123")
+        );
+        assert_eq!(
+            payload["runtime_home"].as_str(),
+            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home")
+        );
+    }
+
     // ── hook-event session_start with empty session_id tests ──────────────────
 
     /// When session_id is empty in a session_start event, the handler must
