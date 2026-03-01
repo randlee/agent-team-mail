@@ -100,6 +100,11 @@ struct DoctorState {
 }
 
 pub fn execute(args: DoctorArgs) -> Result<()> {
+    // Prime daemon connectivity early so doctor reflects post-autostart health.
+    // Must be best-effort: doctor should still produce a report when daemon is
+    // unavailable or autostart fails.
+    let _ = query_list_agents();
+
     let current_dir = std::env::current_dir()?;
     let home_dir = get_home_dir()?;
 
