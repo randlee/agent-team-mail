@@ -976,7 +976,9 @@ Old R.1. Deferred for further design review. The flow risks disrupting active no
 - `atm status` on a fresh machine starts daemon automatically and returns correct status.
 - `atm doctor` no longer flags "daemon not running" after any CLI usage.
 
-### T.2 — Agent roster seeding + config.json watcher *(bug fix, [#182](https://github.com/randlee/agent-team-mail/issues/182))*
+### T.2 — Agent roster seeding + state transitions consolidation *(bug fix, [#182](https://github.com/randlee/agent-team-mail/issues/182), [#183](https://github.com/randlee/agent-team-mail/issues/183))*
+
+> **Note**: T.2 and T.3 were combined into a single sprint execution. Issue #183 (agent state never transitions) was originally planned as T.3 but was folded into T.2 due to the tight coupling between roster seeding and state transition logic. The sprint table reflects this consolidation — T.3 does not appear as a separate entry.
 
 **Problem**: Agent roster is not seeded from team `config.json` on daemon startup. Daemon starts with empty roster even when agents are configured. The daemon's filesystem watcher watches `inboxes/` but ignores `config.json`, so member adds/removes are invisible to the daemon.
 
@@ -991,19 +993,6 @@ Old R.1. Deferred for further design review. The flow risks disrupting active no
 - Starting daemon with a configured team shows all members in `atm status` immediately.
 - Adding a member to config.json (e.g. via `atm teams add-member`) is reflected in daemon roster within one watch cycle.
 - Removing a member from config.json triggers mailbox cleanup (or at minimum flags the orphan).
-
-### T.3 — Agent state transitions *(bug fix, [#183](https://github.com/randlee/agent-team-mail/issues/183))*
-
-**Problem**: Agent state never transitions after initial registration. Agents are stuck in their initial state regardless of activity.
-
-**Deliverables**:
-1. Agent state transitions based on hook events (session_start → active, session_end → inactive).
-2. PID liveness check updates state on poll cycle (alive → active, dead → inactive).
-3. `atm status` reflects real-time state.
-4. Tests: state transition after session_start hook; state transition after PID death.
-
-**Acceptance criteria**:
-- Agent state in `atm status` matches reality within one poll cycle (30s).
 
 ### T.4 — TUI panel consistency *(bug fix, [#184](https://github.com/randlee/agent-team-mail/issues/184))*
 
@@ -1102,15 +1091,14 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
 | T.1 | Daemon auto-start on CLI usage | — | M | PLANNED | [#181](https://github.com/randlee/agent-team-mail/issues/181) |
-| T.2 | Agent roster seeding + config.json watcher | T.1 | M | PLANNED | [#182](https://github.com/randlee/agent-team-mail/issues/182) |
-| T.3 | Agent state transitions | T.1 | M | PLANNED | [#183](https://github.com/randlee/agent-team-mail/issues/183) |
-| T.4 | TUI panel consistency (stdin fix) | T.3 | S | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184) |
+| T.2 | Agent roster seeding + state transitions | T.1 | M | PLANNED | [#182](https://github.com/randlee/agent-team-mail/issues/182), [#183](https://github.com/randlee/agent-team-mail/issues/183) |
+| T.4 | TUI panel consistency (stdin fix) | T.2 | S | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184) |
 | T.5 | TUI message viewing | T.1 | M | PLANNED | [#185](https://github.com/randlee/agent-team-mail/issues/185) |
 | T.6 | TUI header version | — | XS | PLANNED | [#187](https://github.com/randlee/agent-team-mail/issues/187) |
 | T.7 | `atm init --check` + upgrade validation | S.2a | S | PLANNED | — |
 | T.8 | `atm teams resume` session handoff | S.1 | M | PLANNED | — |
 | T.9 | OpenCode baseline adapter | S.1 | L | DEFERRED | — |
-| T.10 | Operational health agent / continuous doctor | T.2, T.3 | M | PLANNED | — |
+| T.10 | Operational health agent / continuous doctor | T.2 | M | PLANNED | — |
 | T.11 | Tmux Sentinel Injection | — | M | PLANNED | [#45](https://github.com/randlee/agent-team-mail/issues/45) |
 | T.12 | Codex Idle Detection via Notify Hook | — | M | PLANNED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
 | T.13 | Ephemeral Pub/Sub for Agent Availability | — | M | PLANNED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
