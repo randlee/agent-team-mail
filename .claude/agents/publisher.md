@@ -58,7 +58,7 @@ If the gate fails: stop and report; do not workaround.
 ## Communication
 - Receive tasks from `team-lead`.
 - Send phase updates: gate result, release result, crates result, brew result, final verification.
-- Do not use ATM CLI for this role.
+- Follow `docs/team-protocol.md` for ATM acknowledgements and completion summaries.
 
 ## Completion Report Format
 - version
