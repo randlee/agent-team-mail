@@ -675,6 +675,35 @@ atm doctor --full
 - `recommendations[]`: `command`, `reason`
 - `log_window`: `mode`, `start`, `end`
 
+#### `DoctorReport` Schema Contract and Compatibility
+
+`atm doctor --json` must return a stable top-level object (`DoctorReport`) with:
+- `summary`
+- `findings`
+- `recommendations`
+- `log_window`
+
+Current required `DoctorReport` shape:
+- `summary`: `team`, `generated_at`, `has_critical`, `counts`
+- `findings[]`: `severity`, `check`, `code`, `message`
+- `recommendations[]`: `command`, `reason`
+- `log_window`: `mode`, `start`, `end`
+
+Logging-health expansion contract:
+- Target shape adds `logging` object with at least:
+  - `health_state` (`healthy|degraded_spooling|degraded_dropping|unavailable`)
+  - `log_path`
+  - `spool_path`
+  - `dropped_count`
+  - `spool_file_count`
+  - `oldest_spool_age_secs`
+  - `last_error` (nullable)
+- Until this object is implemented, diagnostics may infer logging state from
+  findings/recommendations. This is temporary and must be replaced by explicit
+  `logging` fields once available.
+- Field additions must be backward-compatible (additive-only); existing fields
+  above are required and must not be removed or repurposed.
+
 **Last-doctor-call persistence**:
 - Path: `~/.config/atm/doctor-state.json`.
 - Format: `{"last_call_by_team": {"<team>": "<rfc3339-timestamp>"}}`

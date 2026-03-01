@@ -32,6 +32,7 @@ Last updated: 2026-02-28
 | Item | Type | Status | Priority | Notes |
 |---|---|---|---|---|
 | Keep provisional sprint mappings synchronized across planning docs | Documentation | Open | Medium | Source-of-truth sequencing for current draft is `docs/test-plan-phase-T.md`; update `project-plan.md` + `issues.md` together on mapping changes |
+| Create GitHub tracking issue for `atm-monitor` (`T.5b`) | Process | Open | High | Required before committing `T.5b` execution scope |
 
 ## Recently Resolved (No Longer Open)
 

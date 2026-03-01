@@ -105,6 +105,8 @@ This plan references that issue list and uses it to drive Phase T planning decis
 - Keep provisional sprint mappings synchronized between `docs/test-plan-phase-T.md`,
   `docs/project-plan.md`, and `docs/issues.md`.
 - Keep `docs/issues.md` synchronized with actual issue status/priority changes.
+- Keep `DoctorReport` JSON contract and logging-health expansion notes aligned
+  with requirements (`docs/requirements.md`, section 4.3.3).
 
 ## References
 
