@@ -485,7 +485,6 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -712,7 +712,9 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("Enter/Y approve | N reject | Esc close"),
     ];
     frame.render_widget(
-        Paragraph::new(content).block(block).wrap(Wrap { trim: false }),
+        Paragraph::new(content)
+            .block(block)
+            .wrap(Wrap { trim: false }),
         modal,
     );
 }

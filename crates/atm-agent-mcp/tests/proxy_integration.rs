@@ -75,7 +75,11 @@ async fn read_response(reader: &mut BufReader<DuplexStream>) -> Option<Value> {
     }
 
     // Legacy Content-Length path (retained for backward compatibility).
-    let len: usize = trimmed.strip_prefix("Content-Length:")?.trim().parse().ok()?;
+    let len: usize = trimmed
+        .strip_prefix("Content-Length:")?
+        .trim()
+        .parse()
+        .ok()?;
     loop {
         let mut line = String::new();
         reader.read_line(&mut line).await.ok()?;
@@ -84,7 +88,9 @@ async fn read_response(reader: &mut BufReader<DuplexStream>) -> Option<Value> {
         }
     }
     let mut body = vec![0u8; len];
-    tokio::io::AsyncReadExt::read_exact(reader, &mut body).await.ok()?;
+    tokio::io::AsyncReadExt::read_exact(reader, &mut body)
+        .await
+        .ok()?;
     serde_json::from_slice(&body).ok()
 }
 

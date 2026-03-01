@@ -94,8 +94,7 @@ fn resolve_session_id() -> Result<String> {
         if !trimmed.is_empty() {
             eprintln!(
                 "WARNING: {}, falling back to CLAUDE_SESSION_ID. \
-                 Ensure atm-identity-write.py hook is configured in .claude/settings.json."
-                ,
+                 Ensure atm-identity-write.py hook is configured in .claude/settings.json.",
                 fallback_reason
             );
             return Ok(trimmed);
@@ -132,8 +131,7 @@ fn register_team_lead(
 
     // Check liveness of existing session if not forced.
     if !force {
-        let existing: TeamConfig =
-            serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
+        let existing: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
         if !existing.lead_session_id.is_empty() && existing.lead_session_id == session_id {
             println!(
                 "Already registered as team-lead for team '{}'. Session: {}",
@@ -192,10 +190,11 @@ fn register_team_lead(
     }
 
     // Reload and notify members.
-    let team_config: TeamConfig =
-        serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
+    let team_config: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
 
-    let team_dir = config_path.parent().expect("config_path must have a parent");
+    let team_dir = config_path
+        .parent()
+        .expect("config_path must have a parent");
     let inboxes_dir = team_dir.join("inboxes");
     if !inboxes_dir.exists() {
         std::fs::create_dir_all(&inboxes_dir)?;
@@ -239,8 +238,7 @@ fn register_teammate(
     session_id: &str,
 ) -> Result<()> {
     // Verify member exists in team config.
-    let existing: TeamConfig =
-        serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
+    let existing: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
 
     if !existing.members.iter().any(|m| m.name == name) {
         anyhow::bail!(
