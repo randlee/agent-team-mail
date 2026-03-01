@@ -252,7 +252,14 @@ fn ensure_daemon_running() -> Result<()> {
             Err(anyhow::anyhow!("daemon is not running"))
         };
     }
-    agent_team_mail_core::daemon_client::ensure_daemon_running()
+    // Use query path as autostart trigger to stay compatible with published
+    // atm-core APIs available to packaged CLI builds.
+    let _ = agent_team_mail_core::daemon_client::query_list_agents();
+    if agent_team_mail_core::daemon_client::daemon_is_running() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("daemon is not running"))
+    }
 }
 
 fn send_shutdown_request(home_dir: &Path, team_name: &str, agent_name: &str) -> Result<()> {
