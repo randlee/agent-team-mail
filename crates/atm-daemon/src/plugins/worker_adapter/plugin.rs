@@ -1626,7 +1626,7 @@ mod tests {
             "ATM_RUNTIME_HOME must match GEMINI_CLI_HOME"
         );
         assert!(
-            gemini_home.ends_with("runtime/gemini/atm-dev/arch-ctm/home"),
+            std::path::Path::new(&gemini_home).ends_with("runtime/gemini/atm-dev/arch-ctm/home"),
             "runtime home should be agent-scoped; got {gemini_home}"
         );
 
