@@ -998,6 +998,11 @@ Old R.1. Deferred for further design review. The flow risks disrupting active no
 
 **Problem**: TUI right panel status contradicts left panel + stream panel empty.
 
+**Naming note**: This is the **plan-level** `T.4` for issue #184. The
+`docs/test-plan-phase-T.md` execution sequence also uses `T.4` label for Gemini
+resume correctness (#281). Keep this distinction explicit to avoid cross-plan
+numbering confusion.
+
 **Deliverables**:
 1. Right panel state derived from same source as left panel (unified state store).
 2. Stream panel shows live output when available.
@@ -1075,6 +1080,8 @@ Lightweight pub/sub mechanism for agent availability announcements.
 
 `GeminiAdapter.build_command()` emits `--resume --resume-session-id <id>` but verified Gemini CLI uses `--resume <session_id>` as positional arg. Fix flag construction and unit test.
 
+**Status**: COMPLETE ([PR #297](https://github.com/randlee/agent-team-mail/pull/297)).
+
 ### T.15 — Gemini adapter end-to-end spawn/teardown wiring *(enhancement, [#282](https://github.com/randlee/agent-team-mail/issues/282))*
 
 S.1 delivered the adapter trait only. Wire `GeminiAdapter` into the tmux spawn pipeline: pane creation, daemon registration, SIGINT/SIGKILL teardown, lifecycle event emission.
@@ -1105,7 +1112,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.11 | Tmux Sentinel Injection | — | M | PLANNED | [#45](https://github.com/randlee/agent-team-mail/issues/45) |
 | T.12 | Codex Idle Detection via Notify Hook *(superseded by T.5c)* | — | M | PLANNED | [#46](https://github.com/randlee/agent-team-mail/issues/46) |
 | T.13 | Ephemeral Pub/Sub for Agent Availability *(superseded by T.5c)* | — | M | PLANNED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
-| T.14 | Gemini adapter resume flag fix | — | XS | PLANNED | [#281](https://github.com/randlee/agent-team-mail/issues/281) |
+| T.14 | Gemini adapter resume flag fix | — | XS | COMPLETE (PR #297) | [#281](https://github.com/randlee/agent-team-mail/issues/281) |
 | T.15 | Gemini adapter end-to-end spawn wiring | T.14 | L | COMPLETE | [#282](https://github.com/randlee/agent-team-mail/issues/282) |
 | T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | PLANNED | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
 
