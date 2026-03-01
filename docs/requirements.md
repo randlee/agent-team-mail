@@ -867,8 +867,18 @@ Required contract:
   through one daemon lifecycle/event pipeline.
 - Ephemeral pub/sub may distribute availability changes, but must not become the
   canonical persistence source.
-- Availability events must include: `team`, `agent`, `state`, `source`, `ts`,
-  and an idempotency key for deduplication.
+- Availability events must include: `team`, `agent`, `state`, `timestamp`,
+  and `idempotency_key` (stable per logical event replay).
+- Hook relays and adapter emitters may provide these fields directly; daemon
+  normalization may derive backward-compatible defaults for legacy payloads, but
+  durable behavior and tests must target the canonical contract fields above.
+
+Role boundaries:
+- Hook/adapters are signal producers only (emit lifecycle/availability events).
+- Daemon lifecycle pipeline validates, normalizes, deduplicates, and mutates
+  authoritative availability state.
+- Pub/sub is fanout-only notification transport and must not be used as
+  persistent state.
 
 Reliability requirements:
 - Duplicate/out-of-order availability events must not permanently corrupt state.
