@@ -73,7 +73,7 @@ uncommitted until planning gates are completed:
 | TUI panel consistency | Unscheduled / #184 | Candidate only |
 | TUI message viewing | Unscheduled / #185 | Candidate only |
 | TUI header version | Unscheduled / #187 | Candidate only |
-| `atm init --check` + upgrade validation | T.7 | Candidate only |
+| `atm init --check` + upgrade validation | Unscheduled | Candidate only |
 | `atm teams resume` session handoff | T.8 | Candidate only |
 | OpenCode baseline adapter | T.9 | Candidate only |
 | Operational health agent (`atm-monitor`) | T.5b / #286 | Candidate only |
@@ -85,6 +85,7 @@ uncommitted until planning gates are completed:
 | S.2a/S.1 deliverable accuracy cleanup | T.16 / #283 | Candidate only |
 | CLI crate publish failure (`include_str!` packaging) | T.5a / #284 | Candidate only |
 | Test coverage closure for unscheduled backlog (`U.1`-`U.4`) | T.6 | Candidate only |
+| Permanent publishing procedure + strengthened `publisher` agent responsibilities | T.7 | Candidate only |
 
 ## Open Issues Source Of Truth
 

@@ -18,10 +18,15 @@ Phase T candidate execution order.
    - T.5c: #46/#47 availability signaling clarification
 4. T.3: #282 Gemini end-to-end spawn wiring
 5. T.4: #281 Gemini resume correctness
+6. T.7: permanent publishing process hardening + strengthened `publisher` role
 
 `T.6` (test coverage closure for `U.1`-`U.4`) is independent of the
 `T.1`-`T.5*` sequence and may be scheduled at any point once acceptance
 criteria are fully scoped.
+`T.7` should run after publishability fixes (`T.5a`) and before final release
+publication, then remain active as the default publishing gate for future
+sprints/releases through the existing `publisher` team-member role
+(`.claude/agents/publisher.md`).
 
 ---
 
@@ -158,6 +163,71 @@ criteria are fully scoped.
 
 - Packaging and publish dry-run checks pass in CI.
 - Workflow no longer masks publish failures.
+
+---
+
+## T.7 — Permanent Publishing Process + Strengthened `publisher` Role
+
+### Scope
+
+1. Establish permanent publishing responsibilities in the existing `publisher`
+   team-member agent workflow for every future sprint/release publication cycle.
+2. Require a formal inventory of crates/artifacts that will be published for
+   every release event.
+3. Require formal post-publish verification for every required artifact after
+   publishing completes.
+
+### Requirements Coverage
+
+- `requirements.md` section 4.8.6 (release and publish validation requirements)
+
+### Acceptance Criteria
+
+- `publisher` executes a standard pre-publish audit on every release cycle,
+  mapping release scope to:
+  - implemented behavior
+  - present/absent tests
+  - uncovered requirements
+- A machine-readable and human-readable release inventory exists, containing:
+  - package/crate/artifact name
+  - version
+  - source path/release source
+  - publish target (registry/channel)
+  - verification command(s)
+- Post-publish verification runs for every inventory item and records pass/fail
+  with evidence links/log pointers.
+- Publishing is considered complete only if all required inventory items verify
+  successfully or explicit waivers are recorded.
+- Workflow is reusable and documented as the default publishing procedure for
+  all subsequent sprints/phases (not Phase T only).
+
+### Test Matrix
+
+- Process/integration:
+  - `publisher` dry-run with intentional missing test to confirm
+    gap detection and reporting
+  - inventory generation validation (required fields present; no duplicate
+    identifiers; deterministic ordering)
+  - post-publish verification runner executes all inventory checks and fails on
+    any missing/bad artifact
+- Failure-path:
+  - missing inventory item causes release gate failure
+  - artifact exists but wrong version/signature/checksum causes verification
+    failure
+  - partial publish success still fails final gate
+
+### Observability Checks
+
+- Audit and verification outputs are persisted in release logs/artifacts.
+- Failure reason and remediation target are explicit for each failed item.
+
+### Completion Gates
+
+- `publisher` workflow is updated/documented and approved as default release
+  procedure.
+- Inventory file/spec is approved and checked into release workflow inputs.
+- Post-publish verification passes for all required artifacts.
+- Release gate blocks publication completion on unresolved failures.
 
 ---
 
