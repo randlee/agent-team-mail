@@ -19,7 +19,9 @@ Checks:
 - `atm status --json`
 
 Expected:
-- `logging.health_state = "healthy"`
+- target schema: `logging.health_state = "healthy"`
+- until schema field lands: infer healthy from absence of degraded/unavailable
+  logging findings in `atm doctor` output.
 
 Action:
 - No remediation required.
@@ -103,4 +105,3 @@ Escalate when any are true:
 - `unavailable` persists after remediation steps.
 - `degraded_dropping` continues under normal load.
 - spool age grows and never reconverges after daemon recovery.
-

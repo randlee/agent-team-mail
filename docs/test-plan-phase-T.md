@@ -69,8 +69,8 @@ Phase T candidate execution order.
 
 ### Requirements Coverage
 
-- `requirements.md` roster seeding/config watcher requirements
-- `requirements.md` agent state transition requirements
+- `requirements.md` section 4.7: `Roster Seeding and Config Watcher Requirements`
+- `requirements.md` section 4.7: `Agent State Transition Requirements`
 - `requirements.md` section 4.3.1 cleanup invariants (drift safety)
 
 ### Acceptance Criteria
@@ -268,6 +268,28 @@ Phase T candidate execution order.
 
 ---
 
+## Unscheduled Backlog Coverage Placeholders
+
+These issues are tracked but not in the first execution slice. Coverage is
+defined now so they are not left unspecified.
+
+### U.1 — TUI Panel Consistency (#184)
+
+- Acceptance: right/left panel state cannot contradict for same agent snapshot.
+- Tests: integration harness checks panel parity against shared state source.
+
+### U.2 — TUI Message Viewing (#185)
+
+- Acceptance: list/detail/read-state flows available in TUI.
+- Tests: interaction tests for list -> detail -> mark-read behavior.
+
+### U.3 — TUI Header Version (#187)
+
+- Acceptance: header shows current ATM version from build metadata.
+- Tests: render test verifies non-empty version token in header output.
+
+---
+
 ## Global Quality Gates
 
 - All changed behavior covered by tests in this plan.
@@ -277,7 +299,10 @@ Phase T candidate execution order.
 
 ## MCP Readiness Gates (Before Live MCP Testing)
 
-- `atm doctor --json` reports logging health `healthy` (not degraded/unavailable).
+- Logging readiness gate:
+  - target-state: `atm doctor --json` includes `logging.health_state = "healthy"`
+  - pre-implementation fallback: no degraded/unavailable logging findings are present
+    in doctor output.
 - Daemon/session/roster diagnostics show no critical findings.
 - Unified logs contain required lifecycle and command-correlation events for
   at least one end-to-end smoke workflow.

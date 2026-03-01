@@ -69,10 +69,10 @@ uncommitted until planning gates are completed:
 |---|---|---|
 | Daemon auto-start on CLI usage | T.1 / #181 | Candidate only |
 | Agent roster seeding + `config.json` watcher | T.2 / #182 | Candidate only |
-| Agent state transitions | T.3 / #183 | Candidate only |
-| TUI panel consistency | T.4 / #184 | Candidate only |
-| TUI message viewing | T.5 / #185 | Candidate only |
-| TUI header version | T.6 / #187 | Candidate only |
+| Agent state transitions | T.2 / #183 | Candidate only |
+| TUI panel consistency | Unscheduled / #184 | Candidate only |
+| TUI message viewing | Unscheduled / #185 | Candidate only |
+| TUI header version | Unscheduled / #187 | Candidate only |
 | `atm init --check` + upgrade validation | T.7 | Candidate only |
 | `atm teams resume` session handoff | T.8 | Candidate only |
 | OpenCode baseline adapter | T.9 | Candidate only |
