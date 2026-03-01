@@ -671,6 +671,9 @@ atm doctor --full
 - Human-readable output: ordered findings by severity, then recommended remediation commands.
 - JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
 - Recommendations must include directly runnable commands when applicable.
+- `atm doctor` must be diagnostics-first and report-producing by default:
+  daemon probe/autostart failures must be captured as findings in the report,
+  not treated as fatal preconditions that suppress report generation.
 
 **JSON output schema (`--json`)**:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
@@ -714,6 +717,14 @@ Logging-health expansion contract:
 - Missing/unreadable/invalid state file treated as empty (first-call semantics).
 
 **Exit codes**: `0` = no critical findings, `2` = critical findings, `1` = execution error.
+
+Doctor non-failing requirement:
+- Failure to contact or auto-start daemon must not cause immediate process error
+  if team/config inputs are otherwise readable; doctor must still emit a report
+  with daemon health findings and return severity-based exit (`0` or `2`).
+- Exit `1` is reserved for true execution failures that prevent report creation
+  (for example unreadable/malformed required team config or unrecoverable output
+  serialization/write failure).
 
 ### 4.3.3a Operational Health Monitor (`atm-monitor`)
 

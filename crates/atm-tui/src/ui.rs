@@ -168,24 +168,57 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(border_style);
 
-    if app.inbox_preview.is_empty() {
+    if app.inbox_messages.is_empty() {
         frame.render_widget(
             Paragraph::new("No messages")
                 .block(inbox_block)
                 .style(Style::default().fg(Color::DarkGray)),
             left_rows[1],
         );
+    } else if app.inbox_detail_open {
+        if let Some(msg) = app.selected_message() {
+            let status = if msg.read { "read" } else { "unread" };
+            let detail = vec![
+                Line::from(Span::styled(
+                    format!("From: {}  [{status}]", msg.from),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!("At: {}", msg.timestamp),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::raw("")),
+                Line::from(Span::raw(msg.text.clone())),
+            ];
+            frame.render_widget(
+                Paragraph::new(detail)
+                    .block(inbox_block)
+                    .wrap(Wrap { trim: false }),
+                left_rows[1],
+            );
+        }
     } else {
-        let lines: Vec<Line> = app
-            .inbox_preview
+        let items: Vec<ListItem> = app
+            .inbox_messages
             .iter()
-            .map(|s| Line::from(Span::raw(s.clone())))
+            .map(|m| {
+                let marker = if m.read { " " } else { "●" };
+                let summary = m.summary.as_deref().unwrap_or(m.text.as_str());
+                ListItem::new(Line::from(Span::raw(format!(
+                    "{marker} {}: {}",
+                    m.from, summary
+                ))))
+            })
             .collect();
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(inbox_block)
-                .wrap(Wrap { trim: false }),
+        let mut msg_state = ListState::default();
+        msg_state.select(Some(
+            app.selected_message_index
+                .min(items.len().saturating_sub(1)),
+        ));
+        frame.render_stateful_widget(
+            List::new(items).block(inbox_block),
             left_rows[1],
+            &mut msg_state,
         );
     }
 }
@@ -729,5 +762,58 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     } else {
         let end = max_chars.saturating_sub(1);
         format!("{}…", chars[..end].iter().collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{App, MemberRow};
+    use crate::config::TuiConfig;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn render_text(app: &App) -> String {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| draw(f, app)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn test_header_includes_non_empty_version_token() {
+        let app = App::new("atm-dev".to_string(), TuiConfig::default());
+        let rendered = render_text(&app);
+        assert!(rendered.contains("ATM TUI"));
+        assert!(rendered.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+    }
+
+    #[test]
+    fn test_panel_state_parity_uses_shared_snapshot() {
+        let mut app = App::new("atm-dev".to_string(), TuiConfig::default());
+        app.members = vec![MemberRow {
+            agent: "arch-ctm".to_string(),
+            state: "busy".to_string(),
+            inbox_count: 1,
+        }];
+        app.selected_index = 0;
+        app.streaming_agent = Some("arch-ctm".to_string());
+        app.daemon_turn_state = Some(agent_team_mail_core::daemon_stream::AgentStreamState {
+            turn_id: Some("turn-1".to_string()),
+            thread_id: Some("thr-1".to_string()),
+            transport: Some("cli".to_string()),
+            turn_status: agent_team_mail_core::daemon_stream::StreamTurnStatus::Busy,
+        });
+        let rendered = render_text(&app);
+        assert!(rendered.contains("arch-ctm"));
+        assert!(rendered.contains("busy"));
+        assert!(rendered.contains("[LIVE]"));
     }
 }

@@ -61,6 +61,9 @@ pub fn execute(args: DaemonArgs) -> Result<()> {
 
 fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> Result<()> {
     if !agent_team_mail_core::daemon_client::daemon_is_running() {
+        ensure_daemon_running().context("failed to auto-start daemon for --kill")?;
+    }
+    if !agent_team_mail_core::daemon_client::daemon_is_running() {
         anyhow::bail!("daemon is not running");
     }
 
@@ -154,6 +157,17 @@ fn validated_signal_pid(pid: u32) -> Option<i32> {
         Some(pid as i32)
     } else {
         None
+    }
+}
+
+fn ensure_daemon_running() -> Result<()> {
+    // Trigger daemon autostart through the daemon query path used by published
+    // atm-core APIs, then verify liveness.
+    let _ = agent_team_mail_core::daemon_client::query_list_agents();
+    if agent_team_mail_core::daemon_client::daemon_is_running() {
+        Ok(())
+    } else {
+        anyhow::bail!("daemon is not running")
     }
 }
 

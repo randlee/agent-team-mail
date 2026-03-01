@@ -307,6 +307,25 @@ pub fn daemon_is_running() -> bool {
     }
 }
 
+/// Ensure the ATM daemon is running, starting it if needed.
+///
+/// On Unix:
+/// - Delegates to the full Unix implementation used by runtime queries,
+///   including startup lock coordination, socket probing, and event logging.
+///
+/// On non-Unix platforms this is a no-op and returns `Ok(())`.
+pub fn ensure_daemon_running() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        ensure_daemon_running_unix()
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
 /// Send a single request to the daemon and return the parsed response.
 ///
 /// Returns `Ok(None)` when the daemon is not running or the socket cannot be
@@ -764,10 +783,26 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
 
     let socket_path = daemon_socket_path()?;
 
-    // Attempt connection — return None if socket not present or connection refused
+    // First attempt connection directly.
     let stream = match UnixStream::connect(&socket_path) {
         Ok(s) => s,
-        Err(_) => return Ok(None),
+        Err(_) => {
+            // Optional daemon auto-start path, enabled by ATM_DAEMON_AUTOSTART.
+            if daemon_autostart_enabled() {
+                ensure_daemon_running_unix()?;
+                match UnixStream::connect(&socket_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        anyhow::bail!(
+                            "daemon auto-start attempted but socket remained unavailable at {}: {e}",
+                            socket_path.display()
+                        )
+                    }
+                }
+            } else {
+                return Ok(None);
+            }
+        }
     };
 
     // Set a short timeout so a stale/hung daemon does not block the CLI
@@ -799,6 +834,198 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
     };
 
     Ok(Some(response))
+}
+
+#[cfg(unix)]
+fn daemon_autostart_enabled() -> bool {
+    matches!(
+        std::env::var("ATM_DAEMON_AUTOSTART").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
+
+#[cfg(unix)]
+fn resolve_daemon_binary() -> std::ffi::OsString {
+    if let Some(override_bin) = std::env::var_os("ATM_DAEMON_BIN")
+        && !override_bin.is_empty()
+    {
+        return override_bin;
+    }
+
+    let name = std::ffi::OsString::from("atm-daemon");
+
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(dir) = current_exe.parent()
+    {
+        let sibling = dir.join(std::path::Path::new(&name));
+        if sibling.exists() {
+            return sibling.into_os_string();
+        }
+    }
+
+    name
+}
+
+#[cfg(unix)]
+fn ensure_daemon_running_unix() -> anyhow::Result<()> {
+    use crate::event_log::{EventFields, emit_event_best_effort};
+    use crate::io::InboxError;
+    use std::io::ErrorKind;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    if daemon_is_running() {
+        return Ok(());
+    }
+
+    let home = crate::home::get_home_dir()?;
+    cleanup_stale_daemon_runtime_files(&home);
+
+    let startup_lock_path = home.join(".config/atm/daemon-start.lock");
+    if let Some(parent) = startup_lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Serialize daemon startup across concurrent CLI processes.
+    let _startup_lock = match crate::io::lock::acquire_lock(&startup_lock_path, 3) {
+        Ok(lock) => Some(lock),
+        Err(InboxError::LockTimeout { .. }) => None,
+        Err(e) => anyhow::bail!(
+            "failed to acquire daemon startup lock {}: {e}",
+            startup_lock_path.display()
+        ),
+    };
+
+    if daemon_is_running() || daemon_socket_connectable(&home) {
+        return Ok(());
+    }
+
+    let daemon_bin = resolve_daemon_binary();
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "daemon_autostart_attempt",
+        result: Some("attempt".to_string()),
+        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        ..Default::default()
+    });
+    let mut child = Command::new(&daemon_bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "failed to auto-start daemon: binary '{}' not found in PATH (or ATM_DAEMON_BIN override)",
+                    std::path::PathBuf::from(&daemon_bin).display()
+                )
+            } else {
+                anyhow::anyhow!(
+                    "failed to auto-start daemon via '{}': {e}",
+                    std::path::PathBuf::from(&daemon_bin).display()
+                )
+            }
+        })?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if daemon_is_running() || daemon_socket_connectable(&home) {
+            emit_event_best_effort(EventFields {
+                level: "info",
+                source: "atm",
+                action: "daemon_autostart_success",
+                result: Some("ok".to_string()),
+                target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+                ..Default::default()
+            });
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("daemon process exited during startup with status {status}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    let timeout_error = format!(
+        "daemon startup timed out after 5s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+        pid_path.exists(),
+        socket_path.exists(),
+        pid_path.display(),
+        socket_path.display()
+    );
+    emit_event_best_effort(EventFields {
+        level: "warn",
+        source: "atm",
+        action: "daemon_autostart_timeout",
+        result: Some("timeout".to_string()),
+        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        error: Some(timeout_error.clone()),
+        ..Default::default()
+    });
+    anyhow::bail!("{timeout_error}")
+}
+
+#[cfg(unix)]
+fn daemon_socket_connectable(home: &std::path::Path) -> bool {
+    use std::os::unix::net::UnixStream;
+    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    UnixStream::connect(socket_path).is_ok()
+}
+
+#[cfg(unix)]
+fn cleanup_stale_daemon_runtime_files(home: &std::path::Path) {
+    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+
+    let pid_state = read_daemon_pid_state(&pid_path);
+    if matches!(
+        pid_state,
+        PidState::Dead | PidState::Missing | PidState::Malformed
+    ) {
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    // Remove stale socket only when daemon ownership is known-dead.
+    let ownership_known_dead = matches!(
+        pid_state,
+        PidState::Dead | PidState::Missing | PidState::Malformed
+    );
+    if socket_path.exists() && ownership_known_dead && !daemon_socket_connectable(home) {
+        let _ = std::fs::remove_file(&socket_path);
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PidState {
+    Missing,
+    Malformed,
+    Unreadable,
+    Dead,
+    Alive,
+}
+
+#[cfg(unix)]
+fn read_daemon_pid_state(pid_path: &std::path::Path) -> PidState {
+    if !pid_path.exists() {
+        return PidState::Missing;
+    }
+    let content = match std::fs::read_to_string(pid_path) {
+        Ok(s) => s,
+        Err(_) => return PidState::Unreadable,
+    };
+    let pid = match content.trim().parse::<i32>() {
+        Ok(pid) => pid,
+        Err(_) => return PidState::Malformed,
+    };
+    if pid_alive(pid) {
+        PidState::Alive
+    } else {
+        PidState::Dead
+    }
 }
 
 #[cfg(unix)]
@@ -910,6 +1137,22 @@ fn pid_alive(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    fn with_autostart_disabled<T>(f: impl FnOnce() -> T) -> T {
+        let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        // SAFETY: test-only env mutation guarded by #[serial] on callers.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "0") };
+        let out = f();
+        // SAFETY: test-only env mutation guarded by #[serial] on callers.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+        out
+    }
 
     #[test]
     fn test_socket_request_serialization() {
@@ -969,22 +1212,288 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_query_daemon_no_socket_returns_none() {
-        // Without a running daemon the query should gracefully return None.
-        // We ensure no real socket path is present by using a non-existent dir.
-        // This test is platform-independent: on non-unix it always returns None.
-        let req = SocketRequest {
-            version: PROTOCOL_VERSION,
-            request_id: "req-test".to_string(),
-            command: "agent-state".to_string(),
-            payload: serde_json::json!({}),
-        };
-        // Override socket path resolution is not straightforward without DI;
-        // the test relies on the daemon not being present in the test environment.
-        // On CI this will always be None. Locally too unless daemon is running.
-        let result = query_daemon(&req);
-        assert!(result.is_ok());
-        // If daemon happens to be running, we just check the call didn't panic.
+        with_autostart_disabled(|| {
+            // Without a running daemon the query should gracefully return None.
+            // We ensure no real socket path is present by using a non-existent dir.
+            // This test is platform-independent: on non-unix it always returns None.
+            let req = SocketRequest {
+                version: PROTOCOL_VERSION,
+                request_id: "req-test".to_string(),
+                command: "agent-state".to_string(),
+                payload: serde_json::json!({}),
+            };
+            // Override socket path resolution is not straightforward without DI;
+            // the test relies on the daemon not being present in the test environment.
+            // On CI this will always be None. Locally too unless daemon is running.
+            let result = query_daemon(&req);
+            assert!(result.is_ok());
+            // If daemon happens to be running, we just check the call didn't panic.
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_daemon_autostart_flag_parsing() {
+        let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "1") };
+        assert!(daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "true") };
+        assert!(daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "0") };
+        assert!(!daemon_autostart_enabled());
+
+        // SAFETY: serialized env mutation in test.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_resolve_daemon_binary_honors_override() {
+        let old = std::env::var("ATM_DAEMON_BIN").ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("custom-atm-daemon");
+        std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_BIN", &custom) };
+        let resolved = resolve_daemon_binary();
+        assert_eq!(std::path::PathBuf::from(resolved), custom);
+        // SAFETY: serialized env mutation in test.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_runtime_files_removes_dead_pid_file() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+
+        let pid_path = daemon_dir.join("atm-daemon.pid");
+        fs::write(&pid_path, "999999\n").unwrap();
+        assert!(pid_path.exists());
+
+        cleanup_stale_daemon_runtime_files(home);
+        assert!(
+            !pid_path.exists(),
+            "stale PID file should be removed when PID is not alive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_runtime_files_handles_malformed_pid() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+
+        let pid_path = daemon_dir.join("atm-daemon.pid");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        fs::write(&pid_path, "not-a-pid\n").unwrap();
+        fs::write(&socket_path, "stale").unwrap();
+
+        cleanup_stale_daemon_runtime_files(home);
+
+        assert!(
+            !pid_path.exists(),
+            "malformed PID file should be removed during cleanup"
+        );
+        assert!(
+            !socket_path.exists(),
+            "stale socket should be removed when PID ownership is known-dead"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_runtime_files_unreadable_pid_does_not_remove_socket() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+
+        let pid_path = daemon_dir.join("atm-daemon.pid");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        fs::write(&pid_path, "123\n").unwrap();
+        fs::write(&socket_path, "stale").unwrap();
+        let mut perms = fs::metadata(&pid_path).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&pid_path, perms).unwrap();
+
+        cleanup_stale_daemon_runtime_files(home);
+        assert!(
+            socket_path.exists(),
+            "socket must not be removed when PID ownership cannot be read"
+        );
+
+        // Restore permissions so tempdir cleanup succeeds.
+        let mut restore = fs::metadata(&pid_path).unwrap().permissions();
+        restore.set_mode(0o600);
+        fs::set_permissions(&pid_path, restore).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_timeout_when_spawned_process_never_creates_runtime_files() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let script_path = home.join("fake-daemon-never-ready.sh");
+        let script = r#"#!/bin/sh
+set -eu
+sleep 10
+"#;
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_BIN", &script_path);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+
+        let err = ensure_daemon_running_unix().expect_err("startup should time out");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("daemon startup timed out after 5s"),
+            "timeout error should include actionable timeout details: {msg}"
+        );
+        assert!(
+            msg.contains("pid_path="),
+            "timeout error should include pid path"
+        );
+        assert!(
+            msg.contains("socket_path="),
+            "timeout error should include socket path"
+        );
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_serializes_concurrent_start() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let script_path = home.join("fake-daemon.sh");
+
+        let script = r#"#!/bin/sh
+set -eu
+home="${ATM_HOME:?}"
+mkdir -p "$home/.claude/daemon"
+mkdir -p "$home/spawn-markers"
+touch "$home/spawn-markers/spawn.$$"
+echo $$ > "$home/.claude/daemon/atm-daemon.pid"
+sleep 2
+"#;
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_BIN", &script_path);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+
+        let mut handles = Vec::new();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        for _ in 0..2 {
+            let b = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                b.wait();
+                ensure_daemon_running_unix().unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let count = fs::read_dir(home.join("spawn-markers"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .count();
+        assert_eq!(
+            count, 1,
+            "concurrent startup attempts should spawn at most one daemon process"
+        );
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
     }
 
     #[test]
@@ -1013,11 +1522,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_query_agent_state_no_daemon_returns_none() {
-        // Graceful fallback: no daemon → Ok(None)
-        let result = query_agent_state("arch-ctm", "atm-dev");
-        assert!(result.is_ok());
-        // Result is None unless daemon happens to be running
+        with_autostart_disabled(|| {
+            // Graceful fallback: no daemon → Ok(None)
+            let result = query_agent_state("arch-ctm", "atm-dev");
+            assert!(result.is_ok());
+            // Result is None unless daemon happens to be running
+        });
     }
 
     #[test]
@@ -1029,11 +1541,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_query_agent_pane_no_daemon_returns_none() {
-        // Graceful fallback: no daemon → Ok(None)
-        let result = query_agent_pane("arch-ctm");
-        assert!(result.is_ok());
-        // Result is None unless daemon happens to be running
+        with_autostart_disabled(|| {
+            // Graceful fallback: no daemon → Ok(None)
+            let result = query_agent_pane("arch-ctm");
+            assert!(result.is_ok());
+            // Result is None unless daemon happens to be running
+        });
     }
 
     #[test]
@@ -1157,38 +1672,44 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_query_session_no_daemon_returns_none() {
-        // Graceful fallback: no daemon → Ok(None)
-        let result = query_session("team-lead");
-        assert!(result.is_ok());
-        // None unless daemon happens to be running
+        with_autostart_disabled(|| {
+            // Graceful fallback: no daemon → Ok(None)
+            let result = query_session("team-lead");
+            assert!(result.is_ok());
+            // None unless daemon happens to be running
+        });
     }
 
     #[test]
+    #[serial]
     fn test_launch_agent_no_daemon_returns_none() {
-        if daemon_is_running() {
-            // Shared dev machines may have daemon active; this test validates
-            // no-daemon behavior only.
-            return;
-        }
-        let config = LaunchConfig {
-            agent: "test-agent".to_string(),
-            team: "test-team".to_string(),
-            command: "codex --yolo".to_string(),
-            prompt: None,
-            timeout_secs: 5,
-            env_vars: std::collections::HashMap::new(),
-            runtime: Some("codex".to_string()),
-            resume_session_id: None,
-        };
-        // Without a running daemon the call should gracefully return Ok(None).
-        // On non-Unix platforms it always returns None.
-        // On Unix with no daemon socket present it also returns None.
-        let result = launch_agent(&config);
-        // The result should be Ok (no I/O error on missing socket)
-        assert!(result.is_ok());
-        // Result is None unless daemon happens to be running and handling "launch"
-        // (which it won't be in a unit test environment)
+        with_autostart_disabled(|| {
+            if daemon_is_running() {
+                // Shared dev machines may have daemon active; this test validates
+                // no-daemon behavior only.
+                return;
+            }
+            let config = LaunchConfig {
+                agent: "test-agent".to_string(),
+                team: "test-team".to_string(),
+                command: "codex --yolo".to_string(),
+                prompt: None,
+                timeout_secs: 5,
+                env_vars: std::collections::HashMap::new(),
+                runtime: Some("codex".to_string()),
+                resume_session_id: None,
+            };
+            // Without a running daemon the call should gracefully return Ok(None).
+            // On non-Unix platforms it always returns None.
+            // On Unix with no daemon socket present it also returns None.
+            let result = launch_agent(&config);
+            // The result should be Ok (no I/O error on missing socket)
+            assert!(result.is_ok());
+            // Result is None unless daemon happens to be running and handling "launch"
+            // (which it won't be in a unit test environment)
+        });
     }
 
     #[test]
@@ -1218,6 +1739,41 @@ mod tests {
         // On Linux and macOS the max PID is 4194304 or similar; i32::MAX exceeds
         // the kernel's PID range and kill() will return ESRCH (no such process).
         assert!(!pid_alive(i32::MAX));
+    }
+
+    /// When `ATM_DAEMON_BIN` is set to a nonexistent path, `ensure_daemon_running`
+    /// must return `Err` (spawn fails) rather than silently succeeding.
+    /// This confirms that the `ATM_DAEMON_BIN` env var is read by the public API.
+    ///
+    /// The test is skipped when a live daemon is already running to avoid
+    /// interfering with the running process.
+    ///
+    /// `#[serial]` is required because the test mutates the process environment.
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_reads_atm_daemon_bin() {
+        // Skip if a live daemon is already running.
+        if daemon_is_running() {
+            return;
+        }
+        unsafe {
+            std::env::set_var("ATM_DAEMON_BIN", "/nonexistent-bin-for-atm-test");
+        }
+        let result = ensure_daemon_running();
+        unsafe {
+            std::env::remove_var("ATM_DAEMON_BIN");
+        }
+        // On non-Unix the function is a no-op and always returns Ok(()).
+        #[cfg(unix)]
+        assert!(
+            result.is_err(),
+            "spawn of nonexistent binary must return Err on Unix"
+        );
+        #[cfg(not(unix))]
+        assert!(
+            result.is_ok(),
+            "ensure_daemon_running is a no-op on non-Unix"
+        );
     }
 
     // ── LifecycleSource / LifecycleSourceKind ────────────────────────────────
@@ -1339,6 +1895,246 @@ mod tests {
         assert!(
             result.is_err(),
             "send_control should return Err when daemon is not running"
+        );
+    }
+
+    // ── Windows-specific tests ───────────────────────────────────────────────
+    //
+    // These tests validate the Windows code paths for daemon auto-start readiness
+    // and lock behavior. On Windows, all daemon socket communication is intentionally
+    // unavailable (Unix domain sockets only), so the contract is that every public
+    // function returns `Ok(None)` or `false` without panicking or returning an error.
+    //
+    // Requirement: requirements.md §T.1 cross-platform row — "Windows CI coverage
+    // must validate spawn/readiness/lock behavior".
+
+    /// On Windows, `query_daemon` must return `Ok(None)` for any request.
+    ///
+    /// The daemon uses Unix domain sockets which are unavailable on Windows.
+    /// The graceful fallback ensures the CLI degrades silently rather than
+    /// failing with a platform-specific error.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_query_daemon_returns_ok_none() {
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-win-test".to_string(),
+            command: "agent-state".to_string(),
+            payload: serde_json::json!({ "agent": "arch-ctm", "team": "atm-dev" }),
+        };
+        let result = query_daemon(&req);
+        assert!(
+            result.is_ok(),
+            "query_daemon must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "query_daemon must return Ok(None) on Windows (no Unix socket available)"
+        );
+    }
+
+    /// On Windows, `daemon_is_running` must return `false` without panicking.
+    ///
+    /// The PID-file check uses Unix `kill(pid, 0)` which is unavailable on Windows.
+    /// The Windows branch always returns `false` — validated here so CI catches
+    /// any accidental regression that re-introduces a Unix-only code path.
+    #[cfg(windows)]
+    #[test]
+    fn windows_daemon_is_running_returns_false() {
+        // No daemon can be running on Windows (no Unix socket / PID-kill support).
+        assert!(
+            !daemon_is_running(),
+            "daemon_is_running must return false on Windows"
+        );
+    }
+
+    /// On Windows, `subscribe_stream_events` must return `Ok(None)`.
+    ///
+    /// Stream subscriptions require a long-lived Unix domain socket connection.
+    /// The Windows branch short-circuits to `Ok(None)` so callers can treat the
+    /// absence of stream events as equivalent to a daemon that is not running.
+    #[cfg(windows)]
+    #[test]
+    fn windows_subscribe_stream_events_returns_ok_none() {
+        let result = subscribe_stream_events();
+        assert!(
+            result.is_ok(),
+            "subscribe_stream_events must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "subscribe_stream_events must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, `query_agent_state` must return `Ok(None)`.
+    ///
+    /// Exercises the full call path (including payload serialisation) to confirm
+    /// that the Windows `Ok(None)` short-circuit in `query_daemon` propagates
+    /// correctly through the higher-level wrapper.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_query_agent_state_returns_ok_none() {
+        let result = query_agent_state("arch-ctm", "atm-dev");
+        assert!(
+            result.is_ok(),
+            "query_agent_state must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "query_agent_state must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, `query_session` must return `Ok(None)`.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_query_session_returns_ok_none() {
+        let result = query_session("team-lead");
+        assert!(
+            result.is_ok(),
+            "query_session must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "query_session must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, `launch_agent` must return `Ok(None)`.
+    ///
+    /// Confirms that the auto-start path (which requires Unix `fork`/`exec`
+    /// semantics) never executes on Windows and the call degrades gracefully.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_launch_agent_returns_ok_none() {
+        let config = LaunchConfig {
+            agent: "test-agent".to_string(),
+            team: "test-team".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 5,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("codex".to_string()),
+            resume_session_id: None,
+        };
+        let result = launch_agent(&config);
+        assert!(
+            result.is_ok(),
+            "launch_agent must not return Err on Windows (no daemon socket)"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "launch_agent must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, the startup lock (`acquire_lock`) must be acquirable and
+    /// automatically released on drop.
+    ///
+    /// The `ensure_daemon_running_unix` function is gated `#[cfg(unix)]` and
+    /// never runs on Windows, but the startup-lock path (`fs2::LockFileEx`) is
+    /// the same cross-platform primitive used throughout atm-core.  This test
+    /// confirms the Windows lock backend works correctly in the context of the
+    /// daemon startup directory layout.
+    #[cfg(windows)]
+    #[test]
+    fn windows_startup_lock_acquires_and_releases() {
+        use crate::io::lock::acquire_lock;
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_dir = tmp.path().join("config").join("atm");
+        fs::create_dir_all(&lock_dir).unwrap();
+        let lock_path = lock_dir.join("daemon-start.lock");
+
+        // Acquire the lock — mirrors what ensure_daemon_running_unix does.
+        let lock = acquire_lock(&lock_path, 3);
+        assert!(
+            lock.is_ok(),
+            "startup lock must be acquirable on Windows: {:?}",
+            lock.err()
+        );
+
+        // Explicit drop releases the lock (Windows holds handles; explicit drop
+        // ensures the LockFileEx unlock fires before we try to re-acquire).
+        drop(lock.unwrap());
+
+        // Re-acquire to confirm the lock was actually released.
+        let lock2 = acquire_lock(&lock_path, 1);
+        assert!(
+            lock2.is_ok(),
+            "startup lock must be re-acquirable after release on Windows"
+        );
+    }
+
+    /// On Windows, `daemon_socket_path` must produce a path ending with the
+    /// expected suffix regardless of the underlying home-directory resolver.
+    #[cfg(windows)]
+    #[test]
+    fn windows_daemon_socket_path_has_correct_suffix() {
+        let path = daemon_socket_path().unwrap();
+        let s = path.to_string_lossy();
+        assert!(
+            s.ends_with("atm-daemon.sock"),
+            "daemon_socket_path must end with 'atm-daemon.sock' on Windows, got: {s}"
+        );
+        assert!(
+            s.contains(".claude") && s.contains("daemon"),
+            "daemon_socket_path must contain '.claude/daemon' on Windows, got: {s}"
+        );
+    }
+
+    /// On Windows, `daemon_pid_path` must produce a path ending with the
+    /// expected suffix.
+    #[cfg(windows)]
+    #[test]
+    fn windows_daemon_pid_path_has_correct_suffix() {
+        let path = daemon_pid_path().unwrap();
+        let s = path.to_string_lossy();
+        assert!(
+            s.ends_with("atm-daemon.pid"),
+            "daemon_pid_path must end with 'atm-daemon.pid' on Windows, got: {s}"
+        );
+        assert!(
+            s.contains(".claude") && s.contains("daemon"),
+            "daemon_pid_path must contain '.claude/daemon' on Windows, got: {s}"
+        );
+    }
+
+    /// On Windows, `send_control` must return `Err` (not panic) when the daemon
+    /// is not reachable, because `send_control` intentionally propagates absence
+    /// as an error (unlike the `Ok(None)` contract of other public functions).
+    #[cfg(windows)]
+    #[test]
+    fn windows_send_control_no_daemon_returns_err() {
+        use crate::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
+
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: "req-win-ctrl".to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
+            sent_at: "2026-02-21T00:00:00Z".to_string(),
+            team: "atm-dev".to_string(),
+            session_id: String::new(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "tui".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("hello".to_string()),
+            content_ref: None,
+            elicitation_id: None,
+            decision: None,
+        };
+
+        let result = send_control(&req);
+        assert!(
+            result.is_err(),
+            "send_control must return Err on Windows when daemon is not reachable"
         );
     }
 
