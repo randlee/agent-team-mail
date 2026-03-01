@@ -102,7 +102,7 @@ async fn test_hook_watcher_incremental_reads() {
     state
         .lock()
         .unwrap()
-        .set_state("arch-ctm", AgentState::Busy);
+        .set_state("arch-ctm", AgentState::Active);
 
     // Second event (different agent — validates incremental, not re-read)
     append_event(&events_path, "agent-b");
@@ -114,7 +114,7 @@ async fn test_hook_watcher_incremental_reads() {
     // arch-ctm should still be Busy (not re-processed from file start)
     assert_eq!(
         state.lock().unwrap().get_state("arch-ctm"),
-        Some(AgentState::Busy),
+        Some(AgentState::Active),
         "arch-ctm should remain Busy (incremental read, not re-read)"
     );
 
@@ -175,10 +175,10 @@ async fn test_hook_watcher_full_lifecycle() {
     state
         .lock()
         .unwrap()
-        .set_state("arch-ctm", AgentState::Busy);
+        .set_state("arch-ctm", AgentState::Active);
     assert_eq!(
         state.lock().unwrap().get_state("arch-ctm"),
-        Some(AgentState::Busy)
+        Some(AgentState::Active)
     );
 
     // 3. Busy → Idle (second AfterAgent hook)
@@ -189,10 +189,10 @@ async fn test_hook_watcher_full_lifecycle() {
     state
         .lock()
         .unwrap()
-        .set_state("arch-ctm", AgentState::Killed);
+        .set_state("arch-ctm", AgentState::Offline);
     assert_eq!(
         state.lock().unwrap().get_state("arch-ctm"),
-        Some(AgentState::Killed)
+        Some(AgentState::Offline)
     );
     assert!(
         state

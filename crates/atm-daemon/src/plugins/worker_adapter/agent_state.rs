@@ -1,6 +1,6 @@
 //! Agent turn-level state machine for Codex agents
 //!
-//! Tracks per-agent state at the turn level (Launching/Busy/Idle/Killed),
+//! Tracks per-agent state at the turn level (Unknown/Active/Idle/Offline),
 //! which is more granular than [`WorkerState`](super::lifecycle::WorkerState)
 //! (process-level: Running/Crashed/Restarting/Idle).
 //!
@@ -8,13 +8,13 @@
 //!
 //! ```text
 //!                 ┌──────────┐
-//!                 │ Launching │
+//!                 │ Unknown │
 //!                 └────┬─────┘
 //!                      │ (first AfterAgent hook)
 //!                      ▼
 //!       ┌──────────────────────────┐
 //!       │                          │
-//!  nudge/send ──▶  Busy            │
+//!  nudge/send ──▶  Active            │
 //!       │                          │
 //!       │       AfterAgent         │
 //!       │           │              │
@@ -24,7 +24,7 @@
 //!       │      (PID gone)
 //!       │           │
 //!       │           ▼
-//!       │        Killed
+//!       │        Offline
 //!       └──────────────────────────┘
 //! ```
 
@@ -37,29 +37,29 @@ use tracing::debug;
 ///
 /// | State | Meaning | Safe to Nudge? |
 /// |-------|---------|---------------|
-/// | `Launching` | Pane created, agent starting up | No |
-/// | `Busy` | Agent is processing a turn | No |
+/// | `Unknown` | Pane created, agent starting up | No |
+/// | `Active` | Agent is processing a turn | No |
 /// | `Idle` | Agent completed a turn (AfterAgent hook received) | Yes |
-/// | `Killed` | Agent process has exited (PID gone) | No |
+/// | `Offline` | Agent process has exited (PID gone) | No |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
     /// Pane created, agent starting up. Waiting for first AfterAgent hook.
-    Launching,
+    Unknown,
     /// Agent is processing a request (nudge sent or send-keys activity).
-    Busy,
+    Active,
     /// Agent completed a turn. Safe to send prompts.
     Idle,
     /// Agent process has exited (PID no longer running).
-    Killed,
+    Offline,
 }
 
 impl std::fmt::Display for AgentState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Launching => write!(f, "launching"),
-            Self::Busy => write!(f, "busy"),
+            Self::Unknown => write!(f, "unknown"),
+            Self::Active => write!(f, "active"),
             Self::Idle => write!(f, "idle"),
-            Self::Killed => write!(f, "killed"),
+            Self::Offline => write!(f, "offline"),
         }
     }
 }
@@ -72,7 +72,7 @@ impl AgentState {
 
     /// Returns `true` if the agent has permanently exited.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Killed)
+        matches!(self, Self::Offline)
     }
 }
 
@@ -117,15 +117,15 @@ impl AgentStateTracker {
         }
     }
 
-    /// Register a newly spawned agent in `Launching` state.
+    /// Register a newly spawned agent in `Unknown` state.
     pub fn register_agent(&mut self, agent_id: &str) {
         self.set_state_inner(
             agent_id,
-            AgentState::Launching,
+            AgentState::Unknown,
             "initial registration",
             "daemon",
         );
-        debug!("Agent {agent_id} registered (state: Launching)");
+        debug!("Agent {agent_id} registered (state: Unknown)");
     }
 
     /// Remove an agent from tracking.
@@ -156,9 +156,9 @@ impl AgentStateTracker {
             Some(old_state) => debug!(
                 "Agent {agent_id}: {old_state} → {new_state} (reason={reason}, source={source})"
             ),
-            None => debug!(
-                "Agent {agent_id}: (new) → {new_state} (reason={reason}, source={source})"
-            ),
+            None => {
+                debug!("Agent {agent_id}: (new) → {new_state} (reason={reason}, source={source})")
+            }
         }
     }
 
@@ -242,7 +242,7 @@ mod tests {
     fn test_initial_state_is_launching() {
         let mut tracker = AgentStateTracker::new();
         tracker.register_agent("arch-ctm");
-        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Launching));
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Unknown));
     }
 
     #[test]
@@ -258,15 +258,15 @@ mod tests {
         let mut tracker = AgentStateTracker::new();
         tracker.register_agent("arch-ctm");
         tracker.set_state("arch-ctm", AgentState::Idle);
-        tracker.set_state("arch-ctm", AgentState::Busy);
-        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Busy));
+        tracker.set_state("arch-ctm", AgentState::Active);
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Active));
     }
 
     #[test]
     fn test_busy_to_idle_transition() {
         let mut tracker = AgentStateTracker::new();
         tracker.register_agent("arch-ctm");
-        tracker.set_state("arch-ctm", AgentState::Busy);
+        tracker.set_state("arch-ctm", AgentState::Active);
         tracker.set_state("arch-ctm", AgentState::Idle);
         assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
     }
@@ -276,30 +276,30 @@ mod tests {
         let mut tracker = AgentStateTracker::new();
         tracker.register_agent("arch-ctm");
         tracker.set_state("arch-ctm", AgentState::Idle);
-        tracker.set_state("arch-ctm", AgentState::Killed);
-        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Killed));
+        tracker.set_state("arch-ctm", AgentState::Offline);
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Offline));
     }
 
     #[test]
     fn test_full_lifecycle() {
         let mut tracker = AgentStateTracker::new();
         tracker.register_agent("arch-ctm");
-        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Launching));
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Unknown));
 
         // First AfterAgent hook → Idle
         tracker.set_state("arch-ctm", AgentState::Idle);
         assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
         assert!(tracker.get_state("arch-ctm").unwrap().is_safe_to_nudge());
 
-        // Nudge sent → Busy
-        tracker.set_state("arch-ctm", AgentState::Busy);
+        // Nudge sent → Active
+        tracker.set_state("arch-ctm", AgentState::Active);
         assert!(!tracker.get_state("arch-ctm").unwrap().is_safe_to_nudge());
 
         // AfterAgent hook → Idle again
         tracker.set_state("arch-ctm", AgentState::Idle);
 
-        // PID gone → Killed
-        tracker.set_state("arch-ctm", AgentState::Killed);
+        // PID gone → Offline
+        tracker.set_state("arch-ctm", AgentState::Offline);
         assert!(tracker.get_state("arch-ctm").unwrap().is_terminal());
         assert!(!tracker.get_state("arch-ctm").unwrap().is_safe_to_nudge());
     }
@@ -342,32 +342,32 @@ mod tests {
 
         let states = tracker.all_states();
         assert_eq!(states.len(), 2);
-        assert_eq!(states.get("agent-a"), Some(&AgentState::Launching));
+        assert_eq!(states.get("agent-a"), Some(&AgentState::Unknown));
         assert_eq!(states.get("agent-b"), Some(&AgentState::Idle));
     }
 
     #[test]
     fn test_display() {
-        assert_eq!(AgentState::Launching.to_string(), "launching");
-        assert_eq!(AgentState::Busy.to_string(), "busy");
+        assert_eq!(AgentState::Unknown.to_string(), "unknown");
+        assert_eq!(AgentState::Active.to_string(), "active");
         assert_eq!(AgentState::Idle.to_string(), "idle");
-        assert_eq!(AgentState::Killed.to_string(), "killed");
+        assert_eq!(AgentState::Offline.to_string(), "offline");
     }
 
     #[test]
     fn test_is_safe_to_nudge() {
-        assert!(!AgentState::Launching.is_safe_to_nudge());
-        assert!(!AgentState::Busy.is_safe_to_nudge());
+        assert!(!AgentState::Unknown.is_safe_to_nudge());
+        assert!(!AgentState::Active.is_safe_to_nudge());
         assert!(AgentState::Idle.is_safe_to_nudge());
-        assert!(!AgentState::Killed.is_safe_to_nudge());
+        assert!(!AgentState::Offline.is_safe_to_nudge());
     }
 
     #[test]
     fn test_is_terminal() {
-        assert!(!AgentState::Launching.is_terminal());
-        assert!(!AgentState::Busy.is_terminal());
+        assert!(!AgentState::Unknown.is_terminal());
+        assert!(!AgentState::Active.is_terminal());
         assert!(!AgentState::Idle.is_terminal());
-        assert!(AgentState::Killed.is_terminal());
+        assert!(AgentState::Offline.is_terminal());
     }
 
     #[test]

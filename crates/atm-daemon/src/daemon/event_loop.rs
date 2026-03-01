@@ -6,8 +6,8 @@ use crate::daemon::{
     SharedSessionRegistry, SharedStateStore, SharedStreamEventSender, graceful_shutdown,
     spool_drain_loop, start_socket_server, watch_inboxes,
 };
-use crate::plugins::worker_adapter::AgentState;
 use crate::plugin::{Capability, PluginContext, PluginRegistry};
+use crate::plugins::worker_adapter::AgentState;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
 use agent_team_mail_core::schema::TeamConfig;
@@ -204,6 +204,9 @@ pub async fn run(
     // Start event dispatch loop for EventListener plugins
     let dispatch_plugins = plugins.clone();
     let dispatch_cancel = cancel.clone();
+    let dispatch_reconcile_ctx = ctx.clone();
+    let dispatch_reconcile_registry = session_registry.clone();
+    let dispatch_reconcile_state_store = state_store.clone();
     let dispatch_task = tokio::spawn(async move {
         info!("Starting event dispatch loop");
         let mut cursors: std::collections::HashMap<std::path::PathBuf, InboxCursor> =
@@ -225,6 +228,22 @@ pub async fn run(
                     let _span_guard = dispatch_span.enter();
                     debug!("Dispatching event: team={}, agent={}, kind={:?}",
                            event.team, event.agent, event.kind);
+
+                    // Team config watcher event: reconcile immediately on config.json changes.
+                    if event.agent == "__config__" {
+                        let claude_root = dispatch_reconcile_ctx.system.claude_root.clone();
+                        let session_registry = dispatch_reconcile_registry.clone();
+                        let state_store = dispatch_reconcile_state_store.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            reconcile_team_member_activity(&claude_root, &session_registry, &state_store)
+                        }).await;
+                        match result {
+                            Ok(Ok(())) => debug!("config.json reconcile pass completed"),
+                            Ok(Err(e)) => warn!("config.json reconcile pass failed: {e}"),
+                            Err(e) => warn!("config.json reconcile task panicked: {e}"),
+                        }
+                        continue;
+                    }
 
                     // Only dispatch MessageReceived events
                     if event.kind != InboxEventKind::MessageReceived {
@@ -493,19 +512,19 @@ fn reconcile_team_member_activity(
                 match member.is_active {
                     Some(false) => tracker.set_state_with_context(
                         &member.name,
-                        AgentState::Killed,
+                        AgentState::Offline,
                         "config isActive=false",
                         "config_watcher",
                     ),
                     Some(true) => tracker.set_state_with_context(
                         &member.name,
-                        AgentState::Busy,
+                        AgentState::Active,
                         "config isActive=true",
                         "config_watcher",
                     ),
                     None => tracker.set_state_with_context(
                         &member.name,
-                        AgentState::Launching,
+                        AgentState::Unknown,
                         "config isActive missing",
                         "config_watcher",
                     ),
@@ -519,9 +538,7 @@ fn reconcile_team_member_activity(
             let alive = record.state == crate::daemon::session_registry::SessionState::Active
                 && record.is_process_alive();
 
-            if !alive
-                && record.state == crate::daemon::session_registry::SessionState::Active
-            {
+            if !alive && record.state == crate::daemon::session_registry::SessionState::Active {
                 session_registry
                     .lock()
                     .unwrap()
@@ -530,25 +547,39 @@ fn reconcile_team_member_activity(
 
             if member.is_active != Some(alive) {
                 let was_active = member.is_active == Some(true);
+                let previous = member.is_active;
                 member.is_active = Some(alive);
                 changed = true;
+                emit_event_best_effort(EventFields {
+                    level: "warn",
+                    source: "atm-daemon",
+                    action: "state_drift_detected",
+                    team: Some(team_name.clone()),
+                    agent_name: Some(member.name.clone()),
+                    result: Some("reconciled".to_string()),
+                    error: Some(format!(
+                        "isActive drift for {}@{}: config={:?}, reconciled={}",
+                        member.name, team_name, previous, alive
+                    )),
+                    ..Default::default()
+                });
 
                 if alive {
                     member.last_active = Some(now_ms);
                     state_store.lock().unwrap().set_state_with_context(
                         &member.name,
-                        AgentState::Busy,
+                        AgentState::Active,
                         "session active + pid alive",
                         "session_reconcile",
                     );
                 } else if was_active {
                     state_store.lock().unwrap().set_state_with_context(
                         &member.name,
-                        AgentState::Killed,
+                        AgentState::Offline,
                         "pid not alive during reconcile",
                         "session_reconcile",
                     );
-                    archive_member_inbox(&team_dir, &member.name)?;
+                    delete_member_inbox(&team_dir, &member.name)?;
                 }
             }
         }
@@ -572,20 +603,12 @@ fn reconcile_team_member_activity(
     Ok(())
 }
 
-fn archive_member_inbox(team_dir: &std::path::Path, agent_name: &str) -> Result<()> {
+fn delete_member_inbox(team_dir: &std::path::Path, agent_name: &str) -> Result<()> {
     let inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
     if !inbox_path.exists() {
         return Ok(());
     }
-
-    let archive_dir = team_dir.join("inboxes/.archive");
-    std::fs::create_dir_all(&archive_dir)?;
-
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
-    let archived = archive_dir.join(format!("{agent_name}-{stamp}.json"));
-
-    std::fs::rename(&inbox_path, &archived)?;
-    std::fs::write(&inbox_path, "[]")?;
+    std::fs::remove_file(&inbox_path)?;
     Ok(())
 }
 
@@ -1067,9 +1090,7 @@ async fn get_active_teams(ctx: &PluginContext) -> Vec<String> {
 fn format_timestamp(time: SystemTime) -> String {
     use chrono::{DateTime, Utc};
 
-    let duration = time
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
+    let duration = time.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
 
@@ -1212,6 +1233,7 @@ mod tests {
     fn test_reconcile_seeds_state_store_from_config() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
+        let cwd = home.display().to_string();
         write_team_config(
             home,
             "atm-dev",
@@ -1222,7 +1244,7 @@ mod tests {
                     "agentType": "general-purpose",
                     "model": "unknown",
                     "joinedAt": 1,
-                    "cwd": "/tmp",
+                    "cwd": cwd.clone(),
                     "subscriptions": [],
                     "isActive": true
                 },
@@ -1232,7 +1254,7 @@ mod tests {
                     "agentType": "general-purpose",
                     "model": "unknown",
                     "joinedAt": 1,
-                    "cwd": "/tmp",
+                    "cwd": cwd.clone(),
                     "subscriptions": []
                 }
             ]),
@@ -1243,14 +1265,15 @@ mod tests {
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
 
         let tracker = state_store.lock().unwrap();
-        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Busy));
-        assert_eq!(tracker.get_state("qa"), Some(AgentState::Launching));
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Active));
+        assert_eq!(tracker.get_state("qa"), Some(AgentState::Unknown));
     }
 
     #[test]
     fn test_reconcile_removes_deleted_member_from_state_store() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
+        let cwd = home.display().to_string();
         write_team_config(
             home,
             "atm-dev",
@@ -1261,7 +1284,7 @@ mod tests {
                     "agentType": "general-purpose",
                     "model": "unknown",
                     "joinedAt": 1,
-                    "cwd": "/tmp",
+                    "cwd": cwd.clone(),
                     "subscriptions": [],
                     "isActive": true
                 },
@@ -1271,7 +1294,7 @@ mod tests {
                     "agentType": "general-purpose",
                     "model": "unknown",
                     "joinedAt": 1,
-                    "cwd": "/tmp",
+                    "cwd": cwd.clone(),
                     "subscriptions": [],
                     "isActive": true
                 }
@@ -1293,7 +1316,7 @@ mod tests {
                     "agentType": "general-purpose",
                     "model": "unknown",
                     "joinedAt": 1,
-                    "cwd": "/tmp",
+                    "cwd": cwd.clone(),
                     "subscriptions": [],
                     "isActive": true
                 }

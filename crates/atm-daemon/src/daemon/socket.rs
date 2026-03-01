@@ -1030,14 +1030,14 @@ async fn handle_hook_event_command(
                     tracker.register_agent(&agent);
                     tracker.set_state_with_context(
                         &agent,
-                        AgentState::Busy,
+                        AgentState::Active,
                         "session_start lifecycle",
                         "hook_event",
                     );
-                } else if matches!(current, Some(AgentState::Killed | AgentState::Launching)) {
+                } else if matches!(current, Some(AgentState::Offline | AgentState::Unknown)) {
                     tracker.set_state_with_context(
                         &agent,
-                        AgentState::Busy,
+                        AgentState::Active,
                         "session_start lifecycle revive",
                         "hook_event",
                     );
@@ -1085,7 +1085,7 @@ async fn handle_hook_event_command(
                 if tracker.get_state(&agent).is_some() {
                     tracker.set_state_with_context(
                         &agent,
-                        AgentState::Killed,
+                        AgentState::Offline,
                         "session_end lifecycle",
                         "hook_event",
                     );
@@ -1367,8 +1367,8 @@ fn control_request_is_live(
 
     let tracker = state_store.lock().unwrap();
     match tracker.get_state(&control.agent_id) {
-        Some(AgentState::Idle) | Some(AgentState::Busy) => ControlResult::Ok,
-        Some(AgentState::Launching) | Some(AgentState::Killed) | None => ControlResult::NotLive,
+        Some(AgentState::Idle) | Some(AgentState::Active) => ControlResult::Ok,
+        Some(AgentState::Unknown) | Some(AgentState::Offline) | None => ControlResult::NotLive,
     }
 }
 
@@ -2042,20 +2042,22 @@ fn handle_agent_state(
         };
     };
 
-    let session = session_registry.lock().unwrap().query_for_team(&team, &agent).cloned();
-    let (canonical_state, reason, source) =
-        derive_canonical_state(&member, tracker_state, session.as_ref(), tracker_meta.as_ref());
-
-    let output_state = if canonical_state == "offline" && matches!(tracker_state, Some(AgentState::Killed)) {
-        "killed"
-    } else {
-        canonical_state
-    };
+    let session = session_registry
+        .lock()
+        .unwrap()
+        .query_for_team(&team, &agent)
+        .cloned();
+    let (canonical_state, reason, source) = derive_canonical_state(
+        &member,
+        tracker_state,
+        session.as_ref(),
+        tracker_meta.as_ref(),
+    );
 
     make_ok_response(
         &request.request_id,
         serde_json::json!({
-            "state": output_state,
+            "state": canonical_state,
             "baseline_state": canonical_state,
             "last_transition": last_transition,
             "reason": reason,
@@ -2116,9 +2118,9 @@ fn handle_list_agents(
                 .get_state(&agent)
                 .map(|s| match s {
                     AgentState::Idle => "idle",
-                    AgentState::Killed => "offline",
-                    AgentState::Busy => "active",
-                    AgentState::Launching => "unknown",
+                    AgentState::Offline => "offline",
+                    AgentState::Active => "active",
+                    AgentState::Unknown => "unknown",
                 })
                 .unwrap_or("unknown");
             serde_json::json!({ "agent": agent, "state": state })
@@ -2127,7 +2129,10 @@ fn handle_list_agents(
     make_ok_response(&request.request_id, serde_json::json!(agents))
 }
 
-fn load_team_members(home: &std::path::Path, team: &str) -> Option<Vec<agent_team_mail_core::schema::AgentMember>> {
+fn load_team_members(
+    home: &std::path::Path,
+    team: &str,
+) -> Option<Vec<agent_team_mail_core::schema::AgentMember>> {
     let config_path = home.join(".claude/teams").join(team).join("config.json");
     let content = std::fs::read_to_string(config_path).ok()?;
     let config: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(&content).ok()?;
@@ -2187,29 +2192,29 @@ fn derive_canonical_state(
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
         ),
-        Some(AgentState::Busy) => (
+        Some(AgentState::Active) => (
             "active",
             tracker_meta
                 .map(|m| m.reason.clone())
-                .unwrap_or_else(|| "busy tracker state".to_string()),
+                .unwrap_or_else(|| "active tracker state".to_string()),
             tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
         ),
-        Some(AgentState::Killed) => (
+        Some(AgentState::Offline) => (
             "offline",
             tracker_meta
                 .map(|m| m.reason.clone())
-                .unwrap_or_else(|| "killed tracker state".to_string()),
+                .unwrap_or_else(|| "offline tracker state".to_string()),
             tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
         ),
-        Some(AgentState::Launching) => (
+        Some(AgentState::Unknown) => (
             "unknown",
             tracker_meta
                 .map(|m| m.reason.clone())
-                .unwrap_or_else(|| "launching/no lifecycle yet".to_string()),
+                .unwrap_or_else(|| "unknown/no lifecycle yet".to_string()),
             tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
@@ -2552,6 +2557,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_agent_state_not_found() {
         let _fixture = setup_hook_auth_fixture("t", "team-lead", &["team-lead"]);
         let store = make_store();
@@ -2567,6 +2573,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_agent_state_found() {
         use crate::plugins::worker_adapter::AgentState;
 
@@ -2619,6 +2626,75 @@ mod tests {
         let agents = resp.payload.unwrap();
         let arr = agents.as_array().unwrap();
         assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_with_entries_includes_state_metadata() {
+        use crate::plugins::worker_adapter::AgentState;
+
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state_with_context(
+                "arch-ctm",
+                AgentState::Idle,
+                "hook after-agent",
+                "hook_watcher",
+            );
+        }
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+        let agents = resp.payload.unwrap();
+        let arr = agents.as_array().unwrap();
+        assert!(!arr.is_empty());
+        let arch = arr
+            .iter()
+            .find(|a| a["agent"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm entry missing");
+        assert_eq!(arch["state"].as_str(), Some("idle"));
+        assert!(arch["reason"].as_str().is_some());
+        assert!(arch["source"].as_str().is_some());
+    }
+
+    #[test]
+    #[serial]
+    fn test_team_scoped_list_agents_isolated_between_teams() {
+        use crate::plugins::worker_adapter::AgentState;
+
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), "team-a", "team-lead-a", &["team-lead-a", "a1"]);
+        write_hook_auth_team_config(temp.path(), "team-b", "team-lead-b", &["team-lead-b", "b1"]);
+
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("a1");
+            tracker.set_state("a1", AgentState::Idle);
+            tracker.register_agent("b1");
+            tracker.set_state("b1", AgentState::Idle);
+        }
+
+        let req_a = make_request("list-agents", serde_json::json!({"team": "team-a"}));
+        let resp_a = handle_list_agents(&req_a, &store, &sr);
+        assert_eq!(resp_a.status, "ok");
+        let arr_a = resp_a.payload.unwrap().as_array().unwrap().clone();
+        assert!(arr_a.iter().any(|v| v["agent"].as_str() == Some("a1")));
+        assert!(!arr_a.iter().any(|v| v["agent"].as_str() == Some("b1")));
+
+        let req_b = make_request("list-agents", serde_json::json!({"team": "team-b"}));
+        let resp_b = handle_list_agents(&req_b, &store, &sr);
+        assert_eq!(resp_b.status, "ok");
+        let arr_b = resp_b.payload.unwrap().as_array().unwrap().clone();
+        assert!(arr_b.iter().any(|v| v["agent"].as_str() == Some("b1")));
+        assert!(!arr_b.iter().any(|v| v["agent"].as_str() == Some("a1")));
     }
 
     #[test]
@@ -2945,7 +3021,7 @@ mod tests {
         {
             let mut tracker = state_store.lock().unwrap();
             tracker.register_agent("arch-ctm");
-            tracker.set_state("arch-ctm", AgentState::Busy);
+            tracker.set_state("arch-ctm", AgentState::Active);
         }
         let sr = make_sr();
         {
@@ -2997,7 +3073,7 @@ mod tests {
         {
             let mut tracker = state_store.lock().unwrap();
             tracker.register_agent("arch-ctm");
-            tracker.set_state("arch-ctm", AgentState::Busy);
+            tracker.set_state("arch-ctm", AgentState::Active);
         }
         let sr = make_sr();
         {
@@ -3290,7 +3366,7 @@ mod tests {
             let mut tracker = state_store.lock().unwrap();
             tracker.register_agent("agent-a");
             tracker.register_agent("agent-b");
-            tracker.set_state("agent-b", AgentState::Busy);
+            tracker.set_state("agent-b", AgentState::Active);
         }
 
         let launch_tx = new_launch_sender();
@@ -3647,7 +3723,7 @@ mod tests {
         {
             let mut tracker = store.lock().unwrap();
             tracker.register_agent("arch-ctm");
-            tracker.set_state("arch-ctm", AgentState::Busy);
+            tracker.set_state("arch-ctm", AgentState::Active);
         }
         let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-1","team":"atm-dev"}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
@@ -3713,7 +3789,7 @@ mod tests {
 
         // State tracker should be Killed
         let tracker = store.lock().unwrap();
-        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Killed));
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Offline));
     }
 
     #[cfg(unix)]
@@ -4066,8 +4142,8 @@ mod tests {
         let payload3 = resp3.payload.unwrap();
         assert_eq!(
             payload3["state"].as_str().unwrap(),
-            "killed",
-            "Agent state must be 'killed' after session_end"
+            "offline",
+            "Agent state must be 'offline' after session_end"
         );
 
         cancel.cancel();
