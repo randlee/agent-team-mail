@@ -329,8 +329,7 @@ fn test_status_reports_actionable_error_when_autostart_binary_missing() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("failed to auto-start daemon")
-            || combined.contains("not found in PATH"),
+        combined.contains("failed to auto-start daemon") || combined.contains("not found in PATH"),
         "expected actionable auto-start failure message, got: {combined}"
     );
 }
