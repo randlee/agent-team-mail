@@ -90,7 +90,10 @@ fn read_jsonl_line(reader: &mut BufReader<std::process::ChildStdout>) -> Value {
     loop {
         let mut line = String::new();
         reader.read_line(&mut line).expect("read stdout line");
-        assert!(!line.is_empty(), "unexpected EOF waiting for JSONL response");
+        assert!(
+            !line.is_empty(),
+            "unexpected EOF waiting for JSONL response"
+        );
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -137,7 +140,10 @@ fn serve_stdout_emits_only_newline_jsonrpc() {
     let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}"#;
     write_content_length_request(&mut stdin, init_req);
     let init_resp = read_jsonl_line(&mut reader);
-    assert_eq!(init_resp.get("jsonrpc").and_then(Value::as_str), Some("2.0"));
+    assert_eq!(
+        init_resp.get("jsonrpc").and_then(Value::as_str),
+        Some("2.0")
+    );
     assert_eq!(init_resp.get("id").and_then(Value::as_i64), Some(1));
     assert!(
         init_resp.get("result").is_some(),
@@ -148,7 +154,10 @@ fn serve_stdout_emits_only_newline_jsonrpc() {
     let tool_req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atm_pending_count","arguments":{}}}"#;
     write_content_length_request(&mut stdin, tool_req);
     let tool_resp = read_jsonl_line(&mut reader);
-    assert_eq!(tool_resp.get("jsonrpc").and_then(Value::as_str), Some("2.0"));
+    assert_eq!(
+        tool_resp.get("jsonrpc").and_then(Value::as_str),
+        Some("2.0")
+    );
     assert_eq!(tool_resp.get("id").and_then(Value::as_i64), Some(2));
     assert!(
         tool_resp.get("result").is_some() || tool_resp.get("error").is_some(),
