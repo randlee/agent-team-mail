@@ -36,3 +36,33 @@ fn format_event_human_renders_ppid_when_present() {
         "human logs should render ppid when present"
     );
 }
+
+#[test]
+fn format_event_human_omits_ppid_when_absent() {
+    let mut event = new_log_event("atm", "send", "atm::send", "info");
+    event.fields.remove("ppid");
+    let rendered = format_event_human(&event);
+    assert!(
+        !rendered.contains("ppid="),
+        "human logs should omit ppid when field is absent"
+    );
+}
+
+#[test]
+fn send_actions_use_agent_at_team_target_contract() {
+    let mut send_event = new_log_event("atm", "send", "atm::send", "info");
+    send_event.target = "team-lead@atm-dev".to_string();
+    let send_rendered = format_event_human(&send_event);
+    assert!(
+        send_rendered.contains("-> team-lead@atm-dev"),
+        "send target must render as agent@team"
+    );
+
+    let mut dry_run_event = new_log_event("atm", "send_dry_run", "atm::send", "info");
+    dry_run_event.target = "team-lead@atm-dev".to_string();
+    let dry_run_rendered = format_event_human(&dry_run_event);
+    assert!(
+        dry_run_rendered.contains("-> team-lead@atm-dev"),
+        "send_dry_run target must render as agent@team"
+    );
+}

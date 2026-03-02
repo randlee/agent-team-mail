@@ -262,9 +262,9 @@ fn stdout_is_tty() -> bool {
 ///
 /// Output format:
 /// ```text
-/// 2026-02-23T10:30:00Z  INFO  [atm/team-lead] send_message (ok)
-/// 2026-02-23T10:30:01Z  WARN  [atm-daemon] queue_full: dropped 5 events
-/// 2026-02-23T10:30:02Z ERROR  [atm/arch-ctm] dispatch_error: connection refused
+/// 2026-02-23T10:30:00Z  INFO  [atm/team-lead pid=12345] send_message (ok)
+/// 2026-02-23T10:30:01Z  WARN  [atm-daemon pid=12345] queue_full: dropped 5 events
+/// 2026-02-23T10:30:02Z ERROR  [atm/arch-ctm pid=12345] dispatch_error: connection refused
 /// ```
 ///
 /// When stdout is a TTY, level names are colorized:

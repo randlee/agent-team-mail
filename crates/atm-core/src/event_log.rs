@@ -72,6 +72,9 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
             if let Some(cnt) = fields.count {
                 map.insert("count".to_string(), serde_json::Value::Number(cnt.into()));
             }
+            // Intentionally exclude EventFields::message_text from persistent logs.
+            // Message body text can contain sensitive content; logging keeps
+            // transport metadata only (target/result/message_id/count/etc.).
             if let Some(runtime) = &fields.runtime {
                 map.insert(
                     "runtime".to_string(),
@@ -171,6 +174,22 @@ mod tests {
         };
         let event = fields_to_log_event(&fields);
         assert_eq!(event.session_id.as_deref(), Some("my-session-42"));
+    }
+
+    #[test]
+    fn test_fields_to_log_event_omits_message_text_for_privacy() {
+        let fields = EventFields {
+            level: "info",
+            source: "atm",
+            action: "send",
+            message_text: Some("secret body".to_string()),
+            ..Default::default()
+        };
+        let event = fields_to_log_event(&fields);
+        assert!(
+            !event.fields.contains_key("message_text"),
+            "message_text should be intentionally omitted from persisted log fields"
+        );
     }
 
     #[cfg(unix)]

@@ -1156,7 +1156,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 
 | Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
-| V.0 | Baseline diagnostics fixture capture | — | S | IN PROGRESS | prerequisite |
+| V.0 | Baseline diagnostics fixture capture | — | S | COMPLETE | prerequisite |
 | V.1 | Team-scoped doctor reconciliation | V.0 | M | PLANNED | [#333](https://github.com/randlee/agent-team-mail/issues/333) |
 | V.2 | Lead/non-lead teardown semantics | V.0 | M | PLANNED | [#332](https://github.com/randlee/agent-team-mail/issues/332) |
 | V.3 | `isActive`/liveness separation hardening | V.1, W.1 | M | PLANNED | [#330](https://github.com/randlee/agent-team-mail/issues/330) |
