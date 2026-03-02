@@ -1145,6 +1145,27 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | PLANNED | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
 
 ---
+
+## 17.10 Phase V: Doctor State-Model Convergence (Planning)
+
+**Goal**: Eliminate remaining doctor/lifecycle state-model gaps with requirements-first implementation and explicit regression coverage.
+
+**Execution reference**: `docs/test-plan-phase-V.md`
+
+**Coordination note**: `send.rs` overlap with Phase W.1 means **W.1 must merge before V.3**.
+
+| Sprint | Name | Depends On | Size | Status | Issue |
+|--------|------|------------|------|--------|-------|
+| V.0 | Baseline diagnostics fixture capture | — | S | IN PROGRESS | prerequisite |
+| V.1 | Team-scoped doctor reconciliation | V.0 | M | PLANNED | [#333](https://github.com/randlee/agent-team-mail/issues/333) |
+| V.2 | Lead/non-lead teardown semantics | V.0 | M | PLANNED | [#332](https://github.com/randlee/agent-team-mail/issues/332) |
+| V.3 | `isActive`/liveness separation hardening | V.1, W.1 | M | PLANNED | [#330](https://github.com/randlee/agent-team-mail/issues/330) |
+| V.4 | Terminal-member cleanup convergence | V.2 | M | PLANNED | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334) |
+| V.5 | Recommendation engine hardening | V.2 | S | PLANNED | [#336](https://github.com/randlee/agent-team-mail/issues/336) |
+| V.6 | Doctor UX snapshot/report ordering | V.1 | S | PLANNED | [#335](https://github.com/randlee/agent-team-mail/issues/335) |
+| V.7 | Logging identity contract coverage | V.0 | S | PLANNED | (Phase V umbrella) |
+
+---
 ## 18. Future Plugins
 
 | Plugin | Priority | Notes |
