@@ -810,7 +810,7 @@ fn new_request_id() -> String {
 fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let socket_path = daemon_socket_path()?;
 
@@ -821,13 +821,20 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
             // Optional daemon auto-start path, enabled by ATM_DAEMON_AUTOSTART.
             if daemon_autostart_enabled() {
                 ensure_daemon_running_unix()?;
-                match UnixStream::connect(&socket_path) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        anyhow::bail!(
-                            "daemon auto-start attempted but socket remained unavailable at {}: {e}",
-                            socket_path.display()
-                        )
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match UnixStream::connect(&socket_path) {
+                        Ok(s) => break s,
+                        Err(e) if Instant::now() < deadline => {
+                            let _ = e;
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(e) => {
+                            anyhow::bail!(
+                                "daemon auto-start attempted but socket remained unavailable at {}: {e}",
+                                socket_path.display()
+                            )
+                        }
                     }
                 }
             } else {
@@ -920,7 +927,21 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     // Serialize daemon startup across concurrent CLI processes.
     let _startup_lock = match crate::io::lock::acquire_lock(&startup_lock_path, 3) {
         Ok(lock) => Some(lock),
-        Err(InboxError::LockTimeout { .. }) => None,
+        Err(InboxError::LockTimeout { .. }) => {
+            // Another process likely holds the startup lock and is spawning the daemon.
+            // Wait for that startup attempt to converge instead of spawning unlocked.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if daemon_is_running() || daemon_socket_connectable(&home) {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            anyhow::bail!(
+                "timed out waiting for daemon startup lock holder to bring daemon online: {}",
+                startup_lock_path.display()
+            );
+        }
         Err(e) => anyhow::bail!(
             "failed to acquire daemon startup lock {}: {e}",
             startup_lock_path.display()

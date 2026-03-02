@@ -1163,7 +1163,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | V.4 | Terminal-member cleanup convergence | V.2 | M | PLANNED | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334) |
 | V.5 | Recommendation engine hardening | V.2 | S | PLANNED | [#336](https://github.com/randlee/agent-team-mail/issues/336) |
 | V.6 | Doctor UX snapshot/report ordering | V.1 | S | PLANNED | [#335](https://github.com/randlee/agent-team-mail/issues/335) |
-| V.7 | Logging identity contract coverage | V.0 | S | PLANNED | (Phase V umbrella) |
+| V.7 | Logging identity contract coverage | V.0 | S | COMPLETE | (Phase V umbrella) |
 
 ---
 ## 18. Future Plugins
