@@ -328,8 +328,8 @@ fn test_status_reports_actionable_error_when_autostart_binary_missing() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("\"isActive\": true"),
-        "status should fall back to config isActive when daemon auto-start fails: {stdout}"
+        stdout.contains("\"isActive\": null"),
+        "status should report unknown liveness when daemon auto-start fails: {stdout}"
     );
 }
 
