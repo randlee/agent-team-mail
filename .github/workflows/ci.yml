@@ -176,7 +176,7 @@ jobs:
     needs: [clippy]
     # Skip on integrate/* PRs: workspace crates are co-versioned and not yet
     # published to crates.io, so cargo package resolution will always fail.
-    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.base_ref, 'integrate/')) }}
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'integrate/')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
