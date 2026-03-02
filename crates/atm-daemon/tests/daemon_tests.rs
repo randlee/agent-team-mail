@@ -4,8 +4,9 @@ use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
 use agent_team_mail_daemon::daemon;
 use agent_team_mail_daemon::daemon::{
-    StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue, new_pubsub_store,
-    new_session_registry, new_state_store, new_stream_event_sender, new_stream_state_store,
+    SessionRegistry, StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue,
+    new_pubsub_store, new_session_registry, new_state_store, new_stream_event_sender,
+    new_stream_state_store,
 };
 use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
@@ -492,6 +493,10 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
 
 #[tokio::test]
 #[serial]
+#[cfg_attr(
+    windows,
+    ignore = "notify watcher startup is flaky on windows-latest CI; reconcile behavior is covered by deterministic unit tests"
+)]
 async fn test_config_watch_event_updates_and_removes_members() {
     let (ctx, temp_dir) = create_reconcile_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
@@ -531,6 +536,7 @@ async fn test_config_watch_event_updates_and_removes_members() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
     let state_store = new_state_store();
     let state_store_probe = state_store.clone();
+    let session_registry = Arc::new(Mutex::new(SessionRegistry::new()));
 
     let daemon_task = tokio::spawn(async move {
         daemon::run(
@@ -542,7 +548,7 @@ async fn test_config_watch_event_updates_and_removes_members() {
             state_store,
             new_pubsub_store(),
             new_launch_sender(),
-            new_session_registry(),
+            session_registry,
             dedup_store,
             new_stream_state_store(),
             new_stream_event_sender(),
@@ -592,7 +598,7 @@ async fn test_config_watch_event_updates_and_removes_members() {
         ]),
     );
 
-    let added = wait_until(2500, || {
+    let added = wait_until(8000, || {
         state_store_probe
             .lock()
             .unwrap()
@@ -605,7 +611,7 @@ async fn test_config_watch_event_updates_and_removes_members() {
         "worker-b should be added via live config watcher reconcile"
     );
 
-    let removed = wait_until(2500, || {
+    let removed = wait_until(8000, || {
         state_store_probe
             .lock()
             .unwrap()

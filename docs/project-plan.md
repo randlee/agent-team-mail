@@ -727,7 +727,7 @@ Harden daemon foundations required by R.1 session handoff:
 Closes gaps identified during R.0 execution and dogfooding:
 
 1. **Persistent session registry via hooks**: `session_start` hook writes `{agent_name, pid, session_id, team}` to daemon registry persistently. `session_end` hook removes entry. Daemon uses this for kill signals and liveness queries.
-2. **`isActive` semantics**: `isActive` is activity/busy metadata only (not liveness). Daemon session/PID state is the liveness source of truth.
+2. **`isActive` semantics**: `isActive` is advisory only. Daemon uses PID/session liveness as lifecycle truth and reconciles stale `isActive` drift in `config.json`.
 3. **Shutdown-first teardown flow**: For active-agent termination intent, daemon sends `shutdown_request` to mailbox, waits `--timeout`, then force-kills PID if needed.
 4. **Coupled teardown invariant**: After confirmed termination (already-dead or timeout+kill), daemon removes roster entry from `config.json` and deletes mailbox together (no partial state).
 5. **`atm cleanup --agent <name>`**: CLI cleanup command is non-destructive for active agents unless explicit kill semantics are requested; active termination uses shutdown-first flow.
@@ -1145,46 +1145,42 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | PLANNED | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
 
 ---
-## 17.8 Phase V: State Truth + Release Workflow Hardening
 
-**Goal**: enforce a single liveness source of truth (daemon/session state), keep
-`isActive` as activity-only metadata, and complete release workflow automation.
+## 17.10 Phase V: Doctor State-Model Convergence (Planning)
 
-### V.0 — Baseline Cleanup + Observability Prep *(in progress)*
+**Goal**: Eliminate remaining doctor/lifecycle state-model gaps with requirements-first implementation and explicit regression coverage.
 
-Completed in planning worktree:
-- Documentation consistency updates for `isActive` semantics (`activity/busy`, not liveness).
-- Code inconsistency inventory added to `docs/issues.md` for sprint planning.
-- Structured log process metadata expansion (`pid` + `ppid` in event fields where available).
-- Human `atm logs` output includes process metadata and send target rendering.
+**Execution reference**: `docs/test-plan-phase-V.md`
 
-### Phase V Sprint Plan
+**Change-control note**: V.7 scope was redefined from the earlier "integration hardening + release/QA handoff" placeholder to "logging identity contract coverage" (pid/ppid emitters, send/read/status/doctor logging, and contract tests). The superseded integration-handoff work was absorbed into broader doctor/lifecycle convergence and Phase W release-track execution.
+**Change-control note**: Section 17.10 supersedes 17.8 for doctor/lifecycle state-model work (V.0-V.7). The earlier release/publishing hardening track was moved to Phase W (17.11) to preserve separation between lifecycle correctness and release automation.
+**Change-control note (V.2+V.3 execution)**: V.2 (lead/non-lead teardown semantics) and V.3 (`isActive`/liveness separation) are being executed together in a single implementation/review stream to avoid split changes across shared send/status/doctor contracts; tracked by PR [#347](https://github.com/randlee/agent-team-mail/pull/347).
+**Coordination note**: Phase W sprint W.1 (`feature/pW-s1-offline-fix`, merged to `integrate/phase-W`) must merge to `develop` before `integrate/phase-V` merges to `develop` (integration-time merge-order constraint, not a branch dependency).
+**Release automation track note**: V.1a–V.4a release/publishing hardening is tracked under Phase W (see 17.11).
 
-| Sprint | Name | Depends On | Size | Status | Scope |
+| Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
-| V.0 | Baseline cleanup + observability prep | — | S | IN PROGRESS | docs consistency + logging metadata prep already implemented in worktree |
-| V.1 | `isActive` semantics contract enforcement | V.0 | M | PLANNED | enforce activity-only meaning in daemon/core code paths |
-| V.2 | Doctor snapshot/liveness truth alignment | V.1 | M | PLANNED | doctor member table must be daemon-liveness-derived, not `isActive`-derived |
-| V.3 | `send` offline detection via daemon liveness | V.1 | M | PLANNED | use daemon/session truth for offline detection; explicit unknown fallback |
-| V.4 | `status`/`members` output semantics split | V.1 | M | PLANNED | separate liveness from activity in CLI output contracts |
-| V.5 | Daemon reconcile write-path correction | V.1 | M | PLANNED | stop writing PID/session liveness into `isActive` |
-| V.6 | Test migration for state-model separation | V.2,V.3,V.4,V.5 | L | PLANNED | rewrite tests that currently equate `isActive` with online/offline |
-| V.7 | Integration hardening + release/QA handoff | V.6 | S | PLANNED | commit/push, QA pass, and closeout for merged semantics |
+| V.0 | Baseline diagnostics fixture capture | — | S | COMPLETE | prerequisite |
+| V.1 | Team-scoped doctor reconciliation | V.0 | M | COMPLETE | [#333](https://github.com/randlee/agent-team-mail/issues/333) — team-scoped reconciliation absorbed into V.2+V.3 delivery (socket.rs, daemon_client.rs); PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
+| V.2+V.3 | Lead/non-lead teardown semantics + `isActive`/liveness separation hardening | V.0 | M | COMPLETE | [#332](https://github.com/randlee/agent-team-mail/issues/332), [#330](https://github.com/randlee/agent-team-mail/issues/330) — combined delivery per change-control note; PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
+| V.4 | Terminal cleanup convergence + stale tracked members | V.0 | M | COMPLETE | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334), PR [#345](https://github.com/randlee/agent-team-mail/pull/345) |
+| V.5 | Recommendation engine hardening | V.2 | S | DEFERRED | [#336](https://github.com/randlee/agent-team-mail/issues/336) — deferred to a future phase; not in scope for integrate/phase-V merge |
+| V.6 | Doctor UX snapshot/report ordering | V.1 | S | DEFERRED | [#335](https://github.com/randlee/agent-team-mail/issues/335) — deferred to a future phase; not in scope for integrate/phase-V merge |
+| V.7 | Logging identity contract coverage | V.0 | S | COMPLETE | (Phase V umbrella) |
 
-## 17.9 Phase W: Release Automation Track
+---
+## 17.11 Phase W: Release Automation Bridge (Reference)
 
-**Goal**: harden release/publish workflow execution with deterministic inventory,
-publisher process guarantees, retries, and post-publish verification.
+This section exists to resolve cross-phase references used by Phase V and QA review.
 
-| Sprint | Description | Depends On | Status | Issue(s) | PR |
-|--------|-------------|------------|--------|----------|----|
-| W.1 | ATM send offline action + skill doc fix | — | COMPLETE | [#328](https://github.com/randlee/agent-team-mail/issues/328), [#329](https://github.com/randlee/agent-team-mail/issues/329) | [#343](https://github.com/randlee/agent-team-mail/pull/343) |
-| W.2 | Publisher agent rewrite (no sub-agents) | — | COMPLETE | [#327](https://github.com/randlee/agent-team-mail/issues/327) | [#341](https://github.com/randlee/agent-team-mail/pull/341) |
-| W.3 | Release workflow: crates.io retry + Homebrew automation | W.2 | COMPLETE | [#323](https://github.com/randlee/agent-team-mail/issues/323), [#324](https://github.com/randlee/agent-team-mail/issues/324) | [#344](https://github.com/randlee/agent-team-mail/pull/344) |
-| W.4 | Release workflow: pre-publish audit + completion report | W.3 | IN PROGRESS | [#325](https://github.com/randlee/agent-team-mail/issues/325), [#326](https://github.com/randlee/agent-team-mail/issues/326) | [#349](https://github.com/randlee/agent-team-mail/pull/349) |
+| Sprint | Name | Depends On | Size | Status | Notes |
+|--------|------|------------|------|--------|-------|
+| W.1 | Offline prefix behavior alignment | — | S | MERGED to `develop` (PR [#352](https://github.com/randlee/agent-team-mail/pull/352)) | — |
+| W.2 | Publisher rewrite (sub-agent prohibition + inline audit) | W.1 | M | MERGED to `develop` (PR [#352](https://github.com/randlee/agent-team-mail/pull/352)) | — |
+| W.3 | Release workflow hardening (crates.io retry, Homebrew automation) | W.2 | M | MERGED to `develop` (PR [#352](https://github.com/randlee/agent-team-mail/pull/352)) | — |
+| W.4 | Pre-publish audit (cargo package gate, waiver enforcement, release-summary) | W.3 | S | MERGED to `develop` (PR [#352](https://github.com/randlee/agent-team-mail/pull/352)) | — |
 
-**Coordination note**: V.1–V.7 (state-model track) and W.1–W.4 (release automation track)
-run in parallel where dependencies do not overlap.
+**V.4 dependency note**: V.4 is a daemon lifecycle cleanup sprint scoped to #331/#334. It was executed as an independently testable guard/hardening pass before V.2 merge completion to stop active regressions; V.2 remains the broader teardown-policy sprint. V.4 is intentionally independent from V.1 doctor reconciliation.
 
 ---
 ## 18. Future Plugins

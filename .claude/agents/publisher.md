@@ -82,7 +82,7 @@ required = {
     'agent-team-mail-tui',
     'agent-team-mail-mcp',
 }
-artifacts = {item['artifact'] for item in inv.get('artifacts', [])}
+artifacts = {item['artifact'] for item in inv.get('items', [])}
 missing = required - artifacts
 print('Missing crates:', missing or 'none')
 sys.exit(1 if missing else 0)
@@ -98,7 +98,7 @@ with open('Cargo.toml') as f:
 ws_version = re.search(r'version\s*=\s*\"([^\"]+)\"', content).group(1)
 with open('release/release-inventory.json') as f:
     inv = json.load(f)
-inv_version = inv.get('version', '')
+inv_version = inv.get('releaseVersion', '')
 print(f'Workspace: {ws_version}, Inventory: {inv_version}')
 assert ws_version == inv_version.lstrip('v'), 'VERSION MISMATCH'
 print('Version match: OK')
@@ -112,7 +112,7 @@ import json
 with open('release/release-inventory.json') as f:
     inv = json.load(f)
 required_waiver_fields = {'approver', 'reason', 'gateCheck'}
-for item in inv.get('artifacts', []):
+for item in inv.get('items', []):
     if 'waiver' in item:
         missing = required_waiver_fields - set(item['waiver'].keys())
         if missing:
@@ -133,8 +133,7 @@ done
 **Step F — Collect preflight artifacts after workflow completes:**
 ```bash
 # After preflight run finishes, download artifacts
-gh run download <preflight-run-id> --name release-inventory --dir release/
-gh run download <preflight-run-id> --name publisher-preflight-report --dir release/
+gh run download <preflight-run-id> --name release-preflight --dir release/
 cat release/publisher-preflight-report.json
 ```
 

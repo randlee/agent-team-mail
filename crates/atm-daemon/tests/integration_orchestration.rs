@@ -9,7 +9,7 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::config::aliases::resolve_alias;
 use agent_team_mail_daemon::daemon::log_writer::new_log_event_queue;
-use agent_team_mail_daemon::daemon::session_registry::new_session_registry;
+use agent_team_mail_daemon::daemon::session_registry::SessionRegistry;
 use agent_team_mail_daemon::daemon::socket::{
     new_dedup_store, new_launch_sender, new_pubsub_store, new_state_store, new_stream_event_sender,
     new_stream_state_store, start_socket_server,
@@ -26,6 +26,10 @@ fn acquire_test_daemon_lock(
     let lock_path = home_dir.join(".config/atm/daemon.lock");
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).unwrap()
+}
+
+fn new_isolated_session_registry() -> Arc<Mutex<SessionRegistry>> {
+    Arc::new(Mutex::new(SessionRegistry::new()))
 }
 
 // ── Test 1: AgentStateTracker lifecycle ───────────────────────────────────────
@@ -125,7 +129,7 @@ async fn test_socket_query_agent_state() {
         state_store,
         new_pubsub_store(),
         new_launch_sender(),
-        new_session_registry(),
+        new_isolated_session_registry(),
         new_dedup_store(&home_dir).unwrap(),
         new_stream_state_store(),
         new_stream_event_sender(),
@@ -186,7 +190,7 @@ async fn test_socket_query_agent_not_found() {
         new_state_store(),
         new_pubsub_store(),
         new_launch_sender(),
-        new_session_registry(),
+        new_isolated_session_registry(),
         new_dedup_store(&home_dir).unwrap(),
         new_stream_state_store(),
         new_stream_event_sender(),
@@ -249,7 +253,7 @@ async fn test_pubsub_subscription_roundtrip() {
         new_state_store(),
         pubsub_store.clone(),
         new_launch_sender(),
-        new_session_registry(),
+        new_isolated_session_registry(),
         new_dedup_store(&home_dir).unwrap(),
         new_stream_state_store(),
         new_stream_event_sender(),
@@ -366,7 +370,7 @@ async fn test_launch_gemini_runtime_metadata_roundtrip() {
     let daemon_lock = acquire_test_daemon_lock(&home_dir);
 
     let launch_tx = new_launch_sender();
-    let session_registry = new_session_registry();
+    let session_registry = new_isolated_session_registry();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     {
         let mut guard = launch_tx.lock().await;

@@ -400,6 +400,12 @@ impl LogEventV1Builder {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_default();
         let pid = std::process::id();
+        let mut fields = self.fields;
+        if let Some(ppid) = crate::pid::parent_pid() {
+            fields
+                .entry("ppid".to_string())
+                .or_insert_with(|| serde_json::Value::Number(ppid.into()));
+        }
 
         LogEventV1 {
             v: 1,
@@ -417,7 +423,7 @@ impl LogEventV1Builder {
             correlation_id: self.correlation_id,
             outcome: self.outcome,
             error: self.error,
-            fields: self.fields,
+            fields,
             spans: self.spans,
         }
     }
@@ -803,6 +809,27 @@ mod tests {
         assert!(!event.ts.is_empty());
         assert!(!event.hostname.is_empty());
         assert!(event.pid > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_new_log_event_includes_parent_pid_field_on_unix() {
+        let event = new_log_event("atm", "send_message", "atm::send", "info");
+        assert!(
+            event.fields.get("ppid").is_some(),
+            "new_log_event should include ppid field on unix"
+        );
+    }
+
+    #[test]
+    fn test_builder_preserves_explicit_ppid_field() {
+        let event = LogEventV1::builder("atm", "action", "target")
+            .field("ppid", serde_json::Value::Number(999u64.into()))
+            .build();
+        assert_eq!(
+            event.fields.get("ppid"),
+            Some(&serde_json::Value::Number(999u64.into()))
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Send command implementation
 
 use agent_team_mail_core::config::{Config, ConfigOverrides, resolve_config, resolve_identity};
-use agent_team_mail_core::daemon_client::{SessionQueryResult, query_session_for_team};
+use agent_team_mail_core::daemon_client::SessionQueryResult;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
@@ -172,8 +172,8 @@ pub fn execute(args: SendArgs) -> Result<()> {
     };
 
     // Check if recipient is offline and prepend action text.
-    // Source of truth is daemon session liveness; unknown daemon state => no prefix.
-    let recipient_offline = resolve_recipient_offline(&team_name, &agent_name).unwrap_or(false);
+    // Liveness truth comes from daemon session state; isActive is activity-only.
+    let recipient_offline = recipient_has_dead_session(&team_name, &agent_name);
 
     if recipient_offline {
         let action_text = resolve_offline_action(&args, &config);
@@ -181,7 +181,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
             eprintln!(
                 "Warning: Agent '{agent_name}' appears offline. Message will be queued with call-to-action."
             );
-            final_message_text = prepend_offline_action(final_message_text, &action_text);
+            final_message_text = format!("[{action_text}] {final_message_text}");
         }
     }
 
@@ -213,6 +213,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     // Dry run output
     if args.dry_run {
+        let destination = destination_target(&agent_name, &team_name);
         emit_event_best_effort(EventFields {
             level: "info",
             source: "atm",
@@ -221,7 +222,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
             session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
             agent_id: Some(config.core.identity.clone()),
             agent_name: Some(config.core.identity.clone()),
-            target: Some(agent_name.clone()),
+            target: Some(destination),
             result: Some("ok".to_string()),
             message_text: Some(final_message_text.clone()),
             ..Default::default()
@@ -262,6 +263,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
         }
         WriteOutcome::Queued { .. } => ("queued", None),
     };
+    let destination = destination_target(&agent_name, &team_name);
     emit_event_best_effort(EventFields {
         level: "info",
         source: "atm",
@@ -270,7 +272,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
         session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
         agent_id: Some(config.core.identity.clone()),
         agent_name: Some(config.core.identity.clone()),
-        target: Some(agent_name.clone()),
+        target: Some(destination),
         result: Some(result_text.to_string()),
         message_id: inbox_message.message_id.clone(),
         count: conflict_count,
@@ -402,28 +404,6 @@ fn process_file_reference(
 /// Resolve offline action text from CLI flag, config, or default
 ///
 /// Priority: CLI flag > config > default
-fn resolve_recipient_offline(team_name: &str, agent_name: &str) -> Option<bool> {
-    resolve_recipient_offline_with_query(team_name, agent_name, query_session_for_team)
-}
-
-fn resolve_recipient_offline_with_query<F>(
-    team_name: &str,
-    agent_name: &str,
-    query_session: F,
-) -> Option<bool>
-where
-    F: Fn(&str, &str) -> Result<Option<SessionQueryResult>>,
-{
-    match query_session(team_name, agent_name) {
-        Ok(Some(session)) => Some(!session.alive),
-        Ok(None) | Err(_) => None,
-    }
-}
-
-fn prepend_offline_action(message_text: String, action_text: &str) -> String {
-    format!("[{action_text}] {message_text}")
-}
-
 fn resolve_offline_action(args: &SendArgs, config: &Config) -> String {
     if let Some(ref action) = args.offline_action {
         return action.clone();
@@ -434,6 +414,27 @@ fn resolve_offline_action(args: &SendArgs, config: &Config) -> String {
     }
 
     String::new()
+}
+
+fn destination_target(agent_name: &str, team_name: &str) -> String {
+    format!("{agent_name}@{team_name}")
+}
+
+fn recipient_has_dead_session(team: &str, agent_name: &str) -> bool {
+    recipient_has_dead_session_with_query(team, agent_name, |team, agent| {
+        agent_team_mail_core::daemon_client::query_session_for_team(team, agent)
+    })
+}
+
+fn recipient_has_dead_session_with_query<F>(team: &str, agent_name: &str, query: F) -> bool
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
+    match query(team, agent_name) {
+        Ok(Some(session)) => !session.alive,
+        Ok(None) => false, // Unknown session state; do not label as offline.
+        Err(_) => false,   // Best-effort: send must proceed even if daemon query fails.
+    }
 }
 
 /// Generate summary from message text (first ~100 chars)
@@ -505,6 +506,7 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
 
     #[test]
     fn test_generate_summary_short() {
@@ -578,54 +580,6 @@ mod tests {
         assert_eq!(resolve_offline_action(&args, &config), "");
     }
 
-    fn mock_session(alive: bool) -> SessionQueryResult {
-        SessionQueryResult {
-            session_id: "session-123".to_string(),
-            process_id: 12345,
-            alive,
-            runtime: None,
-            runtime_session_id: None,
-            pane_id: None,
-            runtime_home: None,
-        }
-    }
-
-    #[test]
-    fn test_resolve_recipient_offline_returns_true_when_daemon_reports_dead() {
-        let result = resolve_recipient_offline_with_query("atm-dev", "agent", |_, _| {
-            Ok(Some(mock_session(false)))
-        });
-        assert_eq!(result, Some(true));
-    }
-
-    #[test]
-    fn test_resolve_recipient_offline_returns_false_when_daemon_reports_alive() {
-        let result = resolve_recipient_offline_with_query("atm-dev", "agent", |_, _| {
-            Ok(Some(mock_session(true)))
-        });
-        assert_eq!(result, Some(false));
-    }
-
-    #[test]
-    fn test_resolve_recipient_offline_returns_none_when_daemon_has_no_session() {
-        let result = resolve_recipient_offline_with_query("atm-dev", "agent", |_, _| Ok(None));
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_resolve_recipient_offline_returns_none_when_query_errors() {
-        let result = resolve_recipient_offline_with_query("atm-dev", "agent", |_, _| {
-            Err(anyhow::anyhow!("daemon unavailable"))
-        });
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_prepend_offline_action_formats_prefix() {
-        let text = prepend_offline_action("Review this".to_string(), "DO THIS LATER");
-        assert_eq!(text, "[DO THIS LATER] Review this");
-    }
-
     #[test]
     fn test_self_send_warning_prepended() {
         // When sender identity == target agent name, the warning should be
@@ -667,5 +621,60 @@ mod tests {
 
         assert_eq!(message_text, "Hello other!");
         assert!(!message_text.contains("WARNING"));
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_true_for_dead_session() {
+        let is_offline = recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| {
+            Ok(Some(SessionQueryResult {
+                session_id: "s".to_string(),
+                process_id: 123,
+                alive: false,
+                runtime: None,
+                runtime_session_id: None,
+                pane_id: None,
+                runtime_home: None,
+            }))
+        });
+        assert!(is_offline);
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_false_for_alive_session() {
+        let is_offline = recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| {
+            Ok(Some(SessionQueryResult {
+                session_id: "s".to_string(),
+                process_id: 123,
+                alive: true,
+                runtime: None,
+                runtime_session_id: None,
+                pane_id: None,
+                runtime_home: None,
+            }))
+        });
+        assert!(!is_offline);
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_false_when_session_unknown() {
+        let is_offline =
+            recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| Ok(None));
+        assert!(!is_offline);
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_false_on_query_error() {
+        let is_offline = recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| {
+            Err(anyhow!("daemon unavailable"))
+        });
+        assert!(!is_offline);
+    }
+
+    #[test]
+    fn test_destination_target_formats_agent_at_team() {
+        assert_eq!(
+            destination_target("team-lead", "atm-dev"),
+            "team-lead@atm-dev"
+        );
     }
 }

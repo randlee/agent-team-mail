@@ -13,6 +13,13 @@ pub fn is_pid_alive(pid: u32) -> bool {
     platform::is_pid_alive_impl(pid)
 }
 
+/// Best-effort parent process ID for the current process.
+///
+/// Returns `Some(ppid)` when available on the current platform, otherwise `None`.
+pub fn parent_pid() -> Option<u32> {
+    platform::parent_pid_impl()
+}
+
 #[cfg(unix)]
 mod platform {
     pub fn is_pid_alive_impl(pid: u32) -> bool {
@@ -27,6 +34,12 @@ mod platform {
         }
         // EPERM means the process exists but we lack permission to signal it.
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    pub fn parent_pid_impl() -> Option<u32> {
+        // SAFETY: getppid reads current process metadata and has no side effects.
+        let ppid = unsafe { libc::getppid() };
+        if ppid > 0 { Some(ppid as u32) } else { None }
     }
 }
 
@@ -64,12 +77,20 @@ mod platform {
             success != 0 && exit_code == STILL_ACTIVE
         }
     }
+
+    pub fn parent_pid_impl() -> Option<u32> {
+        None
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
 mod platform {
     pub fn is_pid_alive_impl(_pid: u32) -> bool {
         false
+    }
+
+    pub fn parent_pid_impl() -> Option<u32> {
+        None
     }
 }
 
@@ -101,5 +122,14 @@ mod tests {
     #[test]
     fn pid_zero_is_not_alive() {
         assert!(!is_pid_alive(0), "PID 0 should not be considered alive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_pid_is_available_on_unix() {
+        assert!(
+            parent_pid().is_some(),
+            "parent_pid should be present on unix platforms"
+        );
     }
 }

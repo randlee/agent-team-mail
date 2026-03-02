@@ -393,31 +393,26 @@ atm send <agent> --stdin             # message from stdin
 
 **Offline recipient detection**:
 
-Before writing to the inbox, `atm send` checks recipient liveness from daemon/session state:
-- If daemon-backed liveness says the recipient is not live, the recipient is considered offline.
-- If liveness cannot be resolved (daemon unavailable, no session record), status is unknown — **no offline warning** is shown by default.
-- If the recipient is **not in the members array**, the recipient is treated as unknown (no warning, message still delivered).
+Before writing to the inbox, `atm send` queries daemon session state (`query_session_for_team`):
+- If a session record exists and `alive=false`, the recipient is considered offline.
+- If session is missing (`None`) or query fails (`Err`), recipient state is unknown — **no offline warning** is shown.
 - When offline, `atm` prepends a call-to-action tag to the message body: `[{action_text}] {original_message}`
 - The sender receives a warning: `Warning: Agent X appears offline. Message will be queued with call-to-action.`
 - The message is still delivered (written to inbox file) — the warning is informational, not a hard block.
 
-`isActive` MUST NOT be used as the source of truth for online/offline liveness checks.
-
 **Agent activity tracking (daemon-managed)**:
 
 The daemon tracks agent activity by monitoring inbox file changes and message timestamps:
-- `atm send` sets the sender's `isActive: true` and `lastActive` timestamp in team `config.json` as an activity heartbeat.
+- `atm send` sets the sender's `isActive: true` and `lastActive` timestamp in team `config.json` as a heartbeat.
 - The daemon watches inbox file events (already part of the event loop) and tracks last-activity-per-agent from `from` fields and `timestamp` values — no extra I/O beyond existing file watching.
 - After a configurable inactivity timeout (default: 5 minutes), the daemon sets `isActive: false` for the agent.
 - Two activity signals: (1) messages sent by the agent (`from` field across inboxes), (2) messages read by the agent (`read: true` transitions).
 - `lastActive` is stored in the member entry in `config.json` (ISO 8601 timestamp).
 
-`isActive` represents activity/busy signal only. It does not imply process/session liveness.
-
 **Call-to-action text precedence** (highest to lowest):
 1. `--offline-action "custom text"` CLI flag
 2. `offline_action` property in config file (`.atm.toml` or `settings.json`)
-3. Hardcoded default: empty string (no auto-prefix)
+3. Hardcoded default: empty string (`""`, no auto-tagging)
 
 **Special case**: If the resolved action text is an empty string (property exists but value is `""`), the call-to-action is skipped entirely — no brackets prepended, message sent as-is. This allows users to explicitly opt out of auto-tagging.
 
@@ -684,9 +679,6 @@ atm doctor --full
 - Human-readable output MUST start with a concise team member snapshot table (equivalent
   core fields to `atm members`: name/type/model/status), followed by ordered findings by
   severity, then recommended remediation commands.
-- In this snapshot table, `status` MUST represent daemon/session liveness
-  (online/offline), not `isActive`. If activity is displayed, it must be shown as a
-  separate field.
 - JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
 - Recommendations must include directly runnable commands when applicable and MUST be
   context-aware/actionable for the reported finding class (for example, avoid suggesting
@@ -968,8 +960,7 @@ default_team = "backend-ci-team"    # default team for commands
 identity = "team-lead"              # from field on sent messages
 
 [messaging]
-offline_action = ""                          # default: no auto-prefix for offline recipients
-                                             # set non-empty text to enable call-to-action prefixing
+offline_action = ""  # default: no call-to-action prefix when recipient appears offline
 
 [display]
 format = "text"                     # text | json
@@ -1118,12 +1109,6 @@ Optional correlation fields:
 - `outcome`, `error`
 - `fields` (structured map), `spans` (span refs)
 
-Process identity fields:
-- `pid` is required and represents the emitting process ID.
-- `fields.ppid` SHOULD be emitted when parent PID is available on the platform.
-- If parent PID is unavailable on a platform/runtime, omission of `fields.ppid`
-  is allowed and must not fail event validation.
-
 Validation rules:
 - Reject payloads missing required fields
 - Enforce serialized-size guard (`64 KiB` max per line, initial default)
@@ -1236,12 +1221,6 @@ No legacy `events.jsonl` sink code remains in any crate.
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
 - `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy.
 - `ATM_LOG_FILE` may override file path for tests/ops; `ATM_LOG_PATH` remains alias.
-
-#### Human Log Rendering Requirements (`atm logs`)
-
-- Human-readable `atm logs` lines MUST include emitting `pid`.
-- When `fields.ppid` exists, human-readable output MUST include `ppid`.
-- The process metadata render is diagnostic-only and must not alter filtering semantics.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
 
@@ -1384,9 +1363,6 @@ Acceptance checks:
 
 #### Agent State Transition Requirements
 
-- Daemon state is the single source of truth for liveness in ATM.
-- `isActive` in team config is an activity/busy hint and MUST NOT be interpreted as
-  liveness.
 - Agent state must transition based on lifecycle events plus PID liveness checks.
 - Supported baseline states: `unknown`, `active`, `idle`, `offline`.
 - State transitions must record `reason` and `source` for troubleshooting.

@@ -95,7 +95,7 @@ These are code-level inconsistencies against the intended model:
 |---|---|---|---|---|
 | Keep provisional sprint mappings synchronized across planning docs | Documentation | Open | Medium | Source-of-truth sequencing for current draft is `docs/test-plan-phase-T.md`; update `project-plan.md` + `issues.md` together on mapping changes |
 
-## New Doctor Findings (Needs GitHub Issue Creation)
+## New Doctor Findings (Issue Creation Completed)
 
 | Item | Type | Status | Priority | Notes |
 |---|---|---|---|---|
@@ -106,6 +106,22 @@ These are code-level inconsistencies against the intended model:
 | Session registry drift after team recreation/removal (`DAEMON_TRACKS_UNKNOWN_AGENT`) | Bug | Open | High | Daemon continues tracking removed agents (for example `arch-ctm`) after roster reset/recreate, causing persistent unknown-agent warnings. |
 | `isActive=true` members without daemon session (`ACTIVE_WITHOUT_SESSION`) after restore/recreate | Bug | Open | Medium | Restored/re-added members can remain marked active with no live daemon session record; doctor warns until explicit registration/reconciliation occurs. |
 | `atm doctor` recommends `atm register` even when `CLAUDE_SESSION_ID` is unavailable | UX/Diagnostics | Open | Medium | In non-hook shells, `atm register` fails with \"Cannot determine session_id\"; recommendation should be context-aware or include actionable fallback guidance (`--as`, run from managed session, etc.). |
+
+## Phase V Active Mapping (Issue-Backed)
+
+| Sprint | Focus | Issue |
+|---|---|---|
+| V.1 | Team-scoped doctor reconciliation | [#333](https://github.com/randlee/agent-team-mail/issues/333) |
+| V.2 | Lead/non-lead teardown semantics | [#332](https://github.com/randlee/agent-team-mail/issues/332) |
+| V.3 | `isActive`/liveness separation | [#330](https://github.com/randlee/agent-team-mail/issues/330) |
+| V.4 | Terminal cleanup convergence + stale tracked members | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334) |
+| V.5 | Recommendation actionability | [#336](https://github.com/randlee/agent-team-mail/issues/336) |
+| V.6 | Doctor output context snapshot ordering | [#335](https://github.com/randlee/agent-team-mail/issues/335) |
+
+## Phase W Coordination
+
+- Release automation moved to Phase W (`W.1`–`W.4`) to avoid naming collision with Phase V.
+- `send.rs` overlap between W.1 and V.3 requires W.1 to land first.
 
 ### Root-Cause Notes (Documented, Not Yet Implemented)
 

@@ -177,7 +177,8 @@ pub struct AgentMember {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_type: Option<String>,
 
-    /// Whether agent is currently running
+    /// Activity/busy hint (recent work signal). `true` = busy/sending, `false` = idle.
+    /// NOT a liveness indicator — use daemon session state for liveness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_active: Option<bool>,
 

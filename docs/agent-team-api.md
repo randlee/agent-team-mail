@@ -360,11 +360,34 @@ When an agent is respawned (same name), behavior depends on teardown state:
 - If prior instance teardown completed, the new agent starts with an empty mailbox.
 - If prior teardown has not completed yet, stale messages may remain until daemon reconciliation finishes.
 
-### Optional Offline Call-to-Action
+### Offline Queuing Pattern (opt-in)
 
-If operators want explicit offline call-to-action text, they can provide it
-explicitly via `--offline-action` (or config). ATM should not rely on a hardcoded
-prefix by default.
+By default, `atm send` delivers messages without any prefix — no call-to-action tag is added.
+
+To add a call-to-action prefix for messages to offline agents, use `--offline-action`:
+
+```bash
+atm send <agent> "message" --offline-action "[PENDING ACTION - execute when online]"
+```
+
+or configure a default in `.atm.toml`:
+
+```toml
+[send]
+offline_action = "[PENDING ACTION - execute when online]"
+```
+
+With a tag, the pattern has been 100% reliable in testing. Without one, the message is still delivered; the tag is purely a hint to the recipient.
+
+### `atm doctor --json` Output Contract
+
+`atm doctor --json` returns a stable top-level report object with:
+- `summary`
+- `findings`
+- `recommendations`
+- `log_window`
+
+`member_snapshot` is intentionally omitted from JSON output (it is rendered in human output only).
 
 ---
 
@@ -861,7 +884,7 @@ Approve or reject agent's implementation plan.
 | `cwd` | string | Yes | Current working directory of agent |
 | `subscriptions` | array | No | Notification subscriptions (usually empty) |
 | `backendType` | string | No | Backend type (e.g., "tmux", empty if not running) |
-| `isActive` | boolean | No | Activity/busy hint (recent work signal), not liveness |
+| `isActive` | boolean | No | Activity/busy hint (recent work signal), not a liveness indicator |
 
 **Complete Example** (from test-team):
 
@@ -953,8 +976,7 @@ Approve or reject agent's implementation plan.
 - **Team Lead Member**: First member has empty/null `prompt`, `color`, `tmuxPaneId`, and no `backendType`
 - **Spawned Agents**: Have `prompt`, `color`, `tmuxPaneId`, and `backendType` populated
 - **`model`**: Different agents can use different models (e.g., team-lead uses haiku, agents use opus)
-- **`isActive`**: activity/busy hint only (for example recent sender/read activity); not a process/session liveness signal
-- **Liveness source of truth**: daemon session/registry state, not `isActive`
+- **`isActive`**: activity signal only (true=busy/sending, false=idle); NOT a liveness indicator — use daemon session state for liveness
 - **`prompt`**: Where specialized instructions are stored (can be long multi-line text)
 - **`color`**: UI color for team dashboard (optional but recommended)
 
