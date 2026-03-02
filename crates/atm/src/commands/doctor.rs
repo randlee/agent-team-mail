@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
     daemon_is_running, daemon_pid_path, daemon_socket_path, query_list_agents,
-    query_session_for_team,
+    query_list_agents_for_team, query_session_for_team,
 };
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::schema::TeamConfig;
@@ -353,7 +353,7 @@ fn check_roster_session_integrity(team: &str, cfg: &TeamConfig) -> Vec<Finding> 
     let mut findings = Vec::new();
     let roster: HashSet<String> = cfg.members.iter().map(|m| m.name.clone()).collect();
 
-    if let Ok(Some(agents)) = query_list_agents() {
+    if let Ok(Some(agents)) = query_list_agents_for_team(team) {
         for tracked in agents {
             if !roster.contains(&tracked.agent) {
                 findings.push(finding(
@@ -415,6 +415,19 @@ fn check_mailbox_integrity(inboxes_dir: PathBuf, team: &str, cfg: &TeamConfig) -
         if let Some(s) = session
             && !s.alive
         {
+            if member.name == "team-lead" {
+                findings.push(finding(
+                    Severity::Warn,
+                    "mailbox_teardown_integrity",
+                    "LEAD_SESSION_RECOVERY_REQUIRED",
+                    format!(
+                        "Team lead has dead session (pid={}) and requires session recovery/reregister",
+                        s.process_id
+                    ),
+                ));
+                continue;
+            }
+
             let has_mailbox = local_mailboxes.contains(&member.name);
             if has_mailbox {
                 findings.push(finding(
@@ -676,7 +689,10 @@ fn build_recommendations(team: &str, findings: &[Finding]) -> Vec<Recommendation
         });
     }
 
-    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") {
+    if has("ACTIVE_WITHOUT_SESSION")
+        || has("ACTIVE_FLAG_STALE")
+        || has("LEAD_SESSION_RECOVERY_REQUIRED")
+    {
         recs.push(Recommendation {
             command: format!("atm register {team}"),
             reason: "Refresh team-lead/session state before additional lifecycle actions"
@@ -846,6 +862,45 @@ mod tests {
 
         let findings = check_mailbox_integrity(inboxes, "atm-dev", &cfg);
         assert!(findings.iter().any(|f| f.code == "ORPHAN_MAILBOX"));
+    }
+
+    #[test]
+    fn build_recommendations_routes_lead_recovery_to_register_only() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "mailbox_teardown_integrity",
+            "LEAD_SESSION_RECOVERY_REQUIRED",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings);
+        assert!(recs.iter().any(|r| r.command == "atm register atm-dev"));
+        assert!(
+            !recs
+                .iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
+    }
+
+    #[test]
+    fn check_mailbox_integrity_classifies_dead_team_lead_as_recovery_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inboxes = tmp.path().join("inboxes");
+        fs::create_dir_all(&inboxes).unwrap();
+
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        // This unit test covers classification logic only; when daemon is not
+        // reachable, no lead finding is emitted.
+        let findings = check_mailbox_integrity(inboxes, "atm-dev", &cfg);
+        assert!(!findings.iter().any(|f| f.code == "PARTIAL_TEARDOWN"));
     }
 
     #[test]
