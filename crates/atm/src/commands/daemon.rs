@@ -16,7 +16,7 @@ use crate::util::settings::get_home_dir;
 #[derive(Args, Debug)]
 pub struct DaemonArgs {
     /// Kill the named agent process via daemon session tracking
-    #[arg(long, value_name = "AGENT", conflicts_with = "command")]
+    #[arg(long, value_name = "AGENT")]
     kill: Option<String>,
 
     /// Team override for --kill
@@ -60,6 +60,9 @@ pub fn execute(args: DaemonArgs) -> Result<()> {
 }
 
 fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> Result<()> {
+    if !agent_team_mail_core::daemon_client::daemon_is_running() {
+        ensure_daemon_running().context("failed to auto-start daemon for --kill")?;
+    }
     if !agent_team_mail_core::daemon_client::daemon_is_running() {
         anyhow::bail!("daemon is not running");
     }
@@ -132,19 +135,34 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
     } else {
         #[cfg(unix)]
         {
-            // SAFETY: SIGKILL force-terminates process that ignored prior shutdown attempts.
-            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+            // SAFETY: SIGTERM requests cooperative shutdown after SIGINT timeout.
+            let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
         }
-        if wait_for_session_dead(team_name, agent, 3) {
+        if wait_for_session_dead(team_name, agent, 10) {
             crate::commands::teams::cleanup_single_agent(
                 team_name.to_string(),
                 agent.to_string(),
                 true,
             )?;
-            println!("SIGKILL termination + teardown cleanup complete for {agent}@{team_name}");
+            println!("SIGTERM termination + teardown cleanup complete for {agent}@{team_name}");
             Ok(())
         } else {
-            anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+            #[cfg(unix)]
+            {
+                // SAFETY: SIGKILL force-terminates process that ignored prior shutdown attempts.
+                let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            if wait_for_session_dead(team_name, agent, 3) {
+                crate::commands::teams::cleanup_single_agent(
+                    team_name.to_string(),
+                    agent.to_string(),
+                    true,
+                )?;
+                println!("SIGKILL termination + teardown cleanup complete for {agent}@{team_name}");
+                Ok(())
+            } else {
+                anyhow::bail!("failed to terminate {agent}@{team_name} within timeout")
+            }
         }
     }
 }
@@ -154,6 +172,17 @@ fn validated_signal_pid(pid: u32) -> Option<i32> {
         Some(pid as i32)
     } else {
         None
+    }
+}
+
+fn ensure_daemon_running() -> Result<()> {
+    // Trigger daemon autostart through the daemon query path used by published
+    // atm-core APIs, then verify liveness.
+    let _ = agent_team_mail_core::daemon_client::query_list_agents();
+    if agent_team_mail_core::daemon_client::daemon_is_running() {
+        Ok(())
+    } else {
+        anyhow::bail!("daemon is not running")
     }
 }
 

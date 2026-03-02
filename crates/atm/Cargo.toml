@@ -10,6 +10,7 @@ rust-version.workspace = true
 description = "CLI for agent-team-mail: send, read, and manage messages for AI agent teams"
 keywords = ["ai-agents", "messaging", "team-communication", "claude", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+include = ["src/**", "scripts/**", "README.md", "LICENSE", "Cargo.toml"]
 
 [[bin]]
 name = "atm"

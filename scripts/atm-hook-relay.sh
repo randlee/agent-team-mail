@@ -10,10 +10,12 @@
 # The json-payload is passed by Codex as the last argument and contains:
 #   {"type":"agent-turn-complete","thread-id":"...","turn-id":"...","cwd":"...","input-messages":[...],"last-assistant-message":"..."}
 #
-# The script enriches the payload with:
+# The script enriches the payload with canonical availability fields:
 #   - agent: from --agent flag or ATM_IDENTITY env var
 #   - team: from --team flag or ATM_TEAM env var
-#   - received_at: ISO 8601 timestamp
+#   - state: "idle" for AfterAgent completion
+#   - timestamp / received_at: ISO 8601 timestamp
+#   - idempotency_key: stable replay key for dedup
 #
 # Output: Appends one JSON line to ${ATM_HOME:-$HOME}/.claude/daemon/hooks/events.jsonl
 
@@ -48,6 +50,11 @@ if [[ -z "$JSON_PAYLOAD" ]]; then
     exit 1
 fi
 
+if ! echo "$JSON_PAYLOAD" | jq -e . >/dev/null 2>&1; then
+    echo "Error: Invalid JSON payload" >&2
+    exit 1
+fi
+
 # Determine output file location
 ATM_HOME="${ATM_HOME:-$HOME}"
 EVENTS_FILE="$ATM_HOME/.claude/daemon/hooks/events.jsonl"
@@ -57,18 +64,28 @@ mkdir -p "$(dirname "$EVENTS_FILE")"
 
 # Generate ISO 8601 timestamp
 RECEIVED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+PAYLOAD_TYPE=$(echo "$JSON_PAYLOAD" | jq -r '.type // "agent-turn-complete"')
+TURN_ID=$(echo "$JSON_PAYLOAD" | jq -r '.["turn-id"] // "no-turn"')
+IDEMPOTENCY_KEY="${TEAM}:${AGENT}:${TURN_ID}"
 
-# Build enriched event JSON
-# We parse the input payload and add our fields, then output as a single line
-ENRICHED_EVENT=$(cat <<EOF | tr -d '\n'
-{
-  "agent": "$AGENT",
-  "team": "$TEAM",
-  "received_at": "$RECEIVED_AT",
-  "payload": $JSON_PAYLOAD
-}
-EOF
-)
+# Build canonical top-level event JSON expected by daemon hook watcher.
+ENRICHED_EVENT=$(echo "$JSON_PAYLOAD" | jq -c \
+  --arg type "$PAYLOAD_TYPE" \
+  --arg agent "$AGENT" \
+  --arg team "$TEAM" \
+  --arg ts "$RECEIVED_AT" \
+  --arg key "$IDEMPOTENCY_KEY" \
+  '{
+    type: $type,
+    agent: $agent,
+    team: $team,
+    "thread-id": .["thread-id"],
+    "turn-id": .["turn-id"],
+    received_at: $ts,
+    timestamp: $ts,
+    state: "idle",
+    idempotency_key: $key
+  }')
 
 # Append to events file (atomic append operation)
 echo "$ENRICHED_EVENT" >> "$EVENTS_FILE"

@@ -341,10 +341,11 @@ impl WorkerAdapter for CodexTmuxBackend {
             && payload.runtime == "gemini"
             && let Some(pid) = pane_pid(&handle.backend_id)
         {
+            let wait_timeout = gemini_shutdown_wait_timeout();
             send_sigint_to_pane(&handle.backend_id)?;
-            if !wait_for_pid_exit(pid, Duration::from_secs(10)) {
+            if !wait_for_pid_exit(pid, wait_timeout) {
                 send_sigterm(pid);
-                if !wait_for_pid_exit(pid, Duration::from_secs(10)) {
+                if !wait_for_pid_exit(pid, wait_timeout) {
                     send_sigkill(pid);
                 }
             }
@@ -419,6 +420,15 @@ fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(250));
     }
     false
+}
+
+fn gemini_shutdown_wait_timeout() -> Duration {
+    let secs = std::env::var("ATM_GEMINI_SHUTDOWN_WAIT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(10);
+    Duration::from_secs(secs)
 }
 
 fn is_pid_alive(pid: u32) -> bool {

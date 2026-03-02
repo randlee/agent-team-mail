@@ -7,7 +7,22 @@ on:
     branches: [develop, main]
 
 jobs:
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check --all
+
   clippy:
+    needs: [fmt]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -156,8 +171,50 @@ jobs:
       - name: Run MCP Inspector smoke script
         run: ./scripts/ci/mcp_inspector_smoke.sh
 
+  cli-publishability:
+    name: cli-publishability (ubuntu)
+    needs: [clippy]
+    # Skip in regular push/PR CI: co-versioned workspace crates depend on a new
+    # core version that is not yet on crates.io pre-release. Publishability is
+    # validated in release-preflight/release workflows where ordering is handled.
+    if: ${{ !((github.event_name == 'pull_request' && (github.base_ref == 'develop' || github.base_ref == 'main' || startsWith(github.base_ref, 'integrate/'))) || (github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate CLI package
+        run: cargo package -p agent-team-mail --locked --no-verify
+
+      - name: Validate CLI publish dry-run
+        run: cargo publish -p agent-team-mail --dry-run --locked --no-verify
+
+      - name: Simulate publish failure (must be non-zero)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          cargo publish -p does-not-exist --dry-run --locked >/tmp/publish-failure.log 2>&1
+          status=$?
+          set -e
+          if [[ "$status" -eq 0 ]]; then
+            echo "Expected non-zero status for intentional publish failure" >&2
+            cat /tmp/publish-failure.log >&2
+            exit 1
+          fi
+          echo "Intentional publish failure returned non-zero as required."
+
+      - name: Ensure release workflow does not mask publish failures
+        run: |
+          if rg -n "cargo publish .*\\|\\|" .github/workflows/release.yml; then
+            echo "Release workflow masks publish failure; remove '||' fallbacks." >&2
+            exit 1
+          fi
+
   test:
-    needs: [clippy, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke]
+    needs: [clippy, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke, cli-publishability]
     strategy:
       fail-fast: false
       matrix:

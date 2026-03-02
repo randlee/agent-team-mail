@@ -133,7 +133,7 @@ jobs:
           path: ${{ env.ARCHIVE }}
 
   release:
-    needs: [gate-and-tag, build]
+    needs: [gate-and-tag, build, publish-crates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,7 +164,7 @@ jobs:
             release/*
 
   publish-crates:
-    needs: [gate-and-tag, release]
+    needs: [gate-and-tag, build]
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
@@ -175,10 +175,163 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Generate release inventory artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.gate-and-tag.outputs.release_version }}'
+          tag='${{ needs.gate-and-tag.outputs.release_tag }}'
+          commit="$(git rev-parse "$tag")"
+          generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          mkdir -p release
+          python3 - <<'PY' "$version" "$tag" "$commit" "$generated_at"
+          import json
+          import sys
+          from pathlib import Path
+
+          version, tag, commit, generated_at = sys.argv[1:5]
+          inventory = {
+              "releaseVersion": version,
+              "releaseTag": tag,
+              "releaseCommit": commit,
+              "generatedAt": generated_at,
+              "items": [
+                  {
+                      "artifact": "agent-team-mail",
+                      "version": version,
+                      "sourceRef": f"refs/tags/{tag}",
+                      "publishTarget": "crates.io",
+                      "required": True,
+                      "verifyCommands": [
+                          f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail/{version}",
+                          f"cargo install agent-team-mail --version {version} --locked --force",
+                      ],
+                  },
+                  {
+                      "artifact": "agent-team-mail-core",
+                      "version": version,
+                      "sourceRef": f"refs/tags/{tag}",
+                      "publishTarget": "crates.io",
+                      "required": True,
+                      "verifyCommands": [
+                          f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-core/{version}",
+                      ],
+                  },
+                  {
+                      "artifact": "agent-team-mail-daemon",
+                      "version": version,
+                      "sourceRef": f"refs/tags/{tag}",
+                      "publishTarget": "crates.io",
+                      "required": True,
+                      "verifyCommands": [
+                          f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-daemon/{version}",
+                      ],
+                  },
+                  {
+                      "artifact": "agent-team-mail-mcp",
+                      "version": version,
+                      "sourceRef": f"refs/tags/{tag}",
+                      "publishTarget": "crates.io",
+                      "required": True,
+                      "verifyCommands": [
+                          f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-mcp/{version}",
+                      ],
+                  },
+                  {
+                      "artifact": "agent-team-mail-tui",
+                      "version": version,
+                      "sourceRef": f"refs/tags/{tag}",
+                      "publishTarget": "crates.io",
+                      "required": True,
+                      "verifyCommands": [
+                          f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-tui/{version}",
+                      ],
+                  },
+              ],
+          }
+          inventory["items"].sort(key=lambda x: x["artifact"])
+          Path("release/release-inventory.json").write_text(
+              json.dumps(inventory, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print("wrote release/release-inventory.json")
+          PY
+
+      - name: Validate generated release inventory against schema constraints
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          schema_path = Path("docs/release-inventory-schema.json")
+          inventory_path = Path("release/release-inventory.json")
+
+          schema = json.loads(schema_path.read_text(encoding="utf-8"))
+          inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+
+          required_top = ["releaseVersion", "releaseTag", "releaseCommit", "generatedAt", "items"]
+          for field in required_top:
+              if field not in inventory:
+                  raise SystemExit(f"inventory missing required top-level field: {field}")
+
+          items = inventory.get("items", [])
+          if not isinstance(items, list) or not items:
+              raise SystemExit("inventory.items must be a non-empty array")
+
+          required_item = ["artifact", "version", "sourceRef", "publishTarget", "verifyCommands", "required"]
+          artifacts = []
+          for idx, item in enumerate(items):
+              if not isinstance(item, dict):
+                  raise SystemExit(f"inventory.items[{idx}] must be an object")
+              for field in required_item:
+                  if field not in item:
+                      raise SystemExit(f"inventory.items[{idx}] missing required field: {field}")
+              verify = item["verifyCommands"]
+              if not isinstance(verify, list) or not verify:
+                  raise SystemExit(f"inventory.items[{idx}].verifyCommands must be non-empty")
+              if not isinstance(item["required"], bool):
+                  raise SystemExit(f"inventory.items[{idx}].required must be boolean")
+              artifacts.append(item["artifact"])
+              waiver = item.get("waiver")
+              if waiver is not None:
+                  for wf in ["approver", "reason", "gateCheck"]:
+                      if not str(waiver.get(wf, "")).strip():
+                          raise SystemExit(
+                              f"inventory.items[{idx}].waiver.{wf} must be present and non-empty"
+                          )
+
+          if len(artifacts) != len(set(artifacts)):
+              raise SystemExit("inventory has duplicate artifact entries")
+          if artifacts != sorted(artifacts):
+              raise SystemExit("inventory items must be sorted by artifact for deterministic ordering")
+
+          # Ensure schema file itself exposes required item fields.
+          item_required = set(
+              schema["$defs"]["item"]["required"]
+          )
+          missing = set(required_item) - item_required
+          if missing:
+              raise SystemExit(
+                  f"schema missing required item fields: {', '.join(sorted(missing))}"
+              )
+
+          print("release inventory validation passed")
+          PY
+
+      - name: Validate CLI crate packageability
+        run: cargo package -p agent-team-mail --locked --no-verify
+
+      - name: Validate CLI crate publish dry-run
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p agent-team-mail --dry-run --locked --no-verify
+
       - name: Publish agent-team-mail-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail-core || echo "already published (skipping)"
+        run: cargo publish -p agent-team-mail-core --locked
 
       - name: Wait for crates.io indexing
         run: sleep 60
@@ -186,7 +339,7 @@ jobs:
       - name: Publish agent-team-mail
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail || echo "already published (skipping)"
+        run: cargo publish -p agent-team-mail --locked
 
       - name: Wait for crates.io indexing
         run: sleep 60
@@ -194,7 +347,7 @@ jobs:
       - name: Publish agent-team-mail-daemon
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail-daemon || echo "already published (skipping)"
+        run: cargo publish -p agent-team-mail-daemon --locked
 
       - name: Wait for crates.io indexing
         run: sleep 60
@@ -202,7 +355,7 @@ jobs:
       - name: Publish atm-agent-mcp
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail-mcp || echo "already published (skipping)"
+        run: cargo publish -p agent-team-mail-mcp --locked
 
       - name: Wait for crates.io indexing
         run: sleep 60
@@ -210,4 +363,169 @@ jobs:
       - name: Publish atm-tui
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail-tui || echo "already published (skipping)"
+        run: cargo publish -p agent-team-mail-tui --locked
+
+      - name: Verify published crates from generated inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.gate-and-tag.outputs.release_version }}'
+          export CARGO_INSTALL_ROOT="$RUNNER_TEMP/atm-install-root"
+          rm -rf "$CARGO_INSTALL_ROOT"
+          python3 - <<'PY' "$version" "$CARGO_INSTALL_ROOT"
+          import json
+          import os
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          version = sys.argv[1]
+          install_root = sys.argv[2]
+          inventory = json.loads(Path("release/release-inventory.json").read_text(encoding="utf-8"))
+          items = inventory.get("items", [])
+          failures = []
+          verification = []
+          residual_risks = []
+
+          for item in items:
+              artifact = item.get("artifact", "<unknown>")
+              required = bool(item.get("required", True))
+              waiver = item.get("waiver")
+              if waiver:
+                  print(f"waived verification for {artifact}: {waiver}")
+                  verification.append(
+                      {"artifact": artifact, "required": required, "status": "waived", "reason": waiver}
+                  )
+                  residual_risks.append(
+                      {
+                          "artifact": artifact,
+                          "severity": "waived-required" if required else "waived-optional",
+                          "note": str(waiver),
+                      }
+                  )
+                  continue
+
+              verify_cmds = item.get("verifyCommands", [])
+              artifact_failures = []
+              for cmd in verify_cmds:
+                  if "cargo install" in cmd:
+                      attempts = 10
+                      for attempt in range(1, attempts + 1):
+                          env = dict(os.environ)
+                          env["CARGO_INSTALL_ROOT"] = install_root
+                          proc = subprocess.run(
+                              cmd,
+                              shell=True,
+                              env=env,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT,
+                              text=True,
+                          )
+                          if proc.returncode == 0:
+                              break
+                          if attempt == attempts:
+                              artifact_failures.append((cmd, proc.stdout))
+                          else:
+                              print(f"{artifact}: install attempt {attempt}/{attempts} failed; retrying in 30s")
+                              time.sleep(30)
+                  else:
+                      proc = subprocess.run(
+                          cmd,
+                          shell=True,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT,
+                          text=True,
+                      )
+                      if proc.returncode != 0:
+                          artifact_failures.append((cmd, proc.stdout))
+
+              if artifact_failures:
+                  verification.append(
+                      {
+                          "artifact": artifact,
+                          "required": required,
+                          "status": "fail",
+                          "failures": [
+                              {"command": cmd, "output": output}
+                              for cmd, output in artifact_failures
+                          ],
+                      }
+                  )
+                  for cmd, output in artifact_failures:
+                      if required:
+                          failures.append((artifact, cmd, output))
+                      else:
+                          residual_risks.append(
+                              {
+                                  "artifact": artifact,
+                                  "severity": "optional-verification-failed",
+                                  "note": f"{cmd} => {output[:200]}",
+                              }
+                          )
+              else:
+                  verification.append({"artifact": artifact, "required": required, "status": "pass"})
+
+          # Validate CLI binary version explicitly as acceptance criterion.
+          atm_path = Path(install_root) / "bin" / "atm"
+          if atm_path.exists():
+              proc = subprocess.run([str(atm_path), "--version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+              out = proc.stdout.strip()
+              print(out)
+              if f"atm {version}" not in out:
+                  failures.append(("agent-team-mail", "atm --version", f"installed atm version mismatch: {out}"))
+                  residual_risks.append(
+                      {
+                          "artifact": "agent-team-mail",
+                          "severity": "required-verification-failed",
+                          "note": f"installed atm version mismatch: {out}",
+                      }
+                  )
+          else:
+              failures.append(("agent-team-mail", "atm --version", "atm binary missing after install verification"))
+              residual_risks.append(
+                  {
+                      "artifact": "agent-team-mail",
+                      "severity": "required-verification-failed",
+                      "note": "atm binary missing after install verification",
+                  }
+              )
+
+          Path("release/release-verification.json").write_text(
+              json.dumps({"items": verification}, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          summary = {
+              "required_items": sum(1 for item in verification if item.get("required", True)),
+              "required_passed": sum(1 for item in verification if item.get("required", True) and item.get("status") == "pass"),
+              "required_waived": sum(1 for item in verification if item.get("required", True) and item.get("status") == "waived"),
+              "required_failed": sum(1 for item in verification if item.get("required", True) and item.get("status") == "fail"),
+              "optional_items": sum(1 for item in verification if not item.get("required", True)),
+              "optional_failed": sum(1 for item in verification if not item.get("required", True) and item.get("status") == "fail"),
+          }
+          report = {
+              "auditSummary": summary,
+              "inventoryLocation": "release/release-inventory.json",
+              "verificationLocation": "release/release-verification.json",
+              "verificationOutcomes": verification,
+              "residualRisks": residual_risks,
+          }
+          Path("release/publisher-report.json").write_text(
+              json.dumps(report, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          if failures:
+              for artifact, cmd, output in failures:
+                  print(f"[FAIL] {artifact}: {cmd}\n{output}")
+              raise SystemExit("post-publish verification failed for one or more required inventory items")
+          PY
+
+      - name: Upload release inventory artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-inventory
+          path: |
+            release/release-inventory.json
+            release/release-verification.json
+            release/publisher-report.json

@@ -67,8 +67,8 @@ async fn main() -> Result<()> {
             daemon_lock_path.display()
         )
     })?;
-    let daemon_lock = agent_team_mail_core::io::lock::acquire_lock(&daemon_lock_path, 0)
-        .map_err(|e| match e {
+    let daemon_lock = agent_team_mail_core::io::lock::acquire_lock(&daemon_lock_path, 0).map_err(
+        |e| match e {
             agent_team_mail_core::io::InboxError::LockTimeout { .. } => anyhow::anyhow!(
                 "atm-daemon already running (lock held at {}). Refusing second instance.",
                 daemon_lock_path.display()
@@ -78,7 +78,8 @@ async fn main() -> Result<()> {
                 daemon_lock_path.display(),
                 other
             ),
-        })?;
+        },
+    )?;
 
     // Resolve canonical log writer config once and reuse for startup merge + writer task.
     let log_writer_config = LogWriterConfig::from_env(&home_dir);
