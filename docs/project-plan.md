@@ -1153,6 +1153,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 **Execution reference**: `docs/test-plan-phase-V.md`
 
 **Change-control note**: V.7 scope was redefined from the earlier "integration hardening + release/QA handoff" placeholder to "logging identity contract coverage" (pid/ppid emitters, send/read/status/doctor logging, and contract tests). The superseded integration-handoff work was absorbed into broader doctor/lifecycle convergence and Phase W release-track execution.
+**Change-control note**: Section 17.10 supersedes 17.8 for doctor/lifecycle state-model work (V.0-V.7). The earlier release/publishing hardening track was moved to Phase W (17.11) to preserve separation between lifecycle correctness and release automation.
 **Coordination note**: Phase W sprint W.1 (`feature/pW-s1-offline-fix`, merged to `integrate/phase-W`) must merge to `develop` before `integrate/phase-V` merges to `develop` (integration-time merge-order constraint, not a branch dependency).
 **Release automation track note**: V.1a–V.4a release/publishing hardening is tracked under Phase W (see 17.11).
 
