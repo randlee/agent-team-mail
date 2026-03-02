@@ -61,7 +61,7 @@ pub fn execute(args: MembersArgs) -> Result<()> {
                 "name": m.name,
                 "type": m.agent_type,
                 "model": m.model,
-                "isActive": resolve_member_liveness(m, &daemon_liveness),
+                "liveness": resolve_member_liveness(m, &daemon_liveness),
             })).collect::<Vec<_>>()
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
