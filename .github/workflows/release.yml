@@ -432,14 +432,25 @@ jobs:
           print(f"publish_list={publish_list}")
           PY
 
-      - name: Cargo package audit (publishable crates)
+      - name: Cargo package audit (core crate) + locked compile check (non-core)
         shell: bash
         run: |
           set -euo pipefail
+          # Core crate has no unpublished workspace deps, so full package audit works.
+          # Non-core crates depend on agent-team-mail-core which isn't on crates.io yet
+          # at this version, so cargo package would fail. Use cargo check --locked instead
+          # (matching the preflight workflow behavior).
+          echo "::group::cargo package -p agent-team-mail-core"
+          cargo package -p agent-team-mail-core --locked
+          echo "::endgroup::"
+
           IFS=',' read -ra crates <<< '${{ steps.audit.outputs.publish_list }}'
           for crate in "${crates[@]}"; do
-            echo "::group::cargo package -p ${crate}"
-            cargo package -p "${crate}" --locked
+            if [[ "$crate" == "agent-team-mail-core" ]]; then
+              continue
+            fi
+            echo "::group::cargo check -p ${crate} --locked"
+            cargo check -p "${crate}" --locked
             echo "::endgroup::"
           done
 
