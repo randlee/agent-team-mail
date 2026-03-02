@@ -174,10 +174,10 @@ jobs:
   cli-publishability:
     name: cli-publishability (ubuntu)
     needs: [clippy]
-    # Skip on integrate/* and develop→main PRs, and on direct pushes to develop:
-    # workspace crates are co-versioned and not yet published to crates.io at
-    # PR time. The release workflow runs its own packageability validation before publishing.
-    if: ${{ !(github.event_name == 'pull_request' && (startsWith(github.head_ref, 'integrate/') || github.head_ref == 'develop')) && !(github.event_name == 'push' && github.ref == 'refs/heads/develop') }}
+    # Skip in regular push/PR CI: co-versioned workspace crates depend on a new
+    # core version that is not yet on crates.io pre-release. Publishability is
+    # validated in release-preflight/release workflows where ordering is handled.
+    if: ${{ !((github.event_name == 'pull_request' && (github.base_ref == 'develop' || github.base_ref == 'main' || startsWith(github.base_ref, 'integrate/'))) || (github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
