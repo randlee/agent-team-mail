@@ -11,6 +11,7 @@ use agent_team_mail_core::daemon_client::{
     AgentSummary, SessionQueryResult, daemon_is_running, daemon_pid_path, daemon_socket_path,
     query_list_agents, query_list_agents_for_team, query_session_for_team,
 };
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
@@ -133,6 +134,26 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
 
     let report = build_report(&home_dir, &team, &args)?;
 
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "doctor",
+        team: Some(team.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: Some(config.core.identity.clone()),
+        agent_name: Some(config.core.identity.clone()),
+        result: Some(
+            if report.summary.has_critical {
+                "critical_findings"
+            } else {
+                "ok"
+            }
+            .to_string(),
+        ),
+        count: Some(report.findings.len() as u64),
+        ..Default::default()
+    });
+
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -252,16 +273,31 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
                         name: m.name.clone(),
                         agent_type: m.agent_type.clone(),
                         model: m.model.clone(),
-                        status: if m.is_active == Some(true) {
-                            "Online".to_string()
-                        } else {
-                            "Offline".to_string()
-                        },
+                        status: status_from_daemon_session(team, &m.name),
                     })
                     .collect()
             })
             .unwrap_or_default(),
     })
+}
+
+fn status_from_daemon_session(team: &str, member_name: &str) -> String {
+    status_from_daemon_session_with_query(team, member_name, query_session_for_team)
+}
+
+fn status_from_daemon_session_with_query<F>(
+    team: &str,
+    member_name: &str,
+    query_session: F,
+) -> String
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
+    match query_session(team, member_name) {
+        Ok(Some(session)) if session.alive => "Online".to_string(),
+        Ok(Some(_)) => "Offline".to_string(),
+        Ok(None) | Err(_) => "Unknown".to_string(),
+    }
 }
 
 fn finding(severity: Severity, check: &str, code: &str, message: String) -> Finding {
@@ -348,13 +384,23 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
 }
 
 fn check_pid_session_reconciliation(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
+    check_pid_session_reconciliation_with_query(team, cfg, query_session_for_team)
+}
+
+fn check_pid_session_reconciliation_with_query<F>(
+    team: &str,
+    cfg: &TeamConfig,
+    query_session: F,
+) -> Vec<Finding>
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
     let mut findings = Vec::new();
 
     for member in &cfg.members {
-        let session = query_session_for_team(team, &member.name).ok().flatten();
         if member.is_active == Some(true) {
-            match session {
-                Some(s) if !s.alive => findings.push(finding(
+            match query_session(team, &member.name) {
+                Ok(Some(s)) if !s.alive => findings.push(finding(
                     Severity::Warn,
                     "pid_session_reconciliation",
                     "ACTIVE_FLAG_STALE",
@@ -363,12 +409,23 @@ fn check_pid_session_reconciliation(team: &str, cfg: &TeamConfig) -> Vec<Finding
                         member.name, s.process_id
                     ),
                 )),
-                None => findings.push(finding(
+                Ok(None) => findings.push(finding(
                     Severity::Warn,
                     "pid_session_reconciliation",
                     "ACTIVE_WITHOUT_SESSION",
                     format!(
                         "Member '{}' marked active but no daemon session record found",
+                        member.name
+                    ),
+                )),
+                // V.3 contract: daemon query errors are treated as unknown/missing
+                // session state (doctor remains non-failing and emits diagnostics).
+                Err(_) => findings.push(finding(
+                    Severity::Warn,
+                    "pid_session_reconciliation",
+                    "ACTIVE_WITHOUT_SESSION",
+                    format!(
+                        "Member '{}' marked active but daemon session query failed",
                         member.name
                     ),
                 )),
@@ -756,14 +813,19 @@ fn build_recommendations(
     if has("ORPHAN_MAILBOX") || has("TERMINAL_MEMBER_NOT_CLEANED") || has("PARTIAL_TEARDOWN") {
         recs.push(Recommendation {
             command: format!("atm teams cleanup {team}"),
-            reason: "Reconcile stale roster/mailbox teardown drift".to_string(),
+            reason:
+                "Reconcile stale roster/mailbox teardown drift (dead terminal members are cleanup-eligible; active sessions are preserved)".to_string(),
         });
     }
 
-    if has("ACTIVE_WITHOUT_SESSION")
-        || has("ACTIVE_FLAG_STALE")
-        || has("LEAD_SESSION_RECOVERY_REQUIRED")
-    {
+    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") {
+        recs.push(Recommendation {
+            command: format!("atm teams cleanup {team}"),
+            reason: "Reconcile stale non-lead session state and mailbox/roster drift".to_string(),
+        });
+    }
+
+    if has("LEAD_SESSION_RECOVERY_REQUIRED") {
         if has_session_context {
             recs.push(Recommendation {
                 command: format!("atm register {team}"),
@@ -886,6 +948,46 @@ mod tests {
     }
 
     #[test]
+    fn status_from_daemon_session_maps_alive_dead_unknown_and_error() {
+        let alive = SessionQueryResult {
+            session_id: "s1".to_string(),
+            process_id: 1234,
+            alive: true,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        };
+        let dead = SessionQueryResult {
+            session_id: "s2".to_string(),
+            process_id: 5678,
+            alive: false,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        };
+        assert_eq!(
+            status_from_daemon_session_with_query("atm-dev", "a", |_, _| Ok(Some(alive.clone()))),
+            "Online"
+        );
+        assert_eq!(
+            status_from_daemon_session_with_query("atm-dev", "a", |_, _| Ok(Some(dead.clone()))),
+            "Offline"
+        );
+        assert_eq!(
+            status_from_daemon_session_with_query("atm-dev", "a", |_, _| Ok(None)),
+            "Unknown"
+        );
+        assert_eq!(
+            status_from_daemon_session_with_query("atm-dev", "a", |_, _| {
+                Err(anyhow::anyhow!("daemon unavailable"))
+            }),
+            "Unknown"
+        );
+    }
+
+    #[test]
     fn build_recommendations_includes_daemon_start() {
         let findings = vec![finding(
             Severity::Critical,
@@ -898,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn build_recommendations_uses_register_when_session_context_is_available() {
+    fn build_recommendations_routes_active_without_session_to_cleanup_with_context() {
         let findings = vec![finding(
             Severity::Warn,
             "pid_session_reconciliation",
@@ -906,11 +1008,14 @@ mod tests {
             "x".to_string(),
         )];
         let recs = build_recommendations("atm-dev", &findings, true);
-        assert!(recs.iter().any(|r| r.command == "atm register atm-dev"));
+        assert!(
+            recs.iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
     }
 
     #[test]
-    fn build_recommendations_uses_as_fallback_without_session_context() {
+    fn build_recommendations_routes_active_without_session_to_cleanup_without_context() {
         let findings = vec![finding(
             Severity::Warn,
             "pid_session_reconciliation",
@@ -920,7 +1025,7 @@ mod tests {
         let recs = build_recommendations("atm-dev", &findings, false);
         assert!(
             recs.iter()
-                .any(|r| r.command == "atm --as team-lead register atm-dev")
+                .any(|r| r.command == "atm teams cleanup atm-dev")
         );
     }
 
@@ -1097,6 +1202,107 @@ mod tests {
             "dead team-lead must produce explicit recovery warning"
         );
         assert!(!findings.iter().any(|f| f.code == "PARTIAL_TEARDOWN"));
+    }
+
+    #[test]
+    fn check_mailbox_integrity_keeps_dead_non_lead_as_critical_cleanup_finding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inboxes = tmp.path().join("inboxes");
+        fs::create_dir_all(&inboxes).unwrap();
+        fs::write(inboxes.join("arch-ctm.json"), "[]").unwrap();
+
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![
+                member("team-lead", Some(true), 0),
+                member("arch-ctm", Some(true), 0),
+            ],
+            unknown_fields: HashMap::new(),
+        };
+
+        let dead_member_session = SessionQueryResult {
+            session_id: "member-session".to_string(),
+            process_id: 4243,
+            alive: false,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        };
+        let findings = check_mailbox_integrity_with_query(inboxes, "atm-dev", &cfg, |_, name| {
+            if name == "arch-ctm" {
+                Ok(Some(dead_member_session.clone()))
+            } else {
+                Ok(None)
+            }
+        });
+
+        assert!(
+            findings.iter().any(
+                |f| f.code == "TERMINAL_MEMBER_NOT_CLEANED" && f.severity == Severity::Critical
+            ),
+            "dead non-lead with mailbox must remain critical cleanup finding"
+        );
+    }
+
+    #[test]
+    fn build_recommendations_routes_non_lead_teardown_to_cleanup() {
+        let findings = vec![finding(
+            Severity::Critical,
+            "mailbox_teardown_integrity",
+            "TERMINAL_MEMBER_NOT_CLEANED",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(
+            recs.iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
+    }
+
+    #[test]
+    fn build_recommendations_routes_active_without_session_to_cleanup() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "pid_session_reconciliation",
+            "ACTIVE_WITHOUT_SESSION",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(
+            recs.iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
+        assert!(
+            !recs.iter().any(|r| r.command == "atm register atm-dev"),
+            "non-lead stale/unknown activity should route to cleanup, not register"
+        );
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_query_error_maps_to_active_without_session() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let findings = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_, _| {
+            Err(anyhow::anyhow!("daemon unavailable"))
+        });
+        assert!(
+            findings.iter().any(|f| {
+                f.code == "ACTIVE_WITHOUT_SESSION" && f.message.contains("query failed")
+            })
+        );
     }
 
     #[test]

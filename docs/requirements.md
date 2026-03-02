@@ -393,10 +393,9 @@ atm send <agent> --stdin             # message from stdin
 
 **Offline recipient detection**:
 
-Before writing to the inbox, `atm send` checks the recipient's status in `config.json`:
-- If the recipient has **`isActive: false`** (explicitly set), the recipient is considered offline.
-- If `isActive` is **missing or null**, the recipient's status is unknown — **no offline warning** is shown. (Many agents, including the team lead, never have `isActive` set by Claude Code.)
-- If the recipient is **not in the members array**, the recipient is treated as unknown (no warning, message still delivered).
+Before writing to the inbox, `atm send` queries daemon session state (`query_session_for_team`):
+- If a session record exists and `alive=false`, the recipient is considered offline.
+- If session is missing (`None`) or query fails (`Err`), recipient state is unknown — **no offline warning** is shown.
 - When offline, `atm` prepends a call-to-action tag to the message body: `[{action_text}] {original_message}`
 - The sender receives a warning: `Warning: Agent X appears offline. Message will be queued with call-to-action.`
 - The message is still delivered (written to inbox file) — the warning is informational, not a hard block.
@@ -413,7 +412,7 @@ The daemon tracks agent activity by monitoring inbox file changes and message ti
 **Call-to-action text precedence** (highest to lowest):
 1. `--offline-action "custom text"` CLI flag
 2. `offline_action` property in config file (`.atm.toml` or `settings.json`)
-3. Hardcoded default: `PENDING ACTION - execute when online`
+3. Hardcoded default: empty string (`""`, no auto-tagging)
 
 **Special case**: If the resolved action text is an empty string (property exists but value is `""`), the call-to-action is skipped entirely — no brackets prepended, message sent as-is. This allows users to explicitly opt out of auto-tagging.
 
@@ -961,8 +960,7 @@ default_team = "backend-ci-team"    # default team for commands
 identity = "team-lead"              # from field on sent messages
 
 [messaging]
-offline_action = "PENDING ACTION - execute when online"  # call-to-action prepended for offline recipients
-                                                         # set to "" to disable auto-tagging
+offline_action = ""  # default: no call-to-action prefix when recipient appears offline
 
 [display]
 format = "text"                     # text | json

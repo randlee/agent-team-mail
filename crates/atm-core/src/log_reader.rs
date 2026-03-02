@@ -262,9 +262,9 @@ fn stdout_is_tty() -> bool {
 ///
 /// Output format:
 /// ```text
-/// 2026-02-23T10:30:00Z  INFO  [atm/team-lead] send_message (ok)
-/// 2026-02-23T10:30:01Z  WARN  [atm-daemon] queue_full: dropped 5 events
-/// 2026-02-23T10:30:02Z ERROR  [atm/arch-ctm] dispatch_error: connection refused
+/// 2026-02-23T10:30:00Z  INFO  [atm/team-lead pid=12345] send_message (ok)
+/// 2026-02-23T10:30:01Z  WARN  [atm-daemon pid=12345] queue_full: dropped 5 events
+/// 2026-02-23T10:30:02Z ERROR  [atm/arch-ctm pid=12345] dispatch_error: connection refused
 /// ```
 ///
 /// When stdout is a TTY, level names are colorized:
@@ -306,9 +306,30 @@ pub fn format_event_human(event: &LogEventV1) -> String {
         String::new()
     };
 
+    let ppid_suffix = event
+        .fields
+        .get("ppid")
+        .and_then(|v| v.as_u64())
+        .map(|ppid| format!("/ppid={ppid}"))
+        .unwrap_or_default();
+
+    let target_suffix = if event.target.is_empty() {
+        String::new()
+    } else {
+        format!(" -> {}", event.target)
+    };
+
     format!(
-        "{}  {}  [{}{}] {}{}",
-        event.ts, colored_level, event.source_binary, agent_suffix, event.action, msg_suffix,
+        "{}  {}  [{}{} pid={}{}] {}{}{}",
+        event.ts,
+        colored_level,
+        event.source_binary,
+        agent_suffix,
+        event.pid,
+        ppid_suffix,
+        event.action,
+        msg_suffix,
+        target_suffix,
     )
 }
 
@@ -551,6 +572,10 @@ mod tests {
         );
         assert!(formatted.contains("INFO"), "must contain level");
         assert!(formatted.contains("send_message"), "must contain action");
+        assert!(
+            formatted.contains("pid="),
+            "must include pid in human-rendered output"
+        );
     }
 
     #[test]
@@ -582,8 +607,30 @@ mod tests {
         let ev = new_log_event("atm-daemon", "daemon_start", "atm_daemon::main", "info");
         let formatted = format_event_human(&ev);
         assert!(
-            formatted.contains("[atm-daemon]"),
+            formatted.contains("[atm-daemon pid="),
             "no agent suffix when agent is None; got: {formatted}"
+        );
+    }
+
+    #[test]
+    fn test_format_human_includes_target_suffix() {
+        let ev = new_log_event("atm", "send_message", "atm::send", "info");
+        let formatted = format_event_human(&ev);
+        assert!(
+            formatted.contains("-> atm::send"),
+            "formatted event should include target suffix"
+        );
+    }
+
+    #[test]
+    fn test_format_human_includes_ppid_when_present() {
+        let mut ev = new_log_event("atm", "send_message", "atm::send", "info");
+        ev.fields
+            .insert("ppid".to_string(), serde_json::Value::Number(123u64.into()));
+        let formatted = format_event_human(&ev);
+        assert!(
+            formatted.contains("ppid=123"),
+            "formatted event should include ppid when available"
         );
     }
 

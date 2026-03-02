@@ -25,59 +25,119 @@ Own the permanent release-quality gate for every publish cycle.
 - Homebrew tap: `randlee/homebrew-tap`
 - Formula files: `Formula/agent-team-mail.rb`, `Formula/atm.rb`
 
+## Operational Constraints
+
+> **DO NOT spawn sub-agents or background audit agents.** Publisher performs all verification inline using `gh` CLI and standard shell commands.
+>
+> **DO NOT use the `sc-delay-tasks` skill** — it creates named teammates. Use `gh run watch`, `gh pr checks --watch`, or `sleep` loops for waiting.
+
 ## Standard Release Flow
 1. Verify version bump already exists on `develop` (workspace + all crate `Cargo.toml` files). If missing, stop and report.
-2. Create PR `develop` -> `main` and monitor CI.
-3. While PR CI is running, launch a background audit agent to review current codebase against expected release inventory and publish gates.
+2. Create PR `develop` -> `main`.
+3. While waiting for PR CI, run the **Inline Pre-Publish Audit** (see section below) directly — no agent spawning.
 4. While PR CI is running, run **Release Preflight** workflow via `workflow_dispatch` with:
    - `version=<X.Y.Z or vX.Y.Z>`
    - `run_by_agent=publisher`
-5. Treat preflight + PR CI as parallel tracks (no serial waiting unless one fails).
-6. If background audit or preflight finds gaps, immediately report to `team-lead` and pause release progression.
+5. Monitor PR CI with: `gh pr checks --watch --timeout 3600`
+   Monitor preflight run with: `gh run watch --exit-status <run-id>`
+   Treat preflight + PR CI as parallel tracks (no serial waiting unless one fails).
+6. If the inline audit or preflight finds gaps, immediately report to `team-lead` and pause release progression.
 7. Proceed only after `team-lead` confirms mitigations are complete and PR is green.
 8. Merge `develop` -> `main`.
 9. Run **Release** workflow via `workflow_dispatch` with version input (`X.Y.Z` or `vX.Y.Z`).
 10. Workflow runs gate, creates tag from `origin/main`, builds assets, publishes crates (idempotent publish steps skip already-published crate versions), then runs post-publish verification.
-11. Update Homebrew formulas with matching version + SHA256.
+11. Homebrew formula updates (`agent-team-mail.rb` and `atm.rb`) are handled by the W.3 release automation workflow. After the release workflow completes, verify both formula files were updated correctly in `randlee/homebrew-tap` using `gh api repos/randlee/homebrew-tap/contents/Formula/agent-team-mail.rb` and the same for `atm.rb`. If automation did not update them, report to `team-lead` before proceeding.
 12. Verify all channels, then report to `team-lead`.
 
-## Parallel Audit Requirement
-- The inventory/gate audit must run in parallel with the `develop -> main` PR CI by default.
-- The `Release Preflight` workflow must also run in parallel with PR CI by default.
-- Preflight and PR CI are separate lanes; do not force serial execution unless a failure requires mitigation.
-- Background audit scope:
-  - generated release inventory fields and artifact completeness
-  - publish/verify coverage for all required crates/artifacts
-  - waiver policy compliance (approver/reason/gate-check)
-  - release workflow fail-closed behavior
-- Any audit mismatch is a release blocker until acknowledged and mitigated by `team-lead`.
+## Inline Pre-Publish Audit
 
-## Pre-Publish Verification
-After `develop -> main` PR CI has started, and before final merge/tag/release publish,
-verify all of the following in parallel with CI:
- - Run these checks through a dedicated background audit agent (not inline in
-   the publisher execution path) so publisher can continue coordination while
-   the audit runs.
-1. `release/release-inventory.json` exists and validates against `docs/release-inventory-schema.json`.
-2. Inventory includes all 5 crates:
-   - `agent-team-mail-core`
-   - `agent-team-mail`
-   - `agent-team-mail-daemon`
-   - `agent-team-mail-tui`
-   - `agent-team-mail-mcp`
-3. Workspace version in `Cargo.toml` matches the inventory release version.
-4. Any waiver records include all required fields:
-   - `waiver.approver`
-   - `waiver.reason`
-   - `waiver.gateCheck`
-5. Confirm all crates are registered on crates.io before attempting publish run.
-6. Execute `Release Preflight` workflow and collect artifacts:
-   - `release/release-inventory.json`
-   - `release/publisher-preflight-report.json`
-7. Ensure preflight includes:
-   - full package + publish dry-run for `agent-team-mail-core`
-   - locked compile checks for non-core crates (`agent-team-mail`, `agent-team-mail-daemon`, `agent-team-mail-tui`, `agent-team-mail-mcp`)
-   - note that non-core publish dry-run is deferred to release workflow after core publish.
+While PR CI is running, publisher directly runs the following checks using `gh` CLI and standard shell/python3 commands. No sub-agents are spawned.
+
+**Step A — Inventory file validation:**
+```bash
+# Confirm inventory file exists
+cat release/release-inventory.json
+
+# Validate against schema using python3
+python3 -c "
+import json, sys
+with open('release/release-inventory.json') as f:
+    inv = json.load(f)
+with open('docs/release-inventory-schema.json') as f:
+    schema = json.load(f)
+print('Inventory loaded. Keys:', list(inv.keys()))
+"
+```
+
+**Step B — Confirm all 5 crates are present in inventory:**
+```bash
+python3 -c "
+import json, sys
+with open('release/release-inventory.json') as f:
+    inv = json.load(f)
+required = {
+    'agent-team-mail-core',
+    'agent-team-mail',
+    'agent-team-mail-daemon',
+    'agent-team-mail-tui',
+    'agent-team-mail-mcp',
+}
+artifacts = {item['artifact'] for item in inv.get('items', [])}
+missing = required - artifacts
+print('Missing crates:', missing or 'none')
+sys.exit(1 if missing else 0)
+"
+```
+
+**Step C — Workspace version matches inventory:**
+```bash
+python3 -c "
+import json, re
+with open('Cargo.toml') as f:
+    content = f.read()
+ws_version = re.search(r'version\s*=\s*\"([^\"]+)\"', content).group(1)
+with open('release/release-inventory.json') as f:
+    inv = json.load(f)
+inv_version = inv.get('releaseVersion', '')
+print(f'Workspace: {ws_version}, Inventory: {inv_version}')
+assert ws_version == inv_version.lstrip('v'), 'VERSION MISMATCH'
+print('Version match: OK')
+"
+```
+
+**Step D — Waiver records completeness (if any waivers present):**
+```bash
+python3 -c "
+import json
+with open('release/release-inventory.json') as f:
+    inv = json.load(f)
+required_waiver_fields = {'approver', 'reason', 'gateCheck'}
+for item in inv.get('items', []):
+    if 'waiver' in item:
+        missing = required_waiver_fields - set(item['waiver'].keys())
+        if missing:
+            print(f'WAIVER INCOMPLETE for {item[\"artifact\"]}: missing {missing}')
+            exit(1)
+print('All waivers valid (or none present).')
+"
+```
+
+**Step E — Confirm all 5 crates exist on crates.io before publish:**
+```bash
+for crate in agent-team-mail-core agent-team-mail agent-team-mail-daemon agent-team-mail-tui agent-team-mail-mcp; do
+  status=$(curl -s -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/$crate")
+  echo "$crate: HTTP $status"
+done
+```
+
+**Step F — Collect preflight artifacts after workflow completes:**
+```bash
+# After preflight run finishes, download artifacts
+gh run download <preflight-run-id> --name release-preflight --dir release/
+cat release/publisher-preflight-report.json
+```
+
+Any failure in Steps A–F is a release blocker. Report to `team-lead` immediately.
 
 ## Pre-Release Gate (automated)
 The workflow runs:

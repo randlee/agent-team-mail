@@ -2,6 +2,7 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::query_list_agents;
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use anyhow::Result;
 use clap::Args;
@@ -26,7 +27,7 @@ pub struct StatusArgs {
 /// Execute the status command
 pub fn execute(args: StatusArgs) -> Result<()> {
     // Prime daemon connectivity so daemon-backed liveness fields are available.
-    let _ = query_list_agents()?;
+    let _ = query_list_agents();
 
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -78,7 +79,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 json!({
                     "name": m.name,
                     "type": m.agent_type,
-                    "isActive": resolve_member_active(m, &daemon_liveness),
+                    "liveness": resolve_member_liveness(m, &daemon_liveness),
                     "unreadCount": unread,
                 })
             }).collect::<Vec<_>>(),
@@ -100,10 +101,10 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         let member_count = team_config.members.len();
         println!("Members ({member_count}):");
         for member in &team_config.members {
-            let active_str = if resolve_member_active(member, &daemon_liveness) {
-                "Online "
-            } else {
-                "Offline"
+            let active_str = match resolve_member_liveness(member, &daemon_liveness) {
+                Some(true) => "Online ",
+                Some(false) => "Offline",
+                None => "Unknown",
             };
             let unread = inbox_counts.get(&member.name).copied().unwrap_or(0);
             let name = &member.name;
@@ -116,6 +117,19 @@ pub fn execute(args: StatusArgs) -> Result<()> {
             println!("Tasks: {pending_tasks} pending, {completed_tasks} completed");
         }
     }
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "status",
+        team: Some(team_name.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: Some(config.core.identity.clone()),
+        agent_name: Some(config.core.identity.clone()),
+        result: Some(if args.json { "ok_json" } else { "ok_human" }.to_string()),
+        count: Some(team_config.members.len() as u64),
+        ..Default::default()
+    });
 
     Ok(())
 }
@@ -132,14 +146,11 @@ fn load_daemon_liveness(team_name: &str, team_config: &TeamConfig) -> HashMap<St
     liveness
 }
 
-fn resolve_member_active(
+fn resolve_member_liveness(
     member: &agent_team_mail_core::schema::AgentMember,
     daemon_liveness: &HashMap<String, bool>,
-) -> bool {
-    daemon_liveness
-        .get(&member.name)
-        .copied()
-        .unwrap_or_else(|| member.is_active.unwrap_or(false))
+) -> Option<bool> {
+    daemon_liveness.get(&member.name).copied()
 }
 
 /// Count unread messages in inboxes

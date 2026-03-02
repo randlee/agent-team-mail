@@ -202,10 +202,12 @@ def main() -> int:
         )
         return 2
 
-    # Rule 2: Only team LEAD can spawn agents with team_name
+    # Rule 2: Only team LEAD can spawn named teammates (with name or team_name).
     # WHY: Prevents orchestrators from creating teammates (pane exhaustion).
-    # Orchestrators should spawn background agents (no team_name, no teammate_name).
-    if team_name and str(team_name).strip():
+    # Closing the bypass: a teammate that omits team_name but sets name still
+    # creates a named teammate in the inherited team context — must be blocked too.
+    # Orchestrators should spawn background agents (no name, no team_name).
+    if (team_name and str(team_name).strip()) or (teammate_name and str(teammate_name).strip()):
         lead_session_id = get_lead_session_id(team_name)
 
         # Allow if we can't determine lead (no team config yet)
