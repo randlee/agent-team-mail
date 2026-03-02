@@ -702,6 +702,22 @@ fn reconcile_team_member_activity(
                     .and_modify(|c| *c = c.saturating_add(1))
                     .or_insert(1);
                 if *cycles >= 2 {
+                    // Re-check the current on-disk team config before pruning.
+                    // Config watcher updates can race with reconcile snapshots; if
+                    // the member has been re-added, skip prune and reset cycle count.
+                    let member_present =
+                        is_member_present_in_config(&config_path, &tracked.agent_name)
+                            .unwrap_or_else(|e| {
+                                warn!(
+                                    "stale-prune guard: failed to re-check config {}: {e}",
+                                    config_path.display()
+                                );
+                                true
+                            });
+                    if member_present {
+                        absent_cycles.remove(&key);
+                        continue;
+                    }
                     reg.remove_for_team(&team_name, &tracked.agent_name);
                     absent_cycles.remove(&key);
                 }
@@ -746,6 +762,15 @@ fn write_team_config_atomic(path: &std::path::Path, config: &TeamConfig) -> Resu
     std::fs::write(&tmp, serialized)?;
     atomic_swap(path, &tmp)?;
     Ok(())
+}
+
+fn is_member_present_in_config(config_path: &std::path::Path, member_name: &str) -> Result<bool> {
+    let content = std::fs::read_to_string(config_path)?;
+    let config: TeamConfig = serde_json::from_str(&content)?;
+    Ok(config
+        .members
+        .iter()
+        .any(|member| member.name == member_name))
 }
 
 #[derive(Default, Debug, Clone)]
@@ -1733,6 +1758,83 @@ mod tests {
                 .query_for_team("atm-dev", "arch-ctm")
                 .is_some(),
             "active absent sessions must never be stale-pruned"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_reconcile_skips_stale_prune_when_member_readded_before_guard_prune() {
+        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
+        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
+
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let cwd = home.display().to_string();
+        stdfs::create_dir_all(home.join(".claude/teams/atm-dev/inboxes")).unwrap();
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd,
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "dead-sess", i32::MAX as u32);
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+
+        // First cycle sees arch-ctm absent and records stale-prune cycle 1.
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+
+        // Re-add arch-ctm to config before the next cycle.
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": home.display().to_string(),
+                    "subscriptions": [],
+                    "isActive": true
+                },
+                {
+                    "agentId": "arch-ctm@atm-dev",
+                    "name": "arch-ctm",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": home.display().to_string(),
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_some(),
+            "dead session record must not be stale-pruned after member is re-added"
         );
     }
 }
