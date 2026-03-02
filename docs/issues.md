@@ -1,6 +1,6 @@
 # Known Issues
 
-Last updated: 2026-03-01
+Last updated: 2026-03-02
 
 ## Open GitHub Issues
 
@@ -45,6 +45,15 @@ Last updated: 2026-03-01
 | Item | Type | Status | Priority | Notes |
 |---|---|---|---|---|
 | Keep provisional sprint mappings synchronized across planning docs | Documentation | Open | Medium | Source-of-truth sequencing for current draft is `docs/test-plan-phase-T.md`; update `project-plan.md` + `issues.md` together on mapping changes |
+
+## New Doctor Findings (Needs GitHub Issue Creation)
+
+| Item | Type | Status | Priority | Notes |
+|---|---|---|---|---|
+| Doctor reconciliation appears cross-team (reports unknown agents from other teams) | Bug | Open | High | Observed symmetry: `atm doctor --team atm-dev` reports `researcher` (from `annotations-test`), and `atm doctor --team annotations-test` reports `arch-ctm`/`arch-gtm` from `atm-dev`. Likely roster/session integrity check not strictly team-scoped. |
+| Session registry drift after team recreation/removal (`DAEMON_TRACKS_UNKNOWN_AGENT`) | Bug | Open | High | Daemon continues tracking removed agents (for example `arch-ctm`) after roster reset/recreate, causing persistent unknown-agent warnings. |
+| `isActive=true` members without daemon session (`ACTIVE_WITHOUT_SESSION`) after restore/recreate | Bug | Open | Medium | Restored/re-added members can remain marked active with no live daemon session record; doctor warns until explicit registration/reconciliation occurs. |
+| `atm doctor` recommends `atm register` even when `CLAUDE_SESSION_ID` is unavailable | UX/Diagnostics | Open | Medium | In non-hook shells, `atm register` fails with \"Cannot determine session_id\"; recommendation should be context-aware or include actionable fallback guidance (`--as`, run from managed session, etc.). |
 
 ## Recently Resolved (No Longer Open)
 
