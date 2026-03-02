@@ -21,6 +21,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+/// Tracks how many consecutive reconcile cycles a dead session has been absent
+/// from team config before stale-prune is allowed. This guards against
+/// remove+re-add watcher races and prevents deleting legitimate members mid-update.
 static ABSENT_REGISTRY_CYCLES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, u8>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1633,6 +1636,50 @@ mod tests {
                 .query_for_team("atm-dev", "arch-ctm")
                 .is_none(),
             "second absent cycle should prune stale dead member"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_does_not_prune_absent_active_sessions() {
+        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
+
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let cwd = home.display().to_string();
+        stdfs::create_dir_all(home.join(".claude/teams/atm-dev/inboxes")).unwrap();
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd,
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "active-sess", std::process::id());
+        }
+
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_some(),
+            "active absent sessions must never be stale-pruned"
         );
     }
 }
