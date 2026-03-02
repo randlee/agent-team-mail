@@ -1154,6 +1154,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 
 **Change-control note**: V.7 scope was redefined from the earlier "integration hardening + release/QA handoff" placeholder to "logging identity contract coverage" (pid/ppid emitters, send/read/status/doctor logging, and contract tests). The superseded integration-handoff work was absorbed into broader doctor/lifecycle convergence and Phase W release-track execution.
 **Change-control note**: Section 17.10 supersedes 17.8 for doctor/lifecycle state-model work (V.0-V.7). The earlier release/publishing hardening track was moved to Phase W (17.11) to preserve separation between lifecycle correctness and release automation.
+**Change-control note (V.2+V.3 execution)**: V.2 (lead/non-lead teardown semantics) and V.3 (`isActive`/liveness separation) are being executed together in a single implementation/review stream to avoid split changes across shared send/status/doctor contracts; tracked by PR [#347](https://github.com/randlee/agent-team-mail/pull/347).
 **Coordination note**: Phase W sprint W.1 (`feature/pW-s1-offline-fix`, merged to `integrate/phase-W`) must merge to `develop` before `integrate/phase-V` merges to `develop` (integration-time merge-order constraint, not a branch dependency).
 **Release automation track note**: V.1a–V.4a release/publishing hardening is tracked under Phase W (see 17.11).
 
@@ -1161,8 +1162,8 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 |--------|------|------------|------|--------|-------|
 | V.0 | Baseline diagnostics fixture capture | — | S | COMPLETE | prerequisite |
 | V.1 | Team-scoped doctor reconciliation | V.0 | M | PLANNED | [#333](https://github.com/randlee/agent-team-mail/issues/333) |
-| V.2 | Lead/non-lead teardown semantics | V.0 | M | PLANNED | [#332](https://github.com/randlee/agent-team-mail/issues/332) |
-| V.3 | `isActive`/liveness separation hardening | V.1, W.1 | M | PLANNED | [#330](https://github.com/randlee/agent-team-mail/issues/330) |
+| V.2 | Lead/non-lead teardown semantics | V.0 | M | IN PROGRESS | [#332](https://github.com/randlee/agent-team-mail/issues/332), PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
+| V.3 | `isActive`/liveness separation hardening | V.1, W.1 | M | IN PROGRESS | [#330](https://github.com/randlee/agent-team-mail/issues/330), PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
 | V.4 | Terminal-member cleanup convergence | V.2 | M | PLANNED | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334) |
 | V.5 | Recommendation engine hardening | V.2 | S | PLANNED | [#336](https://github.com/randlee/agent-team-mail/issues/336) |
 | V.6 | Doctor UX snapshot/report ordering | V.1 | S | PLANNED | [#335](https://github.com/randlee/agent-team-mail/issues/335) |

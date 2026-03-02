@@ -28,6 +28,8 @@ Define implementation-ready tests for Phase V doctor/lifecycle fixes so each iss
 | V.6 | Doctor UX snapshot ordering | [#335](https://github.com/randlee/agent-team-mail/issues/335) |
 | V.7 | Logging identity contract coverage | track under Phase V umbrella (issue optional) |
 
+**Change-control note (V.2+V.3 execution)**: V.2 and V.3 are being implemented/reviewed as a combined delivery stream in PR [#347](https://github.com/randlee/agent-team-mail/pull/347) because teardown and liveness-semantics updates share the same send/status/doctor touchpoints.
+
 ## Coordination Constraint
 
 - `send.rs` overlap exists between Phase W.1 (offline prefix behavior) and V.3 (`isActive` semantics). Merge-order constraint: Phase W sprint W.1 (`feature/pW-s1-offline-fix`, merged to `integrate/phase-W`) must merge to `develop` before `integrate/phase-V` merges to `develop`.
