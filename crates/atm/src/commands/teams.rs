@@ -1366,7 +1366,13 @@ fn restore(args: RestoreArgs) -> Result<()> {
         // NEVER overwrite leadSessionId
         for member in restore_members {
             if !config.members.iter().any(|m| m.name == member.name) {
-                config.members.push(member.clone());
+                let mut restored = member.clone();
+                // Restored members have no active runtime session until they
+                // explicitly re-register with the daemon.
+                restored.is_active = Some(false);
+                restored.last_active = None;
+                restored.session_id = None;
+                config.members.push(restored);
             }
         }
 
@@ -2025,6 +2031,16 @@ mod tests {
         assert!(
             config.members.iter().any(|m| m.name == "publisher"),
             "publisher should be restored to config"
+        );
+        let publisher = config
+            .members
+            .iter()
+            .find(|m| m.name == "publisher")
+            .expect("publisher restored");
+        assert_eq!(
+            publisher.is_active,
+            Some(false),
+            "restored members should not remain active without a live session"
         );
 
         // Verify inbox is restored

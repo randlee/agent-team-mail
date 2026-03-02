@@ -514,6 +514,7 @@ fn reconcile_team_member_activity(
 
         let team_name = config.name.clone();
         let mut changed = false;
+        let mut terminal_non_lead_members: Vec<String> = Vec::new();
         for member in &mut config.members {
             desired_agent_names.insert(member.name.clone());
             let record = {
@@ -549,22 +550,26 @@ fn reconcile_team_member_activity(
                 }
             }
 
-            let Some(record) = record else {
-                continue;
+            let alive = if let Some(ref record) = record {
+                let is_alive = record.state
+                    == crate::daemon::session_registry::SessionState::Active
+                    && record.is_process_alive();
+
+                if !is_alive
+                    && record.state == crate::daemon::session_registry::SessionState::Active
+                {
+                    session_registry
+                        .lock()
+                        .unwrap()
+                        .mark_dead_for_team(&team_name, &member.name);
+                }
+                is_alive
+            } else {
+                // No live session record means member is not active.
+                false
             };
 
-            let alive = record.state == crate::daemon::session_registry::SessionState::Active
-                && record.is_process_alive();
-
-            if !alive && record.state == crate::daemon::session_registry::SessionState::Active {
-                session_registry
-                    .lock()
-                    .unwrap()
-                    .mark_dead_for_team(&team_name, &member.name);
-            }
-
             if member.is_active != Some(alive) {
-                let was_active = member.is_active == Some(true);
                 let previous = member.is_active;
                 member.is_active = Some(alive);
                 changed = true;
@@ -590,16 +595,40 @@ fn reconcile_team_member_activity(
                         "session active + pid alive",
                         "session_reconcile",
                     );
-                } else if was_active {
+                } else {
                     state_store.lock().unwrap().set_state_with_context(
                         &member.name,
                         AgentState::Offline,
-                        "pid not alive during reconcile",
+                        "session missing/dead during reconcile",
                         "session_reconcile",
                     );
-                    delete_member_inbox(&team_dir, &member.name)?;
                 }
             }
+
+            // Terminal non-lead members must be fully removed (roster + mailbox)
+            // once daemon confirms the session is dead.
+            if member.name != "team-lead"
+                && let Some(ref rec) = record
+                && rec.state == crate::daemon::session_registry::SessionState::Dead
+            {
+                terminal_non_lead_members.push(member.name.clone());
+            }
+        }
+
+        if !terminal_non_lead_members.is_empty() {
+            for name in &terminal_non_lead_members {
+                delete_member_inbox(&team_dir, name)?;
+                session_registry
+                    .lock()
+                    .unwrap()
+                    .remove_for_team(&team_name, name);
+                state_store.lock().unwrap().unregister_agent(name);
+                desired_agent_names.remove(name);
+            }
+            config
+                .members
+                .retain(|m| !terminal_non_lead_members.contains(&m.name));
+            changed = true;
         }
 
         if changed {
@@ -1283,8 +1312,8 @@ mod tests {
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
 
         let tracker = state_store.lock().unwrap();
-        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Active));
-        assert_eq!(tracker.get_state("qa"), Some(AgentState::Unknown));
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Offline));
+        assert_eq!(tracker.get_state("qa"), Some(AgentState::Offline));
     }
 
     #[test]
@@ -1342,5 +1371,175 @@ mod tests {
         );
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
         assert!(state_store.lock().unwrap().get_state("worker").is_none());
+    }
+
+    #[test]
+    fn test_reconcile_marks_missing_session_member_inactive_after_restore() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let cwd = home.display().to_string();
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd.clone(),
+                    "subscriptions": [],
+                    "isActive": true
+                },
+                {
+                    "agentId": "arch-gtm@atm-dev",
+                    "name": "arch-gtm",
+                    "agentType": "gemini",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd.clone(),
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+
+        let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
+            &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
+        )
+        .unwrap();
+        let restored = cfg
+            .members
+            .iter()
+            .find(|m| m.name == "arch-gtm")
+            .expect("member present");
+        assert_eq!(restored.is_active, Some(false));
+    }
+
+    fn assert_terminal_non_lead_cleanup(home: &std::path::Path, inbox_dir: &std::path::Path) {
+        let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
+            &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            cfg.members.iter().all(|m| m.name != "arch-ctm"),
+            "terminal non-lead should be removed from roster"
+        );
+        assert!(
+            !inbox_dir.join("arch-ctm.json").exists(),
+            "terminal non-lead inbox should be removed"
+        );
+    }
+
+    fn setup_dead_terminal_non_lead() -> (
+        TempDir,
+        std::path::PathBuf,
+        super::SharedSessionRegistry,
+        super::SharedStateStore,
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let cwd = home.display().to_string();
+        let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");
+        stdfs::create_dir_all(&inbox_dir).unwrap();
+        stdfs::write(inbox_dir.join("arch-ctm.json"), "[]").unwrap();
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd.clone(),
+                    "subscriptions": [],
+                    "isActive": true
+                },
+                {
+                    "agentId": "arch-ctm@atm-dev",
+                    "name": "arch-ctm",
+                    "agentType": "codex",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd.clone(),
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        (tmp, inbox_dir, sr, state_store)
+    }
+
+    #[test]
+    fn test_session_end_converges_to_remove_dead_member_from_roster_and_mailbox() {
+        let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
+        let home = tmp.path();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-session-end", i32::MAX as u32);
+            // Simulate hook_watcher SessionEnd processing.
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert_terminal_non_lead_cleanup(home, &inbox_dir);
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "terminal non-lead session record should be removed"
+        );
+    }
+
+    #[test]
+    fn test_sigterm_escalation_converges_to_remove_dead_member_from_roster_and_mailbox() {
+        let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
+        let home = tmp.path();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-sigterm", i32::MAX as u32);
+            // Simulate daemon --kill escalation where SIGTERM eventually marks the session dead.
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert_terminal_non_lead_cleanup(home, &inbox_dir);
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "terminal non-lead session record should be removed"
+        );
+    }
+
+    #[test]
+    fn test_kill_timeout_fallback_converges_to_remove_dead_member_from_roster_and_mailbox() {
+        let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
+        let home = tmp.path();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-kill-timeout", i32::MAX as u32);
+            // Simulate daemon --kill exhausting graceful waits and forcing termination.
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert_terminal_non_lead_cleanup(home, &inbox_dir);
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "terminal non-lead session record should be removed"
+        );
     }
 }
