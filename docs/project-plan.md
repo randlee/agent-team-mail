@@ -1180,7 +1180,7 @@ publisher process guarantees, retries, and post-publish verification.
 |--------|-------------|------------|--------|----------|----|
 | W.1 | ATM send offline action + skill doc fix | — | COMPLETE | [#328](https://github.com/randlee/agent-team-mail/issues/328), [#329](https://github.com/randlee/agent-team-mail/issues/329) | [#343](https://github.com/randlee/agent-team-mail/pull/343) |
 | W.2 | Publisher agent rewrite (no sub-agents) | — | COMPLETE | [#327](https://github.com/randlee/agent-team-mail/issues/327) | [#341](https://github.com/randlee/agent-team-mail/pull/341) |
-| W.3 | Release workflow: crates.io retry + Homebrew automation | W.2 | COMPLETE | [#323](https://github.com/randlee/agent-team-mail/issues/323), [#324](https://github.com/randlee/agent-team-mail/issues/324) | [#344](https://github.com/randlee/agent-team-mail/pull/344), [#343](https://github.com/randlee/agent-team-mail/pull/343), [#341](https://github.com/randlee/agent-team-mail/pull/341) |
+| W.3 | Release workflow: crates.io retry + Homebrew automation | W.2 | COMPLETE | [#323](https://github.com/randlee/agent-team-mail/issues/323), [#324](https://github.com/randlee/agent-team-mail/issues/324) | [#344](https://github.com/randlee/agent-team-mail/pull/344) |
 | W.4 | Release workflow: pre-publish audit + completion report | W.3 | IN PROGRESS | [#325](https://github.com/randlee/agent-team-mail/issues/325), [#326](https://github.com/randlee/agent-team-mail/issues/326) | [#349](https://github.com/randlee/agent-team-mail/pull/349) |
 
 **Coordination note**: V.1–V.7 (state-model track) and W.1–W.4 (release automation track)
