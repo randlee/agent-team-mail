@@ -11,6 +11,7 @@ use agent_team_mail_core::daemon_client::{
     AgentSummary, SessionQueryResult, daemon_is_running, daemon_pid_path, daemon_socket_path,
     query_list_agents, query_list_agents_for_team, query_session_for_team,
 };
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
@@ -132,6 +133,26 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
     let team = config.core.default_team.clone();
 
     let report = build_report(&home_dir, &team, &args)?;
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "doctor",
+        team: Some(team.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: Some(config.core.identity.clone()),
+        agent_name: Some(config.core.identity.clone()),
+        result: Some(
+            if report.summary.has_critical {
+                "critical_findings"
+            } else {
+                "ok"
+            }
+            .to_string(),
+        ),
+        count: Some(report.findings.len() as u64),
+        ..Default::default()
+    });
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);

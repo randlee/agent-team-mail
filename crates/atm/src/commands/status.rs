@@ -2,6 +2,7 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::query_list_agents;
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use anyhow::Result;
 use clap::Args;
@@ -116,6 +117,19 @@ pub fn execute(args: StatusArgs) -> Result<()> {
             println!("Tasks: {pending_tasks} pending, {completed_tasks} completed");
         }
     }
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "status",
+        team: Some(team_name.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: Some(config.core.identity.clone()),
+        agent_name: Some(config.core.identity.clone()),
+        result: Some(if args.json { "ok_json" } else { "ok_human" }.to_string()),
+        count: Some(team_config.members.len() as u64),
+        ..Default::default()
+    });
 
     Ok(())
 }
