@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    daemon_is_running, daemon_pid_path, daemon_socket_path, query_list_agents,
-    query_list_agents_for_team, query_session_for_team,
+    AgentSummary, SessionQueryResult, daemon_is_running, daemon_pid_path, daemon_socket_path,
+    query_list_agents, query_list_agents_for_team, query_session_for_team,
 };
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::schema::TeamConfig;
@@ -103,6 +103,8 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
     // Prime daemon connectivity early so doctor reflects post-autostart health.
     // Must be best-effort: doctor should still produce a report when daemon is
     // unavailable or autostart fails.
+    // Intentionally uses the unscoped query for connectivity priming only;
+    // doctor findings themselves use team-scoped checks below.
     let _ = query_list_agents();
 
     let current_dir = std::env::current_dir()?;
@@ -350,10 +352,21 @@ fn check_pid_session_reconciliation(team: &str, cfg: &TeamConfig) -> Vec<Finding
 }
 
 fn check_roster_session_integrity(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
+    check_roster_session_integrity_with_query(team, cfg, query_list_agents_for_team)
+}
+
+fn check_roster_session_integrity_with_query<F>(
+    team: &str,
+    cfg: &TeamConfig,
+    list_agents_for_team: F,
+) -> Vec<Finding>
+where
+    F: Fn(&str) -> anyhow::Result<Option<Vec<AgentSummary>>>,
+{
     let mut findings = Vec::new();
     let roster: HashSet<String> = cfg.members.iter().map(|m| m.name.clone()).collect();
 
-    if let Ok(Some(agents)) = query_list_agents_for_team(team) {
+    if let Ok(Some(agents)) = list_agents_for_team(team) {
         for tracked in agents {
             if !roster.contains(&tracked.agent) {
                 findings.push(finding(
@@ -373,6 +386,18 @@ fn check_roster_session_integrity(team: &str, cfg: &TeamConfig) -> Vec<Finding> 
 }
 
 fn check_mailbox_integrity(inboxes_dir: PathBuf, team: &str, cfg: &TeamConfig) -> Vec<Finding> {
+    check_mailbox_integrity_with_query(inboxes_dir, team, cfg, query_session_for_team)
+}
+
+fn check_mailbox_integrity_with_query<F>(
+    inboxes_dir: PathBuf,
+    team: &str,
+    cfg: &TeamConfig,
+    query_session: F,
+) -> Vec<Finding>
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
     let mut findings = Vec::new();
     let roster: HashSet<String> = cfg.members.iter().map(|m| m.name.clone()).collect();
 
@@ -411,7 +436,7 @@ fn check_mailbox_integrity(inboxes_dir: PathBuf, team: &str, cfg: &TeamConfig) -
     }
 
     for member in &cfg.members {
-        let session = query_session_for_team(team, &member.name).ok().flatten();
+        let session = query_session(team, &member.name).ok().flatten();
         if let Some(s) = session
             && !s.alive
         {
@@ -865,6 +890,54 @@ mod tests {
     }
 
     #[test]
+    fn check_roster_session_integrity_excludes_other_teams_when_scoped() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![
+                member("team-lead", Some(true), 0),
+                member("arch-ctm", Some(true), 0),
+            ],
+            unknown_fields: HashMap::new(),
+        };
+
+        // Seed simulated daemon state for two teams. The scoped query provider
+        // returns only members for the requested team.
+        let atm_dev_agents = vec![
+            AgentSummary {
+                agent: "team-lead".to_string(),
+                state: "idle".to_string(),
+            },
+            AgentSummary {
+                agent: "arch-ctm".to_string(),
+                state: "active".to_string(),
+            },
+        ];
+        let other_team_agents = vec![AgentSummary {
+            agent: "researcher".to_string(),
+            state: "idle".to_string(),
+        }];
+
+        let findings = check_roster_session_integrity_with_query("atm-dev", &cfg, |team| {
+            if team == "atm-dev" {
+                Ok(Some(atm_dev_agents.clone()))
+            } else {
+                Ok(Some(other_team_agents.clone()))
+            }
+        });
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.code == "DAEMON_TRACKS_UNKNOWN_AGENT"),
+            "scoped roster integrity check must ignore agents from other teams"
+        );
+    }
+
+    #[test]
     fn build_recommendations_routes_lead_recovery_to_register_only() {
         let findings = vec![finding(
             Severity::Warn,
@@ -897,9 +970,28 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        // This unit test covers classification logic only; when daemon is not
-        // reachable, no lead finding is emitted.
-        let findings = check_mailbox_integrity(inboxes, "atm-dev", &cfg);
+        let dead_lead_session = SessionQueryResult {
+            session_id: "lead-session".to_string(),
+            process_id: 4242,
+            alive: false,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        };
+        let findings = check_mailbox_integrity_with_query(inboxes, "atm-dev", &cfg, |_, name| {
+            if name == "team-lead" {
+                Ok(Some(dead_lead_session.clone()))
+            } else {
+                Ok(None)
+            }
+        });
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "LEAD_SESSION_RECOVERY_REQUIRED"),
+            "dead team-lead must produce explicit recovery warning"
+        );
         assert!(!findings.iter().any(|f| f.code == "PARTIAL_TEARDOWN"));
     }
 
