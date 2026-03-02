@@ -21,9 +21,9 @@ Define implementation-ready tests for Phase V doctor/lifecycle fixes so each iss
 |---|---|---|
 | V.0 | Baseline fixtures + failing-path capture | prerequisite (no dedicated issue) |
 | V.1 | Team-scoped reconciliation | [#333](https://github.com/randlee/agent-team-mail/issues/333) |
-| V.2 | Lead/non-lead teardown semantics | [#332](https://github.com/randlee/agent-team-mail/issues/332) |
-| V.3 | `isActive`/liveness separation | [#330](https://github.com/randlee/agent-team-mail/issues/330) |
-| V.4 | Terminal-member cleanup convergence *(depends on V.2)* | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334) |
+| V.2 | Lead/non-lead teardown semantics | [#332](https://github.com/randlee/agent-team-mail/issues/332), PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
+| V.3 | `isActive`/liveness separation | [#330](https://github.com/randlee/agent-team-mail/issues/330), PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
+| V.4 | Terminal-member cleanup convergence *(depends on V.0; independently executable)* | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334) |
 | V.5 | Recommendation engine hardening | [#336](https://github.com/randlee/agent-team-mail/issues/336) |
 | V.6 | Doctor UX snapshot ordering | [#335](https://github.com/randlee/agent-team-mail/issues/335) |
 | V.7 | Logging identity contract coverage | track under Phase V umbrella (issue optional) |
