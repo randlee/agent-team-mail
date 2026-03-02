@@ -1,8 +1,20 @@
 # Known Issues
 
-Last updated: 2026-03-02
+Last updated: 2026-03-02 (Phase V)
 
-## Open GitHub Issues
+## Phase V Issues
+
+| Issue | Summary | Type | Status | Priority | Planned Sprint | Notes |
+|---|---|---|---|---|---|---|
+| [#323](https://github.com/randlee/agent-team-mail/issues/323) | Release workflow: post-publish-verify crates.io API 403 | Bug | Open | High | V.3 | Add retry logic to curl checks |
+| [#324](https://github.com/randlee/agent-team-mail/issues/324) | Release workflow: add Homebrew formula publishing job | Enhancement | Open | High | V.3 | Automate Homebrew tap update |
+| [#325](https://github.com/randlee/agent-team-mail/issues/325) | Release workflow: pre-publish audit + waiver gate | Enhancement | Open | High | V.4 | `cargo package --locked` gate before publish |
+| [#326](https://github.com/randlee/agent-team-mail/issues/326) | Release workflow: cross-channel verification + completion report | Enhancement | Open | High | V.4 | Consolidated summary in workflow UI |
+| [#327](https://github.com/randlee/agent-team-mail/issues/327) | publisher agent: eliminate sub-agent spawning | Bug | Open | High | V.2 | Rewrite publisher.md; trigger gh workflow run directly |
+| [#328](https://github.com/randlee/agent-team-mail/issues/328) | atm send: remove default offline action prefix | Bug | Open | High | V.1 | send.rs:419 → `String::new()` |
+| [#329](https://github.com/randlee/agent-team-mail/issues/329) | docs/agent-teams-mail-skill.md: remove [PENDING ACTION] tag pattern guidance | Documentation | Open | Medium | V.1 | Skill doc reinforces bad pattern |
+
+## Pre-Phase-V Open Issues (Carried Forward)
 
 | Issue | Summary | Type | Status | Priority | Planned Sprint | Notes |
 |---|---|---|---|---|---|---|
