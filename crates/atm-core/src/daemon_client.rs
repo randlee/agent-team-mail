@@ -475,6 +475,37 @@ pub fn query_list_agents() -> anyhow::Result<Option<Vec<AgentSummary>>> {
     }
 }
 
+/// Query the daemon for the list of tracked agents scoped to a specific team.
+///
+/// Returns `Ok(None)` when the daemon is not reachable.
+pub fn query_list_agents_for_team(team: &str) -> anyhow::Result<Option<Vec<AgentSummary>>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "list-agents".to_string(),
+        payload: serde_json::json!({ "team": team }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    if !response.is_ok() {
+        return Ok(None);
+    }
+
+    let payload = match response.payload {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    match serde_json::from_value::<Vec<AgentSummary>>(payload) {
+        Ok(agents) => Ok(Some(agents)),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Pane and log file information returned by the `agent-pane` command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentPaneInfo {
