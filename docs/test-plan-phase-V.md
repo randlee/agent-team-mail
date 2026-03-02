@@ -30,7 +30,7 @@ Define implementation-ready tests for Phase V doctor/lifecycle fixes so each iss
 
 ## Coordination Constraint
 
-- `send.rs` overlap exists between Phase W.1 (offline prefix behavior) and V.3 (`isActive` semantics). Sequence: **W.1 must merge before V.3**.
+- `send.rs` overlap exists between Phase W.1 (offline prefix behavior) and V.3 (`isActive` semantics). Merge-order constraint: Phase W sprint W.1 (`feature/pW-s1-offline-fix`, merged to `integrate/phase-W`) must merge to `develop` before `integrate/phase-V` merges to `develop`.
 
 ## V.0 Baseline Fixture Tasks
 

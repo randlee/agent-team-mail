@@ -881,7 +881,7 @@ Approve or reject agent's implementation plan.
 | `cwd` | string | Yes | Current working directory of agent |
 | `subscriptions` | array | No | Notification subscriptions (usually empty) |
 | `backendType` | string | No | Backend type (e.g., "tmux", empty if not running) |
-| `isActive` | boolean | No | Whether agent is currently running |
+| `isActive` | boolean | No | Activity/busy hint (recent work signal), not a liveness indicator |
 
 **Complete Example** (from test-team):
 
@@ -973,7 +973,7 @@ Approve or reject agent's implementation plan.
 - **Team Lead Member**: First member has empty/null `prompt`, `color`, `tmuxPaneId`, and no `backendType`
 - **Spawned Agents**: Have `prompt`, `color`, `tmuxPaneId`, and `backendType` populated
 - **`model`**: Different agents can use different models (e.g., team-lead uses haiku, agents use opus)
-- **`isActive`**: true if agent is currently running; false if idle/disconnected
+- **`isActive`**: activity/busy hint only (`true` = recently active/busy, `false` = idle signal); not an alive/dead runtime guarantee
 - **`prompt`**: Where specialized instructions are stored (can be long multi-line text)
 - **`color`**: UI color for team dashboard (optional but recommended)
 
