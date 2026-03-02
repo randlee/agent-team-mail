@@ -30,16 +30,6 @@
 //!
 //! All input events are handled between ticks with a non-blocking poll.
 
-mod agent_terminal;
-mod app;
-mod codex_adapter;
-mod codex_vendor;
-mod codex_watch;
-mod config;
-mod dashboard;
-mod events;
-mod ui;
-
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -70,10 +60,14 @@ use agent_team_mail_core::{
     logging,
 };
 
-use app::{App, MemberRow, PendingControl};
-use codex_adapter::CodexAdapter;
-use config::{TuiConfig, load_tui_config};
-use dashboard::{get_inbox_count, read_inbox_preview, read_team_members, session_log_path};
+use agent_team_mail_tui::app::{App, MemberRow, PendingControl};
+use agent_team_mail_tui::codex_adapter::CodexAdapter;
+use agent_team_mail_tui::config::{TuiConfig, load_tui_config};
+use agent_team_mail_tui::dashboard::{
+    get_inbox_count, mark_inbox_message_read, read_inbox_messages, read_inbox_preview,
+    read_team_members, session_log_path,
+};
+use agent_team_mail_tui::{events, ui};
 
 // ── Module-level statics ──────────────────────────────────────────────────────
 
@@ -248,6 +242,16 @@ async fn run_app<B: ratatui::backend::Backend>(
                 .selected_agent()
                 .map(|agent| read_inbox_preview(&home, &team, agent, 5))
                 .unwrap_or_default();
+            app.inbox_messages = app
+                .selected_agent()
+                .map(|agent| read_inbox_messages(&home, &team, agent, 100))
+                .unwrap_or_default();
+            if app.inbox_messages.is_empty() {
+                app.selected_message_index = 0;
+                app.inbox_detail_open = false;
+            } else if app.selected_message_index >= app.inbox_messages.len() {
+                app.selected_message_index = app.inbox_messages.len() - 1;
+            }
 
             // Resolve streaming agent from selection.
             if let Some(agent_name) = app.selected_agent().map(str::to_owned)
@@ -261,6 +265,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                 app.streaming_agent = Some(agent_name.clone());
                 app.session_log_path = Some(session_log_path(&team, &agent_name));
                 app.watch_stream_path = watch_feed_path();
+                app.selected_message_index = 0;
+                app.inbox_detail_open = false;
                 if let Some(checkpoint) = load_replay_checkpoint(&team, &agent_name) {
                     app.watch_stream_pos = checkpoint.pos;
                 }
@@ -402,16 +408,45 @@ async fn run_app<B: ratatui::backend::Backend>(
 
         // ── Control action dispatch ───────────────────────────────────────────
         if let Some(pending) = app.pending_control.take() {
-            let stdin_timeout = app.config.stdin_timeout_secs;
-            let interrupt_timeout = app.config.interrupt_timeout_secs;
-            let result = execute_control(
-                &team,
-                &app.streaming_agent,
-                pending,
-                stdin_timeout,
-                interrupt_timeout,
-            )
-            .await;
+            let result = match pending {
+                PendingControl::MarkInboxRead {
+                    agent,
+                    message_id,
+                    from,
+                    timestamp,
+                } => match mark_inbox_message_read(
+                    &home,
+                    &team,
+                    &agent,
+                    message_id.as_deref(),
+                    &from,
+                    &timestamp,
+                ) {
+                    Ok(true) => {
+                        app.inbox_messages = read_inbox_messages(&home, &team, &agent, 100);
+                        if app.selected_message_index >= app.inbox_messages.len()
+                            && !app.inbox_messages.is_empty()
+                        {
+                            app.selected_message_index = app.inbox_messages.len() - 1;
+                        }
+                        "message marked read".to_string()
+                    }
+                    Ok(false) => "message already read (or not found)".to_string(),
+                    Err(e) => format!("failed to mark read: {e}"),
+                },
+                other => {
+                    let stdin_timeout = app.config.stdin_timeout_secs;
+                    let interrupt_timeout = app.config.interrupt_timeout_secs;
+                    execute_control(
+                        &team,
+                        &app.streaming_agent,
+                        other,
+                        stdin_timeout,
+                        interrupt_timeout,
+                    )
+                    .await
+                }
+            };
             app.status_message = Some(result);
         }
 
@@ -832,6 +867,9 @@ async fn execute_control(
             Some(elicitation_id.clone()),
             Some(decision.clone()),
         ),
+        PendingControl::MarkInboxRead { .. } => {
+            return "unsupported: local inbox action".to_string();
+        }
     };
 
     // Select per-action timeout from config before control_action is moved.

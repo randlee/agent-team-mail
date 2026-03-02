@@ -38,6 +38,8 @@ impl RuntimeAdapter for GeminiAdapter {
         let mut parts = vec![
             "gemini".to_string(),
             "--prompt-interactive".to_string(),
+            "--output-format".to_string(),
+            "stream-json".to_string(),
             "--sandbox".to_string(),
             spec.sandbox
                 .map(|v| v.to_string())
@@ -175,6 +177,7 @@ mod tests {
         let cmd = adapter.build_command(&spec).unwrap();
         assert!(cmd.contains("gemini"));
         assert!(cmd.contains("--prompt-interactive"));
+        assert!(cmd.contains("--output-format stream-json"));
         assert!(cmd.contains("--sandbox false"));
         assert!(cmd.contains("--model 'gemini-2.5-pro'"));
         assert!(cmd.contains("--approval-mode 'plan'"));

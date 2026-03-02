@@ -125,6 +125,69 @@ fn create_test_context() -> (PluginContext, TempDir) {
     (ctx, temp_dir)
 }
 
+/// Create a test context where mail teams root matches `${ATM_HOME}/.claude/teams`.
+fn create_reconcile_test_context() -> (PluginContext, TempDir) {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // SAFETY: Tests are serialized via #[serial], so no parallel mutation
+    unsafe {
+        std::env::set_var("ATM_HOME", temp_dir.path());
+    }
+
+    let claude_root = temp_dir.path().join(".claude");
+    let teams_root = claude_root.join("teams");
+    std::fs::create_dir_all(&teams_root).unwrap();
+
+    let system_ctx = SystemContext::new(
+        "test-host".to_string(),
+        agent_team_mail_core::context::Platform::detect(),
+        claude_root.clone(),
+        "test-version".to_string(),
+        "test-team".to_string(),
+    );
+
+    let mail_service = MailService::new(teams_root.clone());
+    let roster_service = RosterService::new(teams_root);
+    let config = Config::default();
+
+    let ctx = PluginContext::new(
+        Arc::new(system_ctx),
+        Arc::new(mail_service),
+        Arc::new(config),
+        Arc::new(roster_service),
+    );
+
+    (ctx, temp_dir)
+}
+
+fn write_team_config(teams_root: &std::path::Path, team: &str, members: serde_json::Value) {
+    let team_dir = teams_root.join(team);
+    std::fs::create_dir_all(team_dir.join("inboxes")).unwrap();
+    let cfg = serde_json::json!({
+        "name": team,
+        "createdAt": 1739284800000u64,
+        "leadAgentId": format!("team-lead@{team}"),
+        "leadSessionId": "lead-session",
+        "members": members,
+    });
+    std::fs::write(
+        team_dir.join("config.json"),
+        serde_json::to_string_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
+}
+
+async fn wait_until(timeout_ms: u64, mut pred: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if pred() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    pred()
+}
+
 /// Create a test status writer
 fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
     Arc::new(StatusWriter::new(
@@ -347,6 +410,216 @@ async fn test_spool_drain_runs_on_interval() {
         result.is_ok(),
         "Daemon should run successfully even with spool drain"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
+    let (ctx, temp_dir) = create_reconcile_test_context();
+    let status_writer = create_test_status_writer(&temp_dir);
+    let teams_root = temp_dir.path().join(".claude/teams");
+    let cwd = temp_dir.path().display().to_string();
+    write_team_config(
+        &teams_root,
+        "test-team",
+        serde_json::json!([
+            {
+                "agentId": "team-lead@test-team",
+                "name": "team-lead",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": cwd,
+                "subscriptions": [],
+                "isActive": true
+            },
+            {
+                "agentId": "worker@test-team",
+                "name": "worker",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": "/tmp",
+                "subscriptions": [],
+                "isActive": false
+            }
+        ]),
+    );
+
+    let mut registry = PluginRegistry::new();
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
+    let state_store = new_state_store();
+    let state_store_probe = state_store.clone();
+
+    let daemon_task = tokio::spawn(async move {
+        daemon::run(
+            &mut registry,
+            &ctx,
+            daemon_lock,
+            cancel_clone,
+            status_writer,
+            state_store,
+            new_pubsub_store(),
+            new_launch_sender(),
+            new_session_registry(),
+            dedup_store,
+            new_stream_state_store(),
+            new_stream_event_sender(),
+            new_log_event_queue(),
+        )
+        .await
+    });
+
+    let seeded = wait_until(1000, || {
+        state_store_probe
+            .lock()
+            .unwrap()
+            .get_state("worker")
+            .is_some()
+    })
+    .await;
+    assert!(
+        seeded,
+        "startup reconcile should seed worker state promptly (<1s)"
+    );
+
+    cancel.cancel();
+    daemon_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_watch_event_updates_and_removes_members() {
+    let (ctx, temp_dir) = create_reconcile_test_context();
+    let status_writer = create_test_status_writer(&temp_dir);
+    let teams_root = temp_dir.path().join(".claude/teams");
+    let cwd = temp_dir.path().display().to_string();
+    write_team_config(
+        &teams_root,
+        "test-team",
+        serde_json::json!([
+            {
+                "agentId": "team-lead@test-team",
+                "name": "team-lead",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": cwd.clone(),
+                "subscriptions": [],
+                "isActive": true
+            },
+            {
+                "agentId": "worker-a@test-team",
+                "name": "worker-a",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": cwd.clone(),
+                "subscriptions": [],
+                "isActive": true
+            }
+        ]),
+    );
+
+    let mut registry = PluginRegistry::new();
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
+    let state_store = new_state_store();
+    let state_store_probe = state_store.clone();
+
+    let daemon_task = tokio::spawn(async move {
+        daemon::run(
+            &mut registry,
+            &ctx,
+            daemon_lock,
+            cancel_clone,
+            status_writer,
+            state_store,
+            new_pubsub_store(),
+            new_launch_sender(),
+            new_session_registry(),
+            dedup_store,
+            new_stream_state_store(),
+            new_stream_event_sender(),
+            new_log_event_queue(),
+        )
+        .await
+    });
+
+    let initial_seeded = wait_until(1500, || {
+        state_store_probe
+            .lock()
+            .unwrap()
+            .get_state("worker-a")
+            .is_some()
+    })
+    .await;
+    assert!(
+        initial_seeded,
+        "worker-a should be tracked after daemon startup"
+    );
+
+    // Add worker-b and remove worker-a to trigger config watcher reconcile.
+    write_team_config(
+        &teams_root,
+        "test-team",
+        serde_json::json!([
+            {
+                "agentId": "team-lead@test-team",
+                "name": "team-lead",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": cwd,
+                "subscriptions": [],
+                "isActive": true
+            },
+            {
+                "agentId": "worker-b@test-team",
+                "name": "worker-b",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": "/tmp",
+                "subscriptions": [],
+                "isActive": true
+            }
+        ]),
+    );
+
+    let added = wait_until(2500, || {
+        state_store_probe
+            .lock()
+            .unwrap()
+            .get_state("worker-b")
+            .is_some()
+    })
+    .await;
+    assert!(
+        added,
+        "worker-b should be added via live config watcher reconcile"
+    );
+
+    let removed = wait_until(2500, || {
+        state_store_probe
+            .lock()
+            .unwrap()
+            .get_state("worker-a")
+            .is_none()
+    })
+    .await;
+    assert!(
+        removed,
+        "worker-a should be removed from tracked state after config update"
+    );
+
+    cancel.cancel();
+    daemon_task.await.unwrap().unwrap();
 }
 
 #[tokio::test]

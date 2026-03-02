@@ -77,13 +77,28 @@ if ! echo "$EVENT_LINE" | jq -e '.received_at' >/dev/null; then
     exit 1
 fi
 
-if ! echo "$EVENT_LINE" | jq -e '.payload.type == "agent-turn-complete"' >/dev/null; then
-    echo "❌ FAIL: payload not properly embedded"
+if ! echo "$EVENT_LINE" | jq -e '.type == "agent-turn-complete"' >/dev/null; then
+    echo "❌ FAIL: event type mismatch"
     exit 1
 fi
 
-if ! echo "$EVENT_LINE" | jq -e '.payload."thread-id" == "thread-123"' >/dev/null; then
-    echo "❌ FAIL: payload thread-id mismatch"
+if ! echo "$EVENT_LINE" | jq -e '."thread-id" == "thread-123"' >/dev/null; then
+    echo "❌ FAIL: thread-id mismatch"
+    exit 1
+fi
+
+if ! echo "$EVENT_LINE" | jq -e '.state == "idle"' >/dev/null; then
+    echo "❌ FAIL: state field missing/mismatch"
+    exit 1
+fi
+
+if ! echo "$EVENT_LINE" | jq -e '.timestamp' >/dev/null; then
+    echo "❌ FAIL: timestamp field missing"
+    exit 1
+fi
+
+if ! echo "$EVENT_LINE" | jq -e '.idempotency_key' >/dev/null; then
+    echo "❌ FAIL: idempotency_key field missing"
     exit 1
 fi
 

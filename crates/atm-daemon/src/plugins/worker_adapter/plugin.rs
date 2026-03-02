@@ -224,6 +224,81 @@ impl WorkerAdapterPlugin {
             .unwrap_or_else(|| "codex".to_string())
     }
 
+    fn default_gemini_runtime_home(&self, team: &str, agent: &str) -> PathBuf {
+        let runtime_root = if let Some(ctx) = &self.ctx {
+            ctx.system
+                .claude_root
+                .parent()
+                .unwrap_or(&ctx.system.claude_root)
+                .to_path_buf()
+        } else {
+            agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| PathBuf::from("."))
+        };
+        runtime_root
+            .join("runtime")
+            .join("gemini")
+            .join(team)
+            .join(agent)
+            .join("home")
+    }
+
+    fn resolve_runtime_session_id(
+        &self,
+        config: &LaunchConfig,
+        runtime: &str,
+    ) -> (String, &'static str, Option<String>) {
+        if let Some(explicit) = config
+            .resume_session_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return (explicit.to_string(), "resume", None);
+        }
+
+        if let Some(registry) = &self.session_registry
+            && let Some(record) = registry
+                .lock()
+                .unwrap()
+                .query_for_team(&config.team, &config.agent)
+                .cloned()
+        {
+            let runtime_matches = record.runtime.as_deref() == Some(runtime);
+            if runtime_matches {
+                if let Some(stored) = record
+                    .runtime_session_id
+                    .as_ref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    return (stored.to_string(), "resume", None);
+                }
+
+                return (
+                    format!("{runtime}-{}", Uuid::new_v4()),
+                    "fresh",
+                    Some(format!(
+                        "resume fallback: missing stored runtime_session_id for {}/{} ({runtime})",
+                        config.team, config.agent
+                    )),
+                );
+            }
+
+            return (
+                format!("{runtime}-{}", Uuid::new_v4()),
+                "fresh",
+                Some(format!(
+                    "resume fallback: stored runtime '{}' mismatch for {}/{}",
+                    record.runtime.unwrap_or_else(|| "unknown".to_string()),
+                    config.team,
+                    config.agent
+                )),
+            );
+        }
+
+        (format!("{runtime}-{}", Uuid::new_v4()), "fresh", None)
+    }
+
     fn resolve_team_name<'a>(
         &'a self,
         ctx: &'a PluginContext,
@@ -449,7 +524,7 @@ impl WorkerAdapterPlugin {
         // Mark agent as Busy now that we've sent a message
         {
             let mut state = self.agent_state.lock().unwrap();
-            state.set_state(&member_name, AgentState::Busy);
+            state.set_state(&member_name, AgentState::Active);
         }
 
         // Record activity after successful message send
@@ -639,9 +714,9 @@ impl WorkerAdapterPlugin {
                 // PID is gone — transition to Killed if not already
                 let mut state = self.agent_state.lock().unwrap();
                 let current = state.get_state(&member_name);
-                if !matches!(current, Some(AgentState::Killed) | None) {
+                if !matches!(current, Some(AgentState::Offline) | None) {
                     warn!("Worker {member_name} PID gone — marking as Killed");
-                    state.set_state(&member_name, AgentState::Killed);
+                    state.set_state(&member_name, AgentState::Offline);
                 }
             }
         }
@@ -761,24 +836,12 @@ impl WorkerAdapterPlugin {
             return Err("Launch config missing required field: 'team'".to_string());
         }
 
-        let backend = match self.backend.as_mut() {
-            Some(b) => b,
-            None => return Err("Worker backend not initialized".to_string()),
-        };
-
         let runtime = config
             .runtime
             .clone()
             .unwrap_or_else(|| "codex".to_string());
-        let spawn_mode = if config.resume_session_id.is_some() {
-            "resume"
-        } else {
-            "fresh"
-        };
-        let runtime_session_id = config
-            .resume_session_id
-            .clone()
-            .unwrap_or_else(|| format!("{runtime}-{}", Uuid::new_v4()));
+        let (runtime_session_id, spawn_mode, resume_warning) =
+            self.resolve_runtime_session_id(&config, &runtime);
 
         // Build env var map: ATM_IDENTITY + ATM_TEAM + extras
         let mut env_vars = config.env_vars.clone();
@@ -794,6 +857,29 @@ impl WorkerAdapterPlugin {
         env_vars
             .entry("ATM_RUNTIME_SESSION_ID".to_string())
             .or_insert_with(|| runtime_session_id.clone());
+        if runtime == "gemini" {
+            let runtime_home = env_vars
+                .get("ATM_RUNTIME_HOME")
+                .cloned()
+                .or_else(|| env_vars.get("GEMINI_CLI_HOME").cloned())
+                .unwrap_or_else(|| {
+                    self.default_gemini_runtime_home(&config.team, &config.agent)
+                        .to_string_lossy()
+                        .to_string()
+                });
+            env_vars
+                .entry("ATM_RUNTIME_HOME".to_string())
+                .or_insert_with(|| runtime_home.clone());
+            env_vars
+                .entry("GEMINI_CLI_HOME".to_string())
+                .or_insert(runtime_home.clone());
+            if let Err(e) = std::fs::create_dir_all(&runtime_home) {
+                warn!(
+                    "Failed to create Gemini runtime home '{}': {e}",
+                    runtime_home
+                );
+            }
+        }
 
         debug!(
             "Launching agent '{}' in team '{}' (runtime '{}') with command '{}'",
@@ -801,6 +887,10 @@ impl WorkerAdapterPlugin {
         );
 
         // Spawn the pane with env vars
+        let backend = match self.backend.as_mut() {
+            Some(b) => b,
+            None => return Err("Worker backend not initialized".to_string()),
+        };
         let handle = backend
             .spawn_with_env(&config.agent, &config.command, &env_vars)
             .await
@@ -813,7 +903,7 @@ impl WorkerAdapterPlugin {
         {
             let mut state = self.agent_state.lock().unwrap();
             state.register_agent(&config.agent);
-            state.set_state(&config.agent, AgentState::Launching);
+            state.set_state(&config.agent, AgentState::Unknown);
         }
         self.workers.insert(config.agent.clone(), handle.clone());
 
@@ -827,6 +917,9 @@ impl WorkerAdapterPlugin {
             let runtime_home = handle
                 .payload_ref::<TmuxPayload>()
                 .and_then(|p| p.runtime_home.clone());
+            let runtime_home = runtime_home
+                .or_else(|| env_vars.get("ATM_RUNTIME_HOME").cloned())
+                .or_else(|| env_vars.get("GEMINI_CLI_HOME").cloned());
             let process_id_for_registry = process_id.unwrap_or(0);
             registry.lock().unwrap().upsert_runtime_for_team(
                 &config.team,
@@ -881,15 +974,16 @@ impl WorkerAdapterPlugin {
             tokio::time::sleep(poll_interval).await;
         }
 
-        let warning = if !reached_idle {
+        let readiness_warning = if !reached_idle {
+            let message = format!(
+                "Readiness timeout reached after {}s; agent may not be ready",
+                config.timeout_secs
+            );
             warn!(
                 "Agent '{}' did not reach Idle within {}s; proceeding with prompt send",
                 config.agent, config.timeout_secs
             );
-            Some(format!(
-                "Readiness timeout reached after {}s; agent may not be ready",
-                config.timeout_secs
-            ))
+            Some(message)
         } else {
             None
         };
@@ -917,14 +1011,26 @@ impl WorkerAdapterPlugin {
                 .unwrap()
                 .get_state(&config.agent)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| "launching".to_string())
+                .unwrap_or_else(|| "unknown".to_string())
         };
+
+        let mut warnings = Vec::new();
+        if let Some(w) = resume_warning {
+            warnings.push(w);
+        }
+        if let Some(w) = readiness_warning {
+            warnings.push(w);
+        }
 
         Ok(LaunchResult {
             agent: config.agent.clone(),
             pane_id,
             state: current_state,
-            warning,
+            warning: if warnings.is_empty() {
+                None
+            } else {
+                Some(warnings.join(" | "))
+            },
         })
     }
 
@@ -1304,6 +1410,7 @@ impl Plugin for WorkerAdapterPlugin {
 mod tests {
     use super::super::mock_backend::{MockCall, MockTmuxBackend};
     use super::*;
+    use crate::daemon::session_registry::new_session_registry;
     use tempfile::TempDir;
 
     /// Helper to create a plugin that has a backend but no launch receiver.
@@ -1473,6 +1580,321 @@ mod tests {
         assert_eq!(
             env_vars.get("ATM_TEAM").map(String::as_str),
             Some("atm-dev")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_launch_gemini_shapes_runtime_home_and_persists_metadata() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        plugin.set_session_registry(registry.clone());
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --prompt-interactive".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: Some("sess-gemini-123".to_string()),
+        };
+
+        let result = plugin.handle_launch(config).await;
+        assert!(result.is_ok(), "launch should succeed");
+
+        let calls = backend.get_calls();
+        let env_vars = calls
+            .into_iter()
+            .find_map(|c| match c {
+                MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+                _ => None,
+            })
+            .expect("spawn_with_env should be called");
+
+        let gemini_home = env_vars
+            .get("GEMINI_CLI_HOME")
+            .cloned()
+            .expect("GEMINI_CLI_HOME must be shaped for gemini");
+        assert_eq!(
+            env_vars.get("ATM_RUNTIME_HOME"),
+            Some(&gemini_home),
+            "ATM_RUNTIME_HOME must match GEMINI_CLI_HOME"
+        );
+        assert!(
+            std::path::Path::new(&gemini_home).ends_with("runtime/gemini/atm-dev/arch-ctm/home"),
+            "runtime home should be agent-scoped; got {gemini_home}"
+        );
+
+        let guard = registry.lock().unwrap();
+        let record = guard
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("runtime session metadata should be persisted");
+        assert_eq!(record.runtime.as_deref(), Some("gemini"));
+        assert_eq!(
+            record.runtime_session_id.as_deref(),
+            Some("sess-gemini-123")
+        );
+        assert_eq!(record.runtime_home.as_deref(), Some(gemini_home.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_handle_launch_spawn_failure_does_not_corrupt_registry() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+        backend.set_spawn_error(Some("Mock spawn failure".to_string()));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend));
+        let registry = new_session_registry();
+        plugin.set_session_registry(registry.clone());
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --prompt-interactive".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: Some("sess-fail-123".to_string()),
+        };
+
+        let err = plugin
+            .handle_launch(config)
+            .await
+            .expect_err("spawn failure should bubble up");
+        assert!(
+            err.contains("Failed to spawn worker pane") && err.contains("Mock spawn failure"),
+            "error should be actionable; got: {err}"
+        );
+
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "registry must remain unchanged after launch failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_explicit_override_takes_precedence_over_registry() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        registry.lock().unwrap().upsert_runtime_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "sess-existing",
+            1234,
+            Some("gemini".to_string()),
+            Some("sess-existing".to_string()),
+            Some("%1".to_string()),
+            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+        );
+        plugin.set_session_registry(registry);
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --resume".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: Some("sess-override".to_string()),
+        };
+
+        let result = plugin.handle_launch(config).await.expect("launch succeeds");
+        assert!(
+            result
+                .warning
+                .as_deref()
+                .is_none_or(|w| !w.contains("resume fallback")),
+            "explicit override should not trigger resume fallback warning: {:?}",
+            result.warning
+        );
+
+        let env_vars = backend
+            .get_calls()
+            .into_iter()
+            .find_map(|c| match c {
+                MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+                _ => None,
+            })
+            .expect("spawn_with_env call must exist");
+        assert_eq!(
+            env_vars.get("ATM_RUNTIME_SESSION_ID").map(String::as_str),
+            Some("sess-override")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_defaults_to_registry_session_for_same_team_agent() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        registry.lock().unwrap().upsert_runtime_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "sess-existing",
+            1234,
+            Some("gemini".to_string()),
+            Some("sess-existing".to_string()),
+            Some("%1".to_string()),
+            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+        );
+        plugin.set_session_registry(registry);
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --resume".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: None,
+        };
+
+        let result = plugin.handle_launch(config).await.expect("launch succeeds");
+        assert!(
+            result
+                .warning
+                .as_deref()
+                .is_none_or(|w| !w.contains("resume fallback")),
+            "registry-based resume should not trigger fallback warning: {:?}",
+            result.warning
+        );
+
+        let env_vars = backend
+            .get_calls()
+            .into_iter()
+            .find_map(|c| match c {
+                MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+                _ => None,
+            })
+            .expect("spawn_with_env call must exist");
+        assert_eq!(
+            env_vars.get("ATM_RUNTIME_SESSION_ID").map(String::as_str),
+            Some("sess-existing")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_does_not_drift_to_session_from_other_runtime() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        registry.lock().unwrap().upsert_runtime_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "sess-codex",
+            1234,
+            Some("codex".to_string()),
+            Some("sess-codex".to_string()),
+            Some("%1".to_string()),
+            Some("/tmp/runtime/codex/atm-dev/arch-ctm/home".to_string()),
+        );
+        plugin.set_session_registry(registry);
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --resume".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: None,
+        };
+
+        let result = plugin.handle_launch(config).await.expect("launch succeeds");
+        let warning = result.warning.expect("fallback warning expected");
+        assert!(warning.contains("stored runtime"));
+
+        let env_vars = backend
+            .get_calls()
+            .into_iter()
+            .find_map(|c| match c {
+                MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+                _ => None,
+            })
+            .expect("spawn_with_env call must exist");
+        let chosen = env_vars
+            .get("ATM_RUNTIME_SESSION_ID")
+            .expect("runtime session env must be set");
+        assert_ne!(chosen, "sess-codex");
+        assert!(
+            chosen.starts_with("gemini-"),
+            "fallback must generate deterministic runtime-prefixed id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_missing_stored_session_id_falls_back_with_warning() {
+        let temp = TempDir::new().unwrap();
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend.clone()));
+        let registry = new_session_registry();
+        registry.lock().unwrap().upsert_runtime_for_team(
+            "atm-dev",
+            "arch-ctm",
+            "sess-no-runtime-id",
+            1234,
+            Some("gemini".to_string()),
+            None,
+            Some("%1".to_string()),
+            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+        );
+        plugin.set_session_registry(registry);
+
+        let config = agent_team_mail_core::daemon_client::LaunchConfig {
+            agent: "arch-ctm".to_string(),
+            team: "atm-dev".to_string(),
+            command: "gemini --resume".to_string(),
+            prompt: None,
+            timeout_secs: 1,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("gemini".to_string()),
+            resume_session_id: None,
+        };
+
+        let result = plugin.handle_launch(config).await.expect("launch succeeds");
+        let warning = result.warning.expect("fallback warning expected");
+        assert!(warning.contains("missing stored runtime_session_id"));
+
+        let env_vars = backend
+            .get_calls()
+            .into_iter()
+            .find_map(|c| match c {
+                MockCall::SpawnWithEnv { env_vars, .. } => Some(env_vars),
+                _ => None,
+            })
+            .expect("spawn_with_env call must exist");
+        let chosen = env_vars
+            .get("ATM_RUNTIME_SESSION_ID")
+            .expect("runtime session env must be set");
+        assert!(
+            chosen.starts_with("gemini-"),
+            "fallback must generate deterministic runtime-prefixed id"
         );
     }
 }

@@ -16,8 +16,8 @@ Phase T candidate execution order.
    - T.5a: #284 CLI crate publishability
    - T.5b: atm-monitor implementation
    - T.5c: #46/#47 availability signaling clarification
-4. T.3: #282 Gemini end-to-end spawn wiring
-5. T.4: #281 Gemini resume correctness
+4. T.15: #282 Gemini end-to-end spawn wiring
+5. T.14: #281 Gemini resume correctness
 6. T.7: permanent publishing process hardening + strengthened `publisher` role
 
 `T.6` (test coverage closure for `U.1`-`U.4`) is independent of the
@@ -283,6 +283,8 @@ sprints/releases through the existing `publisher` team-member role
 - Documented source-of-truth ownership: daemon state is authoritative.
 - Hook events and pub/sub roles are explicitly bounded.
 - Event payload contract includes idempotency key and required fields.
+- Availability payload fields are explicitly named and validated:
+  `agent`, `team`, `state`, `timestamp`, `idempotency_key`.
 
 ### Test Matrix
 
@@ -303,7 +305,7 @@ sprints/releases through the existing `publisher` team-member role
 
 ---
 
-## T.3 — Gemini End-to-End Spawn Wiring (#282)
+## T.15 — Gemini End-to-End Spawn Wiring (#282)
 
 ### Requirements Coverage
 
@@ -332,7 +334,7 @@ sprints/releases through the existing `publisher` team-member role
 
 ---
 
-## T.4 — Gemini Resume Correctness (#281)
+## T.14 — Gemini Resume Correctness (#281)
 
 ### Requirements Coverage
 
