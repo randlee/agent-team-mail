@@ -989,7 +989,7 @@ events for daemon state tracking.
 #### `PreToolUse` (`matcher: "Task"`)
 
 Required policy:
-- Block orchestrator spawns (`subagent_type = "scrum-master"`) unless they are named teammates (`name` provided).
+- Block Task spawns when the target agent prompt (`.claude/agents/<subagent_type>.md`) declares frontmatter `metadata.spawn_policy = named_teammate_required` unless they are named teammates (`name` provided).
 - Block any explicit `team_name` that does not match `.atm.toml` `[core].default_team`.
 - Return exit code `2` with actionable feedback when blocked.
 

@@ -126,10 +126,10 @@ Enforces three rules before allowing a `Task` tool call to proceed. Exit code `2
 
 #### Rule 1: Orchestrators Must Be Named Teammates
 
-If `subagent_type` is in the `ORCHESTRATORS` set (currently: `scrum-master`) and no `name` parameter is provided, the call is **blocked**.
+If the target prompt file (`.claude/agents/<subagent_type>.md`) declares frontmatter `metadata.spawn_policy: named_teammate_required` and no `name` parameter is provided, the call is **blocked**.
 
 ```
-BLOCKED: 'scrum-master' is an orchestrator and must be a named teammate.
+BLOCKED: 'scrum-master' requires named teammate spawn policy.
 
 Correct:
   Task(subagent_type="scrum-master", name="sm-sprint-X", team_name="<team>", ...)
@@ -138,7 +138,7 @@ Wrong:
   Task(subagent_type="scrum-master", run_in_background=true)  # no name = dies at context limit
 ```
 
-**Why**: Scrum-masters coordinate long-running sprints. Background agents (no `name`) cannot compact — they die when the context window fills. Named teammates run as full tmux processes and can compact to survive multi-hour sprints. The `name` parameter is the switch:
+**Why**: Some roles coordinate long-running workflows. Background agents (no `name`) cannot compact — they die when the context window fills. Named teammates run as full tmux processes and can compact to survive multi-hour work. The `name` parameter is the switch:
 - **With `name`** → full tmux teammate (own pane, can compact, survives context limit)
 - **Without `name`** → sidechain background agent (no pane, dies at context limit)
 
@@ -156,7 +156,7 @@ NOT allowed from teammates:
   Task(..., team_name="atm-dev", ...)  # creates named teammate = pane exhaustion
 ```
 
-**Why**: Each named teammate with `team_name` creates a new tmux pane. Without this gate, scrum-master orchestrators can accidentally spawn their own named sub-teammates, creating a pane explosion (3 scrum-masters × 2 sub-agents each = 9 panes). The correct pattern for scrum-masters is to spawn dev and QA as **background agents** (no `name`, no `team_name`).
+**Why**: Each named teammate with `team_name` creates a new tmux pane. Without this gate, orchestrators can accidentally spawn their own named sub-teammates, creating a pane explosion (for example: 3 scrum-masters × 2 sub-agents each = 9 panes). The correct pattern for orchestrators is to spawn implementation/review helpers as **background agents** (no `name`, no `team_name`).
 
 The gate reads `leadSessionId` from `~/.claude/teams/<team>/config.json` and compares it to `session_id` in the hook payload. Only the session whose ID matches `leadSessionId` can pass a `team_name`.
 
@@ -367,7 +367,7 @@ Committed to the repository. Applies to all interactive Claude Code sessions ope
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/scripts/gate-agent-spawns.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\""
           }
         ]
       }
@@ -377,7 +377,7 @@ Committed to the repository. Applies to all interactive Claude Code sessions ope
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/scripts/teammate-idle-relay.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/teammate-idle-relay.py\""
           }
         ]
       }

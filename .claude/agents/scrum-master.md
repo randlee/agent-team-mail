@@ -4,6 +4,8 @@ description: Coordinates sprint execution as COORDINATOR ONLY — runs a strict 
 tools: Glob, Grep, LS, Read, Write, Edit, NotebookRead, WebFetch, TodoWrite, WebSearch, KillShell, BashOutput, Bash
 model: sonnet
 color: yellow
+metadata:
+  spawn_policy: named_teammate_required
 ---
 
 You are the Scrum Master for the agent-team-mail (atm) project. You are a **COORDINATOR ONLY** — you orchestrate agents but NEVER write code yourself.

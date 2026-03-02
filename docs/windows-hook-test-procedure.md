@@ -24,7 +24,7 @@ Add the catch-all PreToolUse logger to `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/scripts/gate-agent-spawns.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\""
           }
         ]
       },
@@ -32,7 +32,7 @@ Add the catch-all PreToolUse logger to `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/scripts/log-tool-use.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/log-tool-use.py\""
           }
         ]
       }
@@ -42,7 +42,7 @@ Add the catch-all PreToolUse logger to `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/scripts/teammate-idle-relay.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/teammate-idle-relay.py\""
           }
         ]
       }
@@ -121,9 +121,9 @@ if (Test-Path $eventsFile) { "" | Set-Content $eventsFile }
    ```
    Use Task tool: subagent_type=general-purpose, name=win-test-2, team_name=atm-dev, model=haiku
    Prompt: "Do these steps in order:
-   1. Run: python3 .claude/scripts/log-pid.py before-send
+   1. Run: python3 "$CLAUDE_PROJECT_DIR/.claude/scripts/log-pid.py" before-send
    2. Run: echo 'test message'
-   3. Run: python3 .claude/scripts/log-pid.py after-send
+   3. Run: python3 "$CLAUDE_PROJECT_DIR/.claude/scripts/log-pid.py" after-send
    4. Send message to team-lead: 'PID test done'"
    ```
 2. Check PreToolUse log:
