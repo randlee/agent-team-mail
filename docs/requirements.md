@@ -584,6 +584,15 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 - A partial result (only roster removed or only mailbox deleted) is a failure state and
   MUST be retried/reconciled by daemon until converged.
 
+**Team-lead teardown semantics (REQUIRED)**:
+- `team-lead` is role-special and MUST NOT be treated as a standard removable teammate in
+  automatic teardown cleanup.
+- Doctor/cleanup logic MUST distinguish lead-session recovery from teammate removal:
+  lead teardown drift must route to lead re-registration/recovery guidance, not generic
+  member cleanup/removal guidance.
+- Lead mailbox absence or stale lead session MUST NOT trigger automated roster deletion of
+  `team-lead`; recovery flows must preserve team ownership semantics.
+
 **Already-terminated case**:
 - If daemon verifies PID/session is already dead at operation start, daemon skips control
   delivery and runs teardown cleanup directly using the same coupled invariant above.
@@ -668,9 +677,13 @@ atm doctor --full
 - Invalid examples: `0m`, `1w`, `1.5h`, `-5m`, `m30`.
 
 **Output requirements**:
-- Human-readable output: ordered findings by severity, then recommended remediation commands.
+- Human-readable output MUST start with a concise team member snapshot table (equivalent
+  core fields to `atm members`: name/type/model/status), followed by ordered findings by
+  severity, then recommended remediation commands.
 - JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
-- Recommendations must include directly runnable commands when applicable.
+- Recommendations must include directly runnable commands when applicable and MUST be
+  context-aware/actionable for the reported finding class (for example, avoid suggesting
+  commands that require unavailable session context without explicit fallback guidance).
 - `atm doctor` must be diagnostics-first and report-producing by default:
   daemon probe/autostart failures must be captured as findings in the report,
   not treated as fatal preconditions that suppress report generation.
