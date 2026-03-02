@@ -1112,7 +1112,10 @@ mod tests {
             created_at: 0,
             lead_agent_id: "team-lead@atm-dev".to_string(),
             lead_session_id: "s".to_string(),
-            members: vec![member("team-lead", Some(true), 0), member("arch-ctm", Some(true), 0)],
+            members: vec![
+                member("team-lead", Some(true), 0),
+                member("arch-ctm", Some(true), 0),
+            ],
             unknown_fields: HashMap::new(),
         };
 
@@ -1134,9 +1137,9 @@ mod tests {
         });
 
         assert!(
-            findings
-                .iter()
-                .any(|f| f.code == "TERMINAL_MEMBER_NOT_CLEANED" && f.severity == Severity::Critical),
+            findings.iter().any(
+                |f| f.code == "TERMINAL_MEMBER_NOT_CLEANED" && f.severity == Severity::Critical
+            ),
             "dead non-lead with mailbox must remain critical cleanup finding"
         );
     }
