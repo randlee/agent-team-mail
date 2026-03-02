@@ -70,9 +70,9 @@ fn pre_tool_use_bash_cmd(global: bool) -> String {
 /// Return the PreToolUse(Task) hook command string for local or global install.
 fn pre_tool_use_task_cmd(global: bool) -> String {
     if global {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/gate-agent-spawns.py\" || true'".to_string()
+        "bash -c 'if test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\"; then python3 \"${HOME}/.claude/scripts/gate-agent-spawns.py\"; else exit 0; fi'".to_string()
     } else {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.claude/scripts/gate-agent-spawns.py\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/gate-agent-spawns.py\" || true'".to_string()
+        "bash -c 'if test -f \"${CLAUDE_PROJECT_DIR}/.claude/scripts/gate-agent-spawns.py\"; then python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/gate-agent-spawns.py\"; else exit 0; fi'".to_string()
     }
 }
 

@@ -50,6 +50,7 @@ def _run_gate(
     toml_content: str | None = None,
     team_config: dict | None = None,
     team_name_for_config: str = "atm-dev",
+    agent_frontmatters: dict[str, str] | None = None,
 ) -> tuple[int, "module"]:
     """Run gate-agent-spawns.main() in a temp dir environment.
 
@@ -67,6 +68,13 @@ def _run_gate(
         if toml_content is not None:
             Path(tmpdir, ".atm.toml").write_text(toml_content)
 
+        if agent_frontmatters:
+            agents_dir = Path(tmpdir) / ".claude" / "agents"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            for agent_name, frontmatter in agent_frontmatters.items():
+                body = f"---\n{frontmatter}\n---\n\nAgent body\n"
+                (agents_dir / f"{agent_name}.md").write_text(body)
+
         # Create team config.json if requested (mock HOME)
         home_dir = Path(tmpdir) / "fakehome"
         if team_config is not None:
@@ -78,7 +86,8 @@ def _run_gate(
         from unittest.mock import patch
 
         with patch("sys.stdin", StringIO(stdin_text)), \
-             patch("pathlib.Path.home", return_value=home_dir):
+             patch("pathlib.Path.home", return_value=home_dir), \
+             patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": tmpdir}, clear=False):
             mod = _load_module("gate_agent_spawns", _GATE_PATH)
             # Override DEBUG_LOG to temp path to avoid polluting system tmp
             mod.DEBUG_LOG = Path(tmpdir) / "debug.jsonl"
@@ -108,6 +117,60 @@ class TestGateRule1Orchestrators(unittest.TestCase):
             rc, _ = _run_gate(
                 _make_tool_input(subagent_type="scrum-master", name="sm-x"),
                 tmpdir=tmpdir,
+            )
+        self.assertEqual(rc, 0)
+
+    def test_quality_mgr_without_name_blocked(self):
+        """quality-mgr without name → exit 2."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rc, _ = _run_gate(
+                _make_tool_input(subagent_type="quality-mgr"),
+                tmpdir=tmpdir,
+            )
+        self.assertEqual(rc, 2)
+
+    def test_quality_mgr_with_name_allowed(self):
+        """quality-mgr with name → exit 0."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rc, _ = _run_gate(
+                _make_tool_input(subagent_type="quality-mgr", name="qm-x"),
+                tmpdir=tmpdir,
+            )
+        self.assertEqual(rc, 0)
+
+    def test_metadata_policy_blocks_without_name(self):
+        """metadata.spawn_policy named_teammate_required + no name → exit 2."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rc, _ = _run_gate(
+                _make_tool_input(subagent_type="custom-orchestrator"),
+                tmpdir=tmpdir,
+                agent_frontmatters={
+                    "custom-orchestrator": "name: custom-orchestrator\nmetadata:\n  spawn_policy: named_teammate_required",
+                },
+            )
+        self.assertEqual(rc, 2)
+
+    def test_metadata_policy_allows_with_name(self):
+        """metadata.spawn_policy named_teammate_required + name → exit 0."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rc, _ = _run_gate(
+                _make_tool_input(subagent_type="custom-orchestrator", name="coordinator-1"),
+                tmpdir=tmpdir,
+                agent_frontmatters={
+                    "custom-orchestrator": "name: custom-orchestrator\nmetadata:\n  spawn_policy: named_teammate_required",
+                },
+            )
+        self.assertEqual(rc, 0)
+
+    def test_metadata_absent_non_legacy_agent_allowed_without_name(self):
+        """No metadata + non-legacy subagent_type + no name → exit 0."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rc, _ = _run_gate(
+                _make_tool_input(subagent_type="custom-worker"),
+                tmpdir=tmpdir,
+                agent_frontmatters={
+                    "custom-worker": "name: custom-worker\ndescription: worker",
+                },
             )
         self.assertEqual(rc, 0)
 

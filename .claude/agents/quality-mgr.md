@@ -4,6 +4,8 @@ description: Coordinates QA across multiple sprints — runs rust-qa and atm-qa 
 tools: Glob, Grep, LS, Read, Write, Edit, NotebookRead, WebFetch, TodoWrite, WebSearch, KillShell, BashOutput, Bash
 model: sonnet
 color: cyan
+metadata:
+  spawn_policy: named_teammate_required
 ---
 
 You are the Quality Manager for the agent-team-mail (atm) project. You are a **COORDINATOR ONLY** — you orchestrate QA agents but NEVER write code yourself.

@@ -32,12 +32,15 @@ Exit codes: 0 = Allow, 2 = Block
 
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
 
-# Orchestrator agents that require full teammate lifecycle
-ORCHESTRATORS = {"scrum-master"}
+# Transition fallback: keep legacy orchestrators protected until all prompts
+# are migrated to metadata-based spawn policy.
+LEGACY_NAMED_REQUIRED = {"scrum-master", "quality-mgr"}
+SPAWN_POLICY_NAMED_REQUIRED = "named_teammate_required"
 
 DEBUG_LOG = Path(tempfile.gettempdir()) / "gate-agent-spawns-debug.jsonl"
 SESSION_ID_FILE = Path(tempfile.gettempdir()) / "atm-session-id"
@@ -80,6 +83,64 @@ def get_lead_session_id(team_name: str) -> str | None:
         return None
 
 
+def _extract_frontmatter(text: str) -> str | None:
+    """Return YAML frontmatter body between leading --- markers, if present."""
+    # Require frontmatter at the start of the file.
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---", 4)
+    if end == -1:
+        return None
+    return text[4:end]
+
+
+def _agent_file_for(subagent_type: str) -> Path | None:
+    if not subagent_type or not str(subagent_type).strip():
+        return None
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    base = Path(project_dir) if project_dir else Path(".")
+    return base / ".claude" / "agents" / f"{subagent_type}.md"
+
+
+def _frontmatter_requires_named_teammate(frontmatter: str) -> bool:
+    """Best-effort parse for metadata spawn policy without YAML deps.
+
+    Supported keys:
+    - metadata.spawn_policy: named_teammate_required
+    - metadata.atm.spawn_policy: named_teammate_required
+    """
+    direct = re.search(
+        r"(?m)^metadata:\n(?:^[ \t].*\n)*?^[ \t]+spawn_policy:\s*([^\n#]+)",
+        frontmatter,
+    )
+    if direct and direct.group(1).strip().strip("'\"") == SPAWN_POLICY_NAMED_REQUIRED:
+        return True
+
+    nested = re.search(
+        r"(?m)^metadata:\n(?:^[ \t].*\n)*?^[ \t]+atm:\n(?:^[ \t]{4,}.*\n)*?^[ \t]{4,}spawn_policy:\s*([^\n#]+)",
+        frontmatter,
+    )
+    if nested and nested.group(1).strip().strip("'\"") == SPAWN_POLICY_NAMED_REQUIRED:
+        return True
+
+    return False
+
+
+def requires_named_teammate(subagent_type: str) -> bool:
+    """Determine policy from agent prompt metadata with legacy fallback."""
+    agent_path = _agent_file_for(subagent_type)
+    if agent_path and agent_path.exists():
+        try:
+            body = agent_path.read_text(encoding="utf-8")
+            frontmatter = _extract_frontmatter(body)
+            if frontmatter is not None:
+                return _frontmatter_requires_named_teammate(frontmatter)
+        except Exception:
+            # Fall through to legacy fallback.
+            pass
+    return subagent_type in LEGACY_NAMED_REQUIRED
+
+
 def main() -> int:
     try:
         data = json.load(sys.stdin)
@@ -114,12 +175,12 @@ def main() -> int:
 
     required_team = get_required_team()
 
-    # Rule 1: Orchestrators must be spawned with teammate_name
+    # Rule 1: Agents with named-teammate policy must be spawned with teammate_name
     # WHY: They need full lifecycle (compaction, proper shutdown) to coordinate
     # long-running sprints. Background agents die at context limit.
-    if subagent_type in ORCHESTRATORS and not teammate_name:
+    if requires_named_teammate(subagent_type) and not teammate_name:
         sys.stderr.write(
-            f"BLOCKED: '{subagent_type}' is an orchestrator and must be a named teammate.\n"
+            f"BLOCKED: '{subagent_type}' requires named teammate spawn policy.\n"
             f"\n"
             f"Correct:\n"
             f'  Task(subagent_type="{subagent_type}", name="sm-sprint-X", team_name="<team>", ...)\n'

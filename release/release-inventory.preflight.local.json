@@ -1,0 +1,59 @@
+{
+  "releaseVersion": "0.26.0",
+  "releaseTag": "v0.26.0",
+  "releaseCommit": "4875846fc58483892a6b06f7d11e723e57f2928a",
+  "generatedAt": "2026-03-02T01:00:00Z",
+  "items": [
+    {
+      "artifact": "agent-team-mail",
+      "version": "0.26.0",
+      "sourceRef": "refs/tags/v0.26.0",
+      "publishTarget": "crates.io",
+      "required": true,
+      "verifyCommands": [
+        "curl -fsSL https://crates.io/api/v1/crates/agent-team-mail/0.26.0",
+        "cargo install agent-team-mail --version 0.26.0 --locked --force"
+      ]
+    },
+    {
+      "artifact": "agent-team-mail-core",
+      "version": "0.26.0",
+      "sourceRef": "refs/tags/v0.26.0",
+      "publishTarget": "crates.io",
+      "required": true,
+      "verifyCommands": [
+        "curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-core/0.26.0"
+      ]
+    },
+    {
+      "artifact": "agent-team-mail-daemon",
+      "version": "0.26.0",
+      "sourceRef": "refs/tags/v0.26.0",
+      "publishTarget": "crates.io",
+      "required": true,
+      "verifyCommands": [
+        "curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-daemon/0.26.0"
+      ]
+    },
+    {
+      "artifact": "agent-team-mail-mcp",
+      "version": "0.26.0",
+      "sourceRef": "refs/tags/v0.26.0",
+      "publishTarget": "crates.io",
+      "required": true,
+      "verifyCommands": [
+        "curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-mcp/0.26.0"
+      ]
+    },
+    {
+      "artifact": "agent-team-mail-tui",
+      "version": "0.26.0",
+      "sourceRef": "refs/tags/v0.26.0",
+      "publishTarget": "crates.io",
+      "required": true,
+      "verifyCommands": [
+        "curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-tui/0.26.0"
+      ]
+    }
+  ]
+}
