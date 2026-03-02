@@ -990,7 +990,6 @@ events for daemon state tracking.
 
 Required policy:
 - Block Task spawns when the target agent prompt (`.claude/agents/<subagent_type>.md`) declares frontmatter `metadata.spawn_policy = named_teammate_required` unless they are named teammates (`name` provided).
-- Temporary migration fallback: continue blocking unnamed spawns for legacy orchestrators (`scrum-master`, `quality-mgr`) until all required prompts have explicit metadata.
 - Block any explicit `team_name` that does not match `.atm.toml` `[core].default_team`.
 - Return exit code `2` with actionable feedback when blocked.
 

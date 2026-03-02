@@ -14,7 +14,8 @@ orchestrators can accidentally spawn agents incorrectly, leading to:
    context limit. Orchestrators need full teammate status to survive long sprints.
 
 This gate enforces three rules:
-- Rule 1: Orchestrators (scrum-master) MUST be named teammates
+- Rule 1: Agents declaring `metadata.spawn_policy: named_teammate_required`
+  MUST be named teammates
 - Rule 2: Only the team LEAD can create named teammates (not orchestrators themselves)
 - Rule 3: team_name must match .atm.toml [core].default_team when provided
 
@@ -37,9 +38,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Transition fallback: keep legacy orchestrators protected until all prompts
-# are migrated to metadata-based spawn policy.
-LEGACY_NAMED_REQUIRED = {"scrum-master", "quality-mgr"}
 SPAWN_POLICY_NAMED_REQUIRED = "named_teammate_required"
 
 DEBUG_LOG = Path(tempfile.gettempdir()) / "gate-agent-spawns-debug.jsonl"
@@ -127,7 +125,7 @@ def _frontmatter_requires_named_teammate(frontmatter: str) -> bool:
 
 
 def requires_named_teammate(subagent_type: str) -> bool:
-    """Determine policy from agent prompt metadata with legacy fallback."""
+    """Determine policy from agent prompt metadata."""
     agent_path = _agent_file_for(subagent_type)
     if agent_path and agent_path.exists():
         try:
@@ -136,9 +134,9 @@ def requires_named_teammate(subagent_type: str) -> bool:
             if frontmatter is not None:
                 return _frontmatter_requires_named_teammate(frontmatter)
         except Exception:
-            # Fall through to legacy fallback.
+            # Fail open on parse/read errors.
             pass
-    return subagent_type in LEGACY_NAMED_REQUIRED
+    return False
 
 
 def main() -> int:

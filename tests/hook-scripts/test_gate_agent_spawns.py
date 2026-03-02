@@ -108,6 +108,9 @@ class TestGateRule1Orchestrators(unittest.TestCase):
             rc, _ = _run_gate(
                 _make_tool_input(subagent_type="scrum-master"),
                 tmpdir=tmpdir,
+                agent_frontmatters={
+                    "scrum-master": "name: scrum-master\nmetadata:\n  spawn_policy: named_teammate_required",
+                },
             )
         self.assertEqual(rc, 2)
 
@@ -117,6 +120,9 @@ class TestGateRule1Orchestrators(unittest.TestCase):
             rc, _ = _run_gate(
                 _make_tool_input(subagent_type="scrum-master", name="sm-x"),
                 tmpdir=tmpdir,
+                agent_frontmatters={
+                    "scrum-master": "name: scrum-master\nmetadata:\n  spawn_policy: named_teammate_required",
+                },
             )
         self.assertEqual(rc, 0)
 
@@ -126,6 +132,9 @@ class TestGateRule1Orchestrators(unittest.TestCase):
             rc, _ = _run_gate(
                 _make_tool_input(subagent_type="quality-mgr"),
                 tmpdir=tmpdir,
+                agent_frontmatters={
+                    "quality-mgr": "name: quality-mgr\nmetadata:\n  spawn_policy: named_teammate_required",
+                },
             )
         self.assertEqual(rc, 2)
 
@@ -135,6 +144,9 @@ class TestGateRule1Orchestrators(unittest.TestCase):
             rc, _ = _run_gate(
                 _make_tool_input(subagent_type="quality-mgr", name="qm-x"),
                 tmpdir=tmpdir,
+                agent_frontmatters={
+                    "quality-mgr": "name: quality-mgr\nmetadata:\n  spawn_policy: named_teammate_required",
+                },
             )
         self.assertEqual(rc, 0)
 

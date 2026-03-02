@@ -128,8 +128,6 @@ Enforces three rules before allowing a `Task` tool call to proceed. Exit code `2
 
 If the target prompt file (`.claude/agents/<subagent_type>.md`) declares frontmatter `metadata.spawn_policy: named_teammate_required` and no `name` parameter is provided, the call is **blocked**.
 
-During migration, the gate also blocks unnamed spawns for legacy orchestrators (`scrum-master`, `quality-mgr`) when metadata is missing.
-
 ```
 BLOCKED: 'scrum-master' requires named teammate spawn policy.
 
