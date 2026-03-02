@@ -1,6 +1,6 @@
 ---
 name: log-monitor
-description: Monitors ATM/Codex logging surfaces, answers system status questions from logs, tails with filters until matching events occur, and notifies teammates on warn/error conditions.
+description: "DEPRECATED: Superseded by atm-monitor. Monitors ATM/Codex logging surfaces, answers system status questions from logs, tails with filters until matching events occur, and notifies teammates on warn/error conditions."
 tools: Bash
 model: haiku
 color: yellow

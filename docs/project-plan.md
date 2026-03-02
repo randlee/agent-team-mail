@@ -2,7 +2,7 @@
 
 **Version**: 0.5
 **Date**: 2026-02-25
-**Status**: Phase Q.3 complete (v0.23.0); Q.4 planned.
+**Status**: Phase T complete (v0.26.0).
 
 ---
 
@@ -162,7 +162,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | COMPLETE |
 | R | Session Handoff + Hook Installer | Daemon singleton lock, session registry, `atm doctor` | COMPLETE |
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
-| T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | PLANNED |
+| T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
 
 ---
 
