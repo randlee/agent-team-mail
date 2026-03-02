@@ -26,7 +26,7 @@ pub struct StatusArgs {
 /// Execute the status command
 pub fn execute(args: StatusArgs) -> Result<()> {
     // Prime daemon connectivity so daemon-backed liveness fields are available.
-    let _ = query_list_agents()?;
+    let _ = query_list_agents();
 
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -78,7 +78,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 json!({
                     "name": m.name,
                     "type": m.agent_type,
-                    "isActive": resolve_member_active(m, &daemon_liveness),
+                    "isActive": resolve_member_liveness(m, &daemon_liveness),
                     "unreadCount": unread,
                 })
             }).collect::<Vec<_>>(),
@@ -100,10 +100,10 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         let member_count = team_config.members.len();
         println!("Members ({member_count}):");
         for member in &team_config.members {
-            let active_str = if resolve_member_active(member, &daemon_liveness) {
-                "Online "
-            } else {
-                "Offline"
+            let active_str = match resolve_member_liveness(member, &daemon_liveness) {
+                Some(true) => "Online ",
+                Some(false) => "Offline",
+                None => "Unknown",
             };
             let unread = inbox_counts.get(&member.name).copied().unwrap_or(0);
             let name = &member.name;
@@ -132,14 +132,11 @@ fn load_daemon_liveness(team_name: &str, team_config: &TeamConfig) -> HashMap<St
     liveness
 }
 
-fn resolve_member_active(
+fn resolve_member_liveness(
     member: &agent_team_mail_core::schema::AgentMember,
     daemon_liveness: &HashMap<String, bool>,
-) -> bool {
-    daemon_liveness
-        .get(&member.name)
-        .copied()
-        .unwrap_or_else(|| member.is_active.unwrap_or(false))
+) -> Option<bool> {
+    daemon_liveness.get(&member.name).copied()
 }
 
 /// Count unread messages in inboxes
