@@ -91,7 +91,8 @@
         "version",
         "sourceRef",
         "publishTarget",
-        "verifyCommands"
+        "verifyCommands",
+        "required"
       ],
       "properties": {
         "artifact": {
@@ -121,6 +122,10 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether this artifact is required for release completion."
         },
         "verification": {
           "$ref": "#/$defs/verification"

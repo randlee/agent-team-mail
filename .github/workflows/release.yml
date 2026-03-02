@@ -201,6 +201,7 @@ jobs:
                       "version": version,
                       "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
+                      "required": True,
                       "verifyCommands": [
                           f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail/{version}",
                           f"cargo install agent-team-mail --version {version} --locked --force",
@@ -211,6 +212,7 @@ jobs:
                       "version": version,
                       "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
+                      "required": True,
                       "verifyCommands": [
                           f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-core/{version}",
                       ],
@@ -220,6 +222,7 @@ jobs:
                       "version": version,
                       "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
+                      "required": True,
                       "verifyCommands": [
                           f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-daemon/{version}",
                       ],
@@ -229,6 +232,7 @@ jobs:
                       "version": version,
                       "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
+                      "required": True,
                       "verifyCommands": [
                           f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-mcp/{version}",
                       ],
@@ -238,6 +242,7 @@ jobs:
                       "version": version,
                       "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
+                      "required": True,
                       "verifyCommands": [
                           f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-tui/{version}",
                       ],
@@ -275,7 +280,7 @@ jobs:
           if not isinstance(items, list) or not items:
               raise SystemExit("inventory.items must be a non-empty array")
 
-          required_item = ["artifact", "version", "sourceRef", "publishTarget", "verifyCommands"]
+          required_item = ["artifact", "version", "sourceRef", "publishTarget", "verifyCommands", "required"]
           artifacts = []
           for idx, item in enumerate(items):
               if not isinstance(item, dict):
@@ -286,6 +291,8 @@ jobs:
               verify = item["verifyCommands"]
               if not isinstance(verify, list) or not verify:
                   raise SystemExit(f"inventory.items[{idx}].verifyCommands must be non-empty")
+              if not isinstance(item["required"], bool):
+                  raise SystemExit(f"inventory.items[{idx}].required must be boolean")
               artifacts.append(item["artifact"])
               waiver = item.get("waiver")
               if waiver is not None:
@@ -379,14 +386,23 @@ jobs:
           items = inventory.get("items", [])
           failures = []
           verification = []
+          residual_risks = []
 
           for item in items:
               artifact = item.get("artifact", "<unknown>")
+              required = bool(item.get("required", True))
               waiver = item.get("waiver")
               if waiver:
                   print(f"waived verification for {artifact}: {waiver}")
                   verification.append(
-                      {"artifact": artifact, "status": "waived", "reason": waiver}
+                      {"artifact": artifact, "required": required, "status": "waived", "reason": waiver}
+                  )
+                  residual_risks.append(
+                      {
+                          "artifact": artifact,
+                          "severity": "waived-required" if required else "waived-optional",
+                          "note": str(waiver),
+                      }
                   )
                   continue
 
@@ -428,6 +444,7 @@ jobs:
                   verification.append(
                       {
                           "artifact": artifact,
+                          "required": required,
                           "status": "fail",
                           "failures": [
                               {"command": cmd, "output": output}
@@ -436,18 +453,18 @@ jobs:
                       }
                   )
                   for cmd, output in artifact_failures:
-                      failures.append((artifact, cmd, output))
+                      if required:
+                          failures.append((artifact, cmd, output))
+                      else:
+                          residual_risks.append(
+                              {
+                                  "artifact": artifact,
+                                  "severity": "optional-verification-failed",
+                                  "note": f"{cmd} => {output[:200]}",
+                              }
+                          )
               else:
-                  verification.append({"artifact": artifact, "status": "pass"})
-
-          if failures:
-              for artifact, cmd, output in failures:
-                  print(f"[FAIL] {artifact}: {cmd}\n{output}")
-              Path("release/release-verification.json").write_text(
-                  json.dumps({"items": verification}, indent=2) + "\n",
-                  encoding="utf-8",
-              )
-              raise SystemExit("post-publish verification failed for one or more inventory items")
+                  verification.append({"artifact": artifact, "required": required, "status": "pass"})
 
           # Validate CLI binary version explicitly as acceptance criterion.
           atm_path = Path(install_root) / "bin" / "atm"
@@ -456,13 +473,52 @@ jobs:
               out = proc.stdout.strip()
               print(out)
               if f"atm {version}" not in out:
-                  raise SystemExit(f"installed atm version mismatch: {out}")
+                  failures.append(("agent-team-mail", "atm --version", f"installed atm version mismatch: {out}"))
+                  residual_risks.append(
+                      {
+                          "artifact": "agent-team-mail",
+                          "severity": "required-verification-failed",
+                          "note": f"installed atm version mismatch: {out}",
+                      }
+                  )
           else:
-              raise SystemExit("atm binary missing after install verification")
+              failures.append(("agent-team-mail", "atm --version", "atm binary missing after install verification"))
+              residual_risks.append(
+                  {
+                      "artifact": "agent-team-mail",
+                      "severity": "required-verification-failed",
+                      "note": "atm binary missing after install verification",
+                  }
+              )
+
           Path("release/release-verification.json").write_text(
               json.dumps({"items": verification}, indent=2) + "\n",
               encoding="utf-8",
           )
+          summary = {
+              "required_items": sum(1 for item in verification if item.get("required", True)),
+              "required_passed": sum(1 for item in verification if item.get("required", True) and item.get("status") == "pass"),
+              "required_waived": sum(1 for item in verification if item.get("required", True) and item.get("status") == "waived"),
+              "required_failed": sum(1 for item in verification if item.get("required", True) and item.get("status") == "fail"),
+              "optional_items": sum(1 for item in verification if not item.get("required", True)),
+              "optional_failed": sum(1 for item in verification if not item.get("required", True) and item.get("status") == "fail"),
+          }
+          report = {
+              "auditSummary": summary,
+              "inventoryLocation": "release/release-inventory.json",
+              "verificationLocation": "release/release-verification.json",
+              "verificationOutcomes": verification,
+              "residualRisks": residual_risks,
+          }
+          Path("release/publisher-report.json").write_text(
+              json.dumps(report, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          if failures:
+              for artifact, cmd, output in failures:
+                  print(f"[FAIL] {artifact}: {cmd}\n{output}")
+              raise SystemExit("post-publish verification failed for one or more required inventory items")
           PY
 
       - name: Upload release inventory artifacts
@@ -472,3 +528,4 @@ jobs:
           path: |
             release/release-inventory.json
             release/release-verification.json
+            release/publisher-report.json

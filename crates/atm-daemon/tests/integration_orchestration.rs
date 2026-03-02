@@ -351,6 +351,167 @@ async fn test_pubsub_subscription_roundtrip() {
     cancel.cancel();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_launch_gemini_runtime_metadata_roundtrip() {
+    use agent_team_mail_core::daemon_client::{
+        LaunchConfig, LaunchResult, PROTOCOL_VERSION, SocketRequest, SocketResponse,
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio_util::sync::CancellationToken;
+
+    let temp_dir = TempDir::new().unwrap();
+    let home_dir = temp_dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+    let daemon_lock = acquire_test_daemon_lock(&home_dir);
+
+    let launch_tx = new_launch_sender();
+    let session_registry = new_session_registry();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    {
+        let mut guard = launch_tx.lock().await;
+        *guard = Some(tx);
+    }
+
+    let registry_for_worker = Arc::clone(&session_registry);
+    tokio::spawn(async move {
+        while let Some(req) = rx.recv().await {
+            let runtime = req
+                .config
+                .runtime
+                .clone()
+                .unwrap_or_else(|| "codex".to_string());
+            let runtime_session_id = req
+                .config
+                .resume_session_id
+                .clone()
+                .unwrap_or_else(|| "gemini-session-auto".to_string());
+            let runtime_home = req
+                .config
+                .env_vars
+                .get("ATM_RUNTIME_HOME")
+                .or_else(|| req.config.env_vars.get("GEMINI_CLI_HOME"))
+                .cloned();
+
+            registry_for_worker.lock().unwrap().upsert_runtime_for_team(
+                &req.config.team,
+                &req.config.agent,
+                &runtime_session_id,
+                std::process::id(),
+                Some(runtime),
+                Some(runtime_session_id.clone()),
+                Some("%42".to_string()),
+                runtime_home,
+            );
+
+            let _ = req.response_tx.send(Ok(LaunchResult {
+                agent: req.config.agent,
+                pane_id: "%42".to_string(),
+                state: "launching".to_string(),
+                warning: None,
+            }));
+        }
+    });
+
+    let _handle = start_socket_server(
+        home_dir.clone(),
+        new_state_store(),
+        new_pubsub_store(),
+        launch_tx,
+        Arc::clone(&session_registry),
+        new_dedup_store(&home_dir).unwrap(),
+        new_stream_state_store(),
+        new_stream_event_sender(),
+        new_log_event_queue(),
+        &daemon_lock,
+        cancel.clone(),
+    )
+    .await
+    .unwrap()
+    .expect("Socket server handle");
+
+    let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+    let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let launch = LaunchConfig {
+        agent: "arch-ctm".to_string(),
+        team: "atm-dev".to_string(),
+        command: "gemini".to_string(),
+        prompt: None,
+        timeout_secs: 5,
+        env_vars: HashMap::from([
+            (
+                "ATM_RUNTIME_HOME".to_string(),
+                "/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string(),
+            ),
+            ("ATM_RUNTIME".to_string(), "gemini".to_string()),
+        ]),
+        runtime: Some("gemini".to_string()),
+        resume_session_id: Some("gemini-session-123".to_string()),
+    };
+
+    let launch_req = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: "orch-gem-launch".to_string(),
+        command: "launch".to_string(),
+        payload: serde_json::to_value(launch).unwrap(),
+    };
+    let launch_line = format!("{}\n", serde_json::to_string(&launch_req).unwrap());
+    reader
+        .get_mut()
+        .write_all(launch_line.as_bytes())
+        .await
+        .unwrap();
+    let mut launch_resp_line = String::new();
+    reader.read_line(&mut launch_resp_line).await.unwrap();
+    let launch_resp: SocketResponse = serde_json::from_str(launch_resp_line.trim()).unwrap();
+    assert!(
+        launch_resp.is_ok(),
+        "launch failed: {:?}",
+        launch_resp.error
+    );
+
+    let mut payload = None;
+    for attempt in 0..10 {
+        let query_req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: format!("orch-gem-query-{attempt}"),
+            command: "session-query-team".to_string(),
+            payload: serde_json::json!({"name": "arch-ctm", "team": "atm-dev"}),
+        };
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let query_line = format!("{}\n", serde_json::to_string(&query_req).unwrap());
+        reader
+            .get_mut()
+            .write_all(query_line.as_bytes())
+            .await
+            .unwrap();
+        let mut query_resp_line = String::new();
+        reader.read_line(&mut query_resp_line).await.unwrap();
+        let query_resp: SocketResponse = serde_json::from_str(query_resp_line.trim()).unwrap();
+        if query_resp.is_ok() {
+            payload = query_resp.payload;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let payload = payload.expect("session-query should succeed after launch");
+    assert_eq!(payload["runtime"].as_str(), Some("gemini"));
+    assert_eq!(
+        payload["runtime_session_id"].as_str(),
+        Some("gemini-session-123")
+    );
+    assert_eq!(
+        payload["runtime_home"].as_str(),
+        Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home")
+    );
+
+    cancel.cancel();
+}
+
 // ── Test 4: Alias config parsing ──────────────────────────────────────────────
 
 #[test]

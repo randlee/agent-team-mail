@@ -369,6 +369,24 @@ pub async fn run(
     let reconcile_ctx = ctx.clone();
     let reconcile_registry = session_registry.clone();
     let reconcile_state_store = state_store.clone();
+
+    // Run one startup reconcile immediately so roster/state is available
+    // without waiting for the periodic interval tick.
+    {
+        let claude_root = ctx.system.claude_root.clone();
+        let startup_registry = session_registry.clone();
+        let startup_state_store = state_store.clone();
+        let startup_result = tokio::task::spawn_blocking(move || {
+            reconcile_team_member_activity(&claude_root, &startup_registry, &startup_state_store)
+        })
+        .await;
+        match startup_result {
+            Ok(Ok(())) => debug!("startup reconcile pass completed"),
+            Ok(Err(e)) => warn!("startup reconcile pass failed: {e}"),
+            Err(e) => warn!("startup reconcile task panicked: {e}"),
+        }
+    }
+
     let reconcile_task = tokio::spawn(async move {
         reconcile_loop(
             reconcile_ctx,

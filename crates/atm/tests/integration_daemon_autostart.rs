@@ -102,13 +102,16 @@ while running:
         payload = req.get("payload", {}) or {}
         if command == "list-agents":
             response_payload = []
-        elif command == "session-for-team":
+        elif command == "session-query-team" or command == "session-for-team":
+            alive = os.environ.get("ATM_FAKE_SESSION_ALIVE", "false").lower() == "true"
+            runtime = os.environ.get("ATM_FAKE_SESSION_RUNTIME", "codex")
             response_payload = {
                 "team": payload.get("team", "unknown"),
-                "agent": payload.get("agent", "unknown"),
+                "agent": payload.get("name", payload.get("agent", "unknown")),
                 "session_id": "fake-session",
                 "process_id": os.getpid(),
-                "alive": True,
+                "alive": alive,
+                "runtime": runtime,
             }
         elif command == "agent-state":
             response_payload = {"state": "idle", "last_transition": None}
@@ -332,6 +335,126 @@ fn test_status_reports_actionable_error_when_autostart_binary_missing() {
         combined.contains("failed to auto-start daemon") || combined.contains("not found in PATH"),
         "expected actionable auto-start failure message, got: {combined}"
     );
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
+fn test_daemon_kill_autostarts_daemon_when_absent() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let team = "team-kill";
+    write_team_config(home, team);
+    let script = write_fake_daemon_script(home);
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    let output = cmd
+        .env("ATM_HOME", home)
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", &script)
+        .env("ATM_FAKE_SESSION_ALIVE", "false")
+        .arg("daemon")
+        .arg("--kill")
+        .arg("alice")
+        .arg("--team")
+        .arg(team)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "daemon --kill should succeed with autostart: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(spawn_count(home), 1, "daemon should autostart for --kill");
+    kill_pid_from_file(home);
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
+fn test_cleanup_agent_autostarts_daemon_when_absent() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let team = "team-cleanup";
+    write_team_config(home, team);
+    let script = write_fake_daemon_script(home);
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    let output = cmd
+        .env("ATM_HOME", home)
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", &script)
+        .arg("cleanup")
+        .arg("--agent")
+        .arg("alice")
+        .arg("--team")
+        .arg(team)
+        .arg("--force")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "cleanup --agent should succeed with autostart: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(spawn_count(home), 1, "daemon should autostart for cleanup");
+    kill_pid_from_file(home);
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
+fn test_doctor_no_daemon_not_running_after_status_autostart() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let team = "team-doctor";
+    write_team_config(home, team);
+    let script = write_fake_daemon_script(home);
+
+    let mut status_cmd = cargo::cargo_bin_cmd!("atm");
+    status_cmd
+        .env("ATM_HOME", home)
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", &script)
+        .env("ATM_FAKE_SESSION_ALIVE", "true")
+        .arg("status")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .assert()
+        .success();
+
+    let mut doctor_cmd = cargo::cargo_bin_cmd!("atm");
+    let output = doctor_cmd
+        .env("ATM_HOME", home)
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", &script)
+        .env("ATM_FAKE_SESSION_ALIVE", "true")
+        .arg("doctor")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "doctor should succeed after daemon autostart: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let has_daemon_not_running = report["findings"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .any(|f| f["code"].as_str() == Some("DAEMON_NOT_RUNNING"))
+        })
+        .unwrap_or(false);
+    assert!(
+        !has_daemon_not_running,
+        "doctor must not report DAEMON_NOT_RUNNING after status autostart"
+    );
+
+    kill_pid_from_file(home);
 }
 
 #[test]

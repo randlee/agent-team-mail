@@ -16,7 +16,7 @@ use crate::util::settings::get_home_dir;
 #[derive(Args, Debug)]
 pub struct DaemonArgs {
     /// Kill the named agent process via daemon session tracking
-    #[arg(long, value_name = "AGENT", conflicts_with = "command")]
+    #[arg(long, value_name = "AGENT")]
     kill: Option<String>,
 
     /// Team override for --kill

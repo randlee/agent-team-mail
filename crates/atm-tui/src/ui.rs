@@ -770,7 +770,9 @@ mod tests {
     use super::*;
     use crate::app::{App, MemberRow};
     use crate::config::TuiConfig;
+    use agent_team_mail_core::schema::InboxMessage;
     use ratatui::{Terminal, backend::TestBackend};
+    use std::collections::HashMap;
 
     fn render_text(app: &App) -> String {
         let backend = TestBackend::new(100, 30);
@@ -815,5 +817,57 @@ mod tests {
         assert!(rendered.contains("arch-ctm"));
         assert!(rendered.contains("busy"));
         assert!(rendered.contains("[LIVE]"));
+    }
+
+    #[test]
+    fn test_inbox_list_detail_and_read_state_render_flow() {
+        let mut app = App::new("atm-dev".to_string(), TuiConfig::default());
+        app.members = vec![MemberRow {
+            agent: "arch-ctm".to_string(),
+            state: "idle".to_string(),
+            inbox_count: 2,
+        }];
+        app.selected_index = 0;
+        app.inbox_messages = vec![
+            InboxMessage {
+                from: "team-lead".to_string(),
+                text: "Please investigate the CI failure.".to_string(),
+                timestamp: "2026-03-02T00:00:00Z".to_string(),
+                read: false,
+                summary: Some("CI failure investigation".to_string()),
+                message_id: Some("msg-1".to_string()),
+                unknown_fields: HashMap::new(),
+            },
+            InboxMessage {
+                from: "quality-mgr".to_string(),
+                text: "Smoke tests passed.".to_string(),
+                timestamp: "2026-03-02T00:01:00Z".to_string(),
+                read: true,
+                summary: Some("Smoke tests passed".to_string()),
+                message_id: Some("msg-2".to_string()),
+                unknown_fields: HashMap::new(),
+            },
+        ];
+
+        // Step 1: list view shows unread marker.
+        let list_rendered = render_text(&app);
+        assert!(list_rendered.contains("team-lead"));
+        assert!(list_rendered.contains("quality-mgr"));
+
+        // Step 2: detail view exposes unread status and full text.
+        app.inbox_detail_open = true;
+        app.selected_message_index = 0;
+        let detail_rendered = render_text(&app);
+        assert!(detail_rendered.contains("From: team-lead  [unread]"));
+        assert!(detail_rendered.contains("At: 2026-03-02T00:00:00Z"));
+
+        // Step 3: simulate mark-read and verify rendered state updates.
+        app.inbox_messages[0].read = true;
+        let detail_after_read = render_text(&app);
+        assert!(detail_after_read.contains("From: team-lead  [read]"));
+
+        app.inbox_detail_open = false;
+        let list_after_read = render_text(&app);
+        assert!(list_after_read.contains("team-lead"));
     }
 }
