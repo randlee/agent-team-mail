@@ -183,16 +183,16 @@ Each sprint verifies Phase T deliverables against v0.27.0 on `develop`. Verifica
 
 ## Sprint Summary
 
-| Sprint | Description | Issues | Type |
-|--------|-------------|--------|------|
-| U.1 | Doctor scoping + teardown classification + recommendation routing | Doctor findings 1,2,3 | Fix |
-| U.2 | Lifecycle teardown hardening | Doctor findings 4,5 | Fix |
-| U.3 | Doctor UX: member snapshot + context-aware recommendations | Doctor findings 6,7 | Fix/UX |
-| U.4 | Daemon reliability verification | #181, #182, #183 | Verify |
-| U.5 | Gemini runtime verification | #281, #282 | Verify |
-| U.6 | CLI publishability + atm-monitor verification | #284, #286 | Verify |
-| U.7 | Availability signaling verification | #46, #47 | Verify |
-| U.8 | TUI verification | #184, #185, #187 | Verify |
+| Sprint | Description | Issues | Type | Depends On |
+|--------|-------------|--------|------|------------|
+| U.1 | Doctor scoping + teardown classification + recommendation routing | Doctor findings 1,2,3 | Fix | — |
+| U.2 | Lifecycle teardown hardening | Doctor findings 4,5 | Fix | — |
+| U.3 | Doctor UX: member snapshot + context-aware recommendations | Doctor findings 6,7 | Fix/UX | — |
+| U.4 | Daemon reliability verification | #181, #182, #183 | Verify | U.1, U.2, U.3 |
+| U.5 | Gemini runtime verification | #281, #282 | Verify | U.1, U.2, U.3 |
+| U.6 | CLI publishability + atm-monitor verification | #284, #286 | Verify | U.1, U.2, U.3 |
+| U.7 | Availability signaling verification | #46, #47 | Verify | U.1, U.2, U.3 |
+| U.8 | TUI verification | #184, #185, #187 | Verify | U.1, U.2, U.3 |
 
 **Sequencing constraint**: U.1/U.2/U.3 (doctor hardening) MUST complete and merge before U.4–U.8 begin. Doctor is used as a verification tool in the Phase T verification sprints — it must be reliable first.
 
