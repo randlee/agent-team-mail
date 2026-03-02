@@ -78,7 +78,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 json!({
                     "name": m.name,
                     "type": m.agent_type,
-                    "isActive": resolve_member_liveness(m, &daemon_liveness),
+                    "liveness": resolve_member_liveness(m, &daemon_liveness),
                     "unreadCount": unread,
                 })
             }).collect::<Vec<_>>(),
