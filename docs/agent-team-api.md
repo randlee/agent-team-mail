@@ -376,6 +376,16 @@ or:
 
 Without a tag, success depends on inbox history depth. With a tag, the pattern has been 100% reliable in testing.
 
+### `atm doctor --json` Output Contract
+
+`atm doctor --json` returns a stable top-level report object with:
+- `summary`
+- `findings`
+- `recommendations`
+- `log_window`
+
+`member_snapshot` is intentionally omitted from JSON output (it is rendered in human output only).
+
 ---
 
 ## Task Management
