@@ -746,6 +746,12 @@ fn reconcile_team_member_activity_with_mode(
                 }
 
                 if !advance_absent_prune_cycles {
+                    // Dispatch-triggered reconcile passes should not advance prune
+                    // counters, but they must still record that this dead member
+                    // was observed absent. That absence marker is used by the
+                    // re-add guard in terminal cleanup to avoid deleting a member
+                    // that was quickly removed and re-added.
+                    absent_cycles.entry(key.clone()).or_insert(1);
                     continue;
                 }
 
