@@ -290,9 +290,11 @@ fn test_exit_criterion_dedup_survives_daemon_restart() {
 /// input to stale agents.
 #[test]
 fn test_stale_session_state_tracking() {
-    use agent_team_mail_daemon::daemon::{SessionState, new_session_registry};
+    use agent_team_mail_daemon::daemon::{SessionRegistry, SessionState};
 
-    let session_registry = new_session_registry();
+    // Use an in-memory registry so this test never reads/writes real
+    // ~/.claude/daemon/session-registry.json state from the host machine.
+    let session_registry = std::sync::Arc::new(std::sync::Mutex::new(SessionRegistry::new()));
 
     // Register agent with an active session (pid = i32::MAX, always dead on any real OS).
     {

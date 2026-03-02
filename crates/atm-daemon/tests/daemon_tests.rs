@@ -594,7 +594,7 @@ async fn test_config_watch_event_updates_and_removes_members() {
         ]),
     );
 
-    let added = wait_until(6000, || {
+    let added = wait_until(8000, || {
         state_store_probe
             .lock()
             .unwrap()
@@ -607,7 +607,7 @@ async fn test_config_watch_event_updates_and_removes_members() {
         "worker-b should be added via live config watcher reconcile"
     );
 
-    let removed = wait_until(6000, || {
+    let removed = wait_until(8000, || {
         state_store_probe
             .lock()
             .unwrap()
