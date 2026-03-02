@@ -39,7 +39,8 @@ Own the permanent release-quality gate for every publish cycle.
 - Any audit mismatch is a release blocker until acknowledged and mitigated by `team-lead`.
 
 ## Pre-Publish Verification
-Before triggering CI/release publish steps, verify all of the following:
+After `develop -> main` PR CI has started, and before final merge/tag/release publish,
+verify all of the following in parallel with CI:
 1. `release/release-inventory.json` exists and validates against `docs/release-inventory-schema.json`.
 2. Inventory includes all 5 crates:
    - `agent-team-mail-core`
