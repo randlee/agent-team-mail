@@ -186,11 +186,27 @@ fn test_members_command_json_output() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
-    cmd.env("ATM_TEAM", "test-team")
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
         .arg("members")
         .arg("--json")
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let members = json["members"].as_array().unwrap();
+    assert!(!members.is_empty());
+    assert!(
+        members[0].get("liveness").is_some(),
+        "members --json should emit daemon-backed liveness field"
+    );
+    assert!(
+        members[0].get("isActive").is_none(),
+        "members --json should not emit deprecated isActive field"
+    );
 }
 
 #[test]
