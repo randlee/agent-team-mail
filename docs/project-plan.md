@@ -1164,8 +1164,8 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | V.1 | Team-scoped doctor reconciliation | V.0 | M | COMPLETE | [#333](https://github.com/randlee/agent-team-mail/issues/333) — team-scoped reconciliation absorbed into V.2+V.3 delivery (socket.rs, daemon_client.rs); PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
 | V.2+V.3 | Lead/non-lead teardown semantics + `isActive`/liveness separation hardening | V.0 | M | COMPLETE | [#332](https://github.com/randlee/agent-team-mail/issues/332), [#330](https://github.com/randlee/agent-team-mail/issues/330) — combined delivery per change-control note; PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
 | V.4 | Terminal cleanup convergence + stale tracked members | V.0 | M | COMPLETE | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334), PR [#345](https://github.com/randlee/agent-team-mail/pull/345) |
-| V.5 | Recommendation engine hardening | V.2 | S | PLANNED | [#336](https://github.com/randlee/agent-team-mail/issues/336) |
-| V.6 | Doctor UX snapshot/report ordering | V.1 | S | PLANNED | [#335](https://github.com/randlee/agent-team-mail/issues/335) |
+| V.5 | Recommendation engine hardening | V.2 | S | DEFERRED | [#336](https://github.com/randlee/agent-team-mail/issues/336) — deferred to a future phase; not in scope for integrate/phase-V merge |
+| V.6 | Doctor UX snapshot/report ordering | V.1 | S | DEFERRED | [#335](https://github.com/randlee/agent-team-mail/issues/335) — deferred to a future phase; not in scope for integrate/phase-V merge |
 | V.7 | Logging identity contract coverage | V.0 | S | COMPLETE | (Phase V umbrella) |
 
 ---

@@ -48,7 +48,7 @@ Define implementation-ready tests for Phase V doctor/lifecycle fixes so each iss
 
 ## V.4 Acceptance Criteria (Terminal Cleanup Convergence)
 
-- Dead terminal non-lead members absent from team config are pruned only after a full extra reconcile cycle.
+- Dead terminal non-lead members absent from team config are pruned only after two full extra reconcile cycles (three total: first detecting absence, two confirming it before prune fires).
 - Active sessions are never pruned by reconcile logic even when absent from config.
 - Kill-timeout fallback converges to full cleanup (session registry removal + roster/mailbox cleanup).
 - `integration_send` test harness disables daemon autostart (`ATM_DAEMON_AUTOSTART=0`) to keep offline/unknown-path assertions deterministic.

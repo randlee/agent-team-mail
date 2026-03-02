@@ -360,21 +360,24 @@ When an agent is respawned (same name), behavior depends on teardown state:
 - If prior instance teardown completed, the new agent starts with an empty mailbox.
 - If prior teardown has not completed yet, stale messages may remain until daemon reconciliation finishes.
 
-### Reliable Offline Queuing Pattern
+### Offline Queuing Pattern (opt-in)
 
-To ensure queued messages are acted on after respawn, use a call-to-action prefix:
+By default, `atm send` delivers messages without any prefix — no call-to-action tag is added.
 
-```
-[PENDING ACTION - execute when online] <instruction here>
-```
+To add a call-to-action prefix for messages to offline agents, use `--offline-action`:
 
-or:
-
-```
-[OFFLINE MESSAGE - Acknowledge and respond] <instruction here>
+```bash
+atm send <agent> "message" --offline-action "[PENDING ACTION - execute when online]"
 ```
 
-Without a tag, success depends on inbox history depth. With a tag, the pattern has been 100% reliable in testing.
+or configure a default in `.atm.toml`:
+
+```toml
+[send]
+offline_action = "[PENDING ACTION - execute when online]"
+```
+
+With a tag, the pattern has been 100% reliable in testing. Without one, the message is still delivered; the tag is purely a hint to the recipient.
 
 ### `atm doctor --json` Output Contract
 
