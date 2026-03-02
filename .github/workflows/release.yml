@@ -530,10 +530,34 @@ jobs:
                   print(artifact)
           PY
 
+          # Phase 1: publish core (the root dependency)
+          core_published=false
           while IFS= read -r crate; do
             [[ -n "$crate" ]] || continue
+            if [[ "$crate" == "agent-team-mail-core" ]]; then
+              publish_if_missing "$crate" yes
+              core_published=true
+            fi
+          done < /tmp/publish_list.txt
+
+          # Phase 2: after core is on crates.io, validate non-core crates can package
+          if [[ "$core_published" == "true" ]]; then
+            echo "--- Validating non-core crate packaging (core now available on registry) ---"
+            while IFS= read -r crate; do
+              [[ -n "$crate" ]] || continue
+              [[ "$crate" == "agent-team-mail-core" ]] && continue
+              echo "::group::cargo package -p ${crate} --locked (pre-publish validation)"
+              cargo package -p "${crate}" --locked
+              echo "::endgroup::"
+            done < /tmp/publish_list.txt
+          fi
+
+          # Phase 3: publish non-core crates
+          while IFS= read -r crate; do
+            [[ -n "$crate" ]] || continue
+            [[ "$crate" == "agent-team-mail-core" ]] && continue
             wait_after="no"
-            if [[ "$crate" == "agent-team-mail-core" || "$crate" == "agent-team-mail" || "$crate" == "agent-team-mail-daemon" || "$crate" == "agent-team-mail-mcp" ]]; then
+            if [[ "$crate" == "agent-team-mail" || "$crate" == "agent-team-mail-daemon" || "$crate" == "agent-team-mail-mcp" ]]; then
               wait_after="yes"
             fi
             publish_if_missing "$crate" "$wait_after"
