@@ -28,6 +28,13 @@ static ABSENT_REGISTRY_CYCLES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, u8>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+/// Tracks consecutive reconcile cycles where a non-lead member is present in
+/// team config with a dead daemon session. Terminal cleanup fires only after
+/// two full cycles, giving re-added members a grace period to re-register.
+static DEAD_MEMBER_CYCLES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, u8>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Run the main daemon event loop.
 ///
 /// This function:
@@ -613,12 +620,34 @@ fn reconcile_team_member_activity(
             }
 
             // Terminal non-lead members must be fully removed (roster + mailbox)
-            // once daemon confirms the session is dead.
+            // once daemon confirms the session is dead. A one-cycle grace period
+            // prevents premature cleanup when a member is briefly removed and
+            // quickly re-added (config-watcher race or remove+recreate flows).
             if member.name != "team-lead"
                 && let Some(ref rec) = record
                 && rec.state == crate::daemon::session_registry::SessionState::Dead
             {
-                terminal_non_lead_members.push(member.name.clone());
+                let key = format!("{team_name}:{}", member.name);
+                // If the member was tracked as absent last cycle, they were just
+                // re-added. Reset their dead-cycle counter so they get a fresh
+                // grace period before terminal cleanup fires.
+                let was_absent = ABSENT_REGISTRY_CYCLES.lock().unwrap().contains_key(&key);
+                let mut dead_cycles = DEAD_MEMBER_CYCLES.lock().unwrap();
+                if was_absent {
+                    dead_cycles.remove(&key);
+                }
+                let cycles = dead_cycles
+                    .entry(key.clone())
+                    .and_modify(|c| *c = c.saturating_add(1))
+                    .or_insert(1);
+                if *cycles >= 2 {
+                    terminal_non_lead_members.push(member.name.clone());
+                    dead_cycles.remove(&key);
+                }
+            } else {
+                // Member is alive, has no session, or is team-lead: reset counter.
+                let key = format!("{team_name}:{}", member.name);
+                DEAD_MEMBER_CYCLES.lock().unwrap().remove(&key);
             }
         }
 
@@ -1528,6 +1557,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_session_end_converges_to_remove_dead_member_from_roster_and_mailbox() {
+        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
         let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         {
@@ -1536,6 +1566,8 @@ mod tests {
             // Simulate hook_watcher SessionEnd processing.
             reg.mark_dead_for_team("atm-dev", "arch-ctm");
         }
+        // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
         assert_terminal_non_lead_cleanup(home, &inbox_dir);
         assert!(
@@ -1550,6 +1582,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_sigterm_escalation_converges_to_remove_dead_member_from_roster_and_mailbox() {
+        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
         let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         {
@@ -1558,6 +1591,8 @@ mod tests {
             // Simulate daemon --kill escalation where SIGTERM eventually marks the session dead.
             reg.mark_dead_for_team("atm-dev", "arch-ctm");
         }
+        // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
         assert_terminal_non_lead_cleanup(home, &inbox_dir);
         assert!(
@@ -1572,6 +1607,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_kill_timeout_fallback_converges_to_remove_dead_member_from_roster_and_mailbox() {
+        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
         let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         {
@@ -1580,6 +1616,8 @@ mod tests {
             // Simulate daemon --kill exhausting graceful waits and forcing termination.
             reg.mark_dead_for_team("atm-dev", "arch-ctm");
         }
+        // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
         assert_terminal_non_lead_cleanup(home, &inbox_dir);
         assert!(
@@ -1595,6 +1633,7 @@ mod tests {
     #[serial]
     fn test_reconcile_prunes_stale_absent_dead_members_only_after_full_extra_cycle() {
         super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
+        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
 
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
@@ -1648,6 +1687,7 @@ mod tests {
     #[serial]
     fn test_reconcile_does_not_prune_absent_active_sessions() {
         super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
+        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
 
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
