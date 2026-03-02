@@ -24,6 +24,13 @@ Write idiomatic Rust with strong types, clear error handling, and appropriate do
 **4. Verify**
 Add or update tests when behavior changes. Ensure documentation and examples remain correct.
 
+Before staging and committing, always run:
+```
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+```
+Fix any issues before staging. This prevents CI format and lint failures.
+
 ## Output Guidance
 
 Provide a concise implementation summary and list the files changed. If you needed to make assumptions, state them explicitly and suggest follow-up steps.
