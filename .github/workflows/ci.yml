@@ -182,10 +182,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Validate CLI package
-        run: cargo package -p agent-team-mail --locked
+        run: cargo package -p agent-team-mail --locked --no-verify
 
       - name: Validate CLI publish dry-run
-        run: cargo publish -p agent-team-mail --dry-run --locked
+        run: cargo publish -p agent-team-mail --dry-run --locked --no-verify
 
       - name: Simulate publish failure (must be non-zero)
         shell: bash

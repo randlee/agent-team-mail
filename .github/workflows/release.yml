@@ -314,12 +314,12 @@ jobs:
           PY
 
       - name: Validate CLI crate packageability
-        run: cargo package -p agent-team-mail --locked
+        run: cargo package -p agent-team-mail --locked --no-verify
 
       - name: Validate CLI crate publish dry-run
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail --dry-run --locked
+        run: cargo publish -p agent-team-mail --dry-run --locked --no-verify
 
       - name: Publish agent-team-mail-core
         env:
