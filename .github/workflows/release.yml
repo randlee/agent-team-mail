@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  issues: write
+  pull-requests: write
 
 jobs:
   gate-and-tag:
@@ -171,6 +173,9 @@ jobs:
         with:
           ref: ${{ needs.gate-and-tag.outputs.release_tag }}
 
+      # NOTE: `release/release-inventory.json` is a CI-generated runtime artifact
+      # produced by this job and uploaded for downstream jobs. It is intentionally
+      # not a committed repository file.
       - name: Generate release inventory artifact
         shell: bash
         run: |
@@ -197,6 +202,7 @@ jobs:
                       "version": version,
                       "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
+                      "publish": True,
                       "required": True,
                       "verifyCommands": [
                           f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail/{version}",
@@ -208,6 +214,7 @@ jobs:
                       "version": version,
                       "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
+                      "publish": True,
                       "required": True,
                       "verifyCommands": [
                           f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-core/{version}",
@@ -218,6 +225,7 @@ jobs:
                       "version": version,
                       "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
+                      "publish": True,
                       "required": True,
                       "verifyCommands": [
                           f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-daemon/{version}",
@@ -228,6 +236,7 @@ jobs:
                       "version": version,
                       "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
+                      "publish": True,
                       "required": True,
                       "verifyCommands": [
                           f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-mcp/{version}",
@@ -238,6 +247,7 @@ jobs:
                       "version": version,
                       "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
+                      "publish": True,
                       "required": True,
                       "verifyCommands": [
                           f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-tui/{version}",
@@ -290,6 +300,15 @@ jobs:
               if not isinstance(item["required"], bool):
                   raise SystemExit(f"inventory.items[{idx}].required must be boolean")
               artifacts.append(item["artifact"])
+              publish = item.get("publish", True)
+              if not isinstance(publish, bool):
+                  raise SystemExit(f"inventory.items[{idx}].publish must be boolean when present")
+              if not publish:
+                  waiver_reason = item.get("waiver_reason")
+                  if not isinstance(waiver_reason, str) or not waiver_reason.strip():
+                      raise SystemExit(
+                          f"inventory.items[{idx}] sets publish=false but waiver_reason is missing/empty"
+                      )
               waiver = item.get("waiver")
               if waiver is not None:
                   for wf in ["approver", "reason", "gateCheck"]:
@@ -319,8 +338,113 @@ jobs:
           name: release-inventory
           path: release/release-inventory.json
 
-  publish-crates:
+  pre-publish-audit:
     needs: [gate-and-tag, prepare-release-inventory]
+    runs-on: ubuntu-latest
+    outputs:
+      publish_list: ${{ steps.audit.outputs.publish_list }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate-and-tag.outputs.release_tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download release inventory artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-inventory
+          path: release
+
+      - name: Validate inventory consistency + waiver gate
+        id: audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.gate-and-tag.outputs.release_version }}'
+          python3 - <<'PY' "$version" "$GITHUB_OUTPUT"
+          import json
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          release_version = sys.argv[1]
+          github_output = Path(sys.argv[2])
+          inventory_path = Path("release/release-inventory.json")
+          cargo_toml_path = Path("Cargo.toml")
+
+          inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+          workspace = tomllib.loads(cargo_toml_path.read_text(encoding="utf-8"))
+          workspace_version = workspace.get("workspace", {}).get("package", {}).get("version")
+          if workspace_version != release_version:
+              raise SystemExit(
+                  f"workspace version mismatch: inventory/tag={release_version}, Cargo.toml={workspace_version}"
+              )
+
+          if inventory.get("releaseVersion") != release_version:
+              raise SystemExit(
+                  f"inventory.releaseVersion mismatch: expected {release_version}, got {inventory.get('releaseVersion')}"
+              )
+
+          expected = {
+              "agent-team-mail-core",
+              "agent-team-mail",
+              "agent-team-mail-daemon",
+              "agent-team-mail-mcp",
+              "agent-team-mail-tui",
+          }
+
+          items = inventory.get("items", [])
+          by_artifact = {item.get("artifact"): item for item in items}
+          missing = sorted(expected - set(by_artifact))
+          if missing:
+              raise SystemExit(f"inventory missing expected artifacts: {', '.join(missing)}")
+
+          publishable = []
+          for artifact in sorted(expected):
+              item = by_artifact[artifact]
+              if item.get("version") != release_version:
+                  raise SystemExit(
+                      f"{artifact}: inventory version mismatch (expected {release_version}, got {item.get('version')})"
+                  )
+
+              publish = item.get("publish", True)
+              if not isinstance(publish, bool):
+                  raise SystemExit(f"{artifact}: publish must be boolean when present")
+
+              if not publish:
+                  waiver_reason = item.get("waiver_reason")
+                  if not isinstance(waiver_reason, str) or not waiver_reason.strip():
+                      raise SystemExit(
+                          f"{artifact}: publish=false requires non-empty waiver_reason"
+                      )
+                  print(f"waived from publish: {artifact} ({waiver_reason})")
+              else:
+                  publishable.append(artifact)
+
+          if not publishable:
+              raise SystemExit("no publishable crates after waiver checks")
+
+          publish_list = ",".join(publishable)
+          with github_output.open("a", encoding="utf-8") as fh:
+              fh.write(f"publish_list={publish_list}\n")
+          print(f"publish_list={publish_list}")
+          PY
+
+      - name: Cargo package audit (publishable crates)
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra crates <<< '${{ steps.audit.outputs.publish_list }}'
+          for crate in "${crates[@]}"; do
+            echo "::group::cargo package -p ${crate}"
+            cargo package -p "${crate}" --locked
+            echo "::endgroup::"
+          done
+
+  publish-crates:
+    needs: [gate-and-tag, prepare-release-inventory, pre-publish-audit]
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
@@ -330,6 +454,12 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Download release inventory artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-inventory
+          path: release
 
       - name: Publish crates in dependency order (idempotent)
         shell: bash
@@ -364,11 +494,39 @@ jobs:
             fi
           }
 
-          publish_if_missing agent-team-mail-core yes
-          publish_if_missing agent-team-mail yes
-          publish_if_missing agent-team-mail-daemon yes
-          publish_if_missing agent-team-mail-mcp yes
-          publish_if_missing agent-team-mail-tui no
+          python3 - <<'PY' "$version" > /tmp/publish_list.txt
+          import json
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          inventory = json.loads(Path("release/release-inventory.json").read_text(encoding="utf-8"))
+          dependency_order = [
+              "agent-team-mail-core",
+              "agent-team-mail",
+              "agent-team-mail-daemon",
+              "agent-team-mail-mcp",
+              "agent-team-mail-tui",
+          ]
+          item_by_artifact = {item.get("artifact"): item for item in inventory.get("items", [])}
+          for artifact in dependency_order:
+              item = item_by_artifact.get(artifact)
+              if item is None:
+                  raise SystemExit(f"inventory missing artifact: {artifact}")
+              if item.get("version") != version:
+                  raise SystemExit(f"{artifact}: inventory version mismatch for publish step")
+              if item.get("publish", True):
+                  print(artifact)
+          PY
+
+          while IFS= read -r crate; do
+            [[ -n "$crate" ]] || continue
+            wait_after="no"
+            if [[ "$crate" == "agent-team-mail-core" || "$crate" == "agent-team-mail" || "$crate" == "agent-team-mail-daemon" || "$crate" == "agent-team-mail-mcp" ]]; then
+              wait_after="yes"
+            fi
+            publish_if_missing "$crate" "$wait_after"
+          done < /tmp/publish_list.txt
 
   post-publish-verify:
     needs: [gate-and-tag, publish-crates, prepare-release-inventory]
@@ -413,7 +571,31 @@ jobs:
           for item in items:
               artifact = item.get("artifact", "<unknown>")
               required = bool(item.get("required", True))
+              publish = item.get("publish", True)
+              waiver_reason = item.get("waiver_reason")
               waiver = item.get("waiver")
+              if not publish:
+                  if not isinstance(waiver_reason, str) or not waiver_reason.strip():
+                      raise SystemExit(
+                          f"{artifact}: publish=false requires non-empty waiver_reason"
+                      )
+                  print(f"waived verification for {artifact}: {waiver_reason}")
+                  verification.append(
+                      {
+                          "artifact": artifact,
+                          "required": required,
+                          "status": "waived",
+                          "reason": waiver_reason,
+                      }
+                  )
+                  residual_risks.append(
+                      {
+                          "artifact": artifact,
+                          "severity": "waived-required" if required else "waived-optional",
+                          "note": waiver_reason,
+                      }
+                  )
+                  continue
               if waiver:
                   print(f"waived verification for {artifact}: {waiver}")
                   verification.append(
@@ -452,15 +634,23 @@ jobs:
                               print(f"{artifact}: install attempt {attempt}/{attempts} failed; retrying in 30s")
                               time.sleep(30)
                   else:
-                      proc = subprocess.run(
-                          cmd,
-                          shell=True,
-                          stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT,
-                          text=True,
-                      )
-                      if proc.returncode != 0:
-                          artifact_failures.append((cmd, proc.stdout))
+                      # Retry curl and other verification commands up to 5 times
+                      attempts = 5
+                      for attempt in range(1, attempts + 1):
+                          proc = subprocess.run(
+                              cmd,
+                              shell=True,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT,
+                              text=True,
+                          )
+                          if proc.returncode == 0:
+                              break
+                          if attempt == attempts:
+                              artifact_failures.append((cmd, proc.stdout))
+                          else:
+                              print(f"{artifact}: verify attempt {attempt}/{attempts} failed; retrying in 30s")
+                              time.sleep(30)
 
               if artifact_failures:
                   verification.append(
@@ -551,3 +741,199 @@ jobs:
             release/release-inventory.json
             release/release-verification.json
             release/publisher-report.json
+
+  update-homebrew:
+    needs: [gate-and-tag, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: randlee/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Compute release tarball SHA256
+        id: sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='${{ needs.gate-and-tag.outputs.release_tag }}'
+          version='${{ needs.gate-and-tag.outputs.release_version }}'
+          # Use the macOS arm64 tarball as the canonical release artifact
+          tarball_url="https://github.com/randlee/agent-team-mail/releases/download/${tag}/atm_${version}_aarch64-apple-darwin.tar.gz"
+          echo "tarball_url=${tarball_url}" >> "$GITHUB_OUTPUT"
+          # Download and compute SHA256
+          curl -fsSL --retry 5 --retry-delay 30 --retry-all-errors -o /tmp/release.tar.gz "${tarball_url}"
+          sha256=$(sha256sum /tmp/release.tar.gz | awk '{print $1}')
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+          echo "Tarball SHA256: ${sha256}"
+
+      - name: Update Homebrew formulas
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.gate-and-tag.outputs.release_version }}'
+          sha256='${{ steps.sha.outputs.sha256 }}'
+          tarball_url='${{ steps.sha.outputs.tarball_url }}'
+
+          for formula in homebrew-tap/Formula/agent-team-mail.rb homebrew-tap/Formula/atm.rb; do
+            if [[ ! -f "$formula" ]]; then
+              echo "Formula not found: $formula" >&2
+              exit 1
+            fi
+            # Update version and url lines using sed
+            sed -i "s|version \"[^\"]*\"|version \"${version}\"|g" "$formula"
+            sed -i "s|url \"[^\"]*\"|url \"${tarball_url}\"|g" "$formula"
+            sed -i "s|sha256 \"[^\"]*\"|sha256 \"${sha256}\"|g" "$formula"
+            echo "Updated $formula"
+          done
+
+      - name: Commit and push to homebrew-tap
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.gate-and-tag.outputs.release_version }}'
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/agent-team-mail.rb Formula/atm.rb
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "chore: bump agent-team-mail to v${version}"
+          git push
+
+  release-summary:
+    if: always()
+    needs: [gate-and-tag, pre-publish-audit, publish-crates, post-publish-verify, release, update-homebrew]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate-and-tag.outputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Generate consolidated completion report
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.gate-and-tag.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.gate-and-tag.outputs.release_version }}
+          STEP_SUMMARY: ${{ github.step_summary }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import urllib.error
+          import urllib.request
+
+          repo = os.environ["REPO"]
+          token = os.environ["GITHUB_TOKEN"]
+          tag = os.environ.get("RELEASE_TAG", "").strip()
+          version = os.environ.get("RELEASE_VERSION", "").strip()
+          summary_path = os.environ["STEP_SUMMARY"]
+
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def github_get(path):
+              req = urllib.request.Request(f"https://api.github.com{path}", headers=headers)
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      return resp.getcode(), json.loads(resp.read().decode("utf-8"))
+              except urllib.error.HTTPError as e:
+                  body = e.read().decode("utf-8", errors="replace")
+                  return e.code, {"error": body}
+
+          def github_post(path, payload):
+              data = json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(
+                  f"https://api.github.com{path}",
+                  headers=headers,
+                  method="POST",
+                  data=data,
+              )
+              with urllib.request.urlopen(req) as resp:
+                  return resp.getcode(), json.loads(resp.read().decode("utf-8"))
+
+          checks = []
+
+          if not tag or not version:
+              checks.append(("Release metadata available", False, "missing release tag/version outputs"))
+          else:
+              code, _ = github_get(f"/repos/{repo}/releases/tags/{tag}")
+              checks.append(("GitHub Release exists", code == 200, f"tag={tag}, status={code}"))
+
+          crates = [
+              "agent-team-mail-core",
+              "agent-team-mail",
+              "agent-team-mail-daemon",
+              "agent-team-mail-mcp",
+              "agent-team-mail-tui",
+          ]
+          for crate in crates:
+              url = f"https://crates.io/api/v1/crates/{crate}/{version}"
+              req = urllib.request.Request(url, headers={"User-Agent": "atm-release-summary"})
+              ok = False
+              detail = url
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      ok = resp.getcode() == 200
+                      detail = f"{url} status={resp.getcode()}"
+              except urllib.error.HTTPError as e:
+                  detail = f"{url} status={e.code}"
+              checks.append((f"crates.io publish: {crate}@{version}", ok, detail))
+
+          formula_urls = [
+              "https://raw.githubusercontent.com/randlee/homebrew-tap/main/Formula/agent-team-mail.rb",
+              "https://raw.githubusercontent.com/randlee/homebrew-tap/main/Formula/atm.rb",
+          ]
+          for formula_url in formula_urls:
+              req = urllib.request.Request(formula_url, headers={"User-Agent": "atm-release-summary"})
+              ok = False
+              detail = formula_url
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      body = resp.read().decode("utf-8", errors="replace")
+                      ok = f'version "{version}"' in body
+                      detail = f"{formula_url} status={resp.getcode()}"
+              except urllib.error.HTTPError as e:
+                  detail = f"{formula_url} status={e.code}"
+              checks.append((f"Homebrew formula version: {formula_url.split('/')[-1]}", ok, detail))
+
+          overall_ok = all(c[1] for c in checks)
+          status_icon = "✅" if overall_ok else "❌"
+          lines = [
+              f"# Release Completion Report {status_icon}",
+              "",
+              f"- Tag: `{tag}`",
+              f"- Version: `{version}`",
+              "",
+              "| Check | Status | Details |",
+              "|---|---|---|",
+          ]
+          for name, ok, detail in checks:
+              lines.append(f"| {name} | {'✅ PASS' if ok else '❌ FAIL'} | `{detail}` |")
+          summary_md = "\n".join(lines) + "\n"
+
+          with open(summary_path, "a", encoding="utf-8") as fh:
+              fh.write(summary_md)
+
+          # If applicable, post summary to PR associated with the tagged commit.
+          if tag:
+              commit_sha = subprocess.check_output(
+                  ["git", "rev-list", "-n", "1", tag], text=True
+              ).strip()
+              code, prs = github_get(f"/repos/{repo}/commits/{commit_sha}/pulls")
+              if code == 200 and isinstance(prs, list) and prs:
+                  pr_number = prs[0]["number"]
+                  github_post(f"/repos/{repo}/issues/{pr_number}/comments", {"body": summary_md})
+
+          if not overall_ok:
+              raise SystemExit("release summary checks reported one or more failures")
+          PY

@@ -360,21 +360,11 @@ When an agent is respawned (same name), behavior depends on teardown state:
 - If prior instance teardown completed, the new agent starts with an empty mailbox.
 - If prior teardown has not completed yet, stale messages may remain until daemon reconciliation finishes.
 
-### Reliable Offline Queuing Pattern
+### Optional Offline Call-to-Action
 
-To ensure queued messages are acted on after respawn, use a call-to-action prefix:
-
-```
-[PENDING ACTION - execute when online] <instruction here>
-```
-
-or:
-
-```
-[OFFLINE MESSAGE - Acknowledge and respond] <instruction here>
-```
-
-Without a tag, success depends on inbox history depth. With a tag, the pattern has been 100% reliable in testing.
+If operators want explicit offline call-to-action text, they can provide it
+explicitly via `--offline-action` (or config). ATM should not rely on a hardcoded
+prefix by default.
 
 ---
 
@@ -871,7 +861,7 @@ Approve or reject agent's implementation plan.
 | `cwd` | string | Yes | Current working directory of agent |
 | `subscriptions` | array | No | Notification subscriptions (usually empty) |
 | `backendType` | string | No | Backend type (e.g., "tmux", empty if not running) |
-| `isActive` | boolean | No | Whether agent is currently running |
+| `isActive` | boolean | No | Activity/busy hint (recent work signal), not liveness |
 
 **Complete Example** (from test-team):
 
@@ -963,7 +953,8 @@ Approve or reject agent's implementation plan.
 - **Team Lead Member**: First member has empty/null `prompt`, `color`, `tmuxPaneId`, and no `backendType`
 - **Spawned Agents**: Have `prompt`, `color`, `tmuxPaneId`, and `backendType` populated
 - **`model`**: Different agents can use different models (e.g., team-lead uses haiku, agents use opus)
-- **`isActive`**: true if agent is currently running; false if idle/disconnected
+- **`isActive`**: activity/busy hint only (for example recent sender/read activity); not a process/session liveness signal
+- **Liveness source of truth**: daemon session/registry state, not `isActive`
 - **`prompt`**: Where specialized instructions are stored (can be long multi-line text)
 - **`color`**: UI color for team dashboard (optional but recommended)
 

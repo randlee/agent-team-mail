@@ -16,6 +16,7 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_CONFIG")
         .env_remove("CLAUDE_SESSION_ID")
@@ -568,7 +569,7 @@ fn test_offline_recipient_detection_auto_tag() {
         .assert()
         .success();
 
-    // Verify message was prepended with default action text
+    // Without explicit action text, default behavior is no prepend.
     let inbox_path = temp_dir
         .path()
         .join(".claude/teams/test-team/inboxes/offline-agent.json");
@@ -577,15 +578,11 @@ fn test_offline_recipient_detection_auto_tag() {
 
     assert_eq!(messages.len(), 1);
     let text = messages[0]["text"].as_str().unwrap();
-    assert!(
-        text.starts_with("[PENDING ACTION - execute when online]"),
-        "Expected default action prefix, got: {text}"
-    );
-    assert!(text.contains("Please review this"));
+    assert_eq!(text, "Please review this");
 }
 
 #[test]
-fn test_offline_recipient_custom_flag() {
+fn test_offline_recipient_custom_flag_without_daemon_no_prefix() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_team_with_offline_agents(&temp_dir, "test-team");
 
@@ -607,15 +604,14 @@ fn test_offline_recipient_custom_flag() {
     let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
 
     let text = messages[0]["text"].as_str().unwrap();
-    assert!(
-        text.starts_with("[DO THIS LATER]"),
-        "Expected custom action prefix, got: {text}"
+    assert_eq!(
+        text, "Review when ready",
+        "No daemon liveness means offline state is unknown; no prefix should be added"
     );
-    assert!(text.contains("Review when ready"));
 }
 
 #[test]
-fn test_offline_recipient_config_override() {
+fn test_offline_recipient_config_override_without_daemon_no_prefix() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_team_with_offline_agents(&temp_dir, "test-team");
 
@@ -645,9 +641,9 @@ fn test_offline_recipient_config_override() {
     let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
 
     let text = messages[0]["text"].as_str().unwrap();
-    assert!(
-        text.starts_with("[QUEUED]"),
-        "Expected config action prefix, got: {text}"
+    assert_eq!(
+        text, "Queued message",
+        "No daemon liveness means offline state is unknown; no prefix should be added"
     );
 }
 
@@ -709,7 +705,7 @@ fn test_online_recipient_no_tag() {
 }
 
 #[test]
-fn test_no_status_agent_treated_as_offline() {
+fn test_no_status_agent_not_treated_as_offline() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_team_with_offline_agents(&temp_dir, "test-team");
 

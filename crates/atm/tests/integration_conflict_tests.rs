@@ -19,6 +19,7 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
         .env_remove("ATM_CONFIG")
@@ -33,6 +34,7 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 
     fs::create_dir_all(&inboxes_dir).unwrap();
 
+    // isActive values in test fixtures are activity hints only; liveness is daemon-derived.
     let config = serde_json::json!({
         "name": team_name,
         "description": "Conflict test team",
@@ -818,7 +820,7 @@ fn test_inbox_command_with_no_messages_anywhere() {
 
 #[test]
 fn test_members_command_shows_correct_labels() {
-    // Verify the Online/Offline labels appear in members output
+    // Verify no-daemon context renders Unknown (liveness cannot be confirmed).
     let temp_dir = TempDir::new().unwrap();
     let team_dir = temp_dir.path().join(".claude/teams/test-team");
     let inboxes_dir = team_dir.join("inboxes");
@@ -870,13 +872,14 @@ fn test_members_command_shows_correct_labels() {
         .success();
 
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("Online"), "Should show Online label");
-    assert!(stdout.contains("Offline"), "Should show Offline label");
+    assert!(stdout.contains("Unknown"), "Should show Unknown label");
+    assert!(!stdout.contains("Online"), "Should not show Online label");
+    assert!(!stdout.contains("Offline"), "Should not show Offline label");
 }
 
 #[test]
 fn test_status_command_shows_correct_labels() {
-    // Verify the Online/Offline labels appear in status output
+    // Verify no-daemon context renders Unknown (liveness cannot be confirmed).
     let temp_dir = TempDir::new().unwrap();
     let team_dir = temp_dir.path().join(".claude/teams/test-team");
     let inboxes_dir = team_dir.join("inboxes");
@@ -928,6 +931,7 @@ fn test_status_command_shows_correct_labels() {
         .success();
 
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("Online"), "Should show Online label");
-    assert!(stdout.contains("Offline"), "Should show Offline label");
+    assert!(stdout.contains("Unknown"), "Should show Unknown label");
+    assert!(!stdout.contains("Online"), "Should not show Online label");
+    assert!(!stdout.contains("Offline"), "Should not show Offline label");
 }
