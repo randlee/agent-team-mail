@@ -1100,6 +1100,63 @@ mod tests {
     }
 
     #[test]
+    fn check_mailbox_integrity_keeps_dead_non_lead_as_critical_cleanup_finding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inboxes = tmp.path().join("inboxes");
+        fs::create_dir_all(&inboxes).unwrap();
+        fs::write(inboxes.join("arch-ctm.json"), "[]").unwrap();
+
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(true), 0), member("arch-ctm", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let dead_member_session = SessionQueryResult {
+            session_id: "member-session".to_string(),
+            process_id: 4243,
+            alive: false,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        };
+        let findings = check_mailbox_integrity_with_query(inboxes, "atm-dev", &cfg, |_, name| {
+            if name == "arch-ctm" {
+                Ok(Some(dead_member_session.clone()))
+            } else {
+                Ok(None)
+            }
+        });
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "TERMINAL_MEMBER_NOT_CLEANED" && f.severity == Severity::Critical),
+            "dead non-lead with mailbox must remain critical cleanup finding"
+        );
+    }
+
+    #[test]
+    fn build_recommendations_routes_non_lead_teardown_to_cleanup() {
+        let findings = vec![finding(
+            Severity::Critical,
+            "mailbox_teardown_integrity",
+            "TERMINAL_MEMBER_NOT_CLEANED",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(
+            recs.iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
+    }
+
+    #[test]
     fn check_config_runtime_drift_flags_env_mismatch() {
         let team = "atm-dev";
         let findings = check_config_runtime_drift(team, &Some(team.to_string()));
