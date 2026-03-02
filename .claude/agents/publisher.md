@@ -41,6 +41,9 @@ Own the permanent release-quality gate for every publish cycle.
 ## Pre-Publish Verification
 After `develop -> main` PR CI has started, and before final merge/tag/release publish,
 verify all of the following in parallel with CI:
+ - Run these checks through a dedicated background audit agent (not inline in
+   the publisher execution path) so publisher can continue coordination while
+   the audit runs.
 1. `release/release-inventory.json` exists and validates against `docs/release-inventory-schema.json`.
 2. Inventory includes all 5 crates:
    - `agent-team-mail-core`
