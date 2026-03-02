@@ -626,6 +626,172 @@ async fn test_config_watch_event_updates_and_removes_members() {
 
 #[tokio::test]
 #[serial]
+async fn test_config_watch_remove_then_readd_preserves_dead_session_record() {
+    let (ctx, temp_dir) = create_reconcile_test_context();
+    let status_writer = create_test_status_writer(&temp_dir);
+    let teams_root = temp_dir.path().join(".claude/teams");
+    let cwd = temp_dir.path().display().to_string();
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let team_name = format!("test-team-{uniq}");
+    let lead_agent_id = format!("team-lead@{team_name}");
+    let worker_name = format!("worker-a-{uniq}");
+    let worker_agent_id = format!("{worker_name}@{team_name}");
+
+    write_team_config(
+        &teams_root,
+        &team_name,
+        serde_json::json!([
+            {
+                "agentId": lead_agent_id,
+                "name": "team-lead",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": cwd.clone(),
+                "subscriptions": [],
+                "isActive": true
+            },
+            {
+                "agentId": worker_agent_id,
+                "name": worker_name,
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": cwd.clone(),
+                "subscriptions": [],
+                "isActive": true
+            }
+        ]),
+    );
+
+    let mut registry = PluginRegistry::new();
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
+    let state_store = new_state_store();
+    let state_store_probe = state_store.clone();
+    let session_registry = new_session_registry();
+    let session_registry_probe = session_registry.clone();
+
+    let daemon_task = tokio::spawn(async move {
+        daemon::run(
+            &mut registry,
+            &ctx,
+            daemon_lock,
+            cancel_clone,
+            status_writer,
+            state_store,
+            new_pubsub_store(),
+            new_launch_sender(),
+            session_registry,
+            dedup_store,
+            new_stream_state_store(),
+            new_stream_event_sender(),
+            new_log_event_queue(),
+        )
+        .await
+    });
+
+    let initial_seeded = wait_until(1500, || {
+        state_store_probe
+            .lock()
+            .unwrap()
+            .get_state(&worker_name)
+            .is_some()
+    })
+    .await;
+    assert!(
+        initial_seeded,
+        "worker should be tracked after daemon startup"
+    );
+
+    // Prepare a dead session record that can only be stale-pruned when absent
+    // for two full cycles.
+    {
+        let mut reg = session_registry_probe.lock().unwrap();
+        reg.upsert_for_team(&team_name, &worker_name, "sess-worker-a", i32::MAX as u32);
+        reg.mark_dead_for_team(&team_name, &worker_name);
+    }
+
+    // Remove member from config, then quickly re-add to simulate watcher race.
+    write_team_config(
+        &teams_root,
+        &team_name,
+        serde_json::json!([
+            {
+                "agentId": lead_agent_id,
+                "name": "team-lead",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": cwd.clone(),
+                "subscriptions": [],
+                "isActive": true
+            }
+        ]),
+    );
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    write_team_config(
+        &teams_root,
+        &team_name,
+        serde_json::json!([
+            {
+                "agentId": lead_agent_id,
+                "name": "team-lead",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": cwd.clone(),
+                "subscriptions": [],
+                "isActive": true
+            },
+            {
+                "agentId": worker_agent_id,
+                "name": worker_name,
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1,
+                "cwd": cwd,
+                "subscriptions": [],
+                "isActive": true
+            }
+        ]),
+    );
+
+    let readded = wait_until(6000, || {
+        state_store_probe
+            .lock()
+            .unwrap()
+            .get_state(&worker_name)
+            .is_some()
+    })
+    .await;
+    assert!(
+        readded,
+        "worker should be present after remove+re-add watcher update"
+    );
+
+    assert!(
+        session_registry_probe
+            .lock()
+            .unwrap()
+            .query_for_team(&team_name, &worker_name)
+            .is_some(),
+        "dead session record must not be pruned when member is re-added within the guard window"
+    );
+
+    cancel.cancel();
+    daemon_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+#[serial]
 async fn test_graceful_shutdown_with_timeout() {
     let (ctx, temp_dir) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);

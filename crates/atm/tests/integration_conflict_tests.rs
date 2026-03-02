@@ -19,6 +19,8 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
+        // Prevent opportunistic daemon autostart from changing expected
+        // offline/online label behavior in deterministic integration tests.
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
@@ -34,6 +36,7 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 
     fs::create_dir_all(&inboxes_dir).unwrap();
 
+    // isActive values in test fixtures are activity hints only; liveness is daemon-derived.
     let config = serde_json::json!({
         "name": team_name,
         "description": "Conflict test team",

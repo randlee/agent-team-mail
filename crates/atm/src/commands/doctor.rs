@@ -813,7 +813,8 @@ fn build_recommendations(
     if has("ORPHAN_MAILBOX") || has("TERMINAL_MEMBER_NOT_CLEANED") || has("PARTIAL_TEARDOWN") {
         recs.push(Recommendation {
             command: format!("atm teams cleanup {team}"),
-            reason: "Reconcile stale roster/mailbox teardown drift".to_string(),
+            reason:
+                "Reconcile stale roster/mailbox teardown drift (dead terminal members are cleanup-eligible; active sessions are preserved)".to_string(),
         });
     }
 

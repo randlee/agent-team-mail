@@ -214,7 +214,9 @@ jobs:
           fi
 
   test:
-    needs: [clippy, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke, cli-publishability]
+    # `cli-publishability` is intentionally skipped in regular PR/push CI; keep
+    # test matrix independent so integration tests still run on every PR.
+    needs: [clippy, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke]
     strategy:
       fail-fast: false
       matrix:
