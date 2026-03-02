@@ -1171,17 +1171,20 @@ Completed in planning worktree:
 | V.6 | Test migration for state-model separation | V.2,V.3,V.4,V.5 | L | PLANNED | rewrite tests that currently equate `isActive` with online/offline |
 | V.7 | Integration hardening + release/QA handoff | V.6 | S | PLANNED | commit/push, QA pass, and closeout for merged semantics |
 
-### Existing Phase V Release/Publisher Tracks
+## 17.9 Phase W: Release Automation Track
 
-| Sprint | Description | Issues | Type | Depends On |
-|--------|-------------|--------|------|------------|
-| V.1a | ATM send offline action + skill doc fix | #328, #329 | Fix | — |
-| V.2a | Publisher agent rewrite (no sub-agents) | #327 | Fix/Docs | — |
-| V.3a | Release workflow: crates.io retry + Homebrew automation | #323, #324 | CI/CD | — |
-| V.4a | Release workflow: pre-publish audit + completion report | #325, #326 | CI/CD | V.3a |
+**Goal**: harden release/publish workflow execution with deterministic inventory,
+publisher process guarantees, retries, and post-publish verification.
 
-**Note**: V.1–V.7 (state-model track) and V.1a–V.4a (release automation track)
-can run in parallel where dependencies do not overlap.
+| Sprint | Description | Depends On | Status | Issue(s) | PR |
+|--------|-------------|------------|--------|----------|----|
+| W.1 | ATM send offline action + skill doc fix | — | COMPLETE | [#328](https://github.com/randlee/agent-team-mail/issues/328), [#329](https://github.com/randlee/agent-team-mail/issues/329) | [#343](https://github.com/randlee/agent-team-mail/pull/343) |
+| W.2 | Publisher agent rewrite (no sub-agents) | — | COMPLETE | [#327](https://github.com/randlee/agent-team-mail/issues/327) | [#341](https://github.com/randlee/agent-team-mail/pull/341) |
+| W.3 | Release workflow: crates.io retry + Homebrew automation | W.2 | COMPLETE | [#323](https://github.com/randlee/agent-team-mail/issues/323), [#324](https://github.com/randlee/agent-team-mail/issues/324) | [#344](https://github.com/randlee/agent-team-mail/pull/344), [#343](https://github.com/randlee/agent-team-mail/pull/343), [#341](https://github.com/randlee/agent-team-mail/pull/341) |
+| W.4 | Release workflow: pre-publish audit + completion report | W.3 | IN PROGRESS | [#325](https://github.com/randlee/agent-team-mail/issues/325), [#326](https://github.com/randlee/agent-team-mail/issues/326) | [#349](https://github.com/randlee/agent-team-mail/pull/349) |
+
+**Coordination note**: V.1–V.7 (state-model track) and W.1–W.4 (release automation track)
+run in parallel where dependencies do not overlap.
 
 ---
 ## 18. Future Plugins

@@ -173,6 +173,9 @@ jobs:
         with:
           ref: ${{ needs.gate-and-tag.outputs.release_tag }}
 
+      # NOTE: `release/release-inventory.json` is a CI-generated runtime artifact
+      # produced by this job and uploaded for downstream jobs. It is intentionally
+      # not a committed repository file.
       - name: Generate release inventory artifact
         shell: bash
         run: |
