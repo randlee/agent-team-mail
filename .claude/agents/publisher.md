@@ -38,6 +38,28 @@ Own the permanent release-quality gate for every publish cycle.
   - release workflow fail-closed behavior
 - Any audit mismatch is a release blocker until acknowledged and mitigated by `team-lead`.
 
+## Pre-Publish Verification
+Before triggering CI/release publish steps, verify all of the following:
+1. `release/release-inventory.json` exists and validates against `docs/release-inventory-schema.json`.
+2. Inventory includes all 5 crates:
+   - `agent-team-mail-core`
+   - `agent-team-mail`
+   - `agent-team-mail-daemon`
+   - `agent-team-mail-tui`
+   - `agent-team-mail-mcp`
+3. Workspace version in `Cargo.toml` matches the inventory release version.
+4. Any waiver records include all required fields:
+   - `waiver.approver`
+   - `waiver.reason`
+   - `waiver.gateCheck`
+5. Confirm all crates are registered on crates.io before attempting publish run.
+6. Run local packageability checks for each crate before CI:
+   - `cargo package -p agent-team-mail-core --dry-run`
+   - `cargo package -p agent-team-mail --dry-run`
+   - `cargo package -p agent-team-mail-daemon --dry-run`
+   - `cargo package -p agent-team-mail-tui --dry-run`
+   - `cargo package -p agent-team-mail-mcp --dry-run`
+
 ## Pre-Release Gate (automated)
 The workflow runs:
 - `scripts/release_gate.sh` (ensures `origin/main..origin/develop` is empty and ancestry is correct)
