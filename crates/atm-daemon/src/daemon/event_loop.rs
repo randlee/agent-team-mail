@@ -21,6 +21,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+static ABSENT_REGISTRY_CYCLES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, u8>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Run the main daemon event loop.
 ///
 /// This function:
@@ -629,6 +633,43 @@ fn reconcile_team_member_activity(
                 .members
                 .retain(|m| !terminal_non_lead_members.contains(&m.name));
             changed = true;
+        }
+
+        // Prune stale daemon session records for members no longer in this
+        // team's config, but only after they remain absent for a full
+        // additional reconcile cycle. This prevents deleting members that are
+        // mid-add during config-watcher updates.
+        {
+            let live_member_names: std::collections::HashSet<String> =
+                config.members.iter().map(|m| m.name.clone()).collect();
+            let mut reg = session_registry.lock().unwrap();
+            let tracked_for_team = reg.sessions_for_team(&team_name);
+            let mut absent_cycles = ABSENT_REGISTRY_CYCLES.lock().unwrap();
+
+            for tracked in tracked_for_team {
+                let key = format!("{team_name}:{}", tracked.agent_name);
+                if live_member_names.contains(&tracked.agent_name) {
+                    absent_cycles.remove(&key);
+                    continue;
+                }
+
+                // Only dead sessions are eligible for stale-prune. Active
+                // sessions absent from config are left for later lifecycle
+                // convergence to avoid racing legitimate add/update flows.
+                if tracked.state != crate::daemon::session_registry::SessionState::Dead {
+                    absent_cycles.remove(&key);
+                    continue;
+                }
+
+                let cycles = absent_cycles
+                    .entry(key.clone())
+                    .and_modify(|c| *c = c.saturating_add(1))
+                    .or_insert(1);
+                if *cycles >= 2 {
+                    reg.remove_for_team(&team_name, &tracked.agent_name);
+                    absent_cycles.remove(&key);
+                }
+            }
         }
 
         if changed {
@@ -1540,6 +1581,58 @@ mod tests {
                 .query_for_team("atm-dev", "arch-ctm")
                 .is_none(),
             "terminal non-lead session record should be removed"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_prunes_stale_absent_dead_members_only_after_full_extra_cycle() {
+        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
+
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let cwd = home.display().to_string();
+        stdfs::create_dir_all(home.join(".claude/teams/atm-dev/inboxes")).unwrap();
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd,
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "stale-sess", i32::MAX as u32);
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_some(),
+            "first absent cycle should not prune dead member yet"
+        );
+
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "second absent cycle should prune stale dead member"
         );
     }
 }
