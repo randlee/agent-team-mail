@@ -213,6 +213,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     // Dry run output
     if args.dry_run {
+        let destination = destination_target(&agent_name, &team_name);
         emit_event_best_effort(EventFields {
             level: "info",
             source: "atm",
@@ -221,7 +222,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
             session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
             agent_id: Some(config.core.identity.clone()),
             agent_name: Some(config.core.identity.clone()),
-            target: Some(agent_name.clone()),
+            target: Some(destination),
             result: Some("ok".to_string()),
             message_text: Some(final_message_text.clone()),
             ..Default::default()
@@ -262,6 +263,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
         }
         WriteOutcome::Queued { .. } => ("queued", None),
     };
+    let destination = destination_target(&agent_name, &team_name);
     emit_event_best_effort(EventFields {
         level: "info",
         source: "atm",
@@ -270,7 +272,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
         session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
         agent_id: Some(config.core.identity.clone()),
         agent_name: Some(config.core.identity.clone()),
-        target: Some(agent_name.clone()),
+        target: Some(destination),
         result: Some(result_text.to_string()),
         message_id: inbox_message.message_id.clone(),
         count: conflict_count,
@@ -412,6 +414,10 @@ fn resolve_offline_action(args: &SendArgs, config: &Config) -> String {
     }
 
     "PENDING ACTION - execute when online".to_string()
+}
+
+fn destination_target(agent_name: &str, team_name: &str) -> String {
+    format!("{agent_name}@{team_name}")
 }
 
 fn recipient_has_dead_session(team: &str, agent_name: &str) -> bool {
@@ -665,5 +671,13 @@ mod tests {
             Err(anyhow!("daemon unavailable"))
         });
         assert!(!is_offline);
+    }
+
+    #[test]
+    fn test_destination_target_formats_agent_at_team() {
+        assert_eq!(
+            destination_target("team-lead", "atm-dev"),
+            "team-lead@atm-dev"
+        );
     }
 }
