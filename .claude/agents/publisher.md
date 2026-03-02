@@ -30,7 +30,7 @@ Own the permanent release-quality gate for every publish cycle.
 7. Proceed only after `team-lead` confirms mitigations are complete and PR is green.
 8. Merge `develop` -> `main`.
 9. Run **Release** workflow via `workflow_dispatch` with version input (`X.Y.Z` or `vX.Y.Z`).
-10. Workflow runs gate, creates tag from `origin/main`, builds assets, publishes crates.
+10. Workflow runs gate, creates tag from `origin/main`, builds assets, publishes crates (idempotent publish steps skip already-published crate versions), then runs post-publish verification.
 11. Update Homebrew formulas with matching version + SHA256.
 12. Verify all channels, then report to `team-lead`.
 
@@ -101,6 +101,7 @@ If the gate fails: stop and report; do not workaround.
 - Homebrew formulas (`agent-team-mail.rb` and `atm.rb`) both match the released version and checksums.
 - Post-publish verification executed for every required inventory item, with
   pass/fail evidence and remediation notes for failures.
+- GitHub Release creation is gated on post-publish verification success.
 - Waivers are allowed only when verification cannot pass for a required item;
   each waiver must include approver, reason, and gate-check reference.
 

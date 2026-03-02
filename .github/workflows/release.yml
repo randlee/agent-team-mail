@@ -133,7 +133,7 @@ jobs:
           path: ${{ env.ARCHIVE }}
 
   release:
-    needs: [gate-and-tag, build, publish-crates]
+    needs: [gate-and-tag, build, post-publish-verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -163,17 +163,13 @@ jobs:
           files: |
             release/*
 
-  publish-crates:
-    needs: [gate-and-tag, build]
+  prepare-release-inventory:
+    needs: gate-and-tag
     runs-on: ubuntu-latest
-    environment: crates-io
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.gate-and-tag.outputs.release_tag }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Generate release inventory artifact
         shell: bash
@@ -307,10 +303,7 @@ jobs:
           if artifacts != sorted(artifacts):
               raise SystemExit("inventory items must be sorted by artifact for deterministic ordering")
 
-          # Ensure schema file itself exposes required item fields.
-          item_required = set(
-              schema["$defs"]["item"]["required"]
-          )
+          item_required = set(schema["$defs"]["item"]["required"])
           missing = set(required_item) - item_required
           if missing:
               raise SystemExit(
@@ -320,50 +313,79 @@ jobs:
           print("release inventory validation passed")
           PY
 
-      - name: Validate CLI crate packageability
-        run: cargo package -p agent-team-mail --locked --no-verify
+      - name: Upload release inventory artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-inventory
+          path: release/release-inventory.json
 
-      - name: Validate CLI crate publish dry-run
+  publish-crates:
+    needs: [gate-and-tag, prepare-release-inventory]
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate-and-tag.outputs.release_tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish crates in dependency order (idempotent)
+        shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail --dry-run --locked --no-verify
+        run: |
+          set -euo pipefail
+          version='${{ needs.gate-and-tag.outputs.release_version }}'
 
-      - name: Publish agent-team-mail-core
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail-core --locked
+          crate_exists() {
+            local crate="$1"
+            local version="$2"
+            local status
+            status="$(curl -s -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/${crate}/${version}")"
+            [[ "$status" == "200" ]]
+          }
 
-      - name: Wait for crates.io indexing
-        run: sleep 60
+          publish_if_missing() {
+            local crate="$1"
+            local wait_after="${2:-no}"
+            if crate_exists "$crate" "$version"; then
+              echo "${crate} ${version} already published; skipping"
+              return 0
+            fi
 
-      - name: Publish agent-team-mail
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail --locked
+            echo "Publishing ${crate} ${version}"
+            cargo publish -p "$crate" --locked
 
-      - name: Wait for crates.io indexing
-        run: sleep 60
+            if [[ "$wait_after" == "yes" ]]; then
+              echo "Waiting for crates.io index propagation after ${crate}"
+              sleep 60
+            fi
+          }
 
-      - name: Publish agent-team-mail-daemon
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail-daemon --locked
+          publish_if_missing agent-team-mail-core yes
+          publish_if_missing agent-team-mail yes
+          publish_if_missing agent-team-mail-daemon yes
+          publish_if_missing agent-team-mail-mcp yes
+          publish_if_missing agent-team-mail-tui no
 
-      - name: Wait for crates.io indexing
-        run: sleep 60
+  post-publish-verify:
+    needs: [gate-and-tag, publish-crates, prepare-release-inventory]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate-and-tag.outputs.release_tag }}
 
-      - name: Publish atm-agent-mcp
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail-mcp --locked
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Wait for crates.io indexing
-        run: sleep 60
-
-      - name: Publish atm-tui
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p agent-team-mail-tui --locked
+      - name: Download release inventory artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-inventory
+          path: release
 
       - name: Verify published crates from generated inventory
         shell: bash
@@ -521,10 +543,10 @@ jobs:
               raise SystemExit("post-publish verification failed for one or more required inventory items")
           PY
 
-      - name: Upload release inventory artifacts
+      - name: Upload release verification artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-inventory
+          name: release-verification
           path: |
             release/release-inventory.json
             release/release-verification.json
