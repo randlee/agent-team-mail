@@ -249,8 +249,14 @@ pub async fn run(
                         let session_registry = dispatch_reconcile_registry.clone();
                         let state_store = dispatch_reconcile_state_store.clone();
                         let result = tokio::task::spawn_blocking(move || {
-                            reconcile_team_member_activity(&claude_root, &session_registry, &state_store)
-                        }).await;
+                            reconcile_team_member_activity_with_mode(
+                                &claude_root,
+                                &session_registry,
+                                &state_store,
+                                false,
+                            )
+                        })
+                        .await;
                         match result {
                             Ok(Ok(())) => debug!("config.json reconcile pass completed"),
                             Ok(Err(e)) => warn!("config.json reconcile pass failed: {e}"),
@@ -494,6 +500,15 @@ fn reconcile_team_member_activity(
     session_registry: &SharedSessionRegistry,
     state_store: &SharedStateStore,
 ) -> Result<()> {
+    reconcile_team_member_activity_with_mode(claude_root, session_registry, state_store, true)
+}
+
+fn reconcile_team_member_activity_with_mode(
+    claude_root: &std::path::Path,
+    session_registry: &SharedSessionRegistry,
+    state_store: &SharedStateStore,
+    advance_absent_prune_cycles: bool,
+) -> Result<()> {
     let teams_root = claude_root.join("teams");
     if !teams_root.exists() {
         return Ok(());
@@ -694,6 +709,10 @@ fn reconcile_team_member_activity(
                 // convergence to avoid racing legitimate add/update flows.
                 if tracked.state != crate::daemon::session_registry::SessionState::Dead {
                     absent_cycles.remove(&key);
+                    continue;
+                }
+
+                if !advance_absent_prune_cycles {
                     continue;
                 }
 
@@ -1844,6 +1863,60 @@ mod tests {
                 .query_for_team("atm-dev", "arch-ctm")
                 .is_some(),
             "dead session record must not be stale-pruned after member is re-added"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_reconcile_config_dispatch_mode_does_not_advance_absent_prune_cycles() {
+        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
+        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
+
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let cwd = home.display().to_string();
+        stdfs::create_dir_all(home.join(".claude/teams/atm-dev/inboxes")).unwrap();
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd,
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "dead-sess", i32::MAX as u32);
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+
+        for _ in 0..5 {
+            super::reconcile_team_member_activity_with_mode(
+                &home.join(".claude"),
+                &sr,
+                &state_store,
+                false,
+            )
+            .unwrap();
+        }
+
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_some(),
+            "dispatch-mode reconcile must not advance stale-prune absent cycles"
         );
     }
 }
