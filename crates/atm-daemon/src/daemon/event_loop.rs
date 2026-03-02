@@ -672,9 +672,9 @@ fn reconcile_team_member_activity(
         }
 
         // Prune stale daemon session records for members no longer in this
-        // team's config, but only after they remain absent for a full
-        // additional reconcile cycle. This prevents deleting members that are
-        // mid-add during config-watcher updates.
+        // team's config, but only after they remain absent for two full extra
+        // reconcile cycles. This prevents deleting members that are mid-add
+        // during config-watcher updates.
         {
             let live_member_names: std::collections::HashSet<String> =
                 config.members.iter().map(|m| m.name.clone()).collect();
@@ -701,7 +701,7 @@ fn reconcile_team_member_activity(
                     .entry(key.clone())
                     .and_modify(|c| *c = c.saturating_add(1))
                     .or_insert(1);
-                if *cycles >= 2 {
+                if *cycles >= 3 {
                     // Re-check the current on-disk team config before pruning.
                     // Config watcher updates can race with reconcile snapshots; if
                     // the member has been re-added, skip prune and reset cycle count.
@@ -1663,7 +1663,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_reconcile_prunes_stale_absent_dead_members_only_after_full_extra_cycle() {
+    fn test_reconcile_prunes_stale_absent_dead_members_only_after_two_full_extra_cycles() {
         super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
         super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
 
@@ -1710,8 +1710,17 @@ mod tests {
             sr.lock()
                 .unwrap()
                 .query_for_team("atm-dev", "arch-ctm")
+                .is_some(),
+            "second absent cycle should still not prune dead member"
+        );
+
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
                 .is_none(),
-            "second absent cycle should prune stale dead member"
+            "third absent cycle should prune stale dead member"
         );
     }
 
