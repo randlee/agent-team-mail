@@ -452,15 +452,23 @@ jobs:
                               print(f"{artifact}: install attempt {attempt}/{attempts} failed; retrying in 30s")
                               time.sleep(30)
                   else:
-                      proc = subprocess.run(
-                          cmd,
-                          shell=True,
-                          stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT,
-                          text=True,
-                      )
-                      if proc.returncode != 0:
-                          artifact_failures.append((cmd, proc.stdout))
+                      # Retry curl and other verification commands up to 5 times
+                      attempts = 5
+                      for attempt in range(1, attempts + 1):
+                          proc = subprocess.run(
+                              cmd,
+                              shell=True,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT,
+                              text=True,
+                          )
+                          if proc.returncode == 0:
+                              break
+                          if attempt == attempts:
+                              artifact_failures.append((cmd, proc.stdout))
+                          else:
+                              print(f"{artifact}: verify attempt {attempt}/{attempts} failed; retrying in 30s")
+                              time.sleep(30)
 
               if artifact_failures:
                   verification.append(
@@ -551,3 +559,63 @@ jobs:
             release/release-inventory.json
             release/release-verification.json
             release/publisher-report.json
+
+  update-homebrew:
+    needs: [gate-and-tag, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: randlee/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Compute release tarball SHA256
+        id: sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='${{ needs.gate-and-tag.outputs.release_tag }}'
+          version='${{ needs.gate-and-tag.outputs.release_version }}'
+          # Use the macOS arm64 tarball as the canonical release artifact
+          tarball_url="https://github.com/randlee/agent-team-mail/releases/download/${tag}/atm_${version}_aarch64-apple-darwin.tar.gz"
+          echo "tarball_url=${tarball_url}" >> "$GITHUB_OUTPUT"
+          # Download and compute SHA256
+          curl -fsSL --retry 5 --retry-delay 30 --retry-all-errors -o /tmp/release.tar.gz "${tarball_url}"
+          sha256=$(sha256sum /tmp/release.tar.gz | awk '{print $1}')
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+          echo "Tarball SHA256: ${sha256}"
+
+      - name: Update Homebrew formulas
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.gate-and-tag.outputs.release_version }}'
+          sha256='${{ steps.sha.outputs.sha256 }}'
+          tarball_url='${{ steps.sha.outputs.tarball_url }}'
+
+          for formula in homebrew-tap/Formula/agent-team-mail.rb homebrew-tap/Formula/atm.rb; do
+            if [[ ! -f "$formula" ]]; then
+              echo "Formula not found: $formula" >&2
+              exit 1
+            fi
+            # Update version and url lines using sed
+            sed -i "s|version \"[^\"]*\"|version \"${version}\"|g" "$formula"
+            sed -i "s|url \"[^\"]*\"|url \"${tarball_url}\"|g" "$formula"
+            sed -i "s|sha256 \"[^\"]*\"|sha256 \"${sha256}\"|g" "$formula"
+            echo "Updated $formula"
+          done
+
+      - name: Commit and push to homebrew-tap
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.gate-and-tag.outputs.release_version }}'
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/agent-team-mail.rb Formula/atm.rb
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "chore: bump agent-team-mail to v${version}"
+          git push
