@@ -1196,6 +1196,7 @@ mod tests {
     use crate::daemon::socket::new_state_store;
     use crate::plugins::worker_adapter::AgentState;
     use agent_team_mail_core::schema::InboxMessage;
+    use serial_test::serial;
     use std::collections::HashMap;
     use std::fs as stdfs;
     use tempfile::TempDir;
@@ -1525,6 +1526,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_session_end_converges_to_remove_dead_member_from_roster_and_mailbox() {
         let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
@@ -1546,6 +1548,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_sigterm_escalation_converges_to_remove_dead_member_from_roster_and_mailbox() {
         let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
@@ -1567,6 +1570,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_kill_timeout_fallback_converges_to_remove_dead_member_from_roster_and_mailbox() {
         let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
@@ -1588,6 +1592,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_reconcile_prunes_stale_absent_dead_members_only_after_full_extra_cycle() {
         super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
 
@@ -1640,6 +1645,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_reconcile_does_not_prune_absent_active_sessions() {
         super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
 
