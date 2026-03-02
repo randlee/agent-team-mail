@@ -138,16 +138,16 @@ fn wait_for_daemon_socket(home: &Path) {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    panic!("fake daemon socket was not created in time: {}", socket.display());
+    panic!(
+        "fake daemon socket was not created in time: {}",
+        socket.display()
+    );
 }
 
 #[cfg(unix)]
 fn start_fake_dead_session_daemon(home: &Path) -> Child {
     let script = write_fake_daemon_script(home);
-    let child = Command::new(&script)
-        .env("ATM_HOME", home)
-        .spawn()
-        .unwrap();
+    let child = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
     wait_for_daemon_socket(home);
     child
 }
@@ -835,16 +835,19 @@ fn test_online_recipient_no_tag() {
 }
 
 #[test]
-fn test_no_status_agent_treated_as_offline() {
+fn test_unknown_session_state_never_prefixes_even_with_offline_action_override() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_team_with_offline_agents(&temp_dir, "test-team");
 
-    // Send to no-status-agent (no isActive field)
+    // Daemon absent => session state is unknown (Ok(None)); no prefix should be added
+    // even when caller provides an explicit offline-action override.
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("send")
         .arg("no-status-agent")
+        .arg("--offline-action")
+        .arg("DO THIS LATER")
         .arg("Check status")
         .assert()
         .success();
@@ -857,8 +860,8 @@ fn test_no_status_agent_treated_as_offline() {
 
     let text = messages[0]["text"].as_str().unwrap();
     assert!(
-        !text.starts_with("[PENDING ACTION - execute when online]"),
-        "Agent with no isActive should NOT be treated as offline (new behavior), got: {text}"
+        !text.starts_with("[DO THIS LATER]"),
+        "Unknown daemon session state must not trigger offline prefix, got: {text}"
     );
     assert_eq!(text, "Check status");
 }
