@@ -973,7 +973,7 @@ Approve or reject agent's implementation plan.
 - **Team Lead Member**: First member has empty/null `prompt`, `color`, `tmuxPaneId`, and no `backendType`
 - **Spawned Agents**: Have `prompt`, `color`, `tmuxPaneId`, and `backendType` populated
 - **`model`**: Different agents can use different models (e.g., team-lead uses haiku, agents use opus)
-- **`isActive`**: true if agent is currently running; false if idle/disconnected
+- **`isActive`**: activity signal only (true=busy/sending, false=idle); NOT a liveness indicator — use daemon session state for liveness
 - **`prompt`**: Where specialized instructions are stored (can be long multi-line text)
 - **`color`**: UI color for team dashboard (optional but recommended)
 
