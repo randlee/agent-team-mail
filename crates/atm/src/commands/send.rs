@@ -416,7 +416,7 @@ fn resolve_offline_action(args: &SendArgs, config: &Config) -> String {
         return action.clone();
     }
 
-    "PENDING ACTION - execute when online".to_string()
+    String::new()
 }
 
 /// Generate summary from message text (first ~100 chars)
@@ -528,10 +528,7 @@ mod tests {
     fn test_resolve_offline_action_default() {
         let args = make_send_args(None);
         let config = Config::default();
-        assert_eq!(
-            resolve_offline_action(&args, &config),
-            "PENDING ACTION - execute when online"
-        );
+        assert_eq!(resolve_offline_action(&args, &config), "");
     }
 
     #[test]
