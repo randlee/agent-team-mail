@@ -175,8 +175,8 @@ Each sprint verifies Phase T deliverables against v0.27.0 on `develop`. Verifica
 |------|--------|----------|-------|
 | Tmux sentinel injection (#45) | T.11 (never started) | Medium | Runtime signaling improvement — schedule if capacity allows |
 | S.2a/S.1 plan accuracy (#283) | T.16 (never started) | Medium | Doc-only — can be done outside sprint structure |
-| Env-var `#[serial]` violations in daemon integration tests | Tech debt | Medium | 27 tests across 3 files; flakiness risk on parallel CI |
-| `atm teams add-member` does not create inbox file | New bug (observed) | High | Blocks reliable team member onboarding |
+| Env-var `#[serial]` violations in daemon integration tests | Tech debt | Medium | Moved to Phase X (`X.2`, issue #337) |
+| `atm teams add-member` does not create inbox file | New bug (observed) | High | Moved to Phase X (`X.1`, issue #338) |
 | Version bump cherry-pick (v0.27.0 → develop) | Release hygiene | High | `release/v0.27.0` has version bump not yet on develop |
 
 ---
@@ -197,4 +197,3 @@ Each sprint verifies Phase T deliverables against v0.27.0 on `develop`. Verifica
 **Sequencing constraint**: U.1/U.2/U.3 (doctor hardening) MUST complete and merge before U.4–U.8 begin. Doctor is used as a verification tool in the Phase T verification sprints — it must be reliable first.
 
 **Parallel tracks within each wave**: U.1/U.2/U.3 can run in parallel with each other. U.4–U.8 can run in parallel with each other once the doctor wave is complete.
-
