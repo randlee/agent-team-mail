@@ -36,6 +36,7 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 
     fs::create_dir_all(&inboxes_dir).unwrap();
 
+    // isActive values in test fixtures are activity hints only; liveness is daemon-derived.
     let config = serde_json::json!({
         "name": team_name,
         "description": "Conflict test team",

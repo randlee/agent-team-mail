@@ -697,7 +697,7 @@ fn test_offline_recipient_detection_auto_tag() {
         .assert()
         .success();
 
-    // Without daemon-confirmed dead session, send should not prepend offline action text.
+    // Without explicit action text, default behavior is no prepend.
     let inbox_path = temp_dir
         .path()
         .join(".claude/teams/test-team/inboxes/offline-agent.json");
