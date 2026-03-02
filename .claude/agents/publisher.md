@@ -67,7 +67,10 @@ verify all of the following in parallel with CI:
 6. Execute `Release Preflight` workflow and collect artifacts:
    - `release/release-inventory.json`
    - `release/publisher-preflight-report.json`
-7. Ensure preflight includes package + publish dry-run for all required crates.
+7. Ensure preflight includes:
+   - full package + publish dry-run for `agent-team-mail-core`
+   - locked compile checks for non-core crates (`agent-team-mail`, `agent-team-mail-daemon`, `agent-team-mail-tui`, `agent-team-mail-mcp`)
+   - note that non-core publish dry-run is deferred to release workflow after core publish.
 
 ## Pre-Release Gate (automated)
 The workflow runs:

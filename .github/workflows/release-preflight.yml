@@ -77,7 +77,7 @@ jobs:
                   {
                       "artifact": "agent-team-mail",
                       "version": version,
-                      "sourceRef": "refs/heads/develop",
+                      "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
                       "required": True,
                       "verifyCommands": [
@@ -88,7 +88,7 @@ jobs:
                   {
                       "artifact": "agent-team-mail-core",
                       "version": version,
-                      "sourceRef": "refs/heads/develop",
+                      "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
                       "required": True,
                       "verifyCommands": [
@@ -98,7 +98,7 @@ jobs:
                   {
                       "artifact": "agent-team-mail-daemon",
                       "version": version,
-                      "sourceRef": "refs/heads/develop",
+                      "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
                       "required": True,
                       "verifyCommands": [
@@ -108,7 +108,7 @@ jobs:
                   {
                       "artifact": "agent-team-mail-mcp",
                       "version": version,
-                      "sourceRef": "refs/heads/develop",
+                      "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
                       "required": True,
                       "verifyCommands": [
@@ -118,7 +118,7 @@ jobs:
                   {
                       "artifact": "agent-team-mail-tui",
                       "version": version,
-                      "sourceRef": "refs/heads/develop",
+                      "sourceRef": f"refs/tags/{tag}",
                       "publishTarget": "crates.io",
                       "required": True,
                       "verifyCommands": [
@@ -223,23 +223,30 @@ jobs:
           print("workspace + crate versions validated")
           PY
 
-      - name: Run package + publish dry-run for all required crates
+      - name: Run dependency-aware preflight crate checks
         shell: bash
         run: |
           set -euo pipefail
-          crates=(
-            agent-team-mail-core
+          # Pre-merge constraint: crates with exact "=X.Y.Z" dependency on
+          # agent-team-mail-core cannot complete publish --dry-run until core is
+          # available in crates.io index. Run full dry-run for core now, and run
+          # locked compile checks for dependents.
+          echo "::group::agent-team-mail-core package"
+          cargo package -p agent-team-mail-core --locked --no-verify
+          echo "::endgroup::"
+          echo "::group::agent-team-mail-core publish-dry-run"
+          cargo publish -p agent-team-mail-core --dry-run --locked --no-verify
+          echo "::endgroup::"
+
+          dependents=(
             agent-team-mail
             agent-team-mail-daemon
             agent-team-mail-mcp
             agent-team-mail-tui
           )
-          for crate in "${crates[@]}"; do
-            echo "::group::${crate} package"
-            cargo package -p "$crate" --locked --no-verify
-            echo "::endgroup::"
-            echo "::group::${crate} publish-dry-run"
-            cargo publish -p "$crate" --dry-run --locked --no-verify
+          for crate in "${dependents[@]}"; do
+            echo "::group::${crate} locked-check"
+            cargo check -p "$crate" --locked
             echo "::endgroup::"
           done
 
@@ -263,12 +270,14 @@ jobs:
               "inventory-generation",
               "inventory-schema-validation",
               "workspace-version-alignment",
-              "all-required-crates-package",
-              "all-required-crates-publish-dry-run",
+              "core-crate-package",
+              "core-crate-publish-dry-run",
+              "non-core-crates-locked-check",
             ],
             "notes": [
               "preflight validates readiness from develop prior to develop->main merge",
               "preflight does not publish crates or create tags/releases",
+              "non-core publish --dry-run is deferred to release workflow after core publish",
             ],
           }
           Path("release/publisher-preflight-report.json").write_text(
