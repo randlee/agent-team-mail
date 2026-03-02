@@ -33,7 +33,7 @@ pub const COLUMN_MAP: &[(&str, &str)] = &[
 /// # Examples
 ///
 /// ```
-/// use atm_tui::agent_terminal::expand_keys;
+/// use agent_team_mail_tui::agent_terminal::expand_keys;
 ///
 /// let line = r#"{"ts":"2026-01-01","lv":"info","act":"send"}"#;
 /// let expanded = expand_keys(line);

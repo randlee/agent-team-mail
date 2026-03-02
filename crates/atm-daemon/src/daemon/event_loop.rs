@@ -263,38 +263,6 @@ pub async fn run(
                             Err(e) => warn!("config.json reconcile task panicked: {e}"),
                         }
 
-                        // Run a short delayed follow-up pass to absorb watcher timing
-                        // races where a remove event is observed just before a re-add.
-                        // This pass intentionally does not advance absent-prune cycles.
-                        //
-                        // Important: schedule this as an async background task instead
-                        // of sleeping inline. Blocking the dispatch loop here can delay
-                        // processing of subsequent config events and cause racey
-                        // remove+re-add behavior under CI load.
-                        let delayed_claude_root = dispatch_reconcile_ctx.system.claude_root.clone();
-                        let delayed_session_registry = dispatch_reconcile_registry.clone();
-                        let delayed_state_store = dispatch_reconcile_state_store.clone();
-                        drop(tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                            let delayed_result = tokio::task::spawn_blocking(move || {
-                                reconcile_team_member_activity_with_mode(
-                                    &delayed_claude_root,
-                                    &delayed_session_registry,
-                                    &delayed_state_store,
-                                    false,
-                                )
-                            })
-                            .await;
-                            match delayed_result {
-                                Ok(Ok(())) => {
-                                    debug!("config.json delayed reconcile pass completed")
-                                }
-                                Ok(Err(e)) => {
-                                    warn!("config.json delayed reconcile pass failed: {e}")
-                                }
-                                Err(e) => warn!("config.json delayed reconcile task panicked: {e}"),
-                            }
-                        }));
                         continue;
                     }
 
@@ -1867,7 +1835,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_reconcile_skips_stale_prune_when_member_readded_before_guard_prune() {
+    fn test_reconcile_dispatch_mode_remove_then_readd_preserves_dead_session_record() {
         super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
         super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
 
@@ -1900,10 +1868,97 @@ mod tests {
             reg.mark_dead_for_team("atm-dev", "arch-ctm");
         }
 
-        // First cycle sees arch-ctm absent and records stale-prune cycle 1.
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        // Step 1: member present in config -> reconcile seeds state store and
+        // must clear any prior absence tracking.
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": home.display().to_string(),
+                    "subscriptions": [],
+                    "isActive": true
+                },
+                {
+                    "agentId": "arch-ctm@atm-dev",
+                    "name": "arch-ctm",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": home.display().to_string(),
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+        super::reconcile_team_member_activity_with_mode(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            true,
+        )
+        .unwrap();
+        assert!(
+            state_store.lock().unwrap().get_state("arch-ctm").is_some(),
+            "member present in config should be seeded in state store"
+        );
+        assert!(
+            !super::ABSENT_REGISTRY_CYCLES
+                .lock()
+                .unwrap()
+                .contains_key("atm-dev:arch-ctm"),
+            "presence should clear stale absent-cycle markers"
+        );
 
-        // Re-add arch-ctm to config before the next cycle.
+        // Step 2: member removed from config -> cycle should advance absent
+        // tracking but not prune dead record yet.
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": home.display().to_string(),
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+        super::reconcile_team_member_activity_with_mode(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            super::ABSENT_REGISTRY_CYCLES
+                .lock()
+                .unwrap()
+                .get("atm-dev:arch-ctm")
+                .copied(),
+            Some(1),
+            "first absent cycle should be recorded when member is removed"
+        );
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_some(),
+            "dead session record must not be pruned on first absence cycle"
+        );
+
+        // Step 3: member re-added -> reconcile must keep dead session record and
+        // clear absent-cycle marker.
         write_team_config(
             home,
             "atm-dev",
@@ -1931,7 +1986,13 @@ mod tests {
             ]),
         );
 
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity_with_mode(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            true,
+        )
+        .unwrap();
 
         assert!(
             sr.lock()
@@ -1939,6 +2000,17 @@ mod tests {
                 .query_for_team("atm-dev", "arch-ctm")
                 .is_some(),
             "dead session record must not be stale-pruned after member is re-added"
+        );
+        assert!(
+            state_store.lock().unwrap().get_state("arch-ctm").is_some(),
+            "re-added member must remain registered in state store"
+        );
+        assert!(
+            !super::ABSENT_REGISTRY_CYCLES
+                .lock()
+                .unwrap()
+                .contains_key("atm-dev:arch-ctm"),
+            "re-added member should clear absent-cycle marker"
         );
     }
 
