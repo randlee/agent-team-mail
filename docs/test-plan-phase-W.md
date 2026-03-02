@@ -1,8 +1,8 @@
-# Phase V: Release Workflow Automation + ATM Bug Fixes
+# Phase W: Release Workflow Automation + ATM Bug Fixes
 
 **Goal**: (1) Eliminate manual steps from the release pipeline that caused the v0.28.0 disaster. (2) Fix ATM messaging bugs surfaced during dogfooding. (3) Harden the publisher agent to eliminate sub-agent sprawl.
 
-**Integration branch**: `integrate/phase-V` off `develop`.
+**Integration branch**: `integrate/phase-W` off `develop`.
 
 **Background**: The v0.28.0 release required manual intervention at every stage — merge conflicts, Homebrew update, GitHub Release creation (due to crates.io 403), and manual publisher.md sub-agent spawning that created named teammate sprawl. This phase automates the gaps.
 
@@ -140,21 +140,21 @@
 
 | Sprint | Description | Issues | Type | Depends On |
 |--------|-------------|--------|------|------------|
-| V.1 | ATM send offline action + skill doc fix | #328, #329 | Fix | — |
-| V.2 | Publisher agent rewrite (no sub-agents) | #327 | Fix/Docs | — |
-| V.3 | Release workflow: crates.io retry + Homebrew automation | #323, #324 | CI/CD | — |
-| V.4 | Release workflow: pre-publish audit + completion report | #325, #326 | CI/CD | V.3 |
+| W.1 | ATM send offline action + skill doc fix | #328, #329 | Fix | — |
+| W.2 | Publisher agent rewrite (no sub-agents) | #327 | Fix/Docs | — |
+| W.3 | Release workflow: crates.io retry + Homebrew automation | #323, #324 | CI/CD | — |
+| W.4 | Release workflow: pre-publish audit + completion report | #325, #326 | CI/CD | W.3 |
 
 **Parallel tracks**: V.1 and V.2 can run in parallel with each other and with V.3. V.4 depends on V.3 (extends the same workflow file).
 
-**Version**: Phase V targets v0.29.0.
+**Version**: Phase W targets v0.29.0.
 
 ---
 
 ## Key Lessons from Phase U / v0.28.0 Release
 
 1. **Named teammate sprawl**: Publisher spawning sub-agents = pane exhaustion. Gate hook now blocks this, but publisher.md must be rewritten to not try.
-2. **Homebrew is not automated**: Every release requires manual SSH+edit+push to homebrew-tap. V.3 closes this.
+2. **Homebrew is not automated**: Every release requires manual SSH+edit+push to homebrew-tap. W.3 closes this.
 3. **crates.io 403s on CI**: CDN bot protection causes transient failures. Retry logic is the fix.
 4. **Merge conflicts**: `Cargo.lock` stale entries, hardcoded version pins in `atm-tui/Cargo.toml`. Pre-publish audit catches version mismatches before they block releases.
-5. **Doctor "offline" ≠ agent not working**: `atm doctor` shows team-lead/arch-ctm as offline post-daemon-restart because session registry is stale. Agents ARE functional (messaging via filesystem). This is a doctor UX issue, not an actual availability problem.
+5. **State-model separation must be explicit**: mailbox delivery can still work while daemon liveness is stale. Treat this as a state reconciliation bug, not expected behavior; `isActive` must remain activity-only and daemon session state must remain liveness truth.
