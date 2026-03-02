@@ -231,6 +231,15 @@ impl SessionRegistry {
         }
     }
 
+    /// Return all tracked agent names for a team.
+    pub fn agent_names_for_team(&self, team: &str) -> Vec<String> {
+        self.sessions
+            .values()
+            .filter(|record| record.team == team)
+            .map(|record| record.agent_name.clone())
+            .collect()
+    }
+
     /// Return the number of registered sessions.
     pub fn len(&self) -> usize {
         self.sessions.len()
@@ -424,6 +433,18 @@ mod tests {
         reg.remove_for_team("atm-dev", "arch-ctm");
         assert!(reg.query_for_team("atm-dev", "arch-ctm").is_none());
         assert!(reg.query_for_team("atm-dev", "arch-gtm").is_some());
+    }
+
+    #[test]
+    fn test_agent_names_for_team_returns_only_team_members() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-1", 111);
+        reg.upsert_for_team("atm-dev", "arch-gtm", "sess-2", 222);
+        reg.upsert_for_team("other-team", "researcher", "sess-3", 333);
+
+        let mut names = reg.agent_names_for_team("atm-dev");
+        names.sort();
+        assert_eq!(names, vec!["arch-ctm".to_string(), "arch-gtm".to_string()]);
     }
 
     #[test]

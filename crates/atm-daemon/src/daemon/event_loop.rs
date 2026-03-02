@@ -631,6 +631,21 @@ fn reconcile_team_member_activity(
             changed = true;
         }
 
+        // Prune stale daemon session records for members no longer in this team's config.
+        // This converges remove/recreate/reset flows so doctor does not report
+        // DAEMON_TRACKS_UNKNOWN_AGENT for removed members.
+        {
+            let live_member_names: std::collections::HashSet<String> =
+                config.members.iter().map(|m| m.name.clone()).collect();
+            let mut reg = session_registry.lock().unwrap();
+            let tracked_for_team = reg.agent_names_for_team(&team_name);
+            for tracked_name in tracked_for_team {
+                if !live_member_names.contains(&tracked_name) {
+                    reg.remove_for_team(&team_name, &tracked_name);
+                }
+            }
+        }
+
         if changed {
             write_team_config_atomic(&config_path, &config)?;
         }
@@ -1540,6 +1555,53 @@ mod tests {
                 .query_for_team("atm-dev", "arch-ctm")
                 .is_none(),
             "terminal non-lead session record should be removed"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_prunes_stale_session_registry_members_not_in_config() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let cwd = home.display().to_string();
+        stdfs::create_dir_all(home.join(".claude/teams/atm-dev/inboxes")).unwrap();
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd.clone(),
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "stale-sess", i32::MAX as u32);
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+        }
+
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+
+        assert!(
+            sr.lock().unwrap().query_for_team("atm-dev", "arch-ctm").is_none(),
+            "stale session entry for removed member should be pruned during reconcile"
+        );
+        assert!(
+            state_store.lock().unwrap().get_state("arch-ctm").is_none(),
+            "stale state-tracker entry for removed member should be pruned during reconcile"
         );
     }
 }
