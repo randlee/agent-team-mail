@@ -782,11 +782,24 @@ fn reconcile_team_member_activity_with_mode(
     }
 
     // Remove state entries for members no longer present in team configs.
+    //
+    // Use a fresh on-disk read here rather than the local per-pass snapshot.
+    // Multiple reconcile passes can overlap (dispatch-triggered + periodic), so
+    // using stale in-memory desired names can unregister members that were
+    // re-added by a concurrent pass (TOCTOU race).
     {
+        let fresh_desired_agent_names = match build_desired_agent_names(&teams_root) {
+            Ok(names) => names,
+            Err(e) => {
+                warn!("cleanup desired-member refresh failed; falling back to local snapshot: {e}");
+                desired_agent_names
+            }
+        };
+
         let mut tracker = state_store.lock().unwrap();
         let tracked: Vec<String> = tracker.all_states().into_keys().collect();
         for name in tracked {
-            if !desired_agent_names.contains(&name) {
+            if !fresh_desired_agent_names.contains(&name) {
                 tracker.unregister_agent(&name);
             }
         }
@@ -814,6 +827,30 @@ fn write_team_config_atomic(path: &std::path::Path, config: &TeamConfig) -> Resu
     std::fs::write(&tmp, serialized)?;
     atomic_swap(path, &tmp)?;
     Ok(())
+}
+
+fn build_desired_agent_names(
+    teams_root: &std::path::Path,
+) -> Result<std::collections::HashSet<String>> {
+    let mut desired = std::collections::HashSet::new();
+    for entry in std::fs::read_dir(teams_root)? {
+        let Ok(entry) = entry else { continue };
+        let team_dir = entry.path();
+        if !team_dir.is_dir() {
+            continue;
+        }
+        let config_path = team_dir.join("config.json");
+        if !config_path.exists() {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&config_path)?;
+        let config: TeamConfig = serde_json::from_str(&content)?;
+        for member in config.members {
+            desired.insert(member.name);
+        }
+    }
+    Ok(desired)
 }
 
 fn is_member_present_in_config(config_path: &std::path::Path, member_name: &str) -> Result<bool> {
