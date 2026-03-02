@@ -133,7 +133,7 @@ jobs:
           path: ${{ env.ARCHIVE }}
 
   release:
-    needs: [gate-and-tag, build]
+    needs: [gate-and-tag, build, publish-crates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,7 +164,7 @@ jobs:
             release/*
 
   publish-crates:
-    needs: [gate-and-tag, release]
+    needs: [gate-and-tag, build]
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
