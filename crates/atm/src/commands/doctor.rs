@@ -245,23 +245,46 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         },
         member_snapshot: team_config
             .as_ref()
-            .map(|cfg| {
-                cfg.members
-                    .iter()
-                    .map(|m| MemberSnapshot {
-                        name: m.name.clone(),
-                        agent_type: m.agent_type.clone(),
-                        model: m.model.clone(),
-                        status: if m.is_active == Some(true) {
-                            "Online".to_string()
-                        } else {
-                            "Offline".to_string()
-                        },
-                    })
-                    .collect()
-            })
+            .map(|cfg| build_member_snapshot(team, cfg))
             .unwrap_or_default(),
     })
+}
+
+fn build_member_snapshot(team: &str, cfg: &TeamConfig) -> Vec<MemberSnapshot> {
+    build_member_snapshot_with_query(team, cfg, query_session_for_team)
+}
+
+fn build_member_snapshot_with_query<F>(
+    team: &str,
+    cfg: &TeamConfig,
+    query_session: F,
+) -> Vec<MemberSnapshot>
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
+    cfg.members
+        .iter()
+        .map(|m| {
+            let liveness = query_session(team, &m.name)
+                .ok()
+                .flatten()
+                .map(|session| session.alive);
+            MemberSnapshot {
+                name: m.name.clone(),
+                agent_type: m.agent_type.clone(),
+                model: m.model.clone(),
+                status: liveness_to_status(liveness),
+            }
+        })
+        .collect()
+}
+
+fn liveness_to_status(liveness: Option<bool>) -> String {
+    match liveness {
+        Some(true) => "Online".to_string(),
+        Some(false) => "Offline".to_string(),
+        None => "Unknown".to_string(),
+    }
 }
 
 fn finding(severity: Severity, check: &str, code: &str, message: String) -> Finding {
@@ -869,6 +892,50 @@ mod tests {
             external_model: None,
             unknown_fields: HashMap::new(),
         }
+    }
+
+    fn session(alive: bool) -> SessionQueryResult {
+        SessionQueryResult {
+            session_id: "session-1".to_string(),
+            process_id: 1234,
+            alive,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        }
+    }
+
+    #[test]
+    fn liveness_to_status_maps_unknown() {
+        assert_eq!(liveness_to_status(None), "Unknown");
+    }
+
+    #[test]
+    fn build_member_snapshot_uses_daemon_liveness_not_is_active() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![
+                member("team-lead", Some(false), 0),
+                member("arch-ctm", Some(true), 0),
+                member("quality-mgr", Some(true), 0),
+            ],
+            unknown_fields: HashMap::new(),
+        };
+
+        let snapshot = build_member_snapshot_with_query("atm-dev", &cfg, |_, name| match name {
+            "team-lead" => Ok(Some(session(true))),
+            "arch-ctm" => Ok(Some(session(false))),
+            _ => Ok(None),
+        });
+
+        assert_eq!(snapshot[0].status, "Online");
+        assert_eq!(snapshot[1].status, "Offline");
+        assert_eq!(snapshot[2].status, "Unknown");
     }
 
     #[test]

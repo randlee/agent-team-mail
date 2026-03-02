@@ -127,6 +127,15 @@
           "type": "boolean",
           "description": "Whether this artifact is required for release completion."
         },
+        "publish": {
+          "type": "boolean",
+          "description": "Whether this artifact should be published in this release."
+        },
+        "waiver_reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Flat waiver reason alias for publish=false compatibility in CI validators."
+        },
         "verification": {
           "$ref": "#/$defs/verification"
         },

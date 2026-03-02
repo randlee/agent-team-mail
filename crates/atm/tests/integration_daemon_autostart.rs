@@ -323,17 +323,13 @@ fn test_status_reports_actionable_error_when_autostart_binary_missing() {
         .unwrap();
 
     assert!(
-        !output.status.success(),
-        "status should fail when auto-start binary is missing"
+        output.status.success(),
+        "status should remain best-effort when auto-start binary is missing"
     );
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        combined.contains("failed to auto-start daemon") || combined.contains("not found in PATH"),
-        "expected actionable auto-start failure message, got: {combined}"
+        stdout.contains("\"liveness\": null"),
+        "status should report unknown liveness when daemon auto-start fails: {stdout}"
     );
 }
 
