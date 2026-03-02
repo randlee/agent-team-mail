@@ -1164,7 +1164,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | V.1 | Team-scoped doctor reconciliation | V.0 | M | PLANNED | [#333](https://github.com/randlee/agent-team-mail/issues/333) |
 | V.2 | Lead/non-lead teardown semantics | V.0 | M | IN PROGRESS | [#332](https://github.com/randlee/agent-team-mail/issues/332), PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
 | V.3 | `isActive`/liveness separation hardening | V.1, W.1 | M | IN PROGRESS | [#330](https://github.com/randlee/agent-team-mail/issues/330), PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
-| V.4 | Terminal-member cleanup convergence | V.2 | M | PLANNED | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334) |
+| V.4 | Terminal cleanup convergence + stale tracked members | V.0 | M | IN PROGRESS | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334), PR [#345](https://github.com/randlee/agent-team-mail/pull/345) |
 | V.5 | Recommendation engine hardening | V.2 | S | PLANNED | [#336](https://github.com/randlee/agent-team-mail/issues/336) |
 | V.6 | Doctor UX snapshot/report ordering | V.1 | S | PLANNED | [#335](https://github.com/randlee/agent-team-mail/issues/335) |
 | V.7 | Logging identity contract coverage | V.0 | S | COMPLETE | (Phase V umbrella) |
@@ -1177,6 +1177,8 @@ This section exists to resolve cross-phase references used by Phase V and QA rev
 | Sprint | Name | Depends On | Size | Status | Notes |
 |--------|------|------------|------|--------|-------|
 | W.1 | Offline prefix behavior alignment (`feature/pW-s1-offline-fix`) | — | S | MERGED to `integrate/phase-W` | Must merge to `develop` before `integrate/phase-V` merges to `develop` |
+
+**V.4 dependency note**: V.4 is a daemon lifecycle cleanup sprint scoped to #331/#334. It was executed as an independently testable guard/hardening pass before V.2 merge completion to stop active regressions; V.2 remains the broader teardown-policy sprint. V.4 is intentionally independent from V.1 doctor reconciliation.
 
 ---
 ## 18. Future Plugins
