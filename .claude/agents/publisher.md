@@ -193,6 +193,17 @@ Example:
 }
 ```
 
+## Recovering from a Failed Release Workflow
+
+If the release workflow fails **after** the tag has been created but **before** anything is published to crates.io or GitHub Releases:
+
+1. **Do NOT fix the workflow on main and re-run.** Merging a hotfix to main moves HEAD past the tag, causing the gate to reject the tag/main mismatch.
+2. Instead, **bump the patch version** on develop (e.g., 0.29.0 → 0.29.1), merge the workflow fix into develop, and start a fresh release cycle with the new version. This avoids tag conflicts entirely.
+3. Only bump **minor** version if team-lead explicitly requests it. Default to **patch** bump for workflow-only fixes.
+4. If the tag was created but nothing was published, the stuck tag is harmless — just skip that version and move on.
+
+**Key principle**: never try to move or delete a release tag. Abandon the version and bump forward.
+
 ## Communication
 - Receive tasks from `team-lead`.
 - Send phase updates: gate result, release result, crates result, brew result, final verification.
