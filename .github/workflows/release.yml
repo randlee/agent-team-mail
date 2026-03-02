@@ -325,8 +325,16 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p agent-team-mail-core --locked
 
-      - name: Wait for crates.io indexing
+      - name: Wait for crates.io indexing (core)
         run: sleep 60
+
+      - name: Validate CLI crate packageability
+        run: cargo package -p agent-team-mail --locked --no-verify
+
+      - name: Validate CLI crate publish dry-run
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p agent-team-mail --dry-run --locked --no-verify
 
       - name: Publish agent-team-mail
         env:
