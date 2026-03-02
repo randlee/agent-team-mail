@@ -30,16 +30,6 @@
 //!
 //! All input events are handled between ticks with a non-blocking poll.
 
-mod agent_terminal;
-mod app;
-mod codex_adapter;
-mod codex_vendor;
-mod codex_watch;
-mod config;
-mod dashboard;
-mod events;
-mod ui;
-
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -70,13 +60,14 @@ use agent_team_mail_core::{
     logging,
 };
 
-use app::{App, MemberRow, PendingControl};
-use codex_adapter::CodexAdapter;
-use config::{TuiConfig, load_tui_config};
-use dashboard::{
+use agent_team_mail_tui::app::{App, MemberRow, PendingControl};
+use agent_team_mail_tui::codex_adapter::CodexAdapter;
+use agent_team_mail_tui::config::{TuiConfig, load_tui_config};
+use agent_team_mail_tui::dashboard::{
     get_inbox_count, mark_inbox_message_read, read_inbox_messages, read_inbox_preview,
     read_team_members, session_log_path,
 };
+use agent_team_mail_tui::{events, ui};
 
 // ── Module-level statics ──────────────────────────────────────────────────────
 
