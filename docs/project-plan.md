@@ -1152,6 +1152,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 
 **Execution reference**: `docs/test-plan-phase-V.md`
 
+**Change-control note**: V.7 scope was redefined from the earlier "integration hardening + release/QA handoff" placeholder to "logging identity contract coverage" (pid/ppid emitters, send/read/status/doctor logging, and contract tests). The superseded integration-handoff work was absorbed into broader doctor/lifecycle convergence and Phase W release-track execution.
 **Coordination note**: `send.rs` overlap with Phase W.1 means **W.1 must merge before V.3**.
 
 | Sprint | Name | Depends On | Size | Status | Issue |
