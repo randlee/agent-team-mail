@@ -262,6 +262,28 @@ pub async fn run(
                             Ok(Err(e)) => warn!("config.json reconcile pass failed: {e}"),
                             Err(e) => warn!("config.json reconcile task panicked: {e}"),
                         }
+
+                        // Run a short delayed follow-up pass to absorb watcher timing
+                        // races where a remove event is observed just before a re-add.
+                        // This pass intentionally does not advance absent-prune cycles.
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        let claude_root = dispatch_reconcile_ctx.system.claude_root.clone();
+                        let session_registry = dispatch_reconcile_registry.clone();
+                        let state_store = dispatch_reconcile_state_store.clone();
+                        let delayed_result = tokio::task::spawn_blocking(move || {
+                            reconcile_team_member_activity_with_mode(
+                                &claude_root,
+                                &session_registry,
+                                &state_store,
+                                false,
+                            )
+                        })
+                        .await;
+                        match delayed_result {
+                            Ok(Ok(())) => debug!("config.json delayed reconcile pass completed"),
+                            Ok(Err(e)) => warn!("config.json delayed reconcile pass failed: {e}"),
+                            Err(e) => warn!("config.json delayed reconcile task panicked: {e}"),
+                        }
                         continue;
                     }
 
