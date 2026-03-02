@@ -1421,8 +1421,27 @@ mod tests {
         assert_eq!(restored.is_active, Some(false));
     }
 
-    #[test]
-    fn test_reconcile_removes_terminal_non_lead_from_roster_and_mailbox() {
+    fn assert_terminal_non_lead_cleanup(home: &std::path::Path, inbox_dir: &std::path::Path) {
+        let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
+            &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            cfg.members.iter().all(|m| m.name != "arch-ctm"),
+            "terminal non-lead should be removed from roster"
+        );
+        assert!(
+            !inbox_dir.join("arch-ctm.json").exists(),
+            "terminal non-lead inbox should be removed"
+        );
+    }
+
+    fn setup_dead_terminal_non_lead() -> (
+        TempDir,
+        std::path::PathBuf,
+        super::SharedSessionRegistry,
+        super::SharedStateStore,
+    ) {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -1457,26 +1476,64 @@ mod tests {
         );
 
         let sr = new_session_registry();
+        let state_store = new_state_store();
+        (tmp, inbox_dir, sr, state_store)
+    }
+
+    #[test]
+    fn test_session_end_converges_to_remove_dead_member_from_roster_and_mailbox() {
+        let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
+        let home = tmp.path();
         {
             let mut reg = sr.lock().unwrap();
-            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-dead", i32::MAX as u32);
+            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-session-end", i32::MAX as u32);
+            // Simulate hook_watcher SessionEnd processing.
             reg.mark_dead_for_team("atm-dev", "arch-ctm");
         }
-        let state_store = new_state_store();
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert_terminal_non_lead_cleanup(home, &inbox_dir);
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "terminal non-lead session record should be removed"
+        );
+    }
 
-        let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
-            &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
-        )
-        .unwrap();
+    #[test]
+    fn test_sigterm_escalation_converges_to_remove_dead_member_from_roster_and_mailbox() {
+        let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
+        let home = tmp.path();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-sigterm", i32::MAX as u32);
+            // Simulate daemon --kill escalation where SIGTERM eventually marks the session dead.
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert_terminal_non_lead_cleanup(home, &inbox_dir);
         assert!(
-            cfg.members.iter().all(|m| m.name != "arch-ctm"),
-            "terminal non-lead should be removed from roster"
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "terminal non-lead session record should be removed"
         );
-        assert!(
-            !inbox_dir.join("arch-ctm.json").exists(),
-            "terminal non-lead inbox should be removed"
-        );
+    }
+
+    #[test]
+    fn test_kill_timeout_fallback_converges_to_remove_dead_member_from_roster_and_mailbox() {
+        let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
+        let home = tmp.path();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-kill-timeout", i32::MAX as u32);
+            // Simulate daemon --kill exhausting graceful waits and forcing termination.
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        assert_terminal_non_lead_cleanup(home, &inbox_dir);
         assert!(
             sr.lock()
                 .unwrap()
