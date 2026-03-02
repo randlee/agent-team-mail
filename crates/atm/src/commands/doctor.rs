@@ -8,14 +8,15 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    daemon_is_running, daemon_pid_path, daemon_socket_path, query_list_agents,
-    query_session_for_team,
+    AgentSummary, SessionQueryResult, daemon_is_running, daemon_pid_path, daemon_socket_path,
+    query_list_agents, query_list_agents_for_team, query_session_for_team,
 };
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::util::hook_identity::read_hook_file;
 use crate::util::settings::get_home_dir;
 
 #[derive(Args, Debug)]
@@ -91,6 +92,16 @@ struct DoctorReport {
     findings: Vec<Finding>,
     recommendations: Vec<Recommendation>,
     log_window: LogWindow,
+    #[serde(skip_serializing, skip_deserializing, default)]
+    member_snapshot: Vec<MemberSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct MemberSnapshot {
+    name: String,
+    agent_type: String,
+    model: String,
+    status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -103,6 +114,8 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
     // Prime daemon connectivity early so doctor reflects post-autostart health.
     // Must be best-effort: doctor should still produce a report when daemon is
     // unavailable or autostart fails.
+    // Intentionally uses the unscoped query for connectivity priming only;
+    // doctor findings themselves use team-scoped checks below.
     let _ = query_list_agents();
 
     let current_dir = std::env::current_dir()?;
@@ -211,7 +224,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         Severity::Info => 2,
     });
 
-    let recommendations = build_recommendations(team, &findings);
+    let recommendations = build_recommendations(team, &findings, has_register_session_context());
 
     let counts = count_findings(&findings);
     let summary = Summary {
@@ -230,6 +243,24 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
             start: window_start.to_rfc3339(),
             end: window_end.to_rfc3339(),
         },
+        member_snapshot: team_config
+            .as_ref()
+            .map(|cfg| {
+                cfg.members
+                    .iter()
+                    .map(|m| MemberSnapshot {
+                        name: m.name.clone(),
+                        agent_type: m.agent_type.clone(),
+                        model: m.model.clone(),
+                        status: if m.is_active == Some(true) {
+                            "Online".to_string()
+                        } else {
+                            "Offline".to_string()
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -350,10 +381,21 @@ fn check_pid_session_reconciliation(team: &str, cfg: &TeamConfig) -> Vec<Finding
 }
 
 fn check_roster_session_integrity(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
+    check_roster_session_integrity_with_query(team, cfg, query_list_agents_for_team)
+}
+
+fn check_roster_session_integrity_with_query<F>(
+    team: &str,
+    cfg: &TeamConfig,
+    list_agents_for_team: F,
+) -> Vec<Finding>
+where
+    F: Fn(&str) -> anyhow::Result<Option<Vec<AgentSummary>>>,
+{
     let mut findings = Vec::new();
     let roster: HashSet<String> = cfg.members.iter().map(|m| m.name.clone()).collect();
 
-    if let Ok(Some(agents)) = query_list_agents() {
+    if let Ok(Some(agents)) = list_agents_for_team(team) {
         for tracked in agents {
             if !roster.contains(&tracked.agent) {
                 findings.push(finding(
@@ -373,6 +415,18 @@ fn check_roster_session_integrity(team: &str, cfg: &TeamConfig) -> Vec<Finding> 
 }
 
 fn check_mailbox_integrity(inboxes_dir: PathBuf, team: &str, cfg: &TeamConfig) -> Vec<Finding> {
+    check_mailbox_integrity_with_query(inboxes_dir, team, cfg, query_session_for_team)
+}
+
+fn check_mailbox_integrity_with_query<F>(
+    inboxes_dir: PathBuf,
+    team: &str,
+    cfg: &TeamConfig,
+    query_session: F,
+) -> Vec<Finding>
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
     let mut findings = Vec::new();
     let roster: HashSet<String> = cfg.members.iter().map(|m| m.name.clone()).collect();
 
@@ -411,10 +465,23 @@ fn check_mailbox_integrity(inboxes_dir: PathBuf, team: &str, cfg: &TeamConfig) -
     }
 
     for member in &cfg.members {
-        let session = query_session_for_team(team, &member.name).ok().flatten();
+        let session = query_session(team, &member.name).ok().flatten();
         if let Some(s) = session
             && !s.alive
         {
+            if member.name == "team-lead" {
+                findings.push(finding(
+                    Severity::Warn,
+                    "mailbox_teardown_integrity",
+                    "LEAD_SESSION_RECOVERY_REQUIRED",
+                    format!(
+                        "Team lead has dead session (pid={}) and requires session recovery/reregister",
+                        s.process_id
+                    ),
+                ));
+                continue;
+            }
+
             let has_mailbox = local_mailboxes.contains(&member.name);
             if has_mailbox {
                 findings.push(finding(
@@ -657,7 +724,24 @@ fn count_findings(findings: &[Finding]) -> FindingCounts {
     counts
 }
 
-fn build_recommendations(team: &str, findings: &[Finding]) -> Vec<Recommendation> {
+fn has_register_session_context() -> bool {
+    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID")
+        && !session_id.trim().is_empty()
+    {
+        return true;
+    }
+    read_hook_file()
+        .ok()
+        .flatten()
+        .map(|d| !d.session_id.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn build_recommendations(
+    team: &str,
+    findings: &[Finding],
+    has_session_context: bool,
+) -> Vec<Recommendation> {
     let mut recs: Vec<Recommendation> = Vec::new();
 
     let has = |code: &str| findings.iter().any(|f| f.code == code);
@@ -676,53 +760,87 @@ fn build_recommendations(team: &str, findings: &[Finding]) -> Vec<Recommendation
         });
     }
 
-    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") {
-        recs.push(Recommendation {
-            command: format!("atm register {team}"),
-            reason: "Refresh team-lead/session state before additional lifecycle actions"
-                .to_string(),
-        });
+    if has("ACTIVE_WITHOUT_SESSION")
+        || has("ACTIVE_FLAG_STALE")
+        || has("LEAD_SESSION_RECOVERY_REQUIRED")
+    {
+        if has_session_context {
+            recs.push(Recommendation {
+                command: format!("atm register {team}"),
+                reason: "Refresh team-lead/session state before additional lifecycle actions"
+                    .to_string(),
+            });
+        } else {
+            recs.push(Recommendation {
+                command: format!("atm --as team-lead register {team}"),
+                reason: "No session context detected. Run from a managed Claude session (or set CLAUDE_SESSION_ID) before retrying register.".to_string(),
+            });
+        }
     }
 
     recs
 }
 
 fn print_human(report: &DoctorReport) {
-    println!("ATM Doctor — team {}", report.summary.team);
-    println!("Generated: {}", report.summary.generated_at);
-    println!();
-    println!(
-        "Findings: critical={} warn={} info={}",
-        report.summary.counts.critical, report.summary.counts.warn, report.summary.counts.info
-    );
-    println!(
-        "Log window: {} -> {} ({})",
-        report.log_window.start, report.log_window.end, report.log_window.mode
-    );
-    println!();
+    print!("{}", render_human(report));
+}
 
-    if report.findings.is_empty() {
-        println!("No findings.");
-        return;
+fn render_human(report: &DoctorReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("ATM Doctor — team {}\n", report.summary.team));
+    out.push_str(&format!("Generated: {}\n\n", report.summary.generated_at));
+
+    out.push_str(&format!(
+        "Findings: critical={} warn={} info={}\n",
+        report.summary.counts.critical, report.summary.counts.warn, report.summary.counts.info
+    ));
+    out.push_str(&format!(
+        "Log window: {} -> {} ({})\n\n",
+        report.log_window.start, report.log_window.end, report.log_window.mode
+    ));
+
+    if !report.member_snapshot.is_empty() {
+        out.push_str("Members:\n");
+        out.push_str(&format!(
+            "  {:<20} {:<20} {:<16}\n",
+            "Name", "Type", "Status"
+        ));
+        out.push_str(&format!("  {}\n", "─".repeat(58)));
+        for m in &report.member_snapshot {
+            out.push_str(&format!(
+                "  {:<20} {:<20} {:<16}\n",
+                m.name, m.agent_type, m.status
+            ));
+        }
+        out.push('\n');
     }
 
-    println!("Findings (ordered by severity):");
+    if report.findings.is_empty() {
+        out.push_str("No findings.\n");
+        return out;
+    }
+
+    out.push_str("Findings (ordered by severity):\n");
     for f in &report.findings {
         let sev = match f.severity {
             Severity::Critical => "CRITICAL",
             Severity::Warn => "WARN",
             Severity::Info => "INFO",
         };
-        println!("- [{sev}] {} ({}): {}", f.check, f.code, f.message);
+        out.push_str(&format!(
+            "- [{sev}] {} ({}): {}\n",
+            f.check, f.code, f.message
+        ));
     }
 
     if !report.recommendations.is_empty() {
-        println!();
-        println!("Recommended actions:");
+        out.push_str("\nRecommended actions:\n");
         for r in &report.recommendations {
-            println!("- {}  # {}", r.command, r.reason);
+            out.push_str(&format!("- {}  # {}\n", r.command, r.reason));
         }
     }
+
+    out
 }
 
 #[cfg(test)]
@@ -775,8 +893,35 @@ mod tests {
             "DAEMON_NOT_RUNNING",
             "x".to_string(),
         )];
-        let recs = build_recommendations("atm-dev", &findings);
+        let recs = build_recommendations("atm-dev", &findings, true);
         assert!(recs.iter().any(|r| r.command == "atm-daemon"));
+    }
+
+    #[test]
+    fn build_recommendations_uses_register_when_session_context_is_available() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "pid_session_reconciliation",
+            "ACTIVE_WITHOUT_SESSION",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm register atm-dev"));
+    }
+
+    #[test]
+    fn build_recommendations_uses_as_fallback_without_session_context() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "pid_session_reconciliation",
+            "ACTIVE_WITHOUT_SESSION",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, false);
+        assert!(
+            recs.iter()
+                .any(|r| r.command == "atm --as team-lead register atm-dev")
+        );
     }
 
     #[test]
@@ -849,6 +994,112 @@ mod tests {
     }
 
     #[test]
+    fn check_roster_session_integrity_excludes_other_teams_when_scoped() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![
+                member("team-lead", Some(true), 0),
+                member("arch-ctm", Some(true), 0),
+            ],
+            unknown_fields: HashMap::new(),
+        };
+
+        // Seed simulated daemon state for two teams. The scoped query provider
+        // returns only members for the requested team.
+        let atm_dev_agents = vec![
+            AgentSummary {
+                agent: "team-lead".to_string(),
+                state: "idle".to_string(),
+            },
+            AgentSummary {
+                agent: "arch-ctm".to_string(),
+                state: "active".to_string(),
+            },
+        ];
+        let other_team_agents = vec![AgentSummary {
+            agent: "researcher".to_string(),
+            state: "idle".to_string(),
+        }];
+
+        let findings = check_roster_session_integrity_with_query("atm-dev", &cfg, |team| {
+            if team == "atm-dev" {
+                Ok(Some(atm_dev_agents.clone()))
+            } else {
+                Ok(Some(other_team_agents.clone()))
+            }
+        });
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.code == "DAEMON_TRACKS_UNKNOWN_AGENT"),
+            "scoped roster integrity check must ignore agents from other teams"
+        );
+    }
+
+    #[test]
+    fn build_recommendations_routes_lead_recovery_to_register_only() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "mailbox_teardown_integrity",
+            "LEAD_SESSION_RECOVERY_REQUIRED",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm register atm-dev"));
+        assert!(
+            !recs
+                .iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
+    }
+
+    #[test]
+    fn check_mailbox_integrity_classifies_dead_team_lead_as_recovery_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inboxes = tmp.path().join("inboxes");
+        fs::create_dir_all(&inboxes).unwrap();
+
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let dead_lead_session = SessionQueryResult {
+            session_id: "lead-session".to_string(),
+            process_id: 4242,
+            alive: false,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        };
+        let findings = check_mailbox_integrity_with_query(inboxes, "atm-dev", &cfg, |_, name| {
+            if name == "team-lead" {
+                Ok(Some(dead_lead_session.clone()))
+            } else {
+                Ok(None)
+            }
+        });
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "LEAD_SESSION_RECOVERY_REQUIRED"),
+            "dead team-lead must produce explicit recovery warning"
+        );
+        assert!(!findings.iter().any(|f| f.code == "PARTIAL_TEARDOWN"));
+    }
+
+    #[test]
     fn check_config_runtime_drift_flags_env_mismatch() {
         let team = "atm-dev";
         let findings = check_config_runtime_drift(team, &Some(team.to_string()));
@@ -882,5 +1133,69 @@ mod tests {
         let findings = check_log_diagnostics(tmp.path(), start, end, false);
 
         assert!(findings.iter().any(|f| f.code == "NO_EVENTS_IN_WINDOW"));
+    }
+
+    #[test]
+    fn render_human_places_member_snapshot_before_findings() {
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 1,
+                    info: 0,
+                },
+            },
+            findings: vec![finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "ACTIVE_WITHOUT_SESSION",
+                "x".to_string(),
+            )],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+            },
+            member_snapshot: vec![MemberSnapshot {
+                name: "team-lead".to_string(),
+                agent_type: "team-lead".to_string(),
+                model: "claude".to_string(),
+                status: "Online".to_string(),
+            }],
+        };
+        let rendered = render_human(&report);
+        let members_idx = rendered.find("Members:").unwrap();
+        let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
+        assert!(members_idx < findings_idx);
+    }
+
+    #[test]
+    fn doctor_json_schema_excludes_member_snapshot() {
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+            },
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+            },
+            member_snapshot: vec![MemberSnapshot::default()],
+        };
+        let value = serde_json::to_value(report).unwrap();
+        assert!(value.get("member_snapshot").is_none());
     }
 }

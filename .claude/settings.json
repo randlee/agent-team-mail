@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\" && python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\" || true'"
+            "command": "bash -c 'if test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\"; then python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\"; else exit 0; fi'"
           }
         ]
       },

@@ -2,7 +2,7 @@
 
 **Version**: 0.5
 **Date**: 2026-02-25
-**Status**: Phase T complete (v0.26.0).
+**Status**: Phase T complete (v0.27.0).
 
 ---
 
@@ -1283,7 +1283,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
 
 **Completed**: 99+ sprints across 23 phases (CI green)
-**Current version**: v0.26.0
+**Current version**: v0.27.0
 **Next**: Phase U (TBD)
 
 ---
@@ -1321,7 +1321,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 |-------|-------------|----------------|-------|
 | [#181](https://github.com/randlee/agent-team-mail/issues/181) | Daemon not auto-starting | T.1 | **Critical** — blocks all daemon-dependent features |
 | [#182](https://github.com/randlee/agent-team-mail/issues/182) | Agent roster not seeded from config.json | T.2 | **Critical** — daemon starts with empty roster |
-| [#183](https://github.com/randlee/agent-team-mail/issues/183) | Agent state never transitions | T.3 | **Critical** — state tracking broken |
+| [#183](https://github.com/randlee/agent-team-mail/issues/183) | Agent state never transitions | T.2 | **Critical** — state tracking broken (consolidated into T.2, PR #289) |
 | [#184](https://github.com/randlee/agent-team-mail/issues/184) | TUI right panel contradicts left panel | T.4 | Needs investigation — may be fixed by Phase L |
 | [#185](https://github.com/randlee/agent-team-mail/issues/185) | No message viewing in TUI | T.5 | Enhancement |
 | [#186](https://github.com/randlee/agent-team-mail/issues/186) | Per-agent output.log never written | — | May be superseded by Phase L unified logging — **needs verification** |
