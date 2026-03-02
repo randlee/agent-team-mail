@@ -26,7 +26,7 @@ pub struct StatusArgs {
 /// Execute the status command
 pub fn execute(args: StatusArgs) -> Result<()> {
     // Prime daemon connectivity so daemon-backed liveness fields are available.
-    let _ = query_list_agents()?;
+    let _ = query_list_agents();
 
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
