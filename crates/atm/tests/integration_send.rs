@@ -568,7 +568,8 @@ fn test_offline_recipient_detection_auto_tag() {
         .assert()
         .success();
 
-    // Verify message was prepended with default action text
+    // Offline detection is daemon-session based. With no daemon session record,
+    // recipient state is unknown and no prefix is injected.
     let inbox_path = temp_dir
         .path()
         .join(".claude/teams/test-team/inboxes/offline-agent.json");
@@ -577,11 +578,7 @@ fn test_offline_recipient_detection_auto_tag() {
 
     assert_eq!(messages.len(), 1);
     let text = messages[0]["text"].as_str().unwrap();
-    assert!(
-        text.starts_with("[PENDING ACTION - execute when online]"),
-        "Expected default action prefix, got: {text}"
-    );
-    assert!(text.contains("Please review this"));
+    assert_eq!(text, "Please review this");
 }
 
 #[test]
@@ -607,11 +604,7 @@ fn test_offline_recipient_custom_flag() {
     let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
 
     let text = messages[0]["text"].as_str().unwrap();
-    assert!(
-        text.starts_with("[DO THIS LATER]"),
-        "Expected custom action prefix, got: {text}"
-    );
-    assert!(text.contains("Review when ready"));
+    assert_eq!(text, "Review when ready");
 }
 
 #[test]
@@ -645,10 +638,7 @@ fn test_offline_recipient_config_override() {
     let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
 
     let text = messages[0]["text"].as_str().unwrap();
-    assert!(
-        text.starts_with("[QUEUED]"),
-        "Expected config action prefix, got: {text}"
-    );
+    assert_eq!(text, "Queued message");
 }
 
 #[test]
