@@ -224,6 +224,13 @@ impl SessionRegistry {
         }
     }
 
+    /// Remove a team-scoped session record.
+    pub fn remove_for_team(&mut self, team: &str, name: &str) {
+        if self.sessions.remove(&make_key(team, name)).is_some() {
+            self.persist_best_effort();
+        }
+    }
+
     /// Return the number of registered sessions.
     pub fn len(&self) -> usize {
         self.sessions.len()
@@ -406,6 +413,17 @@ mod tests {
         let mut reg = SessionRegistry::new();
         // Should not panic
         reg.mark_dead("ghost");
+    }
+
+    #[test]
+    fn test_remove_for_team_deletes_only_target_member() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-a", 100);
+        reg.upsert_for_team("atm-dev", "arch-gtm", "sess-b", 101);
+
+        reg.remove_for_team("atm-dev", "arch-ctm");
+        assert!(reg.query_for_team("atm-dev", "arch-ctm").is_none());
+        assert!(reg.query_for_team("atm-dev", "arch-gtm").is_some());
     }
 
     #[test]
