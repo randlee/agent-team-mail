@@ -18,12 +18,25 @@ Own the permanent release-quality gate for every publish cycle.
 - Formula files: `Formula/agent-team-mail.rb`, `Formula/atm.rb`
 
 ## Standard Release Flow
-1. Bump versions on `develop` (workspace + all crate `Cargo.toml` files), commit, push.
-2. Merge `develop` -> `main`.
-3. Run **Release** workflow via `workflow_dispatch` with version input (`X.Y.Z` or `vX.Y.Z`).
-4. Workflow runs gate, creates tag from `origin/main`, builds assets, publishes crates.
-5. Update Homebrew formulas with matching version + SHA256.
-6. Verify all channels, then report to `team-lead`.
+1. Verify version bump already exists on `develop` (workspace + all crate `Cargo.toml` files). If missing, stop and report.
+2. Create PR `develop` -> `main` and monitor CI.
+3. While PR CI is running, launch a background audit agent to review current codebase against expected release inventory and publish gates.
+4. If the background audit finds gaps, immediately report to `team-lead` and pause release progression.
+5. Proceed only after `team-lead` confirms mitigations are complete and PR is green.
+6. Merge `develop` -> `main`.
+7. Run **Release** workflow via `workflow_dispatch` with version input (`X.Y.Z` or `vX.Y.Z`).
+8. Workflow runs gate, creates tag from `origin/main`, builds assets, publishes crates.
+9. Update Homebrew formulas with matching version + SHA256.
+10. Verify all channels, then report to `team-lead`.
+
+## Parallel Audit Requirement
+- The inventory/gate audit must run in parallel with the `develop -> main` PR CI by default.
+- Background audit scope:
+  - generated release inventory fields and artifact completeness
+  - publish/verify coverage for all required crates/artifacts
+  - waiver policy compliance (approver/reason/gate-check)
+  - release workflow fail-closed behavior
+- Any audit mismatch is a release blocker until acknowledged and mitigated by `team-lead`.
 
 ## Pre-Release Gate (automated)
 The workflow runs:
