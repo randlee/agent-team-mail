@@ -1154,6 +1154,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 
 **Change-control note**: V.7 scope was redefined from the earlier "integration hardening + release/QA handoff" placeholder to "logging identity contract coverage" (pid/ppid emitters, send/read/status/doctor logging, and contract tests). The superseded integration-handoff work was absorbed into broader doctor/lifecycle convergence and Phase W release-track execution.
 **Coordination note**: Phase W sprint W.1 (`feature/pW-s1-offline-fix`, merged to `integrate/phase-W`) must merge to `develop` before `integrate/phase-V` merges to `develop` (integration-time merge-order constraint, not a branch dependency).
+**Release automation track note**: V.1a–V.4a release/publishing hardening is tracked under Phase W (see 17.11).
 
 | Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
@@ -1165,6 +1166,15 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | V.5 | Recommendation engine hardening | V.2 | S | PLANNED | [#336](https://github.com/randlee/agent-team-mail/issues/336) |
 | V.6 | Doctor UX snapshot/report ordering | V.1 | S | PLANNED | [#335](https://github.com/randlee/agent-team-mail/issues/335) |
 | V.7 | Logging identity contract coverage | V.0 | S | COMPLETE | (Phase V umbrella) |
+
+---
+## 17.11 Phase W: Release Automation Bridge (Reference)
+
+This section exists to resolve cross-phase references used by Phase V and QA review.
+
+| Sprint | Name | Depends On | Size | Status | Notes |
+|--------|------|------------|------|--------|-------|
+| W.1 | Offline prefix behavior alignment (`feature/pW-s1-offline-fix`) | — | S | MERGED to `integrate/phase-W` | Must merge to `develop` before `integrate/phase-V` merges to `develop` |
 
 ---
 ## 18. Future Plugins
