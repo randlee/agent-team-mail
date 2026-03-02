@@ -929,18 +929,22 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         Ok(lock) => Some(lock),
         Err(InboxError::LockTimeout { .. }) => {
             // Another process likely holds the startup lock and is spawning the daemon.
-            // Wait for that startup attempt to converge instead of spawning unlocked.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
+            // Wait briefly for that startup attempt to converge.
+            for _ in 0..10 {
                 if daemon_is_running() || daemon_socket_connectable(&home) {
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            anyhow::bail!(
-                "timed out waiting for daemon startup lock holder to bring daemon online: {}",
-                startup_lock_path.display()
-            );
+            // Startup did not converge yet. Re-attempt lock acquisition so any
+            // fallback spawn still occurs under lock (single-daemon invariant).
+            match crate::io::lock::acquire_lock(&startup_lock_path, 10) {
+                Ok(lock) => Some(lock),
+                Err(e) => anyhow::bail!(
+                    "timed out waiting for daemon startup lock holder to bring daemon online: {} ({e})",
+                    startup_lock_path.display()
+                ),
+            }
         }
         Err(e) => anyhow::bail!(
             "failed to acquire daemon startup lock {}: {e}",
