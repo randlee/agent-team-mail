@@ -4,6 +4,7 @@ use agent_team_mail_daemon::plugins::worker_adapter::{
 };
 use serial_test::serial;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -32,13 +33,17 @@ fi
 exit 0
 "#;
     fs::write(&tmux_path, script).expect("write fake tmux");
-    let mut perms = fs::metadata(&tmux_path)
-        .expect("tmux metadata")
-        .permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&tmux_path, perms).expect("chmod fake tmux");
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&tmux_path)
+            .expect("tmux metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&tmux_path, perms).expect("chmod fake tmux");
+    }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[serial]
 async fn test_gemini_shutdown_escalates_to_sigkill_after_sigterm() {
