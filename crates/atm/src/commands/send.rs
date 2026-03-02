@@ -1,6 +1,7 @@
 //! Send command implementation
 
 use agent_team_mail_core::config::{Config, ConfigOverrides, resolve_config, resolve_identity};
+use agent_team_mail_core::daemon_client::SessionQueryResult;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
@@ -170,15 +171,9 @@ pub fn execute(args: SendArgs) -> Result<()> {
         message_text
     };
 
-    // Check if recipient is offline and prepend action text
-    // Only warn if isActive is explicitly false, not on missing/null
-    let recipient_offline = team_config
-        .members
-        .iter()
-        .find(|m| m.name == agent_name)
-        .and_then(|m| m.is_active)
-        .map(|is_active| !is_active)
-        .unwrap_or(false); // Missing or null = not offline
+    // Check if recipient is offline and prepend action text.
+    // Liveness truth comes from daemon session state; isActive is activity-only.
+    let recipient_offline = recipient_has_dead_session(&team_name, &agent_name);
 
     if recipient_offline {
         let action_text = resolve_offline_action(&args, &config);
@@ -419,6 +414,23 @@ fn resolve_offline_action(args: &SendArgs, config: &Config) -> String {
     "PENDING ACTION - execute when online".to_string()
 }
 
+fn recipient_has_dead_session(team: &str, agent_name: &str) -> bool {
+    recipient_has_dead_session_with_query(team, agent_name, |team, agent| {
+        agent_team_mail_core::daemon_client::query_session_for_team(team, agent)
+    })
+}
+
+fn recipient_has_dead_session_with_query<F>(team: &str, agent_name: &str, query: F) -> bool
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
+    match query(team, agent_name) {
+        Ok(Some(session)) => !session.alive,
+        Ok(None) => false, // Unknown session state; do not label as offline.
+        Err(_) => false,   // Best-effort: send must proceed even if daemon query fails.
+    }
+}
+
 /// Generate summary from message text (first ~100 chars)
 fn generate_summary(text: &str) -> String {
     const MAX_LEN: usize = 100;
@@ -488,6 +500,7 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
 
     #[test]
     fn test_generate_summary_short() {
@@ -605,5 +618,52 @@ mod tests {
 
         assert_eq!(message_text, "Hello other!");
         assert!(!message_text.contains("WARNING"));
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_true_for_dead_session() {
+        let is_offline = recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| {
+            Ok(Some(SessionQueryResult {
+                session_id: "s".to_string(),
+                process_id: 123,
+                alive: false,
+                runtime: None,
+                runtime_session_id: None,
+                pane_id: None,
+                runtime_home: None,
+            }))
+        });
+        assert!(is_offline);
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_false_for_alive_session() {
+        let is_offline = recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| {
+            Ok(Some(SessionQueryResult {
+                session_id: "s".to_string(),
+                process_id: 123,
+                alive: true,
+                runtime: None,
+                runtime_session_id: None,
+                pane_id: None,
+                runtime_home: None,
+            }))
+        });
+        assert!(!is_offline);
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_false_when_session_unknown() {
+        let is_offline =
+            recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| Ok(None));
+        assert!(!is_offline);
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_false_on_query_error() {
+        let is_offline = recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| {
+            Err(anyhow!("daemon unavailable"))
+        });
+        assert!(!is_offline);
     }
 }
