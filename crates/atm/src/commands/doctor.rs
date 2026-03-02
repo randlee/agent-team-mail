@@ -16,6 +16,7 @@ use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::util::hook_identity::read_hook_file;
 use crate::util::settings::get_home_dir;
 
 #[derive(Args, Debug)]
@@ -91,6 +92,16 @@ struct DoctorReport {
     findings: Vec<Finding>,
     recommendations: Vec<Recommendation>,
     log_window: LogWindow,
+    #[serde(skip_serializing, skip_deserializing, default)]
+    member_snapshot: Vec<MemberSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct MemberSnapshot {
+    name: String,
+    agent_type: String,
+    model: String,
+    status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -213,7 +224,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         Severity::Info => 2,
     });
 
-    let recommendations = build_recommendations(team, &findings);
+    let recommendations = build_recommendations(team, &findings, has_register_session_context());
 
     let counts = count_findings(&findings);
     let summary = Summary {
@@ -232,6 +243,24 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
             start: window_start.to_rfc3339(),
             end: window_end.to_rfc3339(),
         },
+        member_snapshot: team_config
+            .as_ref()
+            .map(|cfg| {
+                cfg.members
+                    .iter()
+                    .map(|m| MemberSnapshot {
+                        name: m.name.clone(),
+                        agent_type: m.agent_type.clone(),
+                        model: m.model.clone(),
+                        status: if m.is_active == Some(true) {
+                            "Online".to_string()
+                        } else {
+                            "Offline".to_string()
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -695,7 +724,24 @@ fn count_findings(findings: &[Finding]) -> FindingCounts {
     counts
 }
 
-fn build_recommendations(team: &str, findings: &[Finding]) -> Vec<Recommendation> {
+fn has_register_session_context() -> bool {
+    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID")
+        && !session_id.trim().is_empty()
+    {
+        return true;
+    }
+    read_hook_file()
+        .ok()
+        .flatten()
+        .map(|d| !d.session_id.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn build_recommendations(
+    team: &str,
+    findings: &[Finding],
+    has_session_context: bool,
+) -> Vec<Recommendation> {
     let mut recs: Vec<Recommendation> = Vec::new();
 
     let has = |code: &str| findings.iter().any(|f| f.code == code);
@@ -718,52 +764,83 @@ fn build_recommendations(team: &str, findings: &[Finding]) -> Vec<Recommendation
         || has("ACTIVE_FLAG_STALE")
         || has("LEAD_SESSION_RECOVERY_REQUIRED")
     {
-        recs.push(Recommendation {
-            command: format!("atm register {team}"),
-            reason: "Refresh team-lead/session state before additional lifecycle actions"
-                .to_string(),
-        });
+        if has_session_context {
+            recs.push(Recommendation {
+                command: format!("atm register {team}"),
+                reason: "Refresh team-lead/session state before additional lifecycle actions"
+                    .to_string(),
+            });
+        } else {
+            recs.push(Recommendation {
+                command: format!("atm --as team-lead register {team}"),
+                reason: "No session context detected. Run from a managed Claude session (or set CLAUDE_SESSION_ID) before retrying register.".to_string(),
+            });
+        }
     }
 
     recs
 }
 
 fn print_human(report: &DoctorReport) {
-    println!("ATM Doctor — team {}", report.summary.team);
-    println!("Generated: {}", report.summary.generated_at);
-    println!();
-    println!(
-        "Findings: critical={} warn={} info={}",
-        report.summary.counts.critical, report.summary.counts.warn, report.summary.counts.info
-    );
-    println!(
-        "Log window: {} -> {} ({})",
-        report.log_window.start, report.log_window.end, report.log_window.mode
-    );
-    println!();
+    print!("{}", render_human(report));
+}
 
-    if report.findings.is_empty() {
-        println!("No findings.");
-        return;
+fn render_human(report: &DoctorReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("ATM Doctor — team {}\n", report.summary.team));
+    out.push_str(&format!("Generated: {}\n\n", report.summary.generated_at));
+
+    out.push_str(&format!(
+        "Findings: critical={} warn={} info={}\n",
+        report.summary.counts.critical, report.summary.counts.warn, report.summary.counts.info
+    ));
+    out.push_str(&format!(
+        "Log window: {} -> {} ({})\n\n",
+        report.log_window.start, report.log_window.end, report.log_window.mode
+    ));
+
+    if !report.member_snapshot.is_empty() {
+        out.push_str("Members:\n");
+        out.push_str(&format!(
+            "  {:<20} {:<20} {:<16}\n",
+            "Name", "Type", "Status"
+        ));
+        out.push_str(&format!("  {}\n", "─".repeat(58)));
+        for m in &report.member_snapshot {
+            out.push_str(&format!(
+                "  {:<20} {:<20} {:<16}\n",
+                m.name, m.agent_type, m.status
+            ));
+        }
+        out.push('\n');
     }
 
-    println!("Findings (ordered by severity):");
+    if report.findings.is_empty() {
+        out.push_str("No findings.\n");
+        return out;
+    }
+
+    out.push_str("Findings (ordered by severity):\n");
     for f in &report.findings {
         let sev = match f.severity {
             Severity::Critical => "CRITICAL",
             Severity::Warn => "WARN",
             Severity::Info => "INFO",
         };
-        println!("- [{sev}] {} ({}): {}", f.check, f.code, f.message);
+        out.push_str(&format!(
+            "- [{sev}] {} ({}): {}\n",
+            f.check, f.code, f.message
+        ));
     }
 
     if !report.recommendations.is_empty() {
-        println!();
-        println!("Recommended actions:");
+        out.push_str("\nRecommended actions:\n");
         for r in &report.recommendations {
-            println!("- {}  # {}", r.command, r.reason);
+            out.push_str(&format!("- {}  # {}\n", r.command, r.reason));
         }
     }
+
+    out
 }
 
 #[cfg(test)]
@@ -816,8 +893,35 @@ mod tests {
             "DAEMON_NOT_RUNNING",
             "x".to_string(),
         )];
-        let recs = build_recommendations("atm-dev", &findings);
+        let recs = build_recommendations("atm-dev", &findings, true);
         assert!(recs.iter().any(|r| r.command == "atm-daemon"));
+    }
+
+    #[test]
+    fn build_recommendations_uses_register_when_session_context_is_available() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "pid_session_reconciliation",
+            "ACTIVE_WITHOUT_SESSION",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm register atm-dev"));
+    }
+
+    #[test]
+    fn build_recommendations_uses_as_fallback_without_session_context() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "pid_session_reconciliation",
+            "ACTIVE_WITHOUT_SESSION",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, false);
+        assert!(
+            recs.iter()
+                .any(|r| r.command == "atm --as team-lead register atm-dev")
+        );
     }
 
     #[test]
@@ -945,7 +1049,7 @@ mod tests {
             "LEAD_SESSION_RECOVERY_REQUIRED",
             "x".to_string(),
         )];
-        let recs = build_recommendations("atm-dev", &findings);
+        let recs = build_recommendations("atm-dev", &findings, true);
         assert!(recs.iter().any(|r| r.command == "atm register atm-dev"));
         assert!(
             !recs
@@ -1029,5 +1133,69 @@ mod tests {
         let findings = check_log_diagnostics(tmp.path(), start, end, false);
 
         assert!(findings.iter().any(|f| f.code == "NO_EVENTS_IN_WINDOW"));
+    }
+
+    #[test]
+    fn render_human_places_member_snapshot_before_findings() {
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 1,
+                    info: 0,
+                },
+            },
+            findings: vec![finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "ACTIVE_WITHOUT_SESSION",
+                "x".to_string(),
+            )],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+            },
+            member_snapshot: vec![MemberSnapshot {
+                name: "team-lead".to_string(),
+                agent_type: "team-lead".to_string(),
+                model: "claude".to_string(),
+                status: "Online".to_string(),
+            }],
+        };
+        let rendered = render_human(&report);
+        let members_idx = rendered.find("Members:").unwrap();
+        let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
+        assert!(members_idx < findings_idx);
+    }
+
+    #[test]
+    fn doctor_json_schema_excludes_member_snapshot() {
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+            },
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+            },
+            member_snapshot: vec![MemberSnapshot::default()],
+        };
+        let value = serde_json::to_value(report).unwrap();
+        assert!(value.get("member_snapshot").is_none());
     }
 }
