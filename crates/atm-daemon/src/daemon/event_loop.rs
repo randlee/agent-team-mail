@@ -266,24 +266,35 @@ pub async fn run(
                         // Run a short delayed follow-up pass to absorb watcher timing
                         // races where a remove event is observed just before a re-add.
                         // This pass intentionally does not advance absent-prune cycles.
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        let claude_root = dispatch_reconcile_ctx.system.claude_root.clone();
-                        let session_registry = dispatch_reconcile_registry.clone();
-                        let state_store = dispatch_reconcile_state_store.clone();
-                        let delayed_result = tokio::task::spawn_blocking(move || {
-                            reconcile_team_member_activity_with_mode(
-                                &claude_root,
-                                &session_registry,
-                                &state_store,
-                                false,
-                            )
-                        })
-                        .await;
-                        match delayed_result {
-                            Ok(Ok(())) => debug!("config.json delayed reconcile pass completed"),
-                            Ok(Err(e)) => warn!("config.json delayed reconcile pass failed: {e}"),
-                            Err(e) => warn!("config.json delayed reconcile task panicked: {e}"),
-                        }
+                        //
+                        // Important: schedule this as an async background task instead
+                        // of sleeping inline. Blocking the dispatch loop here can delay
+                        // processing of subsequent config events and cause racey
+                        // remove+re-add behavior under CI load.
+                        let delayed_claude_root = dispatch_reconcile_ctx.system.claude_root.clone();
+                        let delayed_session_registry = dispatch_reconcile_registry.clone();
+                        let delayed_state_store = dispatch_reconcile_state_store.clone();
+                        drop(tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            let delayed_result = tokio::task::spawn_blocking(move || {
+                                reconcile_team_member_activity_with_mode(
+                                    &delayed_claude_root,
+                                    &delayed_session_registry,
+                                    &delayed_state_store,
+                                    false,
+                                )
+                            })
+                            .await;
+                            match delayed_result {
+                                Ok(Ok(())) => {
+                                    debug!("config.json delayed reconcile pass completed")
+                                }
+                                Ok(Err(e)) => {
+                                    warn!("config.json delayed reconcile pass failed: {e}")
+                                }
+                                Err(e) => warn!("config.json delayed reconcile task panicked: {e}"),
+                            }
+                        }));
                         continue;
                     }
 
