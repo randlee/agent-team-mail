@@ -1282,9 +1282,9 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | COMPLETE | — |
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
 
-**Completed**: 99+ sprints across 22 phases (CI green)
-**Current version**: v0.23.0
-**Next**: Phase Q.4 (Manual MCP Inspector testing with live Codex)
+**Completed**: 99+ sprints across 23 phases (CI green)
+**Current version**: v0.26.0
+**Next**: Phase U (TBD)
 
 ---
 
