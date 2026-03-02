@@ -1596,7 +1596,10 @@ mod tests {
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
 
         assert!(
-            sr.lock().unwrap().query_for_team("atm-dev", "arch-ctm").is_none(),
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
             "stale session entry for removed member should be pruned during reconcile"
         );
         assert!(
