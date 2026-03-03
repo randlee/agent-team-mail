@@ -152,6 +152,36 @@ pub struct AgentSummary {
     pub state: String,
 }
 
+/// Canonical daemon-backed member-state snapshot returned by team-scoped
+/// `list-agents` queries.
+///
+/// This struct is the single liveness/status source consumed by CLI diagnostic
+/// surfaces (`atm doctor`, `atm status`, `atm members`). It is derived by the
+/// daemon from session-registry + tracker evidence and must not be inferred
+/// from config `isActive`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanonicalMemberState {
+    /// Agent/member name.
+    pub agent: String,
+    /// Canonical daemon status (`active`, `idle`, `offline`, `unknown`).
+    pub state: String,
+    /// Canonical activity hint (`busy`, `idle`, `unknown`).
+    #[serde(default)]
+    pub activity: String,
+    /// Session UUID from the daemon registry when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Process ID from the daemon registry when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u32>,
+    /// Human-readable derivation reason.
+    #[serde(default)]
+    pub reason: String,
+    /// Source of truth used for state derivation.
+    #[serde(default)]
+    pub source: String,
+}
+
 /// Configuration for launching a new agent via the daemon.
 ///
 /// Sent as the payload of a `"launch"` socket command.
@@ -502,6 +532,37 @@ pub fn query_list_agents_for_team(team: &str) -> anyhow::Result<Option<Vec<Agent
 
     match serde_json::from_value::<Vec<AgentSummary>>(payload) {
         Ok(agents) => Ok(Some(agents)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Query the daemon for canonical member-state snapshots scoped to one team.
+///
+/// Returns `Ok(None)` when the daemon is not reachable.
+pub fn query_team_member_states(team: &str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "list-agents".to_string(),
+        payload: serde_json::json!({ "team": team }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    if !response.is_ok() {
+        return Ok(None);
+    }
+
+    let payload = match response.payload {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    match serde_json::from_value::<Vec<CanonicalMemberState>>(payload) {
+        Ok(states) => Ok(Some(states)),
         Err(_) => Ok(None),
     }
 }
@@ -1778,6 +1839,26 @@ sleep 2
         let decoded: AgentSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.agent, "arch-ctm");
         assert_eq!(decoded.state, "idle");
+    }
+
+    #[test]
+    fn test_canonical_member_state_serialization() {
+        let state = CanonicalMemberState {
+            agent: "arch-ctm".to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: Some("sess-123".to_string()),
+            process_id: Some(4242),
+            reason: "session active with live pid".to_string(),
+            source: "session_registry".to_string(),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: CanonicalMemberState = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.agent, "arch-ctm");
+        assert_eq!(decoded.state, "active");
+        assert_eq!(decoded.activity, "busy");
+        assert_eq!(decoded.session_id.as_deref(), Some("sess-123"));
+        assert_eq!(decoded.process_id, Some(4242));
     }
 
     // Unix-only: test PID alive check for the current process
