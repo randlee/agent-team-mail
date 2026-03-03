@@ -1,7 +1,9 @@
 # ATM Quickstart
 
-This guide covers the minimum setup to start using `atm` and the required
-upgrade behavior for daemon version safety.
+## Prerequisites
+
+- `atm` CLI installed and on `PATH`
+- Repo checkout with write access
 
 ## Install
 
@@ -18,20 +20,55 @@ Cargo:
 cargo install agent-team-mail --locked
 ```
 
-## First Run
+## One-Command Setup
 
-Initialize hooks and team defaults in the current project:
-
-```bash
-atm init <team-name>
-```
-
-Then verify messaging:
+Run from your repo root:
 
 ```bash
-atm send <agent> "ping" --team <team-name>
-atm read --team <team-name> --timeout 60
+atm init <team>
 ```
+
+What it does (idempotent):
+- creates `.atm.toml` when missing (`[core].default_team`, `[core].identity`)
+- creates `~/.claude/teams/<team>/config.json` when missing
+- installs ATM hook wiring globally in `~/.claude/settings.json`
+
+Then bind your session (required once per Claude Code session):
+
+```bash
+atm teams resume <team>
+```
+
+Common options:
+
+```bash
+atm init <team> --local          # project-scoped hooks instead of global
+atm init <team> --identity <name>
+atm init <team> --skip-team      # skip team creation (join existing)
+```
+
+## First Send/Read Flow
+
+From a configured teammate shell/session:
+
+```bash
+atm send <teammate> "hello"
+atm read --team <team> --timeout 60
+```
+
+## Global vs Local Hooks (Worktree Rationale)
+
+Default `atm init` installs hooks globally so every worktree/session gets the
+same ATM behavior without per-worktree duplication.
+
+Use `--local` only when you explicitly need project-scoped hook settings in
+`.claude/settings.json`.
+
+## Team Protocol
+
+ATM team communication must follow the mandatory protocol in:
+
+- `docs/team-protocol.md`
 
 ## Upgrading
 
