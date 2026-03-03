@@ -168,11 +168,15 @@ fn shell_quote(input: &str) -> String {
 mod tests {
     use super::*;
 
+    fn expected_test_cwd() -> PathBuf {
+        std::env::temp_dir().join("atm-runtime-test")
+    }
+
     fn base_spec() -> SpawnSpec {
         SpawnSpec {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
-            cwd: PathBuf::from("/tmp/atm-runtime-test"),
+            cwd: expected_test_cwd(),
             model: None,
             sandbox: None,
             approval_mode: None,
@@ -190,8 +194,12 @@ mod tests {
         spec.approval_mode = Some("plan".to_string());
 
         let cmd = adapter.build_command(&spec).unwrap();
+        let expected_cd = format!(
+            "cd {} &&",
+            shell_quote(&expected_test_cwd().to_string_lossy())
+        );
         assert!(cmd.contains("gemini"));
-        assert!(cmd.contains("cd '/tmp/atm-runtime-test' &&"));
+        assert!(cmd.contains(&expected_cd));
         assert!(cmd.contains("--prompt-interactive"));
         assert!(cmd.contains("--output-format stream-json"));
         assert!(cmd.contains("--sandbox false"));
@@ -207,7 +215,11 @@ mod tests {
         spec.resume_session_id = Some("session-123".to_string());
 
         let cmd = adapter.build_command(&spec).unwrap();
-        assert!(cmd.contains("cd '/tmp/atm-runtime-test' &&"));
+        let expected_cd = format!(
+            "cd {} &&",
+            shell_quote(&expected_test_cwd().to_string_lossy())
+        );
+        assert!(cmd.contains(&expected_cd));
         assert!(cmd.contains("--resume 'session-123'"));
     }
 
@@ -216,7 +228,11 @@ mod tests {
         let adapter = CodexAdapter;
         let spec = base_spec();
         let cmd = adapter.build_command(&spec).unwrap();
-        assert_eq!(cmd, "cd '/tmp/atm-runtime-test' && codex --yolo");
+        let expected = format!(
+            "cd {} && codex --yolo",
+            shell_quote(&expected_test_cwd().to_string_lossy())
+        );
+        assert_eq!(cmd, expected);
     }
 
     #[test]
@@ -224,7 +240,11 @@ mod tests {
         let adapter = ClaudeAdapter;
         let spec = base_spec();
         let cmd = adapter.build_command(&spec).unwrap();
-        assert_eq!(cmd, "cd '/tmp/atm-runtime-test' && claude");
+        let expected = format!(
+            "cd {} && claude",
+            shell_quote(&expected_test_cwd().to_string_lossy())
+        );
+        assert_eq!(cmd, expected);
     }
 
     #[test]
@@ -232,7 +252,11 @@ mod tests {
         let adapter = OpenCodeAdapter;
         let spec = base_spec();
         let cmd = adapter.build_command(&spec).unwrap();
-        assert_eq!(cmd, "cd '/tmp/atm-runtime-test' && opencode");
+        let expected = format!(
+            "cd {} && opencode",
+            shell_quote(&expected_test_cwd().to_string_lossy())
+        );
+        assert_eq!(cmd, expected);
     }
 
     #[test]

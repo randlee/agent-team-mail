@@ -163,3 +163,39 @@ fn test_spawn_dual_flag_match_reaches_daemon_and_keeps_folder_json() {
     );
     assert_eq!(parsed["folder"], canonical.to_string_lossy().to_string());
 }
+
+#[test]
+fn test_spawn_relative_folder_normalizes_to_absolute_in_json_output() {
+    let temp_dir = TempDir::new().unwrap();
+    let subdir = temp_dir.path().join("workdir").join("subdir");
+    fs::create_dir_all(&subdir).unwrap();
+    let canonical = fs::canonicalize(&subdir).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .args([
+            "teams",
+            "spawn",
+            "agent-rel",
+            "--team",
+            "atm-dev",
+            "--runtime",
+            "codex",
+            "--folder",
+            "./subdir",
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("Daemon is not running")
+    );
+    assert_eq!(parsed["folder"], canonical.to_string_lossy().to_string());
+}
