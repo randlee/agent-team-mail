@@ -24,7 +24,7 @@
 use agent_team_mail_core::control::{
     CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,
 };
-use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
+use agent_team_mail_core::daemon_client::{CanonicalMemberState, LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging_event::LogEventV1;
 use agent_team_mail_core::schema::TeamConfig;
@@ -2047,8 +2047,8 @@ fn handle_agent_state(
         .unwrap()
         .query_for_team(&team, &agent)
         .cloned();
-    let (canonical_state, reason, source) = derive_canonical_state(
-        &member,
+    let canonical = derive_canonical_member_state(
+        &member.name,
         tracker_state,
         session.as_ref(),
         tracker_meta.as_ref(),
@@ -2057,11 +2057,11 @@ fn handle_agent_state(
     make_ok_response(
         &request.request_id,
         serde_json::json!({
-            "state": canonical_state,
-            "baseline_state": canonical_state,
+            "state": canonical.state.clone(),
+            "baseline_state": canonical.state,
             "last_transition": last_transition,
-            "reason": reason,
-            "source": source,
+            "reason": canonical.reason,
+            "source": canonical.source,
         }),
     )
 }
@@ -2096,14 +2096,10 @@ fn handle_list_agents(
                 let tracker_state = tracker.get_state(&m.name);
                 let tracker_meta = tracker.transition_meta(&m.name);
                 let session = session_guard.query_for_team(team_name, &m.name);
-                let (state, reason, source) =
-                    derive_canonical_state(&m, tracker_state, session, tracker_meta);
-                serde_json::json!({
-                    "agent": m.name,
-                    "state": state,
-                    "reason": reason,
-                    "source": source,
-                })
+                let state =
+                    derive_canonical_member_state(&m.name, tracker_state, session, tracker_meta);
+                serde_json::to_value(state)
+                    .unwrap_or_else(|_| serde_json::json!({"agent": m.name, "state": "unknown"}))
             })
             .collect();
         return make_ok_response(&request.request_id, serde_json::json!(agents));
@@ -2150,21 +2146,25 @@ fn load_team_member(
         .find(|m| m.name == agent || m.agent_id == format!("{agent}@{team}"))
 }
 
-fn derive_canonical_state(
-    member: &agent_team_mail_core::schema::AgentMember,
+fn derive_canonical_member_state(
+    agent: &str,
     tracker_state: Option<AgentState>,
     session: Option<&crate::daemon::session_registry::SessionRecord>,
     tracker_meta: Option<&crate::plugins::worker_adapter::TransitionMeta>,
-) -> (&'static str, String, String) {
+) -> CanonicalMemberState {
     if let Some(session) = session {
         let session_alive = session.state == crate::daemon::session_registry::SessionState::Active
             && session.is_process_alive();
         if !session_alive {
-            return (
-                "offline",
-                "session inactive or pid dead".to_string(),
-                "session_registry".to_string(),
-            );
+            return CanonicalMemberState {
+                agent: agent.to_string(),
+                state: "offline".to_string(),
+                activity: "unknown".to_string(),
+                session_id: Some(session.session_id.clone()),
+                process_id: Some(session.process_id),
+                reason: "session inactive or pid dead".to_string(),
+                source: "session_registry".to_string(),
+            };
         }
         if matches!(tracker_state, Some(AgentState::Idle)) {
             let reason = tracker_meta
@@ -2173,68 +2173,79 @@ fn derive_canonical_state(
             let source = tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "hook_event".to_string());
-            return ("idle", reason, source);
+            return CanonicalMemberState {
+                agent: agent.to_string(),
+                state: "idle".to_string(),
+                activity: "idle".to_string(),
+                session_id: Some(session.session_id.clone()),
+                process_id: Some(session.process_id),
+                reason,
+                source,
+            };
         }
-        return (
-            "active",
-            "session active with live pid".to_string(),
-            "session_registry".to_string(),
-        );
+        return CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: Some(session.session_id.clone()),
+            process_id: Some(session.process_id),
+            reason: "session active with live pid".to_string(),
+            source: "session_registry".to_string(),
+        };
     }
 
     match tracker_state {
-        Some(AgentState::Idle) => (
-            "idle",
-            tracker_meta
+        Some(AgentState::Idle) => CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "idle".to_string(),
+            activity: "idle".to_string(),
+            session_id: None,
+            process_id: None,
+            reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "idle tracker state".to_string()),
-            tracker_meta
+            source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
-        ),
-        Some(AgentState::Active) => (
-            "active",
-            tracker_meta
+        },
+        Some(AgentState::Active) => CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: None,
+            process_id: None,
+            reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "active tracker state".to_string()),
-            tracker_meta
+            source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
-        ),
-        Some(AgentState::Offline) => (
-            "offline",
-            tracker_meta
+        },
+        Some(AgentState::Offline) => CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "offline".to_string(),
+            activity: "unknown".to_string(),
+            session_id: None,
+            process_id: None,
+            reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "offline tracker state".to_string()),
-            tracker_meta
+            source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
-        ),
-        Some(AgentState::Unknown) => (
-            "unknown",
-            tracker_meta
+        },
+        Some(AgentState::Unknown) | None => CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "unknown".to_string(),
+            activity: "unknown".to_string(),
+            session_id: None,
+            process_id: None,
+            reason: tracker_meta
                 .map(|m| m.reason.clone())
-                .unwrap_or_else(|| "unknown/no lifecycle yet".to_string()),
-            tracker_meta
+                .unwrap_or_else(|| "no lifecycle/session evidence".to_string()),
+            source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
-        ),
-        None => match member.is_active {
-            Some(true) => (
-                "active",
-                "config isActive=true".to_string(),
-                "config".to_string(),
-            ),
-            Some(false) => (
-                "offline",
-                "config isActive=false".to_string(),
-                "config".to_string(),
-            ),
-            None => (
-                "unknown",
-                "no lifecycle/session evidence".to_string(),
-                "config".to_string(),
-            ),
         },
     }
 }
