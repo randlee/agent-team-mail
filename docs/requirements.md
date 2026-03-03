@@ -341,6 +341,8 @@ Commands:
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
+  teams join <agent> [--team <team>] [--agent-type <type>] [--model <model>] [--folder <path>]
+  teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [...]
   teams resume <team> [message] [--force] [--kill] [--session-id <id>]
   teams cleanup <team> [agent] [--force]
   teams backup <team> [--json]
@@ -352,7 +354,7 @@ MCP subcommands:
   mcp status
 
 Init command:
-  init <team> [--global] [--check]
+  init <team> [--local] [--identity <name>] [--skip-team] [--check]
 ```
 
 ### 4.2 Messaging Commands
@@ -638,8 +640,11 @@ Required baseline behavior:
 - Resolve agent runtime metadata from `.claude/agents/<agent>.md` frontmatter
   (at minimum `model`, `color`; prompt body used for initial instruction delivery).
 - Resolve team/identity using explicit args first, then `ATM_TEAM` / `ATM_IDENTITY`.
-- Resolve working directory from explicit `--repo-root` (or equivalent), else current
-  project root; launch command MUST `cd` into that root before starting Claude.
+- Resolve working directory from explicit `--folder <path>` (preferred) or legacy
+  `--cwd <path>` compatibility alias, else current project root; launch command MUST
+  `cd` into that root before starting Claude.
+- If both `--folder` and `--cwd` are provided, they must resolve to the same canonical
+  path or the command must fail with an actionable mismatch error.
 - Register teammate in team config before launch, then update pane/session metadata
   after successful spawn.
 - Support resume-aware launch by passing parent session when available (for example,
@@ -654,6 +659,46 @@ Hook/path compatibility requirements:
 Non-goal:
 - Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
   baseline parity is the immediate requirement.
+
+### 4.3.2a `/team-join` Slash Command + `atm teams join` Contract
+
+ATM must provide a first-class teammate onboarding flow for joining an existing
+team from Claude Code slash-command UX.
+
+Required command surfaces:
+- Slash command entrypoint: `/team-join` (implemented via skill/frontmatter so it
+  is discoverable as a slash command in Claude Code).
+- CLI execution contract: `atm teams join <agent> [--team <team>] [--agent-type <type>] [--model <model>] [--folder <path>]`.
+
+Required behavior:
+1. **Caller context check first**:
+   - Determine whether the caller is already a member of a current team using ATM
+     commands and ATM identity resolution.
+   - If caller is already on a team, treat invocation as **team-lead initiated**.
+2. **`--team` semantics**:
+   - In team-lead initiated mode, `--team` is optional verification only.
+   - If provided in this mode, it must match the caller's resolved current team or
+     the command fails with explicit mismatch guidance.
+   - If caller is not already on a team, `--team` is required and identifies the
+     existing target team to join.
+3. **Join operation**:
+   - Verify target team exists before mutation.
+   - Add the teammate to roster (`config.json`) using the same persistence and
+     validation guarantees as `teams add-member`.
+4. **Post-join launch guidance (required output)**:
+   - Return a precise Claude command line for launching/resuming the teammate from
+     the chosen folder using `--resume`.
+   - Human output must include a copy-pastable command and explicit folder context.
+   - JSON output must include structured fields:
+     - `team`
+     - `agent`
+     - `folder`
+     - `launch_command`
+     - `mode` (`team_lead_initiated` or `self_join`)
+5. **Cross-runtime launch compatibility note**:
+   - The join flow may optionally invoke `atm teams spawn` in another tmux window.
+   - For this path, runtime spawn must honor `--folder` for `claude`, `codex`,
+     and `gemini` launch contexts.
 
 ### 4.3.3 `atm doctor`
 
@@ -822,12 +867,34 @@ Required baseline:
 - `atm teams spawn` accepts an explicit runtime selector (initially `claude`,
   `codex`, `gemini` where supported).
 - Proposed baseline command surface:
-  - `atm teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [--model <model>] [--cwd <path>] [--system-prompt <path>] [--sandbox <on|off>] [--approval-mode <mode>] [--include-directories <paths>] [--env KEY=VALUE ...] [--resume] [--resume-session-id <runtime_session_id>]`
+  - `atm teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [--model <model>] [--folder <path>|--cwd <path>] [--system-prompt <path>] [--sandbox <on|off>] [--approval-mode <mode>] [--include-directories <paths>] [--env KEY=VALUE ...] [--resume] [--resume-session-id <runtime_session_id>]`
 - Spawn supports two modes:
   - **fresh**: start a new runtime session with a system prompt/bootstrap prompt.
   - **resume**: continue an existing runtime session bound to the ATM agent.
 - User-facing control remains agent-centric (`team`, `agent`) rather than runtime
   session-centric for normal usage.
+
+### 4.3.4a Codex/Gemini Startup Guidance Prompt Injection
+
+When teammates are launched via `atm teams spawn` for `codex` or `gemini`,
+ATM must inject a short operational guidance block into the startup prompt path.
+
+Required behavior:
+- If caller supplies `--prompt`, ATM must prepend the guidance block before
+  caller text and append a short completion line after caller text.
+- If caller omits `--prompt`, ATM must still send the guidance block as the
+  initial prompt payload.
+- Injection is runtime-scoped to `codex` and `gemini` launch paths.
+
+Canonical guidance content (semantically equivalent text required):
+- `Agent-teams-mail is configured for this session.`
+- `<team-lead> is orchestrating this session.`
+- `atm read --timeout 60`
+- `atm send <team-member> "<message>"`
+
+Notes:
+- Team/member placeholders may be concretized using resolved team context.
+- Command examples must match actual ATM CLI syntax.
 
 ### 4.3.5 Runtime Session and Identity Mapping
 
@@ -1670,9 +1737,9 @@ Acceptance checks:
 
 ### 4.9 Team Hook Setup (`atm init`)
 
-The `atm init` command installs and validates Claude Code hook wiring for ATM
-session coordination. Hook script bodies are embedded in the ATM binary and
-materialized at install time.
+The `atm init` command provides one-command ATM setup and validates Claude Code
+hook wiring for session coordination. Hook script bodies are embedded in the
+ATM binary and materialized at install time.
 
 **Claude hook path reference**:
 - Canonical docs: https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
@@ -1682,37 +1749,51 @@ materialized at install time.
 
 ```bash
 atm init <team>
-atm init <team> --global
+atm init <team> --local
+atm init <team> --identity <name>
+atm init <team> --skip-team
 atm init --check
 atm init <team> --check
 ```
 
 **Arguments and flags**:
-- `<team>`: team name to bind for project/local installs.
-- `--global`: install in user scope (`~/.claude/settings.json`) instead of project scope.
+- `<team>`: target/default team name for generated `.atm.toml` and optional team creation.
+- `--local`: install hooks in project scope (`.claude/settings.json`) instead of default global scope.
+- `--identity <name>`: identity value written to `.atm.toml` (`team-lead` default).
+- `--skip-team`: skip team creation step (join-existing-team workflows).
 - `--check`: read-only validation; report missing/misaligned wiring without modifying files.
 
 #### 4.9.2 Behavior
 
-- Local install writes/merges hook entries in project `.claude/settings.json`.
-- Global install writes/merges hook entries in `~/.claude/settings.json`.
+- One-command setup order (idempotent at each step):
+  1. Create `.atm.toml` in cwd when missing (writes `identity`, `default_team`).
+  2. Create team (`~/.claude/teams/<team>/`) when missing, unless `--skip-team`.
+  3. Install hooks (global by default, or local with `--local`).
+- Default install writes/merges hook entries in `~/.claude/settings.json` (global scope).
+- `--local` install writes/merges hook entries in project `.claude/settings.json`.
 - Installs are idempotent: reruns preserve unrelated settings and avoid duplicate entries.
+- Existing `.atm.toml` is preserved (no silent overwrite); command reports that existing config was found.
+- Existing team is preserved (no duplicate recreation); command reports "team already exists".
 - Global-installed hooks must remain passive in non-ATM repositories; `.atm.toml` guard is the first hook operation.
 - Embedded hook scripts are the runtime source of truth.
 
 #### 4.9.3 File and Write Requirements
 
 - Use read-modify-write semantics; never wholesale rewrite settings files.
+- `.atm.toml` creation must also use read/merge-safe behavior (create-only by default; explicit mutation paths must be additive and transparent).
 - Preserve unknown fields and non-ATM hook entries.
 - Use atomic writes (temp + rename) and create parent directories as needed.
 - Report exact file path(s) modified in command output.
 - Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` (project scope) or `"${CLAUDE_PLUGIN_ROOT}"` (plugin scope), not repo-absolute paths.
+- `atm init` success output must include whether hooks were installed globally or locally.
 
 #### 4.9.4 Exit and Result Semantics
 
 - Exit `0` for `installed`, `updated`, `already-configured`, and `check-ok`.
 - Exit `1` for malformed config, unsupported environment, or write/permission failures.
 - `--check` output must include actionable guidance for each missing/misaligned hook entry.
+- Idempotent no-op cases (`.atm.toml` exists, team exists, hooks already configured)
+  are success states and must be explicitly reported in human output.
 
 ---
 
