@@ -4,10 +4,11 @@ use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_iden
 use agent_team_mail_core::daemon_client::{LaunchConfig, launch_agent, query_session_for_team};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
+use agent_team_mail_core::io::inbox::inbox_update;
 use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::model_registry::ModelId;
 use agent_team_mail_core::schema::{BackendType, TeamConfig};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Args;
 use serde_json::json;
@@ -831,8 +832,10 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
             if let Some(ref pane_id) = args.pane_id {
                 team_config.members[idx].tmux_pane_id = Some(pane_id.clone());
                 write_team_config(&config_path, &team_config)?;
+                ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
                 return Ok(AddMemberOutcome::UpdatedPaneId);
             } else {
+                ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
                 return Ok(AddMemberOutcome::AlreadyRegistered);
             }
         }
@@ -869,6 +872,7 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
             m.tmux_pane_id = Some(pane_id.clone());
         }
         write_team_config(&config_path, &team_config)?;
+        ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
         return Ok(AddMemberOutcome::UpdatedInactive);
     }
 
@@ -903,7 +907,31 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
 
     team_config.members.push(member);
     write_team_config(&config_path, &team_config)?;
+    ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
     Ok(AddMemberOutcome::Added)
+}
+
+fn ensure_member_inbox_atomic(team_dir: &Path, team_name: &str, agent_name: &str) -> Result<()> {
+    let inboxes_dir = team_dir.join("inboxes");
+    fs::create_dir_all(&inboxes_dir).with_context(|| {
+        format!(
+            "Failed to create inboxes directory for team '{}': {}",
+            team_name,
+            inboxes_dir.display()
+        )
+    })?;
+
+    let inbox_path = inboxes_dir.join(format!("{agent_name}.json"));
+    inbox_update(&inbox_path, team_name, agent_name, |_| {}).with_context(|| {
+        format!(
+            "Failed to create inbox '{}' for {}@{}",
+            inbox_path.display(),
+            agent_name,
+            team_name
+        )
+    })?;
+
+    Ok(())
 }
 
 /// Implement `atm teams update-member <team> <agent> [flags]`
@@ -1837,6 +1865,48 @@ mod tests {
 
         let age = format_age(timestamp);
         assert!(age.contains("day"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_add_member_creates_valid_inbox_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let original_home = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let result = add_member_internal(AddMemberArgs {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            agent_type: "codex".to_string(),
+            model: "unknown".to_string(),
+            cwd: None,
+            inactive: false,
+            pane_id: None,
+            session_id: None,
+            backend_type: None,
+        });
+        assert!(matches!(result, Ok(AddMemberOutcome::Added)));
+
+        let inbox_path = team_dir.join("inboxes/arch-ctm.json");
+        assert!(inbox_path.exists(), "inbox should exist after add-member");
+
+        let content = fs::read_to_string(&inbox_path).expect("read inbox");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("valid json");
+        assert!(parsed.is_array(), "inbox json must be an array");
+
+        // SAFETY: test-only cleanup.
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 
     #[test]
