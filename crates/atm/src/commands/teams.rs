@@ -3418,10 +3418,11 @@ mod tests {
 
     #[test]
     fn test_format_spawn_launch_command_claude_includes_required_flags() {
+        let test_cwd = std::env::temp_dir().join("repo");
         let spec = SpawnSpec {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
-            cwd: PathBuf::from("/tmp/repo"),
+            cwd: test_cwd,
             model: None,
             sandbox: None,
             approval_mode: None,
@@ -3441,10 +3442,11 @@ mod tests {
 
     #[test]
     fn test_format_spawn_launch_command_non_claude_passthrough() {
+        let test_cwd = std::env::temp_dir().join("repo");
         let spec = SpawnSpec {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
-            cwd: PathBuf::from("/tmp/repo"),
+            cwd: test_cwd.clone(),
             model: None,
             sandbox: None,
             approval_mode: None,
@@ -3452,8 +3454,8 @@ mod tests {
             resume_session_id: None,
             system_prompt: None,
         };
-        let command = "cd '/tmp/repo' && codex --yolo";
-        let rendered = format_spawn_launch_command(&RuntimeKind::Codex, &spec, command);
+        let command = format!("cd '{}' && codex --yolo", test_cwd.to_string_lossy());
+        let rendered = format_spawn_launch_command(&RuntimeKind::Codex, &spec, &command);
         assert_eq!(rendered, command);
     }
 }

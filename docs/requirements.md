@@ -650,6 +650,9 @@ Required baseline behavior:
 - Support resume-aware launch by passing parent session when available (for example,
   `leadSessionId`-derived handoff).
 - Deliver initial prompt/body content after launch using ATM messaging path.
+- Before reporting launch success or failure, `atm teams spawn` must print the
+  fully constructed launch command (with resolved team/agent/runtime flags and
+  env vars) so operators/agents can retry manually when launch fails.
 
 Hook/path compatibility requirements:
 - Generated hook commands must use `"$CLAUDE_PROJECT_DIR"` for project scripts and guard
