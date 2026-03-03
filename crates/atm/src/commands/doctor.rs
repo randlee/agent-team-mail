@@ -419,6 +419,14 @@ where
     let mut findings = Vec::new();
     let queried = query_states(team);
     let query_failed = queried.is_err();
+    if let Err(err) = &queried {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "DAEMON_UNREACHABLE",
+            format!("Daemon team-scoped state query failed for team '{team}': {err}"),
+        ));
+    }
     let daemon_states: HashMap<String, CanonicalMemberState> = queried
         .ok()
         .flatten()
@@ -1363,6 +1371,36 @@ mod tests {
             findings.iter().any(|f| {
                 f.code == "ACTIVE_WITHOUT_SESSION" && f.message.contains("query failed")
             })
+        );
+        assert!(findings.iter().any(|f| f.code == "DAEMON_UNREACHABLE"));
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_ignores_foreign_state_entries() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let findings = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(Some(vec![CanonicalMemberState {
+                agent: "foreign-agent".to_string(),
+                state: "offline".to_string(),
+                activity: "unknown".to_string(),
+                session_id: Some("foreign-sess".to_string()),
+                process_id: Some(9),
+                reason: "foreign team state".to_string(),
+                source: "session_registry".to_string(),
+            }]))
+        });
+        assert!(
+            findings.is_empty(),
+            "foreign-team daemon states must not create findings for this team's inactive members"
         );
     }
 
