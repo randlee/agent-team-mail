@@ -749,6 +749,10 @@ atm doctor --full
   core fields to `atm members`: name/type/model/status), followed by ordered findings by
   severity, then recommended remediation commands.
 - JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
+- Daemon-unreachable member-state queries MUST emit explicit finding code
+  `DAEMON_UNREACHABLE`.
+- When daemon member-state queries are unreachable/unavailable, member liveness in
+  snapshot/status surfaces MUST render `Unknown` (not `Offline`/`Dead`).
 - Recommendations must include directly runnable commands when applicable and MUST be
   context-aware/actionable for the reported finding class (for example, avoid suggesting
   commands that require unavailable session context without explicit fallback guidance).
@@ -807,6 +811,8 @@ Doctor non-failing requirement:
 - Failure to contact or auto-start daemon must not cause immediate process error
   if team/config inputs are otherwise readable; doctor must still emit a report
   with daemon health findings and return severity-based exit (`0` or `2`).
+- When report generation succeeds (including daemon-unreachable scenarios), doctor
+  MUST NOT return exit code `1`.
 - Exit `1` is reserved for true execution failures that prevent report creation
   (for example unreadable/malformed required team config or unrecoverable output
   serialization/write failure).
@@ -881,6 +887,8 @@ Required behavior:
 - No command-level fallback may map `isActive=false` directly to offline/dead.
 - Per-member status derivation logic must not be duplicated across commands;
   command handlers consume daemon snapshot values directly.
+- Reconciliation and diagnostics must be team-scoped:
+  daemon state for team `A` must not create findings for team `B`.
 
 #### Operational State Variable Inventory
 
