@@ -123,7 +123,7 @@ fn test_init_skip_team_does_not_create_team_config() {
 /// Partial-state case: .atm.toml already present, hooks not installed.
 /// init should install hooks and create team without touching .atm.toml.
 #[test]
-fn test_init_with_existing_atm_toml_installs_hooks_only() {
+fn test_init_with_existing_atm_toml_installs_hooks_and_team() {
     let home = TempDir::new().unwrap();
     let repo = home.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
