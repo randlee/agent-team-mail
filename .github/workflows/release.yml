@@ -825,32 +825,32 @@ jobs:
             # Ensure stale daemon is terminated on install/upgrade.
             # Must be non-fatal when no daemon is running.
             python3 - "$formula" <<'PY'
-import sys
-from pathlib import Path
+          import sys
+          from pathlib import Path
 
-path = Path(sys.argv[1])
-content = path.read_text(encoding="utf-8")
+          path = Path(sys.argv[1])
+          content = path.read_text(encoding="utf-8")
 
-block = (
-    "  def post_install\n"
-    "    system \"sh\", \"-c\", \"pkill -x atm-daemon || true\"\n"
-    "  end\n\n"
-)
+          block = (
+              "  def post_install\n"
+              "    system \"sh\", \"-c\", \"pkill -x atm-daemon || true\"\n"
+              "  end\n\n"
+          )
 
-if "def post_install" not in content:
-    marker = "\n  test do\n"
-    if marker not in content:
-        raise SystemExit(f"Unable to insert post_install: missing test block marker in {path}")
-    content = content.replace(marker, f"\n{block}  test do\n", 1)
-    path.write_text(content, encoding="utf-8")
-elif "pkill -x atm-daemon" not in content:
-    content = content.replace(
-        "def post_install\n",
-        "def post_install\n    system \"sh\", \"-c\", \"pkill -x atm-daemon || true\"\n",
-        1,
-    )
-    path.write_text(content, encoding="utf-8")
-PY
+          if "def post_install" not in content:
+              marker = "\n  test do\n"
+              if marker not in content:
+                  raise SystemExit(f"Unable to insert post_install: missing test block marker in {path}")
+              content = content.replace(marker, f"\n{block}  test do\n", 1)
+              path.write_text(content, encoding="utf-8")
+          elif "pkill -x atm-daemon" not in content:
+              content = content.replace(
+                  "def post_install\n",
+                  "def post_install\n    system \"sh\", \"-c\", \"pkill -x atm-daemon || true\"\n",
+                  1,
+              )
+              path.write_text(content, encoding="utf-8")
+          PY
             echo "Updated $formula"
           done
 
