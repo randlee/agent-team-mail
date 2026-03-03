@@ -774,7 +774,8 @@ atm doctor --full
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
 - `log_window`: `mode`, `start`, `end`
-- `env_overrides`: optional `atm_home`, `atm_team`, `atm_identity`
+- `env_overrides`: optional object fields `atm_home`, `atm_team`,
+  `atm_identity`; each value shape is `{ source, value }`
 
 #### `DoctorReport` Schema Contract and Compatibility
 
@@ -790,7 +791,9 @@ Current required `DoctorReport` shape:
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
 - `log_window`: `mode`, `start`, `end`
-- `env_overrides`: optional `atm_home`, `atm_team`, `atm_identity`
+- `env_overrides`: optional `atm_home`, `atm_team`, `atm_identity`, each with:
+  - `source`: override source tag (`"env"`)
+  - `value`: resolved non-empty value
 
 Logging-health expansion contract:
 - Target shape adds `logging` object with at least:
@@ -1120,6 +1123,8 @@ Additional config-path override:
   merged after repo/global config and before env/flag field overrides.
 - Explicit config path overrides are strict: unreadable/invalid files are
   errors (no silent fallback to other sources).
+- `ATM_HOME` is a filesystem-root override (path anchor for ATM runtime data),
+  not a config-value override in this resolution order.
 
 #### Configuration File (`.atm.toml`)
 

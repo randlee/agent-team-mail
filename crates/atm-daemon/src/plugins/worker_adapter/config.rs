@@ -541,6 +541,7 @@ impl Default for WorkersConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_nudge_config_default() {
@@ -679,6 +680,7 @@ tmux_session = false
     }
 
     #[test]
+    #[serial]
     fn test_config_atm_home_env() {
         unsafe {
             std::env::set_var("ATM_HOME", "/custom/atm");

@@ -4265,6 +4265,10 @@ mod tests {
     #[test]
     fn test_session_query_includes_runtime_metadata_fields() {
         let sr = make_sr();
+        let runtime_home = std::env::temp_dir()
+            .join("runtime/gemini/atm-dev/arch-ctm/home")
+            .to_string_lossy()
+            .into_owned();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_runtime_for_team(
@@ -4275,7 +4279,7 @@ mod tests {
                 Some("gemini".to_string()),
                 Some("gemini-session-123".to_string()),
                 Some("%42".to_string()),
-                Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+                Some(runtime_home.clone()),
             );
         }
         let req = make_request(
@@ -4292,7 +4296,7 @@ mod tests {
         );
         assert_eq!(
             payload["runtime_home"].as_str(),
-            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home")
+            Some(runtime_home.as_str())
         );
     }
 

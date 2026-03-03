@@ -383,28 +383,19 @@ With a tag, the pattern has been 100% reliable in testing. Without one, the mess
 
 `atm doctor --json` returns a stable top-level report object with:
 - `summary`
-- `member_snapshot`
 - `findings`
 - `recommendations`
 - `log_window`
+- `env_overrides`
 
-`member_snapshot` is included in JSON output as an array of per-member objects
-and appears before `findings` in the top-level object to keep machine
-consumers aligned with human output ordering.
-
-`member_snapshot[]` fields:
-- `name`
-- `agent_id`
-- `agent_type`
-- `model`
-- `status`
-- `activity`
-- `session_id` (nullable)
-- `process_id` (nullable)
+`env_overrides` fields (present only when the env var is set to a non-empty value):
+- `atm_home`: `{ "source": "env", "value": "<ATM_HOME>" }`
+- `atm_team`: `{ "source": "env", "value": "<ATM_TEAM>" }`
+- `atm_identity`: `{ "source": "env", "value": "<ATM_IDENTITY>" }`
 
 Change-control note:
-- Changed in Phase Y: `member_snapshot` was promoted to first-class JSON output
-  to support automation consumers.
+- Changed in Phase Y: `env_overrides` was added as a first-class top-level JSON
+  field for diagnostics triage.
 
 ---
 
