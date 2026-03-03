@@ -405,11 +405,13 @@ Before writing to the inbox, `atm send` queries daemon session state (`query_ses
 **Agent activity tracking (daemon-managed)**:
 
 The daemon tracks agent activity by monitoring inbox file changes and message timestamps:
-- `atm send` sets the sender's `isActive: true` and `lastActive` timestamp in team `config.json` as a heartbeat.
+- `atm send` sets the sender's `isActive: true` and `lastActive` timestamp in team `config.json` as an activity heartbeat.
 - The daemon watches inbox file events (already part of the event loop) and tracks last-activity-per-agent from `from` fields and `timestamp` values — no extra I/O beyond existing file watching.
 - After a configurable inactivity timeout (default: 5 minutes), the daemon sets `isActive: false` for the agent.
 - Two activity signals: (1) messages sent by the agent (`from` field across inboxes), (2) messages read by the agent (`read: true` transitions).
-- `lastActive` is stored in the member entry in `config.json` (ISO 8601 timestamp).
+- `isActive` definition: **agent is busy / not idle and may be less responsive**.
+- `lastActive` is stored in the member entry in `config.json` as epoch-millis (`u64`).
+- `lastActive` is activity-driven only and MUST NOT be updated from PID/liveness checks.
 
 **Call-to-action text precedence** (highest to lowest):
 1. `--offline-action "custom text"` CLI flag
@@ -550,7 +552,8 @@ atm members                      # default team
 atm members <team>               # specific team
 ```
 
-**Output**: Agent name, type, model, active status (from `config.json`).
+**Output**: Agent name, type, model, daemon-derived liveness status and activity.
+`atm members` must use the same canonical daemon state snapshot contract as `atm doctor`.
 
 #### `atm status`
 
@@ -561,7 +564,8 @@ atm status                       # default team
 atm status <team>                # specific team
 ```
 
-**Output**: Team info, member list with activity, unread message counts, pending tasks.
+**Output**: Team info, member list with daemon-derived status + activity, unread message counts, pending tasks.
+`atm status` must use the same canonical daemon state snapshot contract as `atm doctor`.
 
 #### `atm teams add-member`
 
@@ -722,6 +726,41 @@ atm doctor --full
 - Config/runtime drift: detect path/env mismatches relevant to daemon/team operation.
 - Unified log diagnostics: summarize warning/error events in the configured time window.
 
+**Authoritative state model (single source of truth)**:
+- Daemon session/registry state is the authoritative source for member liveness and
+  session state in doctor reports.
+- `config.json` `isActive` is activity metadata only (busy/idle signal), not a
+  liveness indicator.
+- Doctor must never infer liveness from `isActive`, mailbox timestamps, or roster
+  presence when daemon/session data is available.
+- If daemon is unreachable, doctor must emit an explicit daemon-reachability finding
+  and mark member liveness as `Unknown` (not `Dead`).
+- Liveness fallback facades (for example mapping `isActive=false` to offline/dead)
+  are prohibited.
+- Doctor/status/members must not implement independent liveness/state derivation logic.
+  They must consume daemon-provided canonical member state directly.
+
+**Daemon canonical member state contract**:
+- Daemon must expose one canonical member-state struct/snapshot for diagnostics surfaces
+  (doctor, status, members).
+- Minimum canonical fields per member:
+  - `name`
+  - `agent_id`
+  - `agent_type`
+  - `model`
+  - `process_id` (nullable)
+  - `session_id` (nullable)
+  - `status` (`active|idle|dead|unknown`)
+  - `activity` (`busy|idle|unknown`)
+  - `state_source` (for observability/debug)
+- Doctor/status/members rendering may format labels, but semantic values must come from
+  this daemon struct with no recomputation.
+- `dead` definition: tracked session/process is terminated (PID no longer exists or
+  session registry marks dead). Dead is terminal for that session/PID; recovery
+  requires new spawn/register with a different session/PID.
+- `offline` is not a canonical daemon/member status for diagnostics surfaces.
+  Legacy `offline` values must be normalized to `dead`.
+
 **Default warning/error log window**:
 - `since = max(team-lead session start, last doctor call time)`.
 - First call (no prior doctor state) uses team-lead session start.
@@ -746,8 +785,18 @@ atm doctor --full
 
 **Output requirements**:
 - Human-readable output MUST start with a concise team member snapshot table (equivalent
-  core fields to `atm members`: name/type/model/status), followed by ordered findings by
-  severity, then recommended remediation commands.
+  core fields to `atm members`) followed by ordered findings by severity, then
+  recommended remediation commands.
+- Snapshot table MUST include at minimum: `Name`, `Agent ID`, `Type`, `Model`,
+  `PID`, `Session ID`, `Status`, `Activity`.
+- `Status` values are daemon-derived and limited to:
+  - `Active` (daemon says live + currently busy),
+  - `Idle` (daemon says live + currently not busy),
+  - `Dead` (daemon has known prior session/process and it is no longer alive),
+  - `Unknown` (daemon has no record for member, or daemon unreachable).
+- `Activity` reflects busy/idle metadata and must not be displayed as liveness.
+- The `Status`/`Activity` values in doctor must be pass-through mappings of daemon
+  canonical state (label translation only), not independently recomputed.
 - JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
 - Recommendations must include directly runnable commands when applicable and MUST be
   context-aware/actionable for the reported finding class (for example, avoid suggesting
@@ -806,6 +855,31 @@ Doctor non-failing requirement:
 - Exit `1` is reserved for true execution failures that prevent report creation
   (for example unreadable/malformed required team config or unrecoverable output
   serialization/write failure).
+
+#### Operational State Variable Inventory (Doctor/Lifecycle Scope)
+
+To prevent state-facade regressions, the following variables are canonical for
+diagnostics and lifecycle behavior:
+
+| State Variable | Persistence Location | Owner | Allowed Values | Meaning | Source of Truth for Doctor |
+|----------------|----------------------|-------|----------------|---------|----------------------------|
+| `session_registry.state` | daemon session registry | daemon | `active`, `dead` | Session liveness for `(team, agent, session_id, process_id)` | **Authoritative** |
+| `agent_availability.state` | daemon in-memory/durable availability state | daemon | `busy`, `idle`, `unknown`, `dead` | Runtime availability/turn state + terminal liveness | **Authoritative** |
+| `process_id` / `pid` | daemon session registry + runtime launch metadata | daemon/runtime adapter | positive integer | OS process identity for liveness checks | **Authoritative when present** |
+| `session_id` | daemon session registry (plus team config linkage) | daemon | non-empty string | Runtime/agent session identity | **Authoritative in daemon path** |
+| `config.members[].isActive` | `~/.claude/teams/<team>/config.json` | CLI + daemon reconciliation | `true`, `false`, `null` | Activity heartbeat metadata (`true` means busy / not idle), not liveness | **Non-authoritative for liveness** |
+| `config.members[].lastActive` | team `config.json` | CLI + daemon reconciliation | epoch-millis `u64` or null | Last activity heartbeat/update time | Informational only |
+| `config.lead_session_id` | team `config.json` | registration/teams flows | string | Last registered lead session reference | Advisory linkage; daemon validates live state |
+| `doctor.log_window` | `doctor-state.json` + invocation args | doctor command | `{mode,start,end}` | Incremental diagnostics window | Authoritative for diagnostics scope only |
+| `logging.health_state` | shared logging-health evaluator output | daemon+CLI evaluator | `healthy`, `degraded_spooling`, `degraded_dropping`, `unavailable` | Unified logging pipeline health | Authoritative for logging diagnostics |
+
+Contract rules:
+- Doctor must derive liveness/session status from daemon-owned state variables.
+- `isActive`/`lastActive` must never be mapped directly to dead/offline status.
+- If daemon state is unavailable, doctor reports `Unknown` with explicit daemon
+  reachability finding; it must not synthesize dead/offline from config-only data.
+- Doctor/status/members must consume daemon canonical state struct directly; no
+  duplicate liveness logic in command handlers.
 
 ### 4.3.3a Operational Health Monitor (`atm-monitor`)
 
@@ -1257,7 +1331,7 @@ Spool filename convention:
   only after successful merge.
 - Merge ordering: timestamp then file order, append-only.
 - Daemon startup spool merge and daemon runtime writer MUST target the same canonical
-  path resolved from `ATM_LOG_FILE`/`ATM_LOG_PATH` (or default `atm.log.jsonl`).
+  path resolved from `ATM_LOG_FILE` (or default `atm.log.jsonl`).
   Divergent startup/runtime sink paths are forbidden.
 
 #### Default-On and Health State Requirements
@@ -1329,9 +1403,11 @@ No legacy `events.jsonl` sink code remains in any crate.
 
 #### Runtime Controls
 
-- `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
-- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy.
-- `ATM_LOG_FILE` may override file path for tests/ops; `ATM_LOG_PATH` remains alias.
+- `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity
+  (default: `info` when unset or invalid).
+- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy
+  (default: `truncated` when unset or invalid).
+- `ATM_LOG_FILE` may override file path for tests/ops.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
 
@@ -1347,6 +1423,22 @@ CLI must ensure daemon availability before executing daemon-backed commands, inc
 - plugin-backed operations
 
 If daemon is unreachable, CLI attempts auto-start once per command invocation.
+
+Environment controls for daemon startup:
+- `ATM_DAEMON_AUTOSTART` gates auto-start behavior.
+  - Missing/unset value defaults to enabled.
+  - Explicit falsey values (`0`, `false`, `no`) disable auto-start for that process.
+- `ATM_DAEMON_BIN` may override the daemon executable path for testing/ops.
+  - Invalid paths must fail with actionable diagnostics.
+  - Override must not weaken single-instance lock guarantees.
+
+Environment variable scope discipline:
+- Normal product operation must not require daemon override env vars.
+- `ATM_DAEMON_AUTOSTART` and `ATM_DAEMON_BIN` are test/ops controls and must not be
+  required in standard user workflows.
+- Doctor diagnostics should surface active non-default daemon override env vars as
+  contextual info to aid troubleshooting.
+- New daemon behavior env vars are not allowed without explicit requirements updates.
 
 #### Single-Instance Contract
 
@@ -1402,6 +1494,8 @@ Scalability expectation:
   be overwritten by a second process.
 - `atm logs` default view and daemon startup spool merge must observe the same
   canonical `atm.log.jsonl` sink path.
+- PID reuse guard: simulated PID-reuse identity mismatch must classify the
+  original session as `dead` and must not be reported as a live continuation.
 
 #### Daemon Session Registry Contract
 
@@ -1430,6 +1524,20 @@ Minimum record shape:
   "updated_at": "2026-02-27T00:00:00Z"
 }
 ```
+
+PID reuse safety requirements:
+- PID alone is insufficient identity for session liveness.
+- Daemon session records must include process-identity metadata sufficient to
+  distinguish PID reuse (for example process start/birth time; optional runtime
+  executable fingerprint where available).
+- A session is considered alive only when:
+  1. PID exists, and
+  2. process-identity metadata still matches the recorded session metadata.
+- If PID exists but identity metadata mismatches, daemon must treat the original
+  session as `dead` (PID reused) and must not attach the new process to the old
+  session automatically.
+- Doctor/status outputs must surface PID-reuse mismatches as explicit diagnostics
+  (for example `PID_REUSED_SESSION_INVALIDATED`) with remediation guidance.
 
 #### CLI Spawn/Readiness Flow
 
@@ -1475,14 +1583,14 @@ Acceptance checks:
 #### Agent State Transition Requirements
 
 - Agent state must transition based on lifecycle events plus PID liveness checks.
-- Supported baseline states: `unknown`, `active`, `idle`, `offline`.
+- Supported baseline states: `unknown`, `active`, `idle`, `dead`.
 - State transitions must record `reason` and `source` for troubleshooting.
 - Team/status outputs must reflect reconciled state within one poll window.
 
 Acceptance checks:
-- `session_start` drives `unknown/offline -> active`.
+- `session_start` drives `unknown/dead -> active` for new session/PID.
 - `teammate_idle` drives `active -> idle`.
-- PID death drives `active/idle -> offline` when lifecycle end is missing.
+- PID death drives `active/idle -> dead` when lifecycle end is missing.
 - Conflicting signals resolve deterministically (latest valid event with liveness guard).
 
 ### 4.8 MCP Server Setup (`atm mcp`)

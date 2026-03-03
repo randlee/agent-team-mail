@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
 **Version**: 0.5
-**Date**: 2026-02-25
-**Status**: Phase X planning in progress (post-v0.30.0 release).
+**Date**: 2026-03-03
+**Status**: Phase Y planning in progress (doctor source-of-truth and diagnostics hardening).
 
 ---
 
@@ -163,7 +163,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | R | Session Handoff + Hook Installer | Daemon singleton lock, session registry, `atm doctor` | COMPLETE |
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
-| X | Team Onboarding + TUI/Doctor Stability | `/team-join`, spawn path normalization, `atm init` one-command setup, and carry-forward bug-debt mapping | PLANNED |
+| X | Team Onboarding + TUI/Doctor Stability | `/team-join`, spawn path normalization, `atm init` one-command setup, and carry-forward bug-debt mapping | COMPLETE |
+| Y | Doctor Source-of-Truth Hardening | Daemon-authoritative state model, doctor output clarity, env-var discipline | PLANNED |
 
 ---
 
@@ -1146,7 +1147,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | PLANNED | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
 
 ---
-## 17.10 Phase X: Team Join UX + Cross-Folder Spawn Planning
+## 17.10 Phase X: Team Join UX + Cross-Folder Spawn — COMPLETE (v0.31.0)
 
 **Goal**: Add a first-class `/team-join` onboarding flow for existing teams and
 standardize runtime launch path selection with `--folder` across spawn surfaces.
@@ -1155,7 +1156,8 @@ hook installation defaults.
 **Execution reference**: `docs/test-plan-phase-X.md`.
 
 **Integration branch**: `integrate/phase-X` off `develop`.
-**Dependency graph**: X.1 → {X.2, X.3}; X.4/X.5/X.6 deferred follow-on.
+**Dependency graph**: X.1 → {X.2, X.3}; X.4-X.7 delivered as follow-on closure.
+**Status**: COMPLETE. Phase integration merged via PR [#370](https://github.com/randlee/agent-team-mail/pull/370); follow-on requirements/doc sync via PR [#371](https://github.com/randlee/agent-team-mail/pull/371).
 
 **Dependency rationale**:
 - X.2 depends on X.1 because join/launch output contracts must settle canonical
@@ -1248,25 +1250,93 @@ worktree-driven launches.
 - `--identity` writes requested identity in `.atm.toml`.
 - `docs/quickstart.md` is created with minimum required sections and worktree/global rationale.
 
-### Deferred Technical Debt Carry-Forward (Phase X Follow-On)
+### Phase X Follow-On Closure (Completed in X.4-X.7)
 
 The following issues are explicitly tracked but deferred from X.1-X.3 to keep
 the current tranche focused on onboarding contract closure.
 
-| Sprint | Issue | Status | Deferral Rationale |
-|--------|-------|--------|--------------------|
-| X.4 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | DEFERRED | Doctor duration parser correctness is isolated from join/init onboarding scope; scheduled after X.1-X.3 merge. |
-| X.5 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | DEFERRED | Test-serialization hardening is CI debt cleanup and can proceed independently after onboarding contract stabilization. |
-| X.6 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | DEFERRED | `add-member` inbox atomicity is important but not a prerequisite for `/team-join`/`atm init` contract planning closure in this tranche. |
+| Sprint | Issue | Status | Closure Notes |
+|--------|-------|--------|---------------|
+| X.4 | [#366](https://github.com/randlee/agent-team-mail/issues/366) | COMPLETE | Delivered in stale-daemon upgrade hardening sprint (PR #367). |
+| X.5 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | COMPLETE | Delivered in Phase X follow-on validation hygiene sprint (PR #368). |
+| X.6 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | COMPLETE | Delivered in Phase X follow-on validation hygiene sprint (PR #368). |
+| X.7 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | COMPLETE | Delivered in Phase X add-member atomicity sprint (PR #369). |
 
 | Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
-| X.1 | `/team-join` contract + slash-command flow planning | — | M | PLANNED | [#351](https://github.com/randlee/agent-team-mail/issues/351) |
-| X.2 | Spawn `--folder` normalization across runtimes | X.1 | S | PLANNED | [#361](https://github.com/randlee/agent-team-mail/issues/361) |
-| X.3 | `atm init` one-command setup + default-global hooks | X.1 | M | PLANNED | [#357](https://github.com/randlee/agent-team-mail/issues/357) |
-| X.4 | Doctor duration parser boundary fix (`parse_since_input`) | — | XS | DEFERRED | [#287](https://github.com/randlee/agent-team-mail/issues/287) |
-| X.5 | Serialize env-mutating daemon tests (`ATM_HOME`) | — | S | DEFERRED | [#337](https://github.com/randlee/agent-team-mail/issues/337) |
-| X.6 | `teams add-member` inbox atomicity | — | S | DEFERRED | [#338](https://github.com/randlee/agent-team-mail/issues/338) |
+| X.1 | `/team-join` contract + slash-command flow planning | — | M | COMPLETE | [#351](https://github.com/randlee/agent-team-mail/issues/351) |
+| X.2 | Spawn `--folder` normalization across runtimes | X.1 | S | COMPLETE | [#361](https://github.com/randlee/agent-team-mail/issues/361) |
+| X.3 | `atm init` one-command setup + default-global hooks | X.1 | M | COMPLETE | [#357](https://github.com/randlee/agent-team-mail/issues/357) |
+| X.4 | Kill stale daemon on install/upgrade | X.3 | XS | COMPLETE | [#366](https://github.com/randlee/agent-team-mail/issues/366) |
+| X.5 | Doctor duration parser boundary fix (`parse_since_input`) | — | XS | COMPLETE | [#287](https://github.com/randlee/agent-team-mail/issues/287) |
+| X.6 | Serialize env-mutating daemon tests (`ATM_HOME`) | — | S | COMPLETE | [#337](https://github.com/randlee/agent-team-mail/issues/337) |
+| X.7 | `teams add-member` inbox atomicity | — | S | COMPLETE | [#338](https://github.com/randlee/agent-team-mail/issues/338) |
+
+---
+## 17.11 Phase Y: Doctor Source-of-Truth + State Model Cleanup
+
+**Goal**: Eliminate diagnostics state-facade behavior by making doctor outputs
+daemon-authoritative, define one explicit operational state model, and lock env-var
+behavior to production-safe defaults plus test/ops-only overrides.
+**Execution reference**: `docs/test-plan-phase-Y.md`.
+
+**Integration branch**: `integrate/phase-Y` off `develop`.
+**Dependency graph**: Y.1 → {Y.2, Y.3}; Y.4 follows Y.1-Y.3.
+
+### Y.1 — Canonical state model + source-of-truth enforcement ([#378](https://github.com/randlee/agent-team-mail/issues/378))
+
+**Problem**: `isActive` and daemon liveness semantics are conflated across status/doctor
+surfaces, causing false offline/dead reporting.
+
+**Deliverables**:
+1. Canonical state-variable inventory in requirements (owner, persistence, allowed values).
+2. Enforce doctor rule: daemon session/registry is liveness source of truth.
+3. Explicitly prohibit config-only liveness facades (`isActive` fallback).
+4. Add daemon-exported canonical member-state struct and require doctor/status/members
+   to consume it directly (no duplicate liveness derivation in command handlers).
+
+### Y.2 — Doctor member snapshot clarity + status contract ([#379](https://github.com/randlee/agent-team-mail/issues/379))
+
+**Problem**: Doctor findings without a consistent member-state snapshot hinder triage.
+
+**Deliverables**:
+1. Snapshot-first doctor output contract (members table before findings).
+2. Required columns: `Name`, `Agent ID`, `Type`, `Model`, `PID`, `Session ID`,
+   `Status`, `Activity`.
+3. Status taxonomy locked to `Active|Idle|Dead|Unknown` with daemon-derived semantics.
+
+### Y.3 — Team-scoped reconciliation + daemon-unreachable semantics ([#380](https://github.com/randlee/agent-team-mail/issues/380))
+
+**Problem**: Cross-team bleed and daemon-unreachable handling can produce misleading
+findings.
+
+**Deliverables**:
+1. Team-scoped reconciliation requirement for doctor/session integrity checks.
+2. Explicit daemon-unreachable finding class; member liveness rendered `Unknown`.
+3. Non-failing doctor behavior retained (report must still be emitted).
+4. PID reuse guard: daemon liveness checks must validate process identity
+   (PID + birth/start identity), not PID existence alone.
+
+### Y.4 — Environment variable discipline and defaults ([#381](https://github.com/randlee/agent-team-mail/issues/381))
+
+**Problem**: Troubleshooting reliability degrades when hidden/legacy env behavior is
+unclear.
+
+**Deliverables**:
+1. Remove deprecated/alias env vars from requirements surfaces.
+2. Default behavior documented and test-planned:
+   - `ATM_LOG` default `info`
+   - `ATM_LOG_MSG` default `truncated`
+   - `ATM_DAEMON_AUTOSTART` default enabled when missing
+3. Restrict daemon override env vars (`ATM_DAEMON_BIN`, `ATM_DAEMON_AUTOSTART`) to
+   test/ops controls and require doctor visibility for active overrides.
+
+| Sprint | Name | Depends On | Size | Status | Issue |
+|--------|------|------------|------|--------|-------|
+| Y.1 | Canonical state model + source-of-truth enforcement | — | M | PLANNED | [#378](https://github.com/randlee/agent-team-mail/issues/378) |
+| Y.2 | Doctor snapshot/status contract hardening | Y.1 | S | PLANNED | [#379](https://github.com/randlee/agent-team-mail/issues/379) |
+| Y.3 | Team-scoped reconciliation + daemon-unreachable semantics | Y.1 | M | PLANNED | [#380](https://github.com/randlee/agent-team-mail/issues/380) |
+| Y.4 | Env-var discipline + defaults verification | Y.1,Y.2,Y.3 | S | PLANNED | [#381](https://github.com/randlee/agent-team-mail/issues/381) |
 
 ---
 ## 18. Future Plugins
@@ -1405,10 +1475,54 @@ the current tranche focused on onboarding contract closure.
 | **Q** | Q.2 | Integration tests + cross-platform validation | COMPLETE | [#253](https://github.com/randlee/agent-team-mail/pull/253) |
 | **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | COMPLETE | — |
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
+| **R** | R.0 | Daemon singleton lock + canonical log sink alignment | COMPLETE | [#266](https://github.com/randlee/agent-team-mail/pull/266) |
+| **R** | R.0b | Session registry + lifecycle management | COMPLETE | [#267](https://github.com/randlee/agent-team-mail/pull/267), [#277](https://github.com/randlee/agent-team-mail/pull/277) |
+| **R** | R.0c | `atm doctor` diagnostics and cleanup guidance | COMPLETE | [#268](https://github.com/randlee/agent-team-mail/pull/268) |
+| **R** | R.0d/R.0e | Runtime compatibility research (Gemini/OpenCode) | COMPLETE | [#271](https://github.com/randlee/agent-team-mail/pull/271) |
+| **R** | — | Phase integration | COMPLETE | [#272](https://github.com/randlee/agent-team-mail/pull/272) |
+| **S** | S.1 | Gemini baseline adapter | COMPLETE | [#278](https://github.com/randlee/agent-team-mail/pull/278) |
+| **S** | S.2a | `atm init` hook installer core | COMPLETE | [#276](https://github.com/randlee/agent-team-mail/pull/276) |
+| **S** | — | Phase integration | COMPLETE | [#279](https://github.com/randlee/agent-team-mail/pull/279) |
+| **T** | T.1 | Daemon auto-start on CLI usage | COMPLETE | [#288](https://github.com/randlee/agent-team-mail/pull/288) |
+| **T** | T.2 | Agent roster seeding + state transitions | COMPLETE | [#289](https://github.com/randlee/agent-team-mail/pull/289) |
+| **T** | T.5a | CLI crate publishability hardening | COMPLETE | [#290](https://github.com/randlee/agent-team-mail/pull/290) |
+| **T** | T.5b | `atm-monitor` health monitor | COMPLETE | [#294](https://github.com/randlee/agent-team-mail/pull/294) |
+| **T** | T.5c | Availability signaling clarification | COMPLETE | [#295](https://github.com/randlee/agent-team-mail/pull/295) |
+| **T** | T.3/T.4 | Gemini spawn wiring + resume fix | COMPLETE | [#296](https://github.com/randlee/agent-team-mail/pull/296), [#297](https://github.com/randlee/agent-team-mail/pull/297) |
+| **T** | T.6 | TUI coverage closure | COMPLETE | [#299](https://github.com/randlee/agent-team-mail/pull/299) |
+| **T** | T.7 | Publishing hardening process | COMPLETE | [#298](https://github.com/randlee/agent-team-mail/pull/298) |
+| **T** | — | Phase integration | COMPLETE | [#300](https://github.com/randlee/agent-team-mail/pull/300) |
+| **U** | U.1 | Doctor scoping + recommendation routing | COMPLETE | [#311](https://github.com/randlee/agent-team-mail/pull/311) |
+| **U** | U.2 | Lifecycle teardown convergence | COMPLETE | [#312](https://github.com/randlee/agent-team-mail/pull/312) |
+| **U** | U.3 | Doctor snapshot + register guidance | COMPLETE | [#313](https://github.com/randlee/agent-team-mail/pull/313) |
+| **U** | U.4 | Daemon reliability verification evidence | COMPLETE | [#314](https://github.com/randlee/agent-team-mail/pull/314) |
+| **U** | U.5 | Gemini runtime verification evidence | COMPLETE | [#315](https://github.com/randlee/agent-team-mail/pull/315) |
+| **U** | U.6 | CLI publishability verification evidence | COMPLETE | [#316](https://github.com/randlee/agent-team-mail/pull/316) |
+| **U** | U.7 | Availability signaling verification evidence | COMPLETE | [#319](https://github.com/randlee/agent-team-mail/pull/319) |
+| **U** | U.8 | TUI verification evidence | COMPLETE | [#317](https://github.com/randlee/agent-team-mail/pull/317) |
+| **U** | — | Phase integration | COMPLETE | [#320](https://github.com/randlee/agent-team-mail/pull/320) |
+| **V** | V.0 | Doctor baseline investigation + test mapping | COMPLETE | [#340](https://github.com/randlee/agent-team-mail/pull/340) |
+| **V** | V.1/V.2/V.3 | Doctor/lifecycle convergence + follow-up | COMPLETE | [#342](https://github.com/randlee/agent-team-mail/pull/342), [#347](https://github.com/randlee/agent-team-mail/pull/347) |
+| **V** | V.4 | Terminal cleanup/session-registry convergence | COMPLETE | [#345](https://github.com/randlee/agent-team-mail/pull/345) |
+| **V** | V.7 | Logging identity + send-target contract | COMPLETE | [#346](https://github.com/randlee/agent-team-mail/pull/346), [#348](https://github.com/randlee/agent-team-mail/pull/348) |
+| **V** | — | Hotfix test isolation | COMPLETE | [#350](https://github.com/randlee/agent-team-mail/pull/350) |
+| **V** | — | Phase integration | COMPLETE | [#353](https://github.com/randlee/agent-team-mail/pull/353) |
+| **W** | W.1 | Offline-send fix | COMPLETE | [#343](https://github.com/randlee/agent-team-mail/pull/343) |
+| **W** | W.2 | Publisher rewrite | COMPLETE | [#341](https://github.com/randlee/agent-team-mail/pull/341) |
+| **W** | W.3 | Release workflow hardening | COMPLETE | [#344](https://github.com/randlee/agent-team-mail/pull/344) |
+| **W** | W.4 | Pre-publish audit + release summary | COMPLETE | [#349](https://github.com/randlee/agent-team-mail/pull/349) |
+| **W** | — | Phase integration | COMPLETE | [#352](https://github.com/randlee/agent-team-mail/pull/352) |
+| **X** | X.1 | `atm teams join` contract + tests | COMPLETE | [#362](https://github.com/randlee/agent-team-mail/pull/362) |
+| **X** | X.2 | Spawn `--folder` normalization | COMPLETE | [#363](https://github.com/randlee/agent-team-mail/pull/363) |
+| **X** | X.3 | One-command `atm init` onboarding | COMPLETE | [#364](https://github.com/randlee/agent-team-mail/pull/364) |
+| **X** | X.4 | Kill stale daemon on install/upgrade | COMPLETE | [#367](https://github.com/randlee/agent-team-mail/pull/367) |
+| **X** | X.5/X.6 | Validation hygiene + add-member atomicity prerequisites | COMPLETE | [#368](https://github.com/randlee/agent-team-mail/pull/368) |
+| **X** | X.7 | `teams add-member` atomic inbox creation | COMPLETE | [#369](https://github.com/randlee/agent-team-mail/pull/369) |
+| **X** | — | Phase integration + requirements sync | COMPLETE | [#370](https://github.com/randlee/agent-team-mail/pull/370), [#371](https://github.com/randlee/agent-team-mail/pull/371) |
 
-**Completed**: 99+ sprints across 23 phases (CI green)
-**Current version**: v0.27.0
-**Next**: Phase X (planning)
+**Completed**: See table above (phases 1-X complete; Y planned)
+**Current version**: v0.31.0
+**Next**: Phase Y (planning)
 
 ---
 
@@ -1434,6 +1548,14 @@ the current tranche focused on onboarding contract closure.
 | Phase N | [#221](https://github.com/randlee/agent-team-mail/pull/221) | Merged |
 | Phase O-R | [#238](https://github.com/randlee/agent-team-mail/pull/238) | Merged |
 | Phase P | Sprint PRs targeted develop directly (no integration branch) | Merged |
+| Phase Q | Sprint PRs targeted develop directly (no integration branch) | Merged |
+| Phase R | [#272](https://github.com/randlee/agent-team-mail/pull/272) | Merged |
+| Phase S | [#279](https://github.com/randlee/agent-team-mail/pull/279) | Merged |
+| Phase T | [#300](https://github.com/randlee/agent-team-mail/pull/300) | Merged |
+| Phase U | [#320](https://github.com/randlee/agent-team-mail/pull/320) | Merged |
+| Phase V | [#353](https://github.com/randlee/agent-team-mail/pull/353) | Merged |
+| Phase W | [#352](https://github.com/randlee/agent-team-mail/pull/352) | Merged |
+| Phase X | [#370](https://github.com/randlee/agent-team-mail/pull/370) | Merged |
 
 ---
 
@@ -1443,23 +1565,20 @@ the current tranche focused on onboarding contract closure.
 
 | Issue | Description | Planned Sprint | Notes |
 |-------|-------------|----------------|-------|
-| [#181](https://github.com/randlee/agent-team-mail/issues/181) | Daemon not auto-starting | T.1 | **Critical** — blocks all daemon-dependent features |
-| [#182](https://github.com/randlee/agent-team-mail/issues/182) | Agent roster not seeded from config.json | T.2 | **Critical** — daemon starts with empty roster |
-| [#183](https://github.com/randlee/agent-team-mail/issues/183) | Agent state never transitions | T.2 | **Critical** — state tracking broken (consolidated into T.2, PR #289) |
-| [#184](https://github.com/randlee/agent-team-mail/issues/184) | TUI right panel contradicts left panel | T.4 | Needs investigation — may be fixed by Phase L |
-| [#185](https://github.com/randlee/agent-team-mail/issues/185) | No message viewing in TUI | T.5 | Enhancement |
-| [#186](https://github.com/randlee/agent-team-mail/issues/186) | Per-agent output.log never written | — | May be superseded by Phase L unified logging — **needs verification** |
-| [#187](https://github.com/randlee/agent-team-mail/issues/187) | TUI header missing version number | T.6 | Quick fix |
-| [#188](https://github.com/randlee/agent-team-mail/issues/188) | Logging overhaul prerequisite | — | May be addressed by Phase L — **needs verification** |
+| [#181](https://github.com/randlee/agent-team-mail/issues/181) | Daemon not auto-starting | T.1 follow-up | **Critical** regression tracker |
+| [#182](https://github.com/randlee/agent-team-mail/issues/182) | Agent roster not seeded from config.json | T.2 follow-up | **Critical** roster bootstrap tracker |
+| [#184](https://github.com/randlee/agent-team-mail/issues/184) | TUI right panel contradicts left panel | T.6 follow-up | Open regression-tracking item |
+| [#185](https://github.com/randlee/agent-team-mail/issues/185) | No message viewing in TUI | T.6 follow-up | Open enhancement-tracking item |
+| [#187](https://github.com/randlee/agent-team-mail/issues/187) | TUI header missing version number | T.6 follow-up | Open polish-tracking item |
 | [#45](https://github.com/randlee/agent-team-mail/issues/45) | Tmux Sentinel Injection | T.11 | Enhancement |
-| [#46](https://github.com/randlee/agent-team-mail/issues/46) | Codex Idle Detection via Notify Hook | T.12 | Enhancement |
-| [#47](https://github.com/randlee/agent-team-mail/issues/47) | Ephemeral Pub/Sub for Agent Availability | T.13 | Enhancement |
-| [#351](https://github.com/randlee/agent-team-mail/issues/351) | Add `/team-join` slash command | X.1 | New onboarding UX contract; paired with `atm teams join` CLI planning |
-| [#361](https://github.com/randlee/agent-team-mail/issues/361) | Spawn path normalization (`--folder` canonical, `--cwd` compatibility) | X.2 | Canonical spawn-directory contract across runtimes |
-| [#357](https://github.com/randlee/agent-team-mail/issues/357) | `atm init` full one-command setup + default global hooks | X.3 | One-command onboarding (`.atm.toml` + team + hooks) plus quickstart updates |
-| [#287](https://github.com/randlee/agent-team-mail/issues/287) | `parse_since_input` accepts `0m` and negative durations | X.4 (deferred) | Deferred follow-on from Phase X onboarding tranche |
-| [#337](https://github.com/randlee/agent-team-mail/issues/337) | Missing `#[serial]` on env-mutating daemon tests (`ATM_HOME`) | X.5 (deferred) | Deferred CI-debt cleanup in Phase X follow-on |
-| [#338](https://github.com/randlee/agent-team-mail/issues/338) | `add-member` does not create inbox atomically | X.6 (deferred) | Deferred follow-on after onboarding contract closure |
+| [#360](https://github.com/randlee/agent-team-mail/issues/360) | Release workflow post-publish verify hits crates.io 403 rate limits | Unplanned | Release-process reliability backlog |
+| [#365](https://github.com/randlee/agent-team-mail/issues/365) | Hardcoded `/tmp` paths in tests (cross-platform fragility) | Unplanned | Test portability backlog |
+| [#372](https://github.com/randlee/agent-team-mail/issues/372) | `test_concurrent_sends_no_data_loss` hangs on macOS CI | Y backlog | Concurrency/deadlock follow-up |
+| [#373](https://github.com/randlee/agent-team-mail/issues/373) | Add `--dry-run` to `atm teams cleanup` | Y backlog | Safer cleanup preview path |
+| [#378](https://github.com/randlee/agent-team-mail/issues/378) | Daemon-authoritative member-state model (single source of truth) | Y.1 | **Critical** doctor/status/members parity |
+| [#379](https://github.com/randlee/agent-team-mail/issues/379) | Doctor snapshot-first member table + status/activity contract | Y.2 | Output contract + triage clarity |
+| [#380](https://github.com/randlee/agent-team-mail/issues/380) | Team-scoped reconciliation + daemon-unreachable semantics | Y.3 | Scope correctness + non-failing behavior |
+| [#381](https://github.com/randlee/agent-team-mail/issues/381) | Environment-variable defaults/discipline + doctor visibility | Y.4 | Production-safe defaults + override transparency |
 
 ---
 
@@ -1520,5 +1639,5 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 ---
 
 **Document Version**: 0.5
-**Last Updated**: 2026-02-25
+**Last Updated**: 2026-03-03
 **Maintained By**: Claude (ARCH-ATM)
