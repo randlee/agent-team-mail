@@ -1331,12 +1331,26 @@ unclear.
 3. Restrict daemon override env vars (`ATM_DAEMON_BIN`, `ATM_DAEMON_AUTOSTART`) to
    test/ops controls and require doctor visibility for active overrides.
 
+### Y.5 — atm init hook format fix + cross-team self-send false positive ([#386](https://github.com/randlee/agent-team-mail/issues/386))
+
+**Problem**: Two bugs found during p3-setup beta testing of v0.31.0.
+
+**Deliverables**:
+1. Fix `atm init` hook writing to always emit current Claude Code hook schema:
+   `{ "matcher": {}, "hooks": [{ "type": "command", "command": "..." }] }`.
+   Update idempotency check to detect and migrate existing old-format entries.
+   Closes [#384](https://github.com/randlee/agent-team-mail/issues/384).
+2. Fix `atm send` self-send check to compare both agent name AND team before
+   warning. Cross-team messages to agents sharing a name must not trigger warning.
+   Closes [#385](https://github.com/randlee/agent-team-mail/issues/385).
+
 | Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
 | Y.1 | Canonical state model + source-of-truth enforcement | — | M | PLANNED | [#378](https://github.com/randlee/agent-team-mail/issues/378) |
 | Y.2 | Doctor snapshot/status contract hardening | Y.1 | S | PLANNED | [#379](https://github.com/randlee/agent-team-mail/issues/379) |
 | Y.3 | Team-scoped reconciliation + daemon-unreachable semantics | Y.1 | M | PLANNED | [#380](https://github.com/randlee/agent-team-mail/issues/380) |
 | Y.4 | Env-var discipline + defaults verification | Y.1,Y.2,Y.3 | S | PLANNED | [#381](https://github.com/randlee/agent-team-mail/issues/381) |
+| Y.5 | atm init hook format + cross-team self-send fix | — | S | PLANNED | [#386](https://github.com/randlee/agent-team-mail/issues/386) |
 
 ---
 ## 18. Future Plugins
