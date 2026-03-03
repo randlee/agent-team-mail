@@ -908,7 +908,7 @@ Implement `atm init` as specified in `docs/requirements.md` §4.9.
 3. Hook scripts embedded in binary at compile time (no external files needed post-install).
 4. Idempotent: merges hook entries, never stomps existing user hooks; safe to re-run.
 5. Global hooks are guarded by `.atm.toml` presence check as first operation (passive in non-ATM repos).
-6. Hooks installed: `SessionStart`, `PreToolUse` (identity write), `PostToolUse` (state tracker).
+6. Hooks installed: `SessionStart`, `PreToolUse` (identity write), `PreToolUse` (Task gate), `PostToolUse` (cleanup). TeammateIdle and SessionEnd hooks are deferred (noted in code comments).
 7. Clear success/error output; non-zero exit on permission or parse errors.
 8. Tests: idempotency test; merge test (existing hooks preserved); guard test (non-ATM repo no-op).
 
@@ -1143,7 +1143,7 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.13 | Ephemeral Pub/Sub for Agent Availability *(superseded by T.5c)* | — | M | SUPERSEDED | [#47](https://github.com/randlee/agent-team-mail/issues/47) |
 | T.14 | Gemini adapter resume flag fix | — | XS | COMPLETE (PR #297) | [#281](https://github.com/randlee/agent-team-mail/issues/281) |
 | T.15 | Gemini adapter end-to-end spawn wiring | T.14 | L | COMPLETE | [#282](https://github.com/randlee/agent-team-mail/issues/282) |
-| T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | PLANNED | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
+| T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | COMPLETE | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
 
 ---
 ## 17.10 Phase X: Team Join UX + Cross-Folder Spawn Planning
