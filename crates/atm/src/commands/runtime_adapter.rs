@@ -16,6 +16,7 @@ pub enum RuntimeKind {
 pub struct SpawnSpec {
     pub team: String,
     pub agent: String,
+    pub cwd: PathBuf,
     pub model: Option<String>,
     pub sandbox: Option<bool>,
     pub approval_mode: Option<String>,
@@ -63,7 +64,11 @@ impl RuntimeAdapter for GeminiAdapter {
             }
         }
 
-        Ok(parts.join(" "))
+        Ok(format!(
+            "cd {} && {}",
+            shell_quote(&spec.cwd.to_string_lossy()),
+            parts.join(" ")
+        ))
     }
 
     fn build_env(&self, spec: &SpawnSpec, home_dir: &Path) -> Result<HashMap<String, String>> {
@@ -99,8 +104,11 @@ impl RuntimeAdapter for GeminiAdapter {
 pub struct CodexAdapter;
 
 impl RuntimeAdapter for CodexAdapter {
-    fn build_command(&self, _spec: &SpawnSpec) -> Result<String> {
-        Ok("codex --yolo".to_string())
+    fn build_command(&self, spec: &SpawnSpec) -> Result<String> {
+        Ok(format!(
+            "cd {} && codex --yolo",
+            shell_quote(&spec.cwd.to_string_lossy())
+        ))
     }
 
     fn build_env(&self, _spec: &SpawnSpec, _home_dir: &Path) -> Result<HashMap<String, String>> {
@@ -112,8 +120,11 @@ impl RuntimeAdapter for CodexAdapter {
 pub struct ClaudeAdapter;
 
 impl RuntimeAdapter for ClaudeAdapter {
-    fn build_command(&self, _spec: &SpawnSpec) -> Result<String> {
-        Ok("claude".to_string())
+    fn build_command(&self, spec: &SpawnSpec) -> Result<String> {
+        Ok(format!(
+            "cd {} && claude",
+            shell_quote(&spec.cwd.to_string_lossy())
+        ))
     }
 
     fn build_env(&self, _spec: &SpawnSpec, _home_dir: &Path) -> Result<HashMap<String, String>> {
@@ -125,8 +136,11 @@ impl RuntimeAdapter for ClaudeAdapter {
 pub struct OpenCodeAdapter;
 
 impl RuntimeAdapter for OpenCodeAdapter {
-    fn build_command(&self, _spec: &SpawnSpec) -> Result<String> {
-        Ok("opencode".to_string())
+    fn build_command(&self, spec: &SpawnSpec) -> Result<String> {
+        Ok(format!(
+            "cd {} && opencode",
+            shell_quote(&spec.cwd.to_string_lossy())
+        ))
     }
 
     fn build_env(&self, _spec: &SpawnSpec, _home_dir: &Path) -> Result<HashMap<String, String>> {
@@ -158,6 +172,7 @@ mod tests {
         SpawnSpec {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
+            cwd: PathBuf::from("/tmp/atm-runtime-test"),
             model: None,
             sandbox: None,
             approval_mode: None,
@@ -176,6 +191,7 @@ mod tests {
 
         let cmd = adapter.build_command(&spec).unwrap();
         assert!(cmd.contains("gemini"));
+        assert!(cmd.contains("cd '/tmp/atm-runtime-test' &&"));
         assert!(cmd.contains("--prompt-interactive"));
         assert!(cmd.contains("--output-format stream-json"));
         assert!(cmd.contains("--sandbox false"));
@@ -191,7 +207,32 @@ mod tests {
         spec.resume_session_id = Some("session-123".to_string());
 
         let cmd = adapter.build_command(&spec).unwrap();
+        assert!(cmd.contains("cd '/tmp/atm-runtime-test' &&"));
         assert!(cmd.contains("--resume 'session-123'"));
+    }
+
+    #[test]
+    fn codex_build_command_prefixes_cd() {
+        let adapter = CodexAdapter;
+        let spec = base_spec();
+        let cmd = adapter.build_command(&spec).unwrap();
+        assert_eq!(cmd, "cd '/tmp/atm-runtime-test' && codex --yolo");
+    }
+
+    #[test]
+    fn claude_build_command_prefixes_cd() {
+        let adapter = ClaudeAdapter;
+        let spec = base_spec();
+        let cmd = adapter.build_command(&spec).unwrap();
+        assert_eq!(cmd, "cd '/tmp/atm-runtime-test' && claude");
+    }
+
+    #[test]
+    fn opencode_build_command_prefixes_cd() {
+        let adapter = OpenCodeAdapter;
+        let spec = base_spec();
+        let cmd = adapter.build_command(&spec).unwrap();
+        assert_eq!(cmd, "cd '/tmp/atm-runtime-test' && opencode");
     }
 
     #[test]

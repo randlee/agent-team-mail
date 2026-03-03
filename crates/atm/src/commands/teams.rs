@@ -108,6 +108,14 @@ pub struct SpawnArgs {
     #[arg(long)]
     prompt: Option<String>,
 
+    /// Canonical spawn directory (preferred)
+    #[arg(long)]
+    folder: Option<PathBuf>,
+
+    /// Legacy spawn directory alias (compatibility)
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -386,6 +394,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
 fn spawn_member(args: SpawnArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
+    let launch_dir = resolve_spawn_folder(args.folder.as_ref(), args.cwd.as_ref(), &current_dir)?;
     let config = resolve_config(
         &ConfigOverrides {
             team: args.team.clone(),
@@ -415,6 +424,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let spec = SpawnSpec {
         team: team_name.clone(),
         agent: args.agent.clone(),
+        cwd: launch_dir.clone(),
         model: args.model.clone(),
         sandbox: args.sandbox,
         approval_mode: args.approval_mode.clone(),
@@ -466,6 +476,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
             "agent": result.agent,
             "team": team_name,
             "runtime": runtime_name(&args.runtime),
+            "folder": launch_dir.to_string_lossy(),
             "pane_id": result.pane_id,
             "state": result.state,
             "warning": result.warning,
@@ -476,6 +487,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         println!("Launched agent: {}", result.agent);
         println!("  team:    {}", team_name);
         println!("  runtime: {}", runtime_name(&args.runtime));
+        println!("  folder:  {}", launch_dir.display());
         println!("  pane:    {}", result.pane_id);
         println!("  state:   {}", result.state);
         if let Some(session_id) = spec.resume_session_id {
@@ -495,6 +507,59 @@ fn runtime_name(runtime: &RuntimeKind) -> &'static str {
         RuntimeKind::Codex => "codex",
         RuntimeKind::Gemini => "gemini",
         RuntimeKind::Opencode => "opencode",
+    }
+}
+
+fn canonicalize_directory(path: &Path, flag: &str) -> Result<PathBuf> {
+    if !path.exists() {
+        anyhow::bail!(
+            "{} path '{}' does not exist. Provide an existing directory.",
+            flag,
+            path.display()
+        );
+    }
+    if !path.is_dir() {
+        anyhow::bail!(
+            "{} path '{}' is not a directory. Provide a directory path.",
+            flag,
+            path.display()
+        );
+    }
+    fs::canonicalize(path)
+        .map_err(|e| anyhow::anyhow!("Failed to resolve {} path '{}': {e}.", flag, path.display()))
+}
+
+fn resolve_spawn_folder(
+    folder: Option<&PathBuf>,
+    cwd: Option<&PathBuf>,
+    current_dir: &Path,
+) -> Result<PathBuf> {
+    let current = fs::canonicalize(current_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to resolve current directory '{}': {e}.",
+            current_dir.display()
+        )
+    })?;
+
+    match (folder, cwd) {
+        (None, None) => Ok(current),
+        (Some(folder_path), None) => canonicalize_directory(folder_path, "--folder"),
+        (None, Some(cwd_path)) => canonicalize_directory(cwd_path, "--cwd"),
+        (Some(folder_path), Some(cwd_path)) => {
+            let folder_canon = canonicalize_directory(folder_path, "--folder")?;
+            let cwd_canon = canonicalize_directory(cwd_path, "--cwd")?;
+            if folder_canon != cwd_canon {
+                anyhow::bail!(
+                    "--folder '{}' and --cwd '{}' resolve to different directories ({} vs {}). \
+                     Provide one flag or matching paths.",
+                    folder_path.display(),
+                    cwd_path.display(),
+                    folder_canon.display(),
+                    cwd_canon.display()
+                );
+            }
+            Ok(folder_canon)
+        }
     }
 }
 
@@ -542,19 +607,7 @@ fn resolve_join_folder(folder: Option<PathBuf>) -> Result<PathBuf> {
         Some(path) => path,
         None => std::env::current_dir()?,
     };
-    if !selected.exists() {
-        anyhow::bail!(
-            "Folder '{}' does not exist. Pass --folder <existing-path>.",
-            selected.display()
-        );
-    }
-    let canonical = fs::canonicalize(&selected).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to resolve folder '{}': {e}. Pass --folder <readable-path>.",
-            selected.display()
-        )
-    })?;
-    Ok(canonical)
+    canonicalize_directory(&selected, "--folder")
 }
 
 fn shell_quote(value: &str) -> String {
@@ -3191,6 +3244,53 @@ mod tests {
     fn test_parse_env_vars_empty_key_errors() {
         let err = parse_env_vars(&["=value".to_string()]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_defaults_to_current_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let current = temp_dir.path().join("repo");
+        fs::create_dir_all(&current).unwrap();
+        let resolved = resolve_spawn_folder(None, None, &current).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&current).unwrap());
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_rejects_mismatched_folder_and_cwd() {
+        let temp_dir = TempDir::new().unwrap();
+        let folder_a = temp_dir.path().join("a");
+        let folder_b = temp_dir.path().join("b");
+        fs::create_dir_all(&folder_a).unwrap();
+        fs::create_dir_all(&folder_b).unwrap();
+        let err =
+            resolve_spawn_folder(Some(&folder_a), Some(&folder_b), temp_dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("resolve to different directories"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_accepts_matching_folder_and_cwd() {
+        let temp_dir = TempDir::new().unwrap();
+        let folder = temp_dir.path().join("same");
+        fs::create_dir_all(&folder).unwrap();
+        let via_folder = temp_dir.path().join("same");
+        let via_cwd = temp_dir.path().join("same/.");
+        let resolved =
+            resolve_spawn_folder(Some(&via_folder), Some(&via_cwd), temp_dir.path()).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&folder).unwrap());
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_rejects_nonexistent_folder() {
+        let temp_dir = TempDir::new().unwrap();
+        let missing = temp_dir.path().join("does-not-exist");
+        let err = resolve_spawn_folder(Some(&missing), None, temp_dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
