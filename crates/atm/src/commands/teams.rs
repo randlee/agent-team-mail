@@ -661,20 +661,6 @@ fn join_member(args: JoinArgs) -> Result<()> {
         shell_quote(&args.agent)
     );
 
-    emit_event_best_effort(EventFields {
-        level: "info",
-        source: "atm",
-        action: "teams_join",
-        team: Some(target_team.clone()),
-        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
-        agent_id: std::env::var("ATM_IDENTITY").ok(),
-        agent_name: std::env::var("ATM_IDENTITY").ok(),
-        target: Some(args.agent.clone()),
-        result: Some("ok".to_string()),
-        spawn_mode: Some(mode.as_str().to_string()),
-        ..Default::default()
-    });
-
     if args.json {
         let output = json!({
             "team": target_team,
