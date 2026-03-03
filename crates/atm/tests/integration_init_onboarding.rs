@@ -120,6 +120,72 @@ fn test_init_skip_team_does_not_create_team_config() {
     );
 }
 
+/// Partial-state case: .atm.toml already present, hooks not installed.
+/// init should install hooks and create team without touching .atm.toml.
+#[test]
+fn test_init_with_existing_atm_toml_installs_hooks_only() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    // Pre-create .atm.toml with custom identity
+    fs::write(
+        repo.join(".atm.toml"),
+        "[core]\ndefault_team = \"my-team\"\nidentity = \"custom-identity\"\n",
+    )
+    .unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success();
+
+    // Hooks should be installed
+    assert!(home.path().join(".claude/settings.json").exists());
+    // Team should be created
+    assert!(home.path().join(".claude/teams/my-team/config.json").exists());
+    // .atm.toml should be unchanged (custom identity preserved)
+    let toml = fs::read_to_string(repo.join(".atm.toml")).unwrap();
+    assert!(
+        toml.contains("identity = \"custom-identity\""),
+        ".atm.toml must not be overwritten when already present"
+    );
+}
+
+/// Partial-state case: hooks already installed, .atm.toml missing.
+/// init should create .atm.toml and team without duplicating hooks.
+#[test]
+fn test_init_with_existing_hooks_creates_atm_toml_without_duplicating_hooks() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    // First run installs everything
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success();
+
+    // Simulate "hooks present, no .atm.toml" by removing .atm.toml
+    fs::remove_file(repo.join(".atm.toml")).unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success();
+
+    // .atm.toml should be recreated
+    assert!(repo.join(".atm.toml").exists());
+    // Hooks must not be duplicated
+    let settings_path = home.path().join(".claude/settings.json");
+    let session_start_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/session-start.py\" || true'";
+    assert_eq!(
+        count_command_in_hooks(&settings_path, "SessionStart", session_start_cmd),
+        1,
+        "SessionStart hook must not be duplicated when hooks pre-exist"
+    );
+}
+
 #[test]
 fn test_init_identity_flag_writes_identity_to_atm_toml() {
     let home = TempDir::new().unwrap();
