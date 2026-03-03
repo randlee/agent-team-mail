@@ -2,7 +2,7 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    canonical_liveness_bool, query_list_agents, query_team_member_state_map,
+    canonical_liveness_bool, query_list_agents, query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
@@ -54,7 +54,13 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     }
 
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-    let daemon_states = query_team_member_state_map(team_name);
+    let daemon_states: HashMap<_, _> = query_team_member_states(team_name)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.agent.clone(), s))
+        .collect();
 
     // Count unread messages for each member
     let inbox_counts = count_inbox_messages(&team_dir, &team_config)?;
