@@ -10,7 +10,7 @@ use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
     AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_pid_path,
     daemon_socket_path, query_list_agents, query_list_agents_for_team, query_session_for_team,
-    query_team_member_states,
+    query_team_member_state_map, query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
@@ -260,13 +260,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     };
 
     let daemon_states_by_agent: HashMap<String, CanonicalMemberState> =
-        query_team_member_states(team)
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| (entry.agent.clone(), entry))
-            .collect();
+        query_team_member_state_map(team);
 
     Ok(DoctorReport {
         summary,
@@ -437,41 +431,55 @@ where
 
     for member in &cfg.members {
         let daemon_state = daemon_states.get(&member.name);
-        if member.is_active == Some(true) {
-            match daemon_state.map(|s| s.state.as_str()) {
-                Some("offline") | Some("dead") => findings.push(finding(
+        match daemon_state.map(|s| s.state.as_str()) {
+            Some("offline") | Some("dead") if member.is_active == Some(true) => {
+                findings.push(finding(
                     Severity::Warn,
                     "pid_session_reconciliation",
                     "ACTIVE_FLAG_STALE",
                     format!(
-                        "Member '{}' marked active but daemon state is dead (pid={})",
+                        "Member '{}' has activity hint isActive=true but daemon state is dead (pid={})",
                         member.name,
                         daemon_state
                             .and_then(|s| s.process_id)
                             .map(|p| p.to_string())
                             .unwrap_or_else(|| "unknown".to_string())
                     ),
-                )),
-                Some("active") | Some("idle") => {}
-                _ if query_failed => findings.push(finding(
-                    Severity::Warn,
-                    "pid_session_reconciliation",
-                    "ACTIVE_WITHOUT_SESSION",
-                    format!(
-                        "Member '{}' marked active but daemon state query failed",
-                        member.name
-                    ),
-                )),
-                _ => findings.push(finding(
-                    Severity::Warn,
-                    "pid_session_reconciliation",
-                    "ACTIVE_WITHOUT_SESSION",
-                    format!(
-                        "Member '{}' marked active but no daemon state record found",
-                        member.name
-                    ),
-                )),
+                ))
             }
+            Some("active") | Some("idle") if member.is_active != Some(true) => {
+                findings.push(finding(
+                    Severity::Warn,
+                    "pid_session_reconciliation",
+                    "GHOST_SESSION",
+                    format!(
+                        "Member '{}' has activity hint isActive!=true but daemon reports live state '{}'",
+                        member.name,
+                        daemon_state
+                            .map(|s| s.state.as_str())
+                            .unwrap_or("unknown")
+                    ),
+                ))
+            }
+            _ if member.is_active == Some(true) && query_failed => findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "ACTIVE_WITHOUT_SESSION",
+                format!(
+                    "Member '{}' has activity hint isActive=true but daemon state query failed",
+                    member.name
+                ),
+            )),
+            _ if member.is_active == Some(true) => findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "ACTIVE_WITHOUT_SESSION",
+                format!(
+                    "Member '{}' has activity hint isActive=true but no daemon state record found",
+                    member.name
+                ),
+            )),
+            _ => {}
         }
     }
 
@@ -866,7 +874,7 @@ fn build_recommendations(
         });
     }
 
-    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") {
+    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") || has("GHOST_SESSION") {
         recs.push(Recommendation {
             command: format!("atm teams cleanup {team}"),
             reason: "Reconcile stale non-lead session state and mailbox/roster drift".to_string(),
@@ -1402,6 +1410,32 @@ mod tests {
             findings.is_empty(),
             "foreign-team daemon states must not create findings for this team's inactive members"
         );
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_detects_ghost_session_for_inactive_hint() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", None, 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let findings = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(Some(vec![CanonicalMemberState {
+                agent: "worker-a".to_string(),
+                state: "active".to_string(),
+                activity: "busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4321),
+                reason: "session active".to_string(),
+                source: "session_registry".to_string(),
+            }]))
+        });
+        assert!(findings.iter().any(|f| f.code == "GHOST_SESSION"));
     }
 
     #[test]
