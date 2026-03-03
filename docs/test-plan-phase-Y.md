@@ -90,7 +90,7 @@ Phase Y validates four workstreams:
 
 2. **`ATM_LOG_MSG` default**
 - Setup: unset/invalid `ATM_LOG_MSG`.
-- Expect: persisted message text policy defaults to `truncated`.
+- Expect: log event message text inclusion policy defaults to `truncated`.
 
 3. **Daemon override vars optional**
 - Setup: unset `ATM_DAEMON_BIN` and `ATM_DAEMON_AUTOSTART`.

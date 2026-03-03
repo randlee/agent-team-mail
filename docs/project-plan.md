@@ -159,7 +159,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | O | Attached CLI Parity | Attach wiring, renderer parity, control-path + fixtures | COMPLETE |
 | O-R | Attach Renderer Parity | RenderClass, event coverage, diff/markdown/reasoning rendering | COMPLETE |
 | P | Attach Path Hardening Closure | Close O-R carry-forward attach deviations and parity hardening | COMPLETE |
-| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | COMPLETE |
+| Q | MCP Server Setup CLI | `atm mcp install/status` for Claude Code, Codex, Gemini | PARTIALLY COMPLETE |
 | R | Session Handoff + Hook Installer | Daemon singleton lock, session registry, `atm doctor` | COMPLETE |
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
@@ -654,7 +654,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
-## 17.6 Phase Q: MCP Server Setup CLI — IN PROGRESS
+## 17.6 Phase Q: MCP Server Setup CLI — PARTIALLY COMPLETE (Q.1-Q.3 done; Q.4 deferred)
 
 **Goal**: Add `atm mcp install/status` commands so users can configure `atm-agent-mcp` as an MCP server for Claude Code, Codex CLI, and Gemini CLI with a single command. See requirements section 4.8.
 
@@ -1520,7 +1520,7 @@ unclear.
 | **X** | X.7 | `teams add-member` atomic inbox creation | COMPLETE | [#369](https://github.com/randlee/agent-team-mail/pull/369) |
 | **X** | — | Phase integration + requirements sync | COMPLETE | [#370](https://github.com/randlee/agent-team-mail/pull/370), [#371](https://github.com/randlee/agent-team-mail/pull/371) |
 
-**Completed**: See table above (phases 1-X complete; Y planned)
+**Completed**: See table above (phases 1-P, R-X complete; Q partially complete with Q.4 deferred; Y planned)
 **Current version**: v0.31.0
 **Next**: Phase Y (planning)
 
@@ -1548,7 +1548,7 @@ unclear.
 | Phase N | [#221](https://github.com/randlee/agent-team-mail/pull/221) | Merged |
 | Phase O-R | [#238](https://github.com/randlee/agent-team-mail/pull/238) | Merged |
 | Phase P | Sprint PRs targeted develop directly (no integration branch) | Merged |
-| Phase Q | Sprint PRs targeted develop directly (no integration branch) | Merged |
+| Phase Q | Q.1-Q.3 merged directly to develop (no integration branch); Q.4 deferred/not started | Partial |
 | Phase R | [#272](https://github.com/randlee/agent-team-mail/pull/272) | Merged |
 | Phase S | [#279](https://github.com/randlee/agent-team-mail/pull/279) | Merged |
 | Phase T | [#300](https://github.com/randlee/agent-team-mail/pull/300) | Merged |

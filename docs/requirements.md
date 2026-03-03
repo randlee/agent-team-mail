@@ -1,7 +1,7 @@
 # agent-team-mail (`atm`) — Requirements Document
 
-**Version**: 0.3
-**Date**: 2026-02-25
+**Version**: 0.4
+**Date**: 2026-03-03
 **Status**: Draft
 
 ---
@@ -2385,6 +2385,6 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 ---
 
-**Document Version**: 0.3
+**Document Version**: 0.4
 **Last Updated**: 2026-02-25
 **Maintained By**: Claude
