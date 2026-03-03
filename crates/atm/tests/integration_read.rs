@@ -465,7 +465,9 @@ fn test_read_since_last_seen_default() {
     create_test_inbox(&team_dir, "test-agent", messages);
 
     // Seed last-seen state at 10:30
-    let state_path = temp_dir.path().join("state.json");
+    let state_dir = temp_dir.path().join(".config").join("atm");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
     let state = serde_json::json!({
         "last_seen": {
             "test-team": {
@@ -518,7 +520,9 @@ fn test_read_since_last_seen_still_shows_older_unread_messages() {
     create_test_inbox(&team_dir, "test-agent", messages);
 
     // Seed last-seen after both messages so timestamp filtering alone would hide everything.
-    let state_path = temp_dir.path().join("state.json");
+    let state_dir = temp_dir.path().join(".config").join("atm");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
     let state = serde_json::json!({
         "last_seen": {
             "test-team": {
@@ -563,7 +567,9 @@ fn test_read_all_ignores_last_seen_filter() {
     create_test_inbox(&team_dir, "test-agent", messages);
 
     // Seed last-seen after both messages; --all should still show both.
-    let state_path = temp_dir.path().join("state.json");
+    let state_dir = temp_dir.path().join(".config").join("atm");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
     let state = serde_json::json!({
         "last_seen": {
             "test-team": {
@@ -600,7 +606,9 @@ fn test_read_no_update_seen() {
     create_test_inbox(&team_dir, "test-agent", messages);
 
     // Seed last-seen state at 10:00
-    let state_path = temp_dir.path().join("state.json");
+    let state_dir = temp_dir.path().join(".config").join("atm");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
     let state = serde_json::json!({
         "last_seen": {
             "test-team": {
@@ -653,7 +661,9 @@ fn test_read_updates_last_seen_from_displayed_messages_only() {
     create_test_inbox(&team_dir, "test-agent", messages);
 
     // Seed last-seen before both messages.
-    let state_path = temp_dir.path().join("state.json");
+    let state_dir = temp_dir.path().join(".config").join("atm");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
     let state = serde_json::json!({
         "last_seen": {
             "test-team": {

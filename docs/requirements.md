@@ -752,6 +752,8 @@ atm doctor --full
   core fields to `atm members`: name/type/model/status), followed by ordered findings by
   severity, then recommended remediation commands.
 - JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
+- Both human and JSON output MUST surface active env overrides for `ATM_HOME`,
+  `ATM_TEAM`, and `ATM_IDENTITY` when set to non-empty values.
 - Daemon-unreachable member-state queries MUST emit explicit finding code
   `DAEMON_UNREACHABLE`.
 - When daemon member-state queries are unreachable/unavailable, member liveness in
@@ -772,6 +774,8 @@ atm doctor --full
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
 - `log_window`: `mode`, `start`, `end`
+- `env_overrides`: optional object fields `atm_home`, `atm_team`,
+  `atm_identity`; each value shape is `{ source, value }`
 
 #### `DoctorReport` Schema Contract and Compatibility
 
@@ -780,12 +784,16 @@ atm doctor --full
 - `findings`
 - `recommendations`
 - `log_window`
+- `env_overrides`
 
 Current required `DoctorReport` shape:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts`
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
 - `log_window`: `mode`, `start`, `end`
+- `env_overrides`: optional `atm_home`, `atm_team`, `atm_identity`, each with:
+  - `source`: override source tag (`"env"`)
+  - `value`: resolved non-empty value
 
 Logging-health expansion contract:
 - Target shape adds `logging` object with at least:
@@ -1110,6 +1118,14 @@ Acceptance checks:
 4. Global config (`~/.config/atm/config.toml`)
 5. Defaults
 
+Additional config-path override:
+- `--config <path>` and `ATM_CONFIG=<path>` add an explicit config file layer
+  merged after repo/global config and before env/flag field overrides.
+- Explicit config path overrides are strict: unreadable/invalid files are
+  errors (no silent fallback to other sources).
+- `ATM_HOME` is a filesystem-root override (path anchor for ATM runtime data),
+  not a config-value override in this resolution order.
+
 #### Configuration File (`.atm.toml`)
 
 ```toml
@@ -1141,10 +1157,22 @@ team-lead = "arch-atm"   # role-name → inbox-identity mapping
 
 | Variable | Description |
 |----------|-------------|
+| `ATM_HOME` | Home-root override used by canonical path resolution (`{ATM_HOME}/.config/atm`, `{ATM_HOME}/.claude`, etc.) |
 | `ATM_TEAM` | Default team name |
 | `ATM_IDENTITY` | Sender identity |
 | `ATM_CONFIG` | Path to config file override |
 | `ATM_NO_COLOR` | Disable colored output |
+| `ATM_DAEMON_AUTOSTART` | Daemon autostart toggle (`1/true/yes` enables, `0/false/no` disables); defaults to enabled when unset |
+| `ATM_DAEMON_BIN` | Optional daemon binary override for test/ops harnesses |
+| `ATM_LOG` | Stderr log level (`trace|debug|info|warn|error`), default `info` |
+| `ATM_LOG_MSG` | Message text logging policy (`none|truncated|full`), default `truncated` |
+| `ATM_LOG_FILE` | Canonical unified log file path override for test/ops |
+
+Environment value rules:
+- Empty/whitespace-only values for `ATM_TEAM` and `ATM_IDENTITY` are ignored
+  and must not erase config/default values.
+- `ATM_DAEMON_BIN` and `ATM_DAEMON_AUTOSTART` are operational/test controls and
+  must not be required for normal production usage.
 
 ### 4.5 Recommended Hooks (Agent Teams)
 
@@ -1304,7 +1332,7 @@ Spool filename convention:
   only after successful merge.
 - Merge ordering: timestamp then file order, append-only.
 - Daemon startup spool merge and daemon runtime writer MUST target the same canonical
-  path resolved from `ATM_LOG_FILE`/`ATM_LOG_PATH` (or default `atm.log.jsonl`).
+  path resolved from `ATM_LOG_FILE` (or default `atm.log.jsonl`).
   Divergent startup/runtime sink paths are forbidden.
 
 #### Default-On and Health State Requirements
@@ -1377,8 +1405,8 @@ No legacy `events.jsonl` sink code remains in any crate.
 #### Runtime Controls
 
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
-- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy.
-- `ATM_LOG_FILE` may override file path for tests/ops; `ATM_LOG_PATH` remains alias.
+- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy (default: `truncated`).
+- `ATM_LOG_FILE` may override file path for tests/ops.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
 
