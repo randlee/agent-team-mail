@@ -1,13 +1,14 @@
 //! Teams command implementation
 
-use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::daemon_client::{LaunchConfig, launch_agent, query_session_for_team};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
+use agent_team_mail_core::io::inbox::inbox_update;
 use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::model_registry::ModelId;
 use agent_team_mail_core::schema::{BackendType, TeamConfig};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Args;
 use serde_json::json;
@@ -42,6 +43,8 @@ pub struct TeamsArgs {
 pub enum TeamsCommand {
     /// Spawn a team member via daemon with runtime-specific adapter behavior
     Spawn(SpawnArgs),
+    /// Join an existing team and print a copy-pastable resume launch command
+    Join(JoinArgs),
     /// Add a member to a team without launching an agent
     AddMember(AddMemberArgs),
     /// Update fields on an existing team member
@@ -106,13 +109,44 @@ pub struct SpawnArgs {
     #[arg(long)]
     prompt: Option<String>,
 
+    /// Canonical spawn directory (`--cwd` is accepted as an alias)
+    #[arg(long, alias = "cwd")]
+    folder: Vec<PathBuf>,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+/// Join an existing team and return launch guidance for the joined identity
+#[derive(Args, Debug)]
+pub struct JoinArgs {
+    /// Agent name to add/join
+    agent: String,
+
+    /// Team name (required in self-join mode; optional verification in team-lead-initiated mode)
+    #[arg(long)]
+    team: Option<String>,
+
+    /// Agent type to persist (default: codex, matching add-member behavior)
+    #[arg(long)]
+    agent_type: Option<String>,
+
+    /// Model identifier validated against the ATM model registry
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Working directory used in roster entry and launch command
+    #[arg(long)]
+    folder: Option<PathBuf>,
+
     /// Output as JSON
     #[arg(long)]
     json: bool,
 }
 
 /// Add a member to a team (no agent spawn)
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct AddMemberArgs {
     /// Team name
     team: String,
@@ -270,6 +304,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
     if let Some(command) = args.command {
         return match command {
             TeamsCommand::Spawn(spawn_args) => spawn_member(spawn_args),
+            TeamsCommand::Join(join_args) => join_member(join_args),
             TeamsCommand::AddMember(add_args) => add_member(add_args),
             TeamsCommand::UpdateMember(update_args) => update_member(update_args),
             TeamsCommand::Resume(resume_args) => resume(resume_args),
@@ -356,6 +391,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
 fn spawn_member(args: SpawnArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
+    let launch_dir = resolve_spawn_folder(&args.folder, &current_dir)?;
     let config = resolve_config(
         &ConfigOverrides {
             team: args.team.clone(),
@@ -385,6 +421,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let spec = SpawnSpec {
         team: team_name.clone(),
         agent: args.agent.clone(),
+        cwd: launch_dir.clone(),
         model: args.model.clone(),
         sandbox: args.sandbox,
         approval_mode: args.approval_mode.clone(),
@@ -415,7 +452,14 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         Ok(Some(r)) => r,
         Ok(None) => {
             if args.json {
-                println!("{{\"error\": \"Daemon is not running. Start it with: atm-daemon\"}}");
+                let output = json!({
+                    "error": "Daemon is not running. Start it with: atm-daemon",
+                    "agent": args.agent,
+                    "team": team_name,
+                    "runtime": runtime_name(&args.runtime),
+                    "folder": launch_dir.to_string_lossy(),
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
             }
@@ -423,7 +467,14 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         }
         Err(e) => {
             if args.json {
-                println!("{{\"error\": \"{}\"}}", e.to_string().replace('"', "\\\""));
+                let output = json!({
+                    "error": e.to_string(),
+                    "agent": args.agent,
+                    "team": team_name,
+                    "runtime": runtime_name(&args.runtime),
+                    "folder": launch_dir.to_string_lossy(),
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 eprintln!("Error: {e}");
             }
@@ -436,6 +487,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
             "agent": result.agent,
             "team": team_name,
             "runtime": runtime_name(&args.runtime),
+            "folder": launch_dir.to_string_lossy(),
             "pane_id": result.pane_id,
             "state": result.state,
             "warning": result.warning,
@@ -446,6 +498,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         println!("Launched agent: {}", result.agent);
         println!("  team:    {}", team_name);
         println!("  runtime: {}", runtime_name(&args.runtime));
+        println!("  folder:  {}", launch_dir.display());
         println!("  pane:    {}", result.pane_id);
         println!("  state:   {}", result.state);
         if let Some(session_id) = spec.resume_session_id {
@@ -468,6 +521,59 @@ fn runtime_name(runtime: &RuntimeKind) -> &'static str {
     }
 }
 
+fn canonicalize_directory(path: &Path, flag: &str) -> Result<PathBuf> {
+    if !path.exists() {
+        anyhow::bail!(
+            "{} path '{}' does not exist. Provide an existing directory.",
+            flag,
+            path.display()
+        );
+    }
+    if !path.is_dir() {
+        anyhow::bail!(
+            "{} path '{}' is not a directory. Provide a directory path.",
+            flag,
+            path.display()
+        );
+    }
+    fs::canonicalize(path)
+        .map_err(|e| anyhow::anyhow!("Failed to resolve {} path '{}': {e}.", flag, path.display()))
+}
+
+fn resolve_spawn_folder(folder_args: &[PathBuf], current_dir: &Path) -> Result<PathBuf> {
+    let current = fs::canonicalize(current_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to resolve current directory '{}': {e}.",
+            current_dir.display()
+        )
+    })?;
+
+    if folder_args.is_empty() {
+        return Ok(current);
+    }
+
+    let mut canonical_paths = Vec::with_capacity(folder_args.len());
+    for raw_path in folder_args {
+        // `folder` accepts values from both --folder and its --cwd alias.
+        canonical_paths.push(canonicalize_directory(raw_path, "--folder/--cwd")?);
+    }
+
+    let first = canonical_paths[0].clone();
+    let mismatched = canonical_paths.iter().any(|p| p != &first);
+    if mismatched {
+        anyhow::bail!(
+            "--folder/--cwd values resolve to different directories: {}. \
+             Provide a single path or matching paths.",
+            canonical_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(first)
+}
+
 fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
     let mut map = std::collections::HashMap::new();
     for pair in pairs {
@@ -484,7 +590,197 @@ fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, 
     Ok(map)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinMode {
+    TeamLeadInitiated,
+    SelfJoin,
+}
+
+impl JoinMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TeamLeadInitiated => "team_lead_initiated",
+            Self::SelfJoin => "self_join",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddMemberOutcome {
+    Added,
+    UpdatedInactive,
+    UpdatedPaneId,
+    AlreadyRegistered,
+}
+
+fn resolve_join_folder(folder: Option<PathBuf>) -> Result<PathBuf> {
+    let selected = match folder {
+        Some(path) => path,
+        None => std::env::current_dir()?,
+    };
+    canonicalize_directory(&selected, "--folder")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'"'"'"#))
+}
+
+fn resolve_caller_team_context(home_dir: &Path, current_dir: &Path) -> Result<Option<String>> {
+    let config = resolve_config(&ConfigOverrides::default(), current_dir, home_dir)?;
+    let configured_team = config.core.default_team.trim().to_string();
+    if configured_team.is_empty() {
+        return Ok(None);
+    }
+
+    let caller_identity = resolve_identity(&config.core.identity, &config.roles, &config.aliases);
+    if caller_identity.is_empty() || caller_identity == "human" {
+        return Ok(None);
+    }
+
+    let config_path = home_dir
+        .join(".claude/teams")
+        .join(&configured_team)
+        .join("config.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let team_config = read_team_config(&config_path)?;
+    let is_member = team_config
+        .members
+        .iter()
+        .any(|m| m.name == caller_identity);
+    if is_member {
+        Ok(Some(configured_team))
+    } else {
+        Ok(None)
+    }
+}
+
+fn join_member(args: JoinArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let caller_team = resolve_caller_team_context(&home_dir, &current_dir)?;
+
+    let (mode, target_team) = if let Some(caller_team) = caller_team {
+        if let Some(requested_team) = args.team.as_deref()
+            && requested_team != caller_team
+        {
+            anyhow::bail!(
+                "--team '{}' does not match your current team '{}'. \
+                 Remove --team or pass --team '{}'.",
+                requested_team,
+                caller_team,
+                caller_team
+            );
+        }
+        (JoinMode::TeamLeadInitiated, caller_team)
+    } else {
+        let explicit_team = args.team.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--team is required when caller has no current team context. \
+                 Set ATM_TEAM/ATM_IDENTITY for team-lead-initiated mode, or pass --team <team>."
+            )
+        })?;
+        (JoinMode::SelfJoin, explicit_team)
+    };
+
+    let team_dir = home_dir.join(".claude/teams").join(&target_team);
+    if !team_dir.exists() {
+        anyhow::bail!(
+            "Team '{}' not found (directory {} doesn't exist)",
+            target_team,
+            team_dir.display()
+        );
+    }
+
+    let config_path = team_dir.join("config.json");
+    if !config_path.exists() {
+        anyhow::bail!("Team config not found at {}", config_path.display());
+    }
+
+    let folder = resolve_join_folder(args.folder)?;
+    let folder_display = folder.to_string_lossy().to_string();
+    let member_outcome = add_member_internal(AddMemberArgs {
+        team: target_team.clone(),
+        agent: args.agent.clone(),
+        agent_type: args.agent_type.unwrap_or_else(|| "codex".to_string()),
+        model: args.model.unwrap_or_else(|| "unknown".to_string()),
+        cwd: Some(folder.clone()),
+        inactive: false,
+        pane_id: None,
+        session_id: None,
+        backend_type: None,
+    })?;
+
+    let roster_state = match member_outcome {
+        AddMemberOutcome::Added | AddMemberOutcome::UpdatedInactive => "added",
+        AddMemberOutcome::UpdatedPaneId | AddMemberOutcome::AlreadyRegistered => "already_present",
+    };
+
+    let launch_command = format!(
+        "cd {} && env ATM_TEAM={} ATM_IDENTITY={} claude --resume",
+        shell_quote(&folder_display),
+        shell_quote(&target_team),
+        shell_quote(&args.agent)
+    );
+
+    if args.json {
+        let output = json!({
+            "team": target_team,
+            "agent": args.agent,
+            "folder": folder_display,
+            "launch_command": launch_command,
+            "mode": mode.as_str(),
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("Mode: {}", mode.as_str());
+    println!("Team: {}", target_team);
+    println!("Agent: {}", args.agent);
+    println!("Folder: {}", folder_display);
+    println!("Roster: {}", roster_state);
+    if roster_state == "already_present" {
+        println!("Requested team member is already in the roster.");
+    }
+    println!("Launch command:");
+    println!("{launch_command}");
+    println!("  # Note: adjust quoting for Windows PowerShell/cmd");
+    Ok(())
+}
+
 fn add_member(args: AddMemberArgs) -> Result<()> {
+    match add_member_internal(args.clone())? {
+        AddMemberOutcome::UpdatedPaneId => {
+            println!(
+                "Updated tmuxPaneId for '{}' in team '{}' (paneId='{}')",
+                args.agent,
+                args.team,
+                args.pane_id.as_deref().unwrap_or_default()
+            );
+        }
+        AddMemberOutcome::AlreadyRegistered => {
+            println!("Member already registered (idempotent)");
+        }
+        AddMemberOutcome::UpdatedInactive => {
+            println!(
+                "Updated inactive member '{}' in team '{}' (agentType='{}')",
+                args.agent, args.team, args.agent_type
+            );
+        }
+        AddMemberOutcome::Added => {
+            println!(
+                "Added member '{}' to team '{}' (agentType='{}')",
+                args.agent, args.team, args.agent_type
+            );
+        }
+    }
+    Ok(())
+}
+
+fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     let home_dir = get_home_dir()?;
     let team_dir = home_dir.join(".claude/teams").join(&args.team);
     if !team_dir.exists() {
@@ -536,14 +832,12 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
             if let Some(ref pane_id) = args.pane_id {
                 team_config.members[idx].tmux_pane_id = Some(pane_id.clone());
                 write_team_config(&config_path, &team_config)?;
-                println!(
-                    "Updated tmuxPaneId for '{}' in team '{}' (paneId='{}')",
-                    args.agent, args.team, pane_id
-                );
+                ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+                return Ok(AddMemberOutcome::UpdatedPaneId);
             } else {
-                println!("Member already registered (idempotent)");
+                ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+                return Ok(AddMemberOutcome::AlreadyRegistered);
             }
-            return Ok(());
         }
 
         // Collision guard: active member with a different agent_id → reject.
@@ -578,11 +872,8 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
             m.tmux_pane_id = Some(pane_id.clone());
         }
         write_team_config(&config_path, &team_config)?;
-        println!(
-            "Updated inactive member '{}' in team '{}' (agentType='{}')",
-            args.agent, args.team, args.agent_type
-        );
-        return Ok(());
+        ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+        return Ok(AddMemberOutcome::UpdatedInactive);
     }
 
     // Brand-new member.
@@ -616,11 +907,29 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
 
     team_config.members.push(member);
     write_team_config(&config_path, &team_config)?;
+    ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+    Ok(AddMemberOutcome::Added)
+}
 
-    println!(
-        "Added member '{}' to team '{}' (agentType='{}')",
-        args.agent, args.team, args.agent_type
-    );
+fn ensure_member_inbox_atomic(team_dir: &Path, team_name: &str, agent_name: &str) -> Result<()> {
+    let inboxes_dir = team_dir.join("inboxes");
+    fs::create_dir_all(&inboxes_dir).with_context(|| {
+        format!(
+            "Failed to create inboxes directory for team '{}': {}",
+            team_name,
+            inboxes_dir.display()
+        )
+    })?;
+
+    let inbox_path = inboxes_dir.join(format!("{agent_name}.json"));
+    inbox_update(&inbox_path, team_name, agent_name, |_| {}).with_context(|| {
+        format!(
+            "Failed to create inbox '{}' for {}@{}",
+            inbox_path.display(),
+            agent_name,
+            team_name
+        )
+    })?;
 
     Ok(())
 }
@@ -1556,6 +1865,48 @@ mod tests {
 
         let age = format_age(timestamp);
         assert!(age.contains("day"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_add_member_creates_valid_inbox_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let original_home = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let result = add_member_internal(AddMemberArgs {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            agent_type: "codex".to_string(),
+            model: "unknown".to_string(),
+            cwd: None,
+            inactive: false,
+            pane_id: None,
+            session_id: None,
+            backend_type: None,
+        });
+        assert!(matches!(result, Ok(AddMemberOutcome::Added)));
+
+        let inbox_path = team_dir.join("inboxes/arch-ctm.json");
+        assert!(inbox_path.exists(), "inbox should exist after add-member");
+
+        let content = fs::read_to_string(&inbox_path).expect("read inbox");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("valid json");
+        assert!(parsed.is_array(), "inbox json must be an array");
+
+        // SAFETY: test-only cleanup.
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 
     #[test]
@@ -2960,6 +3311,63 @@ mod tests {
     fn test_parse_env_vars_empty_key_errors() {
         let err = parse_env_vars(&["=value".to_string()]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_defaults_to_current_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let current = temp_dir.path().join("repo");
+        fs::create_dir_all(&current).unwrap();
+        let resolved = resolve_spawn_folder(&[], &current).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&current).unwrap());
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_rejects_mismatched_folder_and_cwd() {
+        let temp_dir = TempDir::new().unwrap();
+        let folder_a = temp_dir.path().join("a");
+        let folder_b = temp_dir.path().join("b");
+        fs::create_dir_all(&folder_a).unwrap();
+        fs::create_dir_all(&folder_b).unwrap();
+        let err = resolve_spawn_folder(&[folder_a, folder_b], temp_dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("resolve to different directories"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_accepts_matching_folder_and_cwd() {
+        let temp_dir = TempDir::new().unwrap();
+        let folder = temp_dir.path().join("same");
+        fs::create_dir_all(&folder).unwrap();
+        let via_folder = temp_dir.path().join("same");
+        let via_cwd = temp_dir.path().join("same/.");
+        let resolved = resolve_spawn_folder(&[via_folder, via_cwd], temp_dir.path()).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&folder).unwrap());
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_rejects_nonexistent_folder() {
+        let temp_dir = TempDir::new().unwrap();
+        let missing = temp_dir.path().join("does-not-exist");
+        let err = resolve_spawn_folder(&[missing], temp_dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_directory_rejects_file_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("not-a-dir.txt");
+        fs::write(&file_path, "data").unwrap();
+        let err = canonicalize_directory(&file_path, "--folder").unwrap_err();
+        assert!(
+            err.to_string().contains("is not a directory"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

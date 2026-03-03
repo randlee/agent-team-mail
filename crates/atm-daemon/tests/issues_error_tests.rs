@@ -7,6 +7,7 @@ use agent_team_mail_daemon::plugin::MailService;
 use agent_team_mail_daemon::plugin::{Plugin, PluginContext};
 use agent_team_mail_daemon::plugins::issues::IssuesPlugin;
 use agent_team_mail_daemon::roster::RosterService;
+use serial_test::serial;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -75,6 +76,7 @@ fn create_team_config(teams_root: &Path, team_name: &str) {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_api_failure_continues_polling() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -116,6 +118,7 @@ async fn test_api_failure_continues_polling() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_auth_failure_on_comment() {
     // This test would require injecting a mock provider that fails only on add_comment
     // The current architecture makes this difficult without dependency injection
@@ -123,6 +126,7 @@ async fn test_auth_failure_on_comment() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_missing_provider_init_fails() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -144,6 +148,7 @@ async fn test_missing_provider_init_fails() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_missing_gh_binary() {
     // Testing that gh CLI is not found is difficult in integration tests
     // because we can't reliably control the PATH in a way that works across all CI environments
@@ -155,6 +160,7 @@ async fn test_missing_gh_binary() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_empty_config_uses_defaults() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -176,6 +182,7 @@ async fn test_empty_config_uses_defaults() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_invalid_config_values_use_defaults() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -217,6 +224,7 @@ async fn test_invalid_config_values_use_defaults() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_handle_message_with_invalid_format() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -270,6 +278,7 @@ async fn test_handle_message_with_invalid_format() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_handle_message_with_empty_body() {
     let temp_dir = TempDir::new().unwrap();
 

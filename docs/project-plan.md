@@ -2,7 +2,7 @@
 
 **Version**: 0.5
 **Date**: 2026-02-25
-**Status**: Phase T complete (v0.27.0).
+**Status**: Phase X planning in progress (post-v0.30.0 release).
 
 ---
 
@@ -163,6 +163,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | R | Session Handoff + Hook Installer | Daemon singleton lock, session registry, `atm doctor` | COMPLETE |
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
+| X | Team Onboarding + TUI/Doctor Stability | `/team-join`, spawn path normalization, `atm init` one-command setup, and carry-forward bug-debt mapping | PLANNED |
 
 ---
 
@@ -1145,42 +1146,127 @@ Update project-plan.md S.2a deliverable #6 to reflect actual hooks installed (Se
 | T.16 | S.2a/S.1 plan deliverable accuracy | — | XS | PLANNED | [#283](https://github.com/randlee/agent-team-mail/issues/283) |
 
 ---
+## 17.10 Phase X: Team Join UX + Cross-Folder Spawn Planning
 
-## 17.10 Phase V: Doctor State-Model Convergence (Planning)
+**Goal**: Add a first-class `/team-join` onboarding flow for existing teams and
+standardize runtime launch path selection with `--folder` across spawn surfaces.
+Add a one-command `atm init` onboarding flow for `.atm.toml`, team creation, and
+hook installation defaults.
+**Execution reference**: `docs/test-plan-phase-X.md`.
 
-**Goal**: Eliminate remaining doctor/lifecycle state-model gaps with requirements-first implementation and explicit regression coverage.
+**Integration branch**: `integrate/phase-X` off `develop`.
+**Dependency graph**: X.1 → {X.2, X.3}; X.4/X.5/X.6 deferred follow-on.
 
-**Execution reference**: `docs/test-plan-phase-V.md`
+**Dependency rationale**:
+- X.2 depends on X.1 because join/launch output contracts must settle canonical
+  folder semantics before spawn normalization can be finalized.
+- X.3 depends on X.1 so one-command init guidance and join guidance remain
+  consistent (single onboarding contract, no split UX semantics).
 
-**Change-control note**: V.7 scope was redefined from the earlier "integration hardening + release/QA handoff" placeholder to "logging identity contract coverage" (pid/ppid emitters, send/read/status/doctor logging, and contract tests). The superseded integration-handoff work was absorbed into broader doctor/lifecycle convergence and Phase W release-track execution.
-**Change-control note**: Section 17.10 supersedes 17.8 for doctor/lifecycle state-model work (V.0-V.7). The earlier release/publishing hardening track was moved to Phase W (17.11) to preserve separation between lifecycle correctness and release automation.
-**Change-control note (V.2+V.3 execution)**: V.2 (lead/non-lead teardown semantics) and V.3 (`isActive`/liveness separation) are being executed together in a single implementation/review stream to avoid split changes across shared send/status/doctor contracts; tracked by PR [#347](https://github.com/randlee/agent-team-mail/pull/347).
-**Coordination note**: Phase W sprint W.1 (`feature/pW-s1-offline-fix`, merged to `integrate/phase-W`) must merge to `develop` before `integrate/phase-V` merges to `develop` (integration-time merge-order constraint, not a branch dependency).
-**Release automation track note**: V.1a–V.4a release/publishing hardening is tracked under Phase W (see 17.11).
+### X.1 — `/team-join` contract and skill/CLI alignment ([#351](https://github.com/randlee/agent-team-mail/issues/351))
+
+**Problem**: Existing onboarding requires manual multi-step team/member/session
+coordination and does not provide a single guided flow for joining an established
+team.
+
+**Deliverables**:
+1. Define `/team-join` slash-command UX contract (skill entrypoint) with
+   deterministic behavior and explicit outputs.
+2. Add CLI contract for `atm teams join`:
+   - caller team-context check first,
+   - `--team` optional verification in team-lead-initiated mode,
+   - required `--team` when caller has no current team context.
+3. Define post-join output contract with a copy-pastable
+   `claude --resume ...` launch command (folder-aware).
+4. Add acceptance test plan for join flow:
+   - team-lead-initiated path,
+   - self-join path,
+   - team mismatch rejection path.
+5. Align output contract explicitly with requirements JSON schema in
+   `docs/requirements.md` §4.3.2a (`team`, `agent`, `folder`, `launch_command`, `mode`).
+
+**Acceptance criteria**:
+- `atm teams join --help` documents required surface (`<agent>`, optional
+  `--team`, and output mode support).
+- Team-mismatch rejection path returns non-zero and explicit mismatch guidance.
+- JSON output contains all required fields from `docs/requirements.md` §4.3.2a.
+- Human output includes copy-pastable launch command with explicit folder context.
+
+**References**: `docs/requirements.md` §4.3.2a; `docs/test-plan-phase-X.md` X.1.
+
+### X.2 — Spawn path normalization: `--folder` support (runtime launch portability) ([#361](https://github.com/randlee/agent-team-mail/issues/361))
+
+**Problem**: Spawn launch directory semantics are inconsistently expressed across
+runtime surfaces (`--cwd`, repo-root wording, tmux launch wrappers), making
+cross-directory session launch fragile.
+
+**Deliverables**:
+1. Standardize `--folder <path>` as canonical spawn directory flag with
+   `--cwd` compatibility alias.
+2. Require identical behavior for Claude/Codex/Gemini spawn flows, including
+   tmux-initiated launches.
+3. Add validation rule: if both `--folder` and `--cwd` are provided, they must
+   match after canonicalization.
+4. Add tests for folder resolution and launch command generation in same-folder
+   and cross-folder cases.
+5. Add codex/gemini startup guidance prompt-injection contract:
+   - inject ATM usage guidance before/after caller-supplied prompt,
+   - emit guidance-only startup prompt when caller prompt is omitted,
+   - verify command text uses current ATM CLI syntax.
+
+### X.3 — `atm init` one-command setup + default-global hooks ([#357](https://github.com/randlee/agent-team-mail/issues/357))
+
+**Problem**: `atm init` currently installs hooks only. Users must separately create
+`.atm.toml` and create team state, and local-hook default can silently no-op in
+worktree-driven launches.
+
+**Deliverables**:
+1. Expand `atm init <team>` flow to run in idempotent order:
+   - create `.atm.toml` in cwd when missing (`identity`, `default_team`),
+   - create team directory/roster when missing,
+   - install hooks.
+2. Change install-mode default:
+   - default hook install target becomes global scope,
+   - add `--local` as explicit project-scoped opt-out.
+3. Add flags:
+   - `--identity <name>` to seed `.atm.toml` identity (default `team-lead`),
+   - `--skip-team` to skip team creation for existing-team joins.
+4. Preserve idempotency and explicit status output:
+   - existing `.atm.toml` is detected and not overwritten silently,
+   - existing team is detected and not recreated,
+   - existing hook entries are not duplicated.
+5. Create `docs/quickstart.md` (new document):
+   - one-command setup flow,
+   - global-vs-local hook guidance (worktree rationale),
+   - first-send/read + `docs/team-protocol.md` pointer.
+
+**Acceptance criteria**:
+- Fresh repo: `atm init my-team` creates `.atm.toml`, creates team, installs hooks globally.
+- Re-running `atm init` is idempotent (no duplicate hooks, no destructive config churn).
+- `--local` installs project-local hooks with preserved existing semantics.
+- `--skip-team` skips team creation while still configuring `.atm.toml`/hooks.
+- `--identity` writes requested identity in `.atm.toml`.
+- `docs/quickstart.md` is created with minimum required sections and worktree/global rationale.
+
+### Deferred Technical Debt Carry-Forward (Phase X Follow-On)
+
+The following issues are explicitly tracked but deferred from X.1-X.3 to keep
+the current tranche focused on onboarding contract closure.
+
+| Sprint | Issue | Status | Deferral Rationale |
+|--------|-------|--------|--------------------|
+| X.4 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | DEFERRED | Doctor duration parser correctness is isolated from join/init onboarding scope; scheduled after X.1-X.3 merge. |
+| X.5 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | DEFERRED | Test-serialization hardening is CI debt cleanup and can proceed independently after onboarding contract stabilization. |
+| X.6 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | DEFERRED | `add-member` inbox atomicity is important but not a prerequisite for `/team-join`/`atm init` contract planning closure in this tranche. |
 
 | Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
-| V.0 | Baseline diagnostics fixture capture | — | S | COMPLETE | prerequisite |
-| V.1 | Team-scoped doctor reconciliation | V.0 | M | COMPLETE | [#333](https://github.com/randlee/agent-team-mail/issues/333) — team-scoped reconciliation absorbed into V.2+V.3 delivery (socket.rs, daemon_client.rs); PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
-| V.2+V.3 | Lead/non-lead teardown semantics + `isActive`/liveness separation hardening | V.0 | M | COMPLETE | [#332](https://github.com/randlee/agent-team-mail/issues/332), [#330](https://github.com/randlee/agent-team-mail/issues/330) — combined delivery per change-control note; PR [#347](https://github.com/randlee/agent-team-mail/pull/347) |
-| V.4 | Terminal cleanup convergence + stale tracked members | V.0 | M | COMPLETE | [#331](https://github.com/randlee/agent-team-mail/issues/331), [#334](https://github.com/randlee/agent-team-mail/issues/334), PR [#345](https://github.com/randlee/agent-team-mail/pull/345) |
-| V.5 | Recommendation engine hardening | V.2 | S | DEFERRED | [#336](https://github.com/randlee/agent-team-mail/issues/336) — deferred to a future phase; not in scope for integrate/phase-V merge |
-| V.6 | Doctor UX snapshot/report ordering | V.1 | S | DEFERRED | [#335](https://github.com/randlee/agent-team-mail/issues/335) — deferred to a future phase; not in scope for integrate/phase-V merge |
-| V.7 | Logging identity contract coverage | V.0 | S | COMPLETE | (Phase V umbrella) |
-
----
-## 17.11 Phase W: Release Automation Bridge (Reference)
-
-This section exists to resolve cross-phase references used by Phase V and QA review.
-
-| Sprint | Name | Depends On | Size | Status | Notes |
-|--------|------|------------|------|--------|-------|
-| W.1 | Offline prefix behavior alignment | — | S | MERGED to `develop` (PR [#352](https://github.com/randlee/agent-team-mail/pull/352)) | — |
-| W.2 | Publisher rewrite (sub-agent prohibition + inline audit) | W.1 | M | MERGED to `develop` (PR [#352](https://github.com/randlee/agent-team-mail/pull/352)) | — |
-| W.3 | Release workflow hardening (crates.io retry, Homebrew automation) | W.2 | M | MERGED to `develop` (PR [#352](https://github.com/randlee/agent-team-mail/pull/352)) | — |
-| W.4 | Pre-publish audit (cargo package gate, waiver enforcement, release-summary) | W.3 | S | MERGED to `develop` (PR [#352](https://github.com/randlee/agent-team-mail/pull/352)) | — |
-
-**V.4 dependency note**: V.4 is a daemon lifecycle cleanup sprint scoped to #331/#334. It was executed as an independently testable guard/hardening pass before V.2 merge completion to stop active regressions; V.2 remains the broader teardown-policy sprint. V.4 is intentionally independent from V.1 doctor reconciliation.
+| X.1 | `/team-join` contract + slash-command flow planning | — | M | PLANNED | [#351](https://github.com/randlee/agent-team-mail/issues/351) |
+| X.2 | Spawn `--folder` normalization across runtimes | X.1 | S | PLANNED | [#361](https://github.com/randlee/agent-team-mail/issues/361) |
+| X.3 | `atm init` one-command setup + default-global hooks | X.1 | M | PLANNED | [#357](https://github.com/randlee/agent-team-mail/issues/357) |
+| X.4 | Doctor duration parser boundary fix (`parse_since_input`) | — | XS | DEFERRED | [#287](https://github.com/randlee/agent-team-mail/issues/287) |
+| X.5 | Serialize env-mutating daemon tests (`ATM_HOME`) | — | S | DEFERRED | [#337](https://github.com/randlee/agent-team-mail/issues/337) |
+| X.6 | `teams add-member` inbox atomicity | — | S | DEFERRED | [#338](https://github.com/randlee/agent-team-mail/issues/338) |
 
 ---
 ## 18. Future Plugins
@@ -1322,7 +1408,7 @@ This section exists to resolve cross-phase references used by Phase V and QA rev
 
 **Completed**: 99+ sprints across 23 phases (CI green)
 **Current version**: v0.27.0
-**Next**: Phase U (TBD)
+**Next**: Phase X (planning)
 
 ---
 
@@ -1355,7 +1441,7 @@ This section exists to resolve cross-phase references used by Phase V and QA rev
 
 **WARNING**: All issues below are OPEN on GitHub. Do not mark as resolved without verifying the fix exists AND closing the GitHub issue.
 
-| Issue | Description | Phase T Sprint | Notes |
+| Issue | Description | Planned Sprint | Notes |
 |-------|-------------|----------------|-------|
 | [#181](https://github.com/randlee/agent-team-mail/issues/181) | Daemon not auto-starting | T.1 | **Critical** — blocks all daemon-dependent features |
 | [#182](https://github.com/randlee/agent-team-mail/issues/182) | Agent roster not seeded from config.json | T.2 | **Critical** — daemon starts with empty roster |
@@ -1368,6 +1454,12 @@ This section exists to resolve cross-phase references used by Phase V and QA rev
 | [#45](https://github.com/randlee/agent-team-mail/issues/45) | Tmux Sentinel Injection | T.11 | Enhancement |
 | [#46](https://github.com/randlee/agent-team-mail/issues/46) | Codex Idle Detection via Notify Hook | T.12 | Enhancement |
 | [#47](https://github.com/randlee/agent-team-mail/issues/47) | Ephemeral Pub/Sub for Agent Availability | T.13 | Enhancement |
+| [#351](https://github.com/randlee/agent-team-mail/issues/351) | Add `/team-join` slash command | X.1 | New onboarding UX contract; paired with `atm teams join` CLI planning |
+| [#361](https://github.com/randlee/agent-team-mail/issues/361) | Spawn path normalization (`--folder` canonical, `--cwd` compatibility) | X.2 | Canonical spawn-directory contract across runtimes |
+| [#357](https://github.com/randlee/agent-team-mail/issues/357) | `atm init` full one-command setup + default global hooks | X.3 | One-command onboarding (`.atm.toml` + team + hooks) plus quickstart updates |
+| [#287](https://github.com/randlee/agent-team-mail/issues/287) | `parse_since_input` accepts `0m` and negative durations | X.4 (deferred) | Deferred follow-on from Phase X onboarding tranche |
+| [#337](https://github.com/randlee/agent-team-mail/issues/337) | Missing `#[serial]` on env-mutating daemon tests (`ATM_HOME`) | X.5 (deferred) | Deferred CI-debt cleanup in Phase X follow-on |
+| [#338](https://github.com/randlee/agent-team-mail/issues/338) | `add-member` does not create inbox atomically | X.6 (deferred) | Deferred follow-on after onboarding contract closure |
 
 ---
 
