@@ -108,13 +108,9 @@ pub struct SpawnArgs {
     #[arg(long)]
     prompt: Option<String>,
 
-    /// Canonical spawn directory (preferred)
-    #[arg(long)]
-    folder: Option<PathBuf>,
-
-    /// Legacy spawn directory alias (compatibility)
-    #[arg(long)]
-    cwd: Option<PathBuf>,
+    /// Canonical spawn directory (`--cwd` is accepted as an alias)
+    #[arg(long, alias = "cwd")]
+    folder: Vec<PathBuf>,
 
     /// Output as JSON
     #[arg(long)]
@@ -394,7 +390,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
 fn spawn_member(args: SpawnArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
-    let launch_dir = resolve_spawn_folder(args.folder.as_ref(), args.cwd.as_ref(), &current_dir)?;
+    let launch_dir = resolve_spawn_folder(&args.folder, &current_dir)?;
     let config = resolve_config(
         &ConfigOverrides {
             team: args.team.clone(),
@@ -455,7 +451,14 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         Ok(Some(r)) => r,
         Ok(None) => {
             if args.json {
-                println!("{{\"error\": \"Daemon is not running. Start it with: atm-daemon\"}}");
+                let output = json!({
+                    "error": "Daemon is not running. Start it with: atm-daemon",
+                    "agent": args.agent,
+                    "team": team_name,
+                    "runtime": runtime_name(&args.runtime),
+                    "folder": launch_dir.to_string_lossy(),
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
             }
@@ -463,7 +466,14 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         }
         Err(e) => {
             if args.json {
-                println!("{{\"error\": \"{}\"}}", e.to_string().replace('"', "\\\""));
+                let output = json!({
+                    "error": e.to_string(),
+                    "agent": args.agent,
+                    "team": team_name,
+                    "runtime": runtime_name(&args.runtime),
+                    "folder": launch_dir.to_string_lossy(),
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 eprintln!("Error: {e}");
             }
@@ -529,11 +539,7 @@ fn canonicalize_directory(path: &Path, flag: &str) -> Result<PathBuf> {
         .map_err(|e| anyhow::anyhow!("Failed to resolve {} path '{}': {e}.", flag, path.display()))
 }
 
-fn resolve_spawn_folder(
-    folder: Option<&PathBuf>,
-    cwd: Option<&PathBuf>,
-    current_dir: &Path,
-) -> Result<PathBuf> {
+fn resolve_spawn_folder(folder_args: &[PathBuf], current_dir: &Path) -> Result<PathBuf> {
     let current = fs::canonicalize(current_dir).map_err(|e| {
         anyhow::anyhow!(
             "Failed to resolve current directory '{}': {e}.",
@@ -541,26 +547,30 @@ fn resolve_spawn_folder(
         )
     })?;
 
-    match (folder, cwd) {
-        (None, None) => Ok(current),
-        (Some(folder_path), None) => canonicalize_directory(folder_path, "--folder"),
-        (None, Some(cwd_path)) => canonicalize_directory(cwd_path, "--cwd"),
-        (Some(folder_path), Some(cwd_path)) => {
-            let folder_canon = canonicalize_directory(folder_path, "--folder")?;
-            let cwd_canon = canonicalize_directory(cwd_path, "--cwd")?;
-            if folder_canon != cwd_canon {
-                anyhow::bail!(
-                    "--folder '{}' and --cwd '{}' resolve to different directories ({} vs {}). \
-                     Provide one flag or matching paths.",
-                    folder_path.display(),
-                    cwd_path.display(),
-                    folder_canon.display(),
-                    cwd_canon.display()
-                );
-            }
-            Ok(folder_canon)
-        }
+    if folder_args.is_empty() {
+        return Ok(current);
     }
+
+    let mut canonical_paths = Vec::with_capacity(folder_args.len());
+    for raw_path in folder_args {
+        // `folder` accepts values from both --folder and its --cwd alias.
+        canonical_paths.push(canonicalize_directory(raw_path, "--folder/--cwd")?);
+    }
+
+    let first = canonical_paths[0].clone();
+    let mismatched = canonical_paths.iter().any(|p| p != &first);
+    if mismatched {
+        anyhow::bail!(
+            "--folder/--cwd values resolve to different directories: {}. \
+             Provide a single path or matching paths.",
+            canonical_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(first)
 }
 
 fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
@@ -3251,7 +3261,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let current = temp_dir.path().join("repo");
         fs::create_dir_all(&current).unwrap();
-        let resolved = resolve_spawn_folder(None, None, &current).unwrap();
+        let resolved = resolve_spawn_folder(&[], &current).unwrap();
         assert_eq!(resolved, fs::canonicalize(&current).unwrap());
     }
 
@@ -3262,8 +3272,7 @@ mod tests {
         let folder_b = temp_dir.path().join("b");
         fs::create_dir_all(&folder_a).unwrap();
         fs::create_dir_all(&folder_b).unwrap();
-        let err =
-            resolve_spawn_folder(Some(&folder_a), Some(&folder_b), temp_dir.path()).unwrap_err();
+        let err = resolve_spawn_folder(&[folder_a, folder_b], temp_dir.path()).unwrap_err();
         assert!(
             err.to_string().contains("resolve to different directories"),
             "unexpected error: {err}"
@@ -3277,8 +3286,7 @@ mod tests {
         fs::create_dir_all(&folder).unwrap();
         let via_folder = temp_dir.path().join("same");
         let via_cwd = temp_dir.path().join("same/.");
-        let resolved =
-            resolve_spawn_folder(Some(&via_folder), Some(&via_cwd), temp_dir.path()).unwrap();
+        let resolved = resolve_spawn_folder(&[via_folder, via_cwd], temp_dir.path()).unwrap();
         assert_eq!(resolved, fs::canonicalize(&folder).unwrap());
     }
 
@@ -3286,9 +3294,21 @@ mod tests {
     fn test_resolve_spawn_folder_rejects_nonexistent_folder() {
         let temp_dir = TempDir::new().unwrap();
         let missing = temp_dir.path().join("does-not-exist");
-        let err = resolve_spawn_folder(Some(&missing), None, temp_dir.path()).unwrap_err();
+        let err = resolve_spawn_folder(&[missing], temp_dir.path()).unwrap_err();
         assert!(
             err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_directory_rejects_file_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("not-a-dir.txt");
+        fs::write(&file_path, "data").unwrap();
+        let err = canonicalize_directory(&file_path, "--folder").unwrap_err();
+        assert!(
+            err.to_string().contains("is not a directory"),
             "unexpected error: {err}"
         );
     }

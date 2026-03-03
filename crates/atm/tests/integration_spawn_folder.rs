@@ -34,8 +34,31 @@ fn test_spawn_folder_rejects_nonexistent_directory() {
     ])
     .assert()
     .failure()
-    .stderr(predicate::str::contains("--folder path"))
     .stderr(predicate::str::contains("does not exist"));
+}
+
+#[test]
+fn test_spawn_folder_rejects_existing_file_path() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("plain-file.txt");
+    fs::write(&file_path, "x").unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.args([
+        "teams",
+        "spawn",
+        "agent-file",
+        "--team",
+        "atm-dev",
+        "--runtime",
+        "codex",
+        "--folder",
+        file_path.to_str().unwrap(),
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("is not a directory"));
 }
 
 #[test]
@@ -64,4 +87,79 @@ fn test_spawn_folder_and_cwd_mismatch_rejected() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("resolve to different directories"));
+}
+
+#[test]
+fn test_spawn_cwd_only_reaches_daemon_with_json_folder_field() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("cwd-only");
+    fs::create_dir_all(&folder).unwrap();
+    let canonical = fs::canonicalize(&folder).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .args([
+            "teams",
+            "spawn",
+            "agent-c",
+            "--team",
+            "atm-dev",
+            "--runtime",
+            "codex",
+            "--cwd",
+            folder.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("Daemon is not running")
+    );
+    assert_eq!(parsed["folder"], canonical.to_string_lossy().to_string());
+}
+
+#[test]
+fn test_spawn_dual_flag_match_reaches_daemon_and_keeps_folder_json() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("dual");
+    fs::create_dir_all(&folder).unwrap();
+    let canonical = fs::canonicalize(&folder).unwrap();
+    let alt = temp_dir.path().join("dual/.");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .args([
+            "teams",
+            "spawn",
+            "agent-d",
+            "--team",
+            "atm-dev",
+            "--runtime",
+            "gemini",
+            "--folder",
+            folder.to_str().unwrap(),
+            "--cwd",
+            alt.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("Daemon is not running")
+    );
+    assert_eq!(parsed["folder"], canonical.to_string_lossy().to_string());
 }
