@@ -67,16 +67,28 @@ Pass criteria: folder semantics and startup guidance are consistent across suppo
 
 Pass criteria: all command forms are idempotent and produce expected setup state.
 
-## Deferred Follow-On Verification Stubs (X.4/X.5/X.6)
+## X.4 — Kill Stale Daemon on Install/Upgrade ([#366](https://github.com/randlee/agent-team-mail/issues/366))
 
-These are intentionally deferred from X.1-X.3 and retained here so the issues are
+### Verification Targets
+
+| Check | Verification |
+|---|---|
+| Homebrew post-install kills daemon | `grep -A5 'def post_install\|pkill' Formula/agent-team-mail.rb` confirms `pkill -x atm-daemon \|\| true` present |
+| Quickstart upgrading section | `docs/quickstart.md` contains an "Upgrading" section with manual kill step |
+| Daemon restarts cleanly after kill | After `pkill -x atm-daemon`, next `atm` CLI call (with auto-start enabled) starts fresh daemon |
+
+Pass criteria: Homebrew formula and quickstart docs both cover the upgrade scenario.
+
+## Deferred Follow-On Verification Stubs (X.5/X.6/X.7)
+
+These are intentionally deferred from X.1-X.4 and retained here so the issues are
 explicitly mapped with rationale and baseline verification intent.
 
 | Sprint | Issue | Baseline Verification Target |
 |---|---|---|
-| X.4 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | Reject `atm doctor --since 0m` and negative durations with actionable validation error |
-| X.5 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | Parallel daemon test run remains stable when env-mutating tests are serialized |
-| X.6 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | `atm teams add-member` creates inbox atomically and avoids doctor drift finding |
+| X.5 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | Reject `atm doctor --since 0m` and negative durations with actionable validation error |
+| X.6 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | Parallel daemon test run remains stable when env-mutating tests are serialized |
+| X.7 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | `atm teams add-member` creates inbox atomically and avoids doctor drift finding |
 
 ## Suggested Execution Commands
 

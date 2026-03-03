@@ -1155,8 +1155,8 @@ hook installation defaults.
 **Execution reference**: `docs/test-plan-phase-X.md`.
 
 **Integration branch**: `integrate/phase-X` off `develop`.
-**Dependency graph**: X.1 → {X.2, X.3}; X.4/X.5/X.6 deferred follow-on.
-**Canonical sprint-to-issue mapping**: X.1=`#351`, X.2=`#361`, X.3=`#357`, X.4=`#287`, X.5=`#337`, X.6=`#338`.
+**Dependency graph**: X.1 → {X.2, X.3}; X.4 independent; X.5/X.6/X.7 deferred follow-on.
+**Canonical sprint-to-issue mapping**: X.1=`#351`, X.2=`#361`, X.3=`#357`, X.4=`#366`, X.5=`#287`, X.6=`#337`, X.7=`#338`.
 
 **Dependency rationale**:
 - X.2 depends on X.1 because join/launch output contracts must settle canonical
@@ -1249,25 +1249,48 @@ worktree-driven launches.
 - `--identity` writes requested identity in `.atm.toml`.
 - `docs/quickstart.md` is created with minimum required sections and worktree/global rationale.
 
+### X.4 — Kill stale daemon on install/upgrade ([#366](https://github.com/randlee/agent-team-mail/issues/366))
+
+**Problem**: When `atm` is upgraded (via Homebrew or `cargo install`), the running
+`atm-daemon` process is not stopped. The new CLI binary may be protocol-incompatible
+with the old daemon, leading to silent misbehavior.
+
+**Deliverables**:
+1. Add `pkill -x atm-daemon || true` to the Homebrew formula post-install hook
+   so upgrading via `brew upgrade agent-team-mail` kills the stale daemon.
+2. Add a note to `docs/quickstart.md` under an "Upgrading" section that after a
+   manual upgrade (e.g. `cargo install`), users should run `pkill -x atm-daemon`
+   or `atm daemon stop` if the daemon is running.
+3. (Optional) Expose `atm daemon stop` convenience subcommand if not already
+   present, or document the existing kill path clearly.
+
+**Acceptance criteria**:
+- Homebrew formula `Formula/agent-team-mail.rb` contains a `def post_install` (or
+  `def caveats`) block that kills the running daemon on upgrade.
+- `docs/quickstart.md` has an "Upgrading" section with the manual kill step.
+- No regression: `atm daemon start` (or equivalent auto-start path) still works
+  after the kill.
+
 ### Deferred Technical Debt Carry-Forward (Phase X Follow-On)
 
-The following issues are explicitly tracked but deferred from X.1-X.3 to keep
+The following issues are explicitly tracked but deferred from X.1-X.4 to keep
 the current tranche focused on onboarding contract closure.
 
 | Sprint | Issue | Status | Deferral Rationale |
 |--------|-------|--------|--------------------|
-| X.4 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | DEFERRED | Doctor duration parser correctness is isolated from join/init onboarding scope; scheduled after X.1-X.3 merge. |
-| X.5 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | DEFERRED | Test-serialization hardening is CI debt cleanup and can proceed independently after onboarding contract stabilization. |
-| X.6 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | DEFERRED | `add-member` inbox atomicity is important but not a prerequisite for `/team-join`/`atm init` contract planning closure in this tranche. |
+| X.5 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | DEFERRED | Doctor duration parser correctness is isolated from join/init onboarding scope; scheduled after X.1-X.4 merge. |
+| X.6 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | DEFERRED | Test-serialization hardening is CI debt cleanup and can proceed independently after onboarding contract stabilization. |
+| X.7 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | DEFERRED | `add-member` inbox atomicity is important but not a prerequisite for `/team-join`/`atm init` contract planning closure in this tranche. |
 
 | Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
 | X.1 | `/team-join` contract + slash-command flow planning | — | M | PLANNED | [#351](https://github.com/randlee/agent-team-mail/issues/351) |
 | X.2 | Spawn `--folder` normalization across runtimes | X.1 | S | PLANNED | [#361](https://github.com/randlee/agent-team-mail/issues/361) |
 | X.3 | `atm init` one-command setup + default-global hooks | X.1 | M | PLANNED | [#357](https://github.com/randlee/agent-team-mail/issues/357) |
-| X.4 | Doctor duration parser boundary fix (`parse_since_input`) | — | XS | DEFERRED | [#287](https://github.com/randlee/agent-team-mail/issues/287) |
-| X.5 | Serialize env-mutating daemon tests (`ATM_HOME`) | — | S | DEFERRED | [#337](https://github.com/randlee/agent-team-mail/issues/337) |
-| X.6 | `teams add-member` inbox atomicity | — | S | DEFERRED | [#338](https://github.com/randlee/agent-team-mail/issues/338) |
+| X.4 | Kill stale daemon on install/upgrade | X.3 | XS | ACTIVE | [#366](https://github.com/randlee/agent-team-mail/issues/366) |
+| X.5 | Doctor duration parser boundary fix (`parse_since_input`) | — | XS | DEFERRED | [#287](https://github.com/randlee/agent-team-mail/issues/287) |
+| X.6 | Serialize env-mutating daemon tests (`ATM_HOME`) | — | S | DEFERRED | [#337](https://github.com/randlee/agent-team-mail/issues/337) |
+| X.7 | `teams add-member` inbox atomicity | — | S | DEFERRED | [#338](https://github.com/randlee/agent-team-mail/issues/338) |
 
 ---
 ## 18. Future Plugins

@@ -1795,6 +1795,38 @@ atm init <team> --check
 - Idempotent no-op cases (`.atm.toml` exists, team exists, hooks already configured)
   are success states and must be explicitly reported in human output.
 
+### 4.10 Daemon Upgrade Lifecycle ([#366](https://github.com/randlee/agent-team-mail/issues/366))
+
+When `atm` is upgraded, a stale `atm-daemon` from a prior version may remain
+running. Protocol or API mismatches between the new CLI and old daemon can cause
+silent misbehavior. The upgrade path must ensure daemon/CLI version parity.
+
+#### 4.10.1 Homebrew Post-Install Kill
+
+- The Homebrew formula `Formula/agent-team-mail.rb` MUST include a `post_install`
+  hook that kills any running `atm-daemon` process:
+  ```sh
+  def post_install
+    system "pkill", "-x", "atm-daemon"; rescue nil
+  end
+  ```
+  or equivalent shell form: `pkill -x atm-daemon || true`
+- The kill is non-blocking and non-fatal: if no daemon is running, the hook exits 0.
+- After the kill, the daemon is restarted automatically on the next `atm` CLI
+  invocation (via the existing auto-start mechanism in §4.7).
+
+#### 4.10.2 Manual Upgrade Guidance
+
+- `docs/quickstart.md` MUST include an "Upgrading" section that instructs users
+  performing manual upgrades (e.g. `cargo install agent-team-mail`) to kill the
+  running daemon:
+  ```bash
+  pkill -x atm-daemon || true
+  ```
+  or use `atm daemon stop` if that subcommand exists.
+- The section should note that auto-start will re-launch the daemon on the next
+  `atm` invocation.
+
 ---
 
 ## 5. Plugin System (Daemon Only)
