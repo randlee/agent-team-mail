@@ -1971,6 +1971,13 @@ fn handle_session_query_team(
 ///
 /// Payload: `{"agent": "<name>", "team": "<team>"}`  (team is currently informational)
 /// Response: `{"state": "<state>", "last_transition": "<iso8601 or null>"}`
+///
+/// Protocol note:
+/// - `agent-state` is intentionally a backward-compatible, minimal response
+///   surface (state + transition metadata + reason/source hints).
+/// - Team-scoped `list-agents` is the canonical full member-state surface and
+///   includes richer fields (`activity`, `session_id`, `process_id`).
+/// - Consumers that need full canonical state should prefer `list-agents`.
 fn handle_agent_state(
     request: &agent_team_mail_core::daemon_client::SocketRequest,
     state_store: &SharedStateStore,
@@ -2069,7 +2076,11 @@ fn handle_agent_state(
 /// Handle the `list-agents` command.
 ///
 /// Payload: `{}`
-/// Response: array of `{"agent": "<name>", "state": "<state>"}`
+/// Response:
+/// - Unscoped: array of lightweight `{"agent": "<name>", "state": "<state>"}`
+///   entries for compatibility with legacy callers.
+/// - Team-scoped (`{"team":"..."}`): array of full canonical member-state
+///   objects used by doctor/status/members surfaces.
 fn handle_list_agents(
     request: &agent_team_mail_core::daemon_client::SocketRequest,
     state_store: &SharedStateStore,

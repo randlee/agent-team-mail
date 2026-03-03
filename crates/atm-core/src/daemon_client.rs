@@ -570,7 +570,10 @@ pub fn query_list_agents_for_team(team: &str) -> anyhow::Result<Option<Vec<Agent
 
 /// Query the daemon for canonical member-state snapshots scoped to one team.
 ///
-/// Returns `Ok(None)` when the daemon is not reachable.
+/// Returns:
+/// - `Ok(None)` when the daemon is not reachable.
+/// - `Err(...)` when daemon response payload is present but does not match the
+///   canonical state schema.
 pub fn query_team_member_states(team: &str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>> {
     let request = SocketRequest {
         version: PROTOCOL_VERSION,
@@ -593,10 +596,17 @@ pub fn query_team_member_states(team: &str) -> anyhow::Result<Option<Vec<Canonic
         None => return Ok(None),
     };
 
-    match serde_json::from_value::<Vec<CanonicalMemberState>>(payload) {
-        Ok(states) => Ok(Some(states)),
-        Err(_) => Ok(None),
-    }
+    decode_canonical_member_states_payload(payload).map(Some)
+}
+
+fn decode_canonical_member_states_payload(
+    payload: serde_json::Value,
+) -> anyhow::Result<Vec<CanonicalMemberState>> {
+    serde_json::from_value::<Vec<CanonicalMemberState>>(payload).map_err(|err| {
+        anyhow::anyhow!(
+            "invalid canonical member-state payload from daemon list-agents(team): {err}"
+        )
+    })
 }
 
 /// Pane and log file information returned by the `agent-pane` command.
@@ -1929,6 +1939,38 @@ sleep 2
         assert_eq!(canonical_liveness_bool(Some(&idle)), Some(true));
         assert_eq!(canonical_liveness_bool(Some(&dead)), Some(false));
         assert_eq!(canonical_liveness_bool(None), None);
+    }
+
+    #[test]
+    fn test_decode_canonical_member_states_payload_rejects_invalid_schema() {
+        let invalid = serde_json::json!({
+            "agent": "arch-ctm",
+            "state": "active"
+        });
+        let err = decode_canonical_member_states_payload(invalid).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid canonical member-state payload")
+        );
+    }
+
+    #[test]
+    fn test_decode_canonical_member_states_payload_accepts_valid_schema() {
+        let valid = serde_json::json!([
+            {
+                "agent": "arch-ctm",
+                "state": "active",
+                "activity": "busy",
+                "session_id": "sess-1",
+                "process_id": 1234,
+                "reason": "session active",
+                "source": "session_registry"
+            }
+        ]);
+        let states = decode_canonical_member_states_payload(valid).expect("valid payload");
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].agent, "arch-ctm");
+        assert_eq!(states[0].state, "active");
     }
 
     // Unix-only: test PID alive check for the current process

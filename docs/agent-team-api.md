@@ -383,11 +383,28 @@ With a tag, the pattern has been 100% reliable in testing. Without one, the mess
 
 `atm doctor --json` returns a stable top-level report object with:
 - `summary`
+- `member_snapshot`
 - `findings`
 - `recommendations`
 - `log_window`
 
-`member_snapshot` is intentionally omitted from JSON output (it is rendered in human output only).
+`member_snapshot` is included in JSON output as an array of per-member objects
+and appears before `findings` in the top-level object to keep machine
+consumers aligned with human output ordering.
+
+`member_snapshot[]` fields:
+- `name`
+- `agent_id`
+- `agent_type`
+- `model`
+- `process_id` (nullable)
+- `session_id` (nullable)
+- `status`
+- `activity`
+
+Change-control note:
+- Changed in Phase Y: `member_snapshot` was promoted to first-class JSON output
+  to support automation consumers.
 
 ---
 
