@@ -10,7 +10,7 @@ use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
     AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_pid_path,
     daemon_socket_path, query_list_agents, query_list_agents_for_team, query_session_for_team,
-    query_team_member_state_map, query_team_member_states,
+    query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
@@ -195,6 +195,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     let config_path = team_dir.join("config.json");
 
     let mut findings: Vec<Finding> = Vec::new();
+    let mut daemon_states_by_agent: HashMap<String, CanonicalMemberState> = HashMap::new();
 
     if !team_dir.exists() {
         findings.push(finding(
@@ -224,7 +225,10 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
 
     // Check 2 + 3 + 4: session/roster/mailbox integrity
     if let Some(cfg) = &team_config {
-        findings.extend(check_pid_session_reconciliation(team, cfg));
+        let (pid_findings, daemon_states) =
+            check_pid_session_reconciliation_with_query(team, cfg, query_team_member_states);
+        daemon_states_by_agent = daemon_states;
+        findings.extend(pid_findings);
         findings.extend(check_roster_session_integrity(team, cfg));
         findings.extend(check_mailbox_integrity(team_dir.join("inboxes"), team, cfg));
     }
@@ -258,9 +262,6 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         has_critical: counts.critical > 0,
         counts,
     };
-
-    let daemon_states_by_agent: HashMap<String, CanonicalMemberState> =
-        query_team_member_state_map(team);
 
     Ok(DoctorReport {
         summary,
@@ -398,36 +399,52 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     findings
 }
 
-fn check_pid_session_reconciliation(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
-    check_pid_session_reconciliation_with_query(team, cfg, query_team_member_states)
-}
-
 fn check_pid_session_reconciliation_with_query<F>(
     team: &str,
     cfg: &TeamConfig,
     query_states: F,
-) -> Vec<Finding>
+) -> (Vec<Finding>, HashMap<String, CanonicalMemberState>)
 where
     F: Fn(&str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>>,
 {
     let mut findings = Vec::new();
-    let queried = query_states(team);
-    let query_failed = queried.is_err();
-    if let Err(err) = &queried {
+    let (daemon_states, query_unreachable, unreachable_reason): (
+        HashMap<String, CanonicalMemberState>,
+        bool,
+        Option<String>,
+    ) = match query_states(team) {
+        Ok(Some(states)) => (
+            states
+                .into_iter()
+                .map(|s| (s.agent.clone(), s))
+                .collect::<HashMap<_, _>>(),
+            false,
+            None,
+        ),
+        Ok(None) => (
+            HashMap::new(),
+            true,
+            Some(format!(
+                "Daemon team-scoped state query unavailable for team '{team}'"
+            )),
+        ),
+        Err(err) => (
+            HashMap::new(),
+            true,
+            Some(format!(
+                "Daemon team-scoped state query failed for team '{team}': {err}"
+            )),
+        ),
+    };
+
+    if let Some(reason) = unreachable_reason {
         findings.push(finding(
             Severity::Warn,
             "daemon_health",
             "DAEMON_UNREACHABLE",
-            format!("Daemon team-scoped state query failed for team '{team}': {err}"),
+            reason,
         ));
     }
-    let daemon_states: HashMap<String, CanonicalMemberState> = queried
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| (s.agent.clone(), s))
-        .collect();
 
     for member in &cfg.members {
         let daemon_state = daemon_states.get(&member.name);
@@ -461,12 +478,12 @@ where
                     ),
                 ))
             }
-            _ if member.is_active == Some(true) && query_failed => findings.push(finding(
+            _ if member.is_active == Some(true) && query_unreachable => findings.push(finding(
                 Severity::Warn,
                 "pid_session_reconciliation",
                 "ACTIVE_WITHOUT_SESSION",
                 format!(
-                    "Member '{}' has activity hint isActive=true but daemon state query failed",
+                    "Member '{}' has activity hint isActive=true but daemon state query unavailable",
                     member.name
                 ),
             )),
@@ -483,7 +500,7 @@ where
         }
     }
 
-    findings
+    (findings, daemon_states)
 }
 
 fn check_roster_session_integrity(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
@@ -859,7 +876,7 @@ fn build_recommendations(
 
     let has = |code: &str| findings.iter().any(|f| f.code == code);
 
-    if has("DAEMON_NOT_RUNNING") {
+    if has("DAEMON_NOT_RUNNING") || has("DAEMON_UNREACHABLE") {
         recs.push(Recommendation {
             command: "atm-daemon".to_string(),
             reason: "Start daemon to enable session/teardown reconciliation".to_string(),
@@ -1077,6 +1094,18 @@ mod tests {
     }
 
     #[test]
+    fn build_recommendations_includes_daemon_start_for_unreachable() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "daemon_health",
+            "DAEMON_UNREACHABLE",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm-daemon"));
+    }
+
+    #[test]
     fn build_recommendations_routes_active_without_session_to_cleanup_with_context() {
         let findings = vec![finding(
             Severity::Warn,
@@ -1220,6 +1249,52 @@ mod tests {
                 .iter()
                 .any(|f| f.code == "DAEMON_TRACKS_UNKNOWN_AGENT"),
             "scoped roster integrity check must ignore agents from other teams"
+        );
+    }
+
+    #[test]
+    fn check_roster_session_integrity_ignores_foreign_team_name_collision() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![
+                member("team-lead", Some(true), 0),
+                member("shared-agent", None, 0),
+            ],
+            unknown_fields: HashMap::new(),
+        };
+
+        let atm_dev_agents = vec![
+            AgentSummary {
+                agent: "team-lead".to_string(),
+                state: "idle".to_string(),
+            },
+            AgentSummary {
+                agent: "shared-agent".to_string(),
+                state: "idle".to_string(),
+            },
+        ];
+        let other_team_agents = vec![AgentSummary {
+            agent: "shared-agent".to_string(),
+            state: "active".to_string(),
+        }];
+
+        let findings = check_roster_session_integrity_with_query("atm-dev", &cfg, |team| {
+            if team == "atm-dev" {
+                Ok(Some(atm_dev_agents.clone()))
+            } else {
+                Ok(Some(other_team_agents.clone()))
+            }
+        });
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.code == "DAEMON_TRACKS_UNKNOWN_AGENT"),
+            "foreign-team same-name agents must not bleed into this team's roster checks"
         );
     }
 
@@ -1372,15 +1447,35 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        let findings = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
             Err(anyhow::anyhow!("daemon unavailable"))
         });
-        assert!(
-            findings.iter().any(|f| {
-                f.code == "ACTIVE_WITHOUT_SESSION" && f.message.contains("query failed")
-            })
-        );
+        assert!(findings.iter().any(|f| {
+            f.code == "ACTIVE_WITHOUT_SESSION" && f.message.contains("query unavailable")
+        }));
         assert!(findings.iter().any(|f| f.code == "DAEMON_UNREACHABLE"));
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_query_none_maps_to_daemon_unreachable() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| Ok(None));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "DAEMON_UNREACHABLE" && f.message.contains("unavailable"))
+        );
+        assert!(findings.iter().any(|f| f.code == "ACTIVE_WITHOUT_SESSION"));
     }
 
     #[test]
@@ -1395,7 +1490,7 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        let findings = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
             Ok(Some(vec![CanonicalMemberState {
                 agent: "foreign-agent".to_string(),
                 state: "offline".to_string(),
@@ -1424,7 +1519,7 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        let findings = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
             Ok(Some(vec![CanonicalMemberState {
                 agent: "worker-a".to_string(),
                 state: "active".to_string(),
