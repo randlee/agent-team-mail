@@ -3,7 +3,6 @@
 ## Prerequisites
 
 - `atm` CLI installed and on `PATH`
-- Claude Code hooks enabled in your environment
 - Repo checkout with write access
 
 ## One-Command Setup
@@ -19,12 +18,18 @@ What it does (idempotent):
 - creates `~/.claude/teams/<team>/config.json` when missing
 - installs ATM hook wiring globally in `~/.claude/settings.json`
 
+Then bind your session (required once per Claude Code session):
+
+```bash
+atm teams resume <team>
+```
+
 Common options:
 
 ```bash
-atm init <team> --local
+atm init <team> --local          # project-scoped hooks instead of global
 atm init <team> --identity <name>
-atm init <team> --skip-team
+atm init <team> --skip-team      # skip team creation (join existing)
 ```
 
 ## First Send/Read Flow
