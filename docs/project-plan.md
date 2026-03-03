@@ -1155,7 +1155,8 @@ hook installation defaults.
 **Execution reference**: `docs/test-plan-phase-X.md`.
 
 **Integration branch**: `integrate/phase-X` off `develop`.
-**Dependency graph**: X.1 → {X.2, X.3}; X.4 independent; X.5/X.6/X.7 deferred follow-on.
+**Dependency graph**: X.1 → {X.2, X.3}; X.4 independent; X.5/X.6/X.7 completed follow-on.
+**Status**: COMPLETE — all X.1-X.7 sprints delivered and QA-cleared. PR #370 (integrate/phase-X → develop).
 **Canonical sprint-to-issue mapping**: X.1=`#351`, X.2=`#361`, X.3=`#357`, X.4=`#366`, X.5=`#287`, X.6=`#337`, X.7=`#338`.
 
 **Dependency rationale**:
@@ -1284,13 +1285,13 @@ the current tranche focused on onboarding contract closure.
 
 | Sprint | Name | Depends On | Size | Status | Issue |
 |--------|------|------------|------|--------|-------|
-| X.1 | `/team-join` contract + slash-command flow planning | — | M | PLANNED | [#351](https://github.com/randlee/agent-team-mail/issues/351) |
-| X.2 | Spawn `--folder` normalization across runtimes | X.1 | S | PLANNED | [#361](https://github.com/randlee/agent-team-mail/issues/361) |
-| X.3 | `atm init` one-command setup + default-global hooks | X.1 | M | PLANNED | [#357](https://github.com/randlee/agent-team-mail/issues/357) |
-| X.4 | Kill stale daemon on install/upgrade | X.3 | XS | ACTIVE | [#366](https://github.com/randlee/agent-team-mail/issues/366) |
-| X.5 | Doctor duration parser boundary fix (`parse_since_input`) | — | XS | DEFERRED | [#287](https://github.com/randlee/agent-team-mail/issues/287) |
-| X.6 | Serialize env-mutating daemon tests (`ATM_HOME`) | — | S | DEFERRED | [#337](https://github.com/randlee/agent-team-mail/issues/337) |
-| X.7 | `teams add-member` inbox atomicity | — | S | DEFERRED | [#338](https://github.com/randlee/agent-team-mail/issues/338) |
+| X.1 | `/team-join` contract + slash-command flow planning | — | M | COMPLETE | [#351](https://github.com/randlee/agent-team-mail/issues/351) |
+| X.2 | Spawn `--folder` normalization across runtimes | X.1 | S | COMPLETE | [#361](https://github.com/randlee/agent-team-mail/issues/361) |
+| X.3 | `atm init` one-command setup + default-global hooks | X.1 | M | COMPLETE | [#357](https://github.com/randlee/agent-team-mail/issues/357) |
+| X.4 | Kill stale daemon on install/upgrade | X.3 | XS | COMPLETE | [#366](https://github.com/randlee/agent-team-mail/issues/366) |
+| X.5 | Doctor duration parser boundary fix (`parse_since_input`) | — | XS | COMPLETE | [#287](https://github.com/randlee/agent-team-mail/issues/287) |
+| X.6 | Serialize env-mutating daemon tests (`ATM_HOME`) | — | S | COMPLETE | [#337](https://github.com/randlee/agent-team-mail/issues/337) |
+| X.7 | `teams add-member` inbox atomicity | — | S | COMPLETE | [#338](https://github.com/randlee/agent-team-mail/issues/338) |
 
 ---
 ## 18. Future Plugins
@@ -1429,10 +1430,16 @@ the current tranche focused on onboarding contract closure.
 | **Q** | Q.2 | Integration tests + cross-platform validation | COMPLETE | [#253](https://github.com/randlee/agent-team-mail/pull/253) |
 | **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | COMPLETE | — |
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
+| **X** | X.1 | `/team-join` contract + slash-command flow planning | COMPLETE | [#362](https://github.com/randlee/agent-team-mail/pull/362) |
+| **X** | X.2 | Spawn `--folder` normalization across runtimes | COMPLETE | [#363](https://github.com/randlee/agent-team-mail/pull/363) |
+| **X** | X.3 | `atm init` one-command setup + default-global hooks | COMPLETE | [#364](https://github.com/randlee/agent-team-mail/pull/364) |
+| **X** | X.4 | Kill stale daemon on install/upgrade | COMPLETE | [#367](https://github.com/randlee/agent-team-mail/pull/367) |
+| **X** | X.5+X.6 | `parse_since_input` validation + `#[serial]` daemon tests | COMPLETE | [#368](https://github.com/randlee/agent-team-mail/pull/368) |
+| **X** | X.7 | `teams add-member` inbox atomicity | COMPLETE | [#369](https://github.com/randlee/agent-team-mail/pull/369) |
 
-**Completed**: 99+ sprints across 23 phases (CI green)
-**Current version**: v0.27.0
-**Next**: Phase X (planning)
+**Completed**: 106+ sprints across 24 phases (CI green)
+**Current version**: v0.31.0
+**Next**: Phase Y (TBD)
 
 ---
 
