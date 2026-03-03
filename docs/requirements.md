@@ -561,6 +561,28 @@ atm status <team>                # specific team
 
 **Output**: Team info, member list with activity, unread message counts, pending tasks.
 
+#### `atm teams add-member`
+
+Add a member to a team roster with mailbox bootstrap guarantees.
+
+```
+atm teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
+```
+
+**Required behavior**:
+- Add/update the member entry in `config.json`.
+- Create `inboxes/<agent>.json` as part of the same add-member operation using the
+  same atomic write path used for inbox creation elsewhere.
+- The command must be idempotent: re-running add-member for an existing member
+  must not corrupt or truncate an existing inbox.
+- Command completion is not successful unless roster and mailbox converge together
+  (member exists in `config.json` and inbox file exists).
+
+**Acceptance checks**:
+- Immediately after add-member returns success, `inboxes/<agent>.json` exists.
+- First `atm send <agent>@<team>` succeeds without requiring a bootstrap side effect.
+- `atm doctor` reports no roster/mailbox drift for a newly added member.
+
 ### 4.3.1 Lifecycle Teardown and Cleanup Semantics
 
 Daemon-managed teammate shutdown and cleanup MUST follow one canonical flow so that
@@ -674,6 +696,8 @@ atm doctor --full
 - Accepted units: `s` = seconds, `m` = minutes, `h` = hours, `d` = days.
 - Examples: `30m`, `2h`, `1d`, `45s`.
 - Invalid examples: `0m`, `1w`, `1.5h`, `-5m`, `m30`.
+- Zero/negative duration inputs MUST fail validation with actionable error text and
+  must not be coerced into a valid range.
 
 **Output requirements**:
 - Human-readable output MUST start with a concise team member snapshot table (equivalent
@@ -767,6 +791,26 @@ Acceptance checks:
 - Clearing and re-introducing the fault must emit a new alert.
 - Monitor can be launched as a background teammate and continues polling/sending
   alerts without interactive prompting.
+
+### 4.3.3b TUI Baseline Correctness Requirements
+
+TUI behavior must remain consistent with daemon-backed state and inbox data.
+
+Required behavior:
+- Left and right status panels must derive from one normalized state source.
+  Contradictory panel state for the same agent/session is invalid.
+- When daemon state is unavailable, TUI must render explicit degraded/unavailable
+  state guidance instead of silent empty or contradictory status.
+- TUI must provide inbox message viewing:
+  - message list view for selected agent/team context,
+  - message detail view for full payload content,
+  - mark-as-read persistence using the same atomic write guarantees as CLI reads.
+- TUI header must display ATM version from build metadata (`CARGO_PKG_VERSION`).
+
+Acceptance checks:
+- Panel-consistency tests fail on divergent left/right state and pass on unified state.
+- Message list/detail and mark-read persistence tests pass for representative inbox fixtures.
+- Header-render tests assert visible version string in normal TUI startup.
 
 ### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
 
@@ -2008,6 +2052,10 @@ The core has no awareness of whether a team member is local or remote.
 - **Plugin trait tests**: Default test harness for plugin implementations
 - **No external dependencies in tests**: Mock file system, no network calls
 - **Schema evolution tests**: Verify round-trip with unknown fields, missing optional fields
+- **Global env mutation safety**: Tests that read/write process-global env vars
+  (for example `ATM_HOME`) MUST be serialized to avoid cross-test races.
+- **Parallel stability gate**: CI/local suites must include a parallel run baseline
+  (`--test-threads=8` or equivalent) for env-sensitive integration tests.
 
 ### 8.4 Performance
 

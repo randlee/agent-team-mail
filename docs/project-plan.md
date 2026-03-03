@@ -163,6 +163,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | R | Session Handoff + Hook Installer | Daemon singleton lock, session registry, `atm doctor` | COMPLETE |
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
+| X | Team Onboarding + TUI/Doctor Stability | Close onboarding race, daemon test flakes, and prioritized TUI/doctor blockers | PLANNED |
 
 ---
 
@@ -1183,6 +1184,152 @@ This section exists to resolve cross-phase references used by Phase V and QA rev
 **V.4 dependency note**: V.4 is a daemon lifecycle cleanup sprint scoped to #331/#334. It was executed as an independently testable guard/hardening pass before V.2 merge completion to stop active regressions; V.2 remains the broader teardown-policy sprint. V.4 is intentionally independent from V.1 doctor reconciliation.
 
 ---
+## 17.12 Phase X: Team Onboarding + TUI/Doctor Stability (Planning)
+
+**Goal**: Close active blockers across onboarding, daemon test stability, TUI correctness, and doctor correctness.
+**Execution reference**: `docs/test-plan-phase-X.md`.
+
+**Integration branch**: `integrate/phase-X` off `develop`.
+
+**Execution order**:
+1. High priority (foundational blockers): X.3 → X.4 → X.5.
+2. Medium priority (correctness + core feature): X.6 → X.7.
+3. Low priority (polish): X.8.
+4. Onboarding/test-stability track: X.1 → X.2 (can run in parallel with X.3-X.8 when ownership does not overlap).
+
+### X.1 — Atomic inbox creation in `atm teams add-member` *(bug fix, [#338](https://github.com/randlee/agent-team-mail/issues/338))*
+
+**Problem**: `atm teams add-member` updates team roster but does not create `inboxes/<member>.json` in the same operation. This creates roster/inbox drift and first-send bootstrap failures.
+
+**Deliverables**:
+1. Make `atm teams add-member` create member inbox atomically as part of add flow.
+2. Reuse shared atomic file-write path used by send/bootstrap logic (no bespoke writer).
+3. Preserve idempotency: re-adding existing member does not corrupt existing inbox.
+4. Add regression tests for add-member + immediate inbox existence.
+5. Add doctor integration coverage proving no false drift after add-member.
+
+**Acceptance criteria**:
+- Immediately after `atm teams add-member <team> <member>`, `inboxes/<member>.json` exists.
+- First `atm send` to that member works without bootstrap side-effects.
+- `atm doctor` reports no roster/inbox integrity finding for that newly added member.
+
+### X.2 — Serialize daemon integration tests mutating `ATM_HOME` *(bug fix, [#337](https://github.com/randlee/agent-team-mail/issues/337))*
+
+**Problem**: 27 daemon integration tests mutate process env (`ATM_HOME`) without serialization, causing nondeterministic failures under parallel test execution.
+
+**Deliverables**:
+1. Add `#[serial]` to all daemon integration tests that read/write `ATM_HOME` in:
+   - `crates/atm-daemon/tests/issues_error_tests.rs`
+   - `crates/atm-daemon/tests/ci_monitor_error_tests.rs`
+   - `crates/atm-daemon/tests/issues_integration.rs`
+2. Keep unaffected tests parallel to avoid unnecessary runtime regression.
+3. Add/adjust test docs comments so env-mutating tests clearly indicate serialization requirement.
+4. Validate with local parallel stress run and existing CI matrix.
+
+**Acceptance criteria**:
+- No env-race flakes in daemon test suite under parallel execution (`--test-threads=8` baseline check).
+- Linux/macOS/Windows CI daemon test jobs stay green without intermittent ATM_HOME failures.
+
+### X.3 — Daemon auto-start reliability for TUI entry *(bug fix, [#181](https://github.com/randlee/agent-team-mail/issues/181))*
+
+**Priority**: High (foundational blocker).
+
+**Problem**: If daemon does not auto-start reliably, TUI cannot establish live state and appears broken on first use.
+
+**Deliverables**:
+1. Ensure TUI/CLI paths that require daemon trigger deterministic auto-start.
+2. Return explicit failure details when auto-start fails (not silent empty-state behavior).
+3. Add regression coverage for fresh-machine/no-daemon startup path.
+
+**Acceptance criteria**:
+- Starting TUI on a machine without a running daemon auto-starts daemon and loads state.
+- Startup failure yields actionable error output instead of empty/contradictory TUI state.
+
+### X.4 — Roster seeding from `config.json` at startup *(bug fix, [#182](https://github.com/randlee/agent-team-mail/issues/182))*
+
+**Priority**: High (depends on X.3).
+
+**Problem**: TUI/daemon present empty roster despite configured team members because startup seeding/reconciliation is incomplete.
+
+**Deliverables**:
+1. Seed daemon roster from team `config.json` during startup.
+2. Verify roster correctness in TUI immediately after startup.
+3. Add startup seeding and reconciliation tests to prevent regressions.
+
+**Acceptance criteria**:
+- With existing team config, first TUI render shows configured members without manual refresh hacks.
+- Roster state matches `config.json` after daemon startup.
+
+### X.5 — TUI right/left panel state convergence *(bug fix, [#184](https://github.com/randlee/agent-team-mail/issues/184))*
+
+**Priority**: High (after X.3 + X.4).
+
+**Problem**: Right panel status can contradict left panel and stream panel behavior, reducing trust in UI correctness.
+
+**Deliverables**:
+1. Make both panels read from one normalized state source.
+2. Ensure stream panel emptiness is handled consistently with status indicators.
+3. Add regression tests for multi-panel consistency.
+
+**Acceptance criteria**:
+- No contradictory status between left and right panels under identical runtime state.
+- Stream panel and status indicators remain consistent across state transitions.
+
+### X.6 — `parse_since_input` rejects `0m`/negative durations *(bug fix, [#287](https://github.com/randlee/agent-team-mail/issues/287))*
+
+**Priority**: Medium.
+
+**Problem**: Doctor duration parsing currently accepts invalid ranges that violate requirement expectations.
+
+**Deliverables**:
+1. Reject zero and negative duration inputs in `parse_since_input`.
+2. Return clear validation errors for invalid values.
+3. Add unit tests for valid/invalid boundary cases.
+
+**Acceptance criteria**:
+- `0m` and negative durations are rejected with explicit error output.
+- Positive duration inputs continue to work as before.
+
+### X.7 — TUI message viewing capability *(bug fix, [#185](https://github.com/randlee/agent-team-mail/issues/185))*
+
+**Priority**: Medium (larger scope; after core correctness blockers).
+
+**Problem**: TUI cannot view inbox messages, limiting operational use despite daemon/status fixes.
+
+**Deliverables**:
+1. Message list view with basic navigation/filtering as needed.
+2. Message detail pane for full payload visibility.
+3. Read-state behavior and related tests.
+
+**Acceptance criteria**:
+- Operators can view and inspect inbox messages directly from TUI.
+- Message viewing behavior is covered by integration/UI tests.
+
+### X.8 — TUI header version visibility *(bug fix, [#187](https://github.com/randlee/agent-team-mail/issues/187))*
+
+**Priority**: Low (polish).
+
+**Problem**: TUI header omits version string, reducing supportability during debugging.
+
+**Deliverables**:
+1. Render ATM version in TUI header from compile-time package version.
+2. Add lightweight regression check.
+
+**Acceptance criteria**:
+- Header consistently displays expected version string in packaged and dev runs.
+
+| Sprint | Name | Depends On | Size | Status | Issue |
+|--------|------|------------|------|--------|-------|
+| X.1 | Atomic inbox creation in `atm teams add-member` | — | S | PLANNED | [#338](https://github.com/randlee/agent-team-mail/issues/338) |
+| X.2 | Serialize daemon tests mutating `ATM_HOME` | X.1 | S | PLANNED | [#337](https://github.com/randlee/agent-team-mail/issues/337) |
+| X.3 | Daemon auto-start reliability for TUI entry | — | M | PLANNED | [#181](https://github.com/randlee/agent-team-mail/issues/181) |
+| X.4 | Roster seeding from `config.json` at startup | X.3 | M | PLANNED | [#182](https://github.com/randlee/agent-team-mail/issues/182) |
+| X.5 | TUI right/left panel state convergence | X.4 | M | PLANNED | [#184](https://github.com/randlee/agent-team-mail/issues/184) |
+| X.6 | Doctor duration parser boundary fix (`parse_since_input`) | X.5 | XS | PLANNED | [#287](https://github.com/randlee/agent-team-mail/issues/287) |
+| X.7 | TUI message viewing capability | X.6 | L | PLANNED | [#185](https://github.com/randlee/agent-team-mail/issues/185) |
+| X.8 | TUI header version visibility | X.7 | XS | PLANNED | [#187](https://github.com/randlee/agent-team-mail/issues/187) |
+
+---
 ## 18. Future Plugins
 
 | Plugin | Priority | Notes |
@@ -1322,7 +1469,7 @@ This section exists to resolve cross-phase references used by Phase V and QA rev
 
 **Completed**: 99+ sprints across 23 phases (CI green)
 **Current version**: v0.27.0
-**Next**: Phase U (TBD)
+**Next**: Phase X (planned)
 
 ---
 
@@ -1355,19 +1502,22 @@ This section exists to resolve cross-phase references used by Phase V and QA rev
 
 **WARNING**: All issues below are OPEN on GitHub. Do not mark as resolved without verifying the fix exists AND closing the GitHub issue.
 
-| Issue | Description | Phase T Sprint | Notes |
+| Issue | Description | Planned Sprint | Notes |
 |-------|-------------|----------------|-------|
-| [#181](https://github.com/randlee/agent-team-mail/issues/181) | Daemon not auto-starting | T.1 | **Critical** — blocks all daemon-dependent features |
-| [#182](https://github.com/randlee/agent-team-mail/issues/182) | Agent roster not seeded from config.json | T.2 | **Critical** — daemon starts with empty roster |
+| [#181](https://github.com/randlee/agent-team-mail/issues/181) | Daemon not auto-starting | X.3 | **Critical** — foundational TUI blocker |
+| [#182](https://github.com/randlee/agent-team-mail/issues/182) | Agent roster not seeded from config.json | X.4 | **Critical** — TUI roster correctness blocker |
 | [#183](https://github.com/randlee/agent-team-mail/issues/183) | Agent state never transitions | T.2 | **Critical** — state tracking broken (consolidated into T.2, PR #289) |
-| [#184](https://github.com/randlee/agent-team-mail/issues/184) | TUI right panel contradicts left panel | T.4 | Needs investigation — may be fixed by Phase L |
-| [#185](https://github.com/randlee/agent-team-mail/issues/185) | No message viewing in TUI | T.5 | Enhancement |
+| [#184](https://github.com/randlee/agent-team-mail/issues/184) | TUI right panel contradicts left panel | X.5 | High priority correctness bug after daemon/roster foundation |
+| [#185](https://github.com/randlee/agent-team-mail/issues/185) | No message viewing in TUI | X.7 | Medium priority core feature (deferred larger scope) |
 | [#186](https://github.com/randlee/agent-team-mail/issues/186) | Per-agent output.log never written | — | May be superseded by Phase L unified logging — **needs verification** |
-| [#187](https://github.com/randlee/agent-team-mail/issues/187) | TUI header missing version number | T.6 | Quick fix |
+| [#187](https://github.com/randlee/agent-team-mail/issues/187) | TUI header missing version number | X.8 | Low priority polish / quick win |
+| [#287](https://github.com/randlee/agent-team-mail/issues/287) | `parse_since_input` accepts `0m` and negative durations | X.6 | Medium priority doctor correctness bug |
 | [#188](https://github.com/randlee/agent-team-mail/issues/188) | Logging overhaul prerequisite | — | May be addressed by Phase L — **needs verification** |
 | [#45](https://github.com/randlee/agent-team-mail/issues/45) | Tmux Sentinel Injection | T.11 | Enhancement |
 | [#46](https://github.com/randlee/agent-team-mail/issues/46) | Codex Idle Detection via Notify Hook | T.12 | Enhancement |
 | [#47](https://github.com/randlee/agent-team-mail/issues/47) | Ephemeral Pub/Sub for Agent Availability | T.13 | Enhancement |
+| [#337](https://github.com/randlee/agent-team-mail/issues/337) | Missing `#[serial]` on env-mutating daemon tests (`ATM_HOME`) | X.2 | Medium — CI flake prevention/hardening |
+| [#338](https://github.com/randlee/agent-team-mail/issues/338) | `add-member` does not create inbox atomically | X.1 | High — onboarding reliability bug |
 
 ---
 

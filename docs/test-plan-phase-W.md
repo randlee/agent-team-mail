@@ -128,10 +128,10 @@
 
 | Item | Source | Priority | Notes |
 |------|--------|----------|-------|
-| Flaky daemon integration tests (`#[serial]` missing) | Phase U backlog | Medium | 27 tests across 3 files; `atm-daemon/tests/`: issues_error_tests.rs, ci_monitor_error_tests.rs, issues_integration.rs |
+| Flaky daemon integration tests (`#[serial]` missing) | Moved to Phase X | Medium | Phase X `X.2` / issue #337 tracks this explicitly |
 | `acquire_lock` max_retries 3→8 in daemon_client.rs | Observed flakiness | Medium | Races during fast CI test runs |
 | Doctor regression: `LEAD_SESSION_RECOVERY_REQUIRED` shown when lead is functional | Post-Phase-U finding | High | After daemon restart, doctor shows team-lead offline even when messaging works. Phase U U.2 hardening may not cover this path. Needs investigation. |
-| `atm teams add-member` does not create inbox file | Phase U backlog | High | Blocks reliable team member onboarding; add-member should create inbox atomically |
+| `atm teams add-member` does not create inbox file | Moved to Phase X | High | Phase X `X.1` / issue #338 tracks atomic add-member inbox creation |
 | Phase V release hygiene: cherry-pick gate hook fix to develop if not already present | Cleanup | High | Commit 0863bd5 must be on develop |
 
 ---
