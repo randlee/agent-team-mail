@@ -1743,7 +1743,7 @@ ATM binary and materialized at install time.
 
 **Claude hook path reference**:
 - Canonical docs: https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
-- Follow "Reference scripts by path": use `"$CLAUDE_PROJECT_DIR"/...` for project scripts and `"${CLAUDE_PLUGIN_ROOT}"/...` for plugin-bundled scripts.
+- Follow "Reference scripts by path": use `"$CLAUDE_PROJECT_DIR"/...` for project-scoped scripts and `"${HOME}/.claude/scripts/"...` for globally-installed scripts.
 
 #### 4.9.1 Command Forms
 
@@ -1777,6 +1777,15 @@ atm init <team> --check
 - Global-installed hooks must remain passive in non-ATM repositories; `.atm.toml` guard is the first hook operation.
 - Embedded hook scripts are the runtime source of truth.
 
+**Required test scenarios** (each must be independently tested):
+
+| Scenario | Pre-state | Expected outcome |
+|----------|-----------|-----------------|
+| Fresh setup | No `.atm.toml`, no hooks, no team | Creates all three; reports each as "created" |
+| Has `.atm.toml`, no hooks | `.atm.toml` present, hooks absent | Installs hooks; does not overwrite `.atm.toml` |
+| Has hooks, no `.atm.toml` | Hooks present, `.atm.toml` absent | Creates `.atm.toml` and team; does not duplicate hooks |
+| Fully initialized | `.atm.toml`, hooks, and team all present | No changes; all three reported as "already configured" |
+
 #### 4.9.3 File and Write Requirements
 
 - Use read-modify-write semantics; never wholesale rewrite settings files.
@@ -1784,7 +1793,7 @@ atm init <team> --check
 - Preserve unknown fields and non-ATM hook entries.
 - Use atomic writes (temp + rename) and create parent directories as needed.
 - Report exact file path(s) modified in command output.
-- Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` (project scope) or `"${CLAUDE_PLUGIN_ROOT}"` (plugin scope), not repo-absolute paths.
+- Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` (project scope) for project-local hook scripts and `"${HOME}/.claude/scripts/"` (global scope) for globally-installed hook scripts, not repo-absolute paths.
 - `atm init` success output must include whether hooks were installed globally or locally.
 
 #### 4.9.4 Exit and Result Semantics
