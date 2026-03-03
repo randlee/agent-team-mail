@@ -29,6 +29,20 @@ fn count_command_in_hooks(settings_path: &Path, hook_category: &str, command: &s
     }
 }
 
+fn normalize_for_bash_quoted_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace('"', "\\\"")
+}
+
+fn expected_global_session_start_cmd(home: &TempDir) -> String {
+    let script_path =
+        normalize_for_bash_quoted_path(&home.path().join(".claude/scripts/session-start.py"));
+    format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script_path}\" || true'"
+    )
+}
+
 #[test]
 fn test_init_fresh_repo_creates_atm_toml_team_and_global_hooks() {
     let home = TempDir::new().unwrap();
@@ -72,9 +86,9 @@ fn test_init_is_idempotent_on_rerun() {
     let second = fs::read_to_string(&settings_path).unwrap();
     assert_eq!(first, second, "settings should be unchanged on rerun");
 
-    let session_start_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/session-start.py\" || true'";
+    let session_start_cmd = expected_global_session_start_cmd(&home);
     assert_eq!(
-        count_command_in_hooks(&settings_path, "SessionStart", session_start_cmd),
+        count_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
         1,
         "SessionStart hook should not be duplicated"
     );
@@ -182,9 +196,9 @@ fn test_init_with_existing_hooks_creates_atm_toml_without_duplicating_hooks() {
     assert!(repo.join(".atm.toml").exists());
     // Hooks must not be duplicated
     let settings_path = home.path().join(".claude/settings.json");
-    let session_start_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/session-start.py\" || true'";
+    let session_start_cmd = expected_global_session_start_cmd(&home);
     assert_eq!(
-        count_command_in_hooks(&settings_path, "SessionStart", session_start_cmd),
+        count_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
         1,
         "SessionStart hook must not be duplicated when hooks pre-exist"
     );
