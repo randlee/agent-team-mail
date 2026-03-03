@@ -132,6 +132,13 @@ pub struct WorkersConfig {
     pub agents: HashMap<String, AgentConfig>,
 }
 
+fn resolve_default_worker_log_dir() -> Result<PathBuf, PluginError> {
+    let home_dir = agent_team_mail_core::home::get_home_dir().map_err(|e| PluginError::Config {
+        message: format!("Failed to resolve workers.log_dir default from home directory: {e}"),
+    })?;
+    Ok(home_dir.join(".config/atm/worker-logs"))
+}
+
 impl WorkersConfig {
     /// Validate backend name
     ///
@@ -406,15 +413,8 @@ impl WorkersConfig {
             .unwrap_or("atm-workers")
             .to_string();
 
-        // Log directory: default to ~/.config/atm/worker-logs
-        // When ATM_HOME is set, use it directly (test-friendly)
-        let default_log_dir = if let Ok(atm_home) = std::env::var("ATM_HOME") {
-            PathBuf::from(atm_home).join("worker-logs")
-        } else {
-            agent_team_mail_core::home::get_home_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(".config/atm/worker-logs")
-        };
+        // Log directory: default to {ATM_HOME or home}/.config/atm/worker-logs
+        let default_log_dir = resolve_default_worker_log_dir()?;
 
         let log_dir = table
             .get("log_dir")
@@ -517,14 +517,8 @@ impl WorkersConfig {
 
 impl Default for WorkersConfig {
     fn default() -> Self {
-        // When ATM_HOME is set, use it directly (test-friendly)
-        let default_log_dir = if let Ok(atm_home) = std::env::var("ATM_HOME") {
-            PathBuf::from(atm_home).join("worker-logs")
-        } else {
-            agent_team_mail_core::home::get_home_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(".config/atm/worker-logs")
-        };
+        let default_log_dir = resolve_default_worker_log_dir()
+            .unwrap_or_else(|_| PathBuf::from(".config/atm/worker-logs"));
 
         Self {
             enabled: false,
@@ -690,7 +684,10 @@ tmux_session = false
             std::env::set_var("ATM_HOME", "/custom/atm");
         }
         let config = WorkersConfig::default();
-        assert_eq!(config.log_dir, PathBuf::from("/custom/atm/worker-logs"));
+        assert_eq!(
+            config.log_dir,
+            PathBuf::from("/custom/atm/.config/atm/worker-logs")
+        );
         unsafe {
             std::env::remove_var("ATM_HOME");
         }

@@ -88,12 +88,23 @@ struct LogWindow {
     end: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct EnvOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    atm_home: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    atm_team: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    atm_identity: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DoctorReport {
     summary: Summary,
     findings: Vec<Finding>,
     recommendations: Vec<Recommendation>,
     log_window: LogWindow,
+    env_overrides: EnvOverrides,
     #[serde(skip_serializing, skip_deserializing, default)]
     member_snapshot: Vec<MemberSnapshot>,
 }
@@ -272,6 +283,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
             start: window_start.to_rfc3339(),
             end: window_end.to_rfc3339(),
         },
+        env_overrides: active_env_overrides(),
         member_snapshot: team_config
             .as_ref()
             .map(|cfg| {
@@ -322,6 +334,21 @@ fn finding(severity: Severity, check: &str, code: &str, message: String) -> Find
         check: check.to_string(),
         code: code.to_string(),
         message,
+    }
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn active_env_overrides() -> EnvOverrides {
+    EnvOverrides {
+        atm_home: nonempty_env("ATM_HOME"),
+        atm_team: nonempty_env("ATM_TEAM"),
+        atm_identity: nonempty_env("ATM_IDENTITY"),
     }
 }
 
@@ -934,6 +961,23 @@ fn render_human(report: &DoctorReport) -> String {
         report.log_window.start, report.log_window.end, report.log_window.mode
     ));
 
+    if report.env_overrides.atm_home.is_some()
+        || report.env_overrides.atm_team.is_some()
+        || report.env_overrides.atm_identity.is_some()
+    {
+        out.push_str("Active env overrides:\n");
+        if let Some(v) = &report.env_overrides.atm_home {
+            out.push_str(&format!("  ATM_HOME={v}\n"));
+        }
+        if let Some(v) = &report.env_overrides.atm_team {
+            out.push_str(&format!("  ATM_TEAM={v}\n"));
+        }
+        if let Some(v) = &report.env_overrides.atm_identity {
+            out.push_str(&format!("  ATM_IDENTITY={v}\n"));
+        }
+        out.push('\n');
+    }
+
     if !report.member_snapshot.is_empty() {
         out.push_str("Members:\n");
         out.push_str(&format!(
@@ -987,6 +1031,7 @@ fn render_human(report: &DoctorReport) -> String {
 mod tests {
     use super::*;
     use agent_team_mail_core::schema::AgentMember;
+    use serial_test::serial;
 
     fn member(name: &str, is_active: Option<bool>, joined_at: u64) -> AgentMember {
         AgentMember {
@@ -1594,6 +1639,7 @@ mod tests {
                 start: "2026-03-02T00:00:00Z".to_string(),
                 end: "2026-03-02T00:01:00Z".to_string(),
             },
+            env_overrides: EnvOverrides::default(),
             member_snapshot: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
                 agent_type: "team-lead".to_string(),
@@ -1631,9 +1677,82 @@ mod tests {
                 start: "2026-03-02T00:00:00Z".to_string(),
                 end: "2026-03-02T00:01:00Z".to_string(),
             },
+            env_overrides: EnvOverrides {
+                atm_home: Some("/tmp/atm-home".to_string()),
+                atm_team: Some("atm-dev".to_string()),
+                atm_identity: Some("arch-ctm".to_string()),
+            },
             member_snapshot: vec![MemberSnapshot::default()],
         };
         let value = serde_json::to_value(report).unwrap();
         assert!(value.get("member_snapshot").is_none());
+        assert_eq!(
+            value["env_overrides"]["atm_home"],
+            serde_json::Value::String("/tmp/atm-home".to_string())
+        );
+        assert_eq!(
+            value["env_overrides"]["atm_team"],
+            serde_json::Value::String("atm-dev".to_string())
+        );
+        assert_eq!(
+            value["env_overrides"]["atm_identity"],
+            serde_json::Value::String("arch-ctm".to_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn active_env_overrides_ignores_empty_values() {
+        unsafe {
+            std::env::set_var("ATM_HOME", "   ");
+            std::env::set_var("ATM_TEAM", "atm-dev");
+            std::env::set_var("ATM_IDENTITY", "");
+        }
+
+        let overrides = active_env_overrides();
+        assert_eq!(overrides.atm_home, None);
+        assert_eq!(overrides.atm_team.as_deref(), Some("atm-dev"));
+        assert_eq!(overrides.atm_identity, None);
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEAM");
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    fn render_human_includes_active_env_overrides() {
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+            },
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+            },
+            env_overrides: EnvOverrides {
+                atm_home: Some("/tmp/home".to_string()),
+                atm_team: Some("atm-dev".to_string()),
+                atm_identity: Some("arch-ctm".to_string()),
+            },
+            member_snapshot: vec![],
+        };
+
+        let rendered = render_human(&report);
+        assert!(rendered.contains("Active env overrides:"));
+        assert!(rendered.contains("ATM_HOME=/tmp/home"));
+        assert!(rendered.contains("ATM_TEAM=atm-dev"));
+        assert!(rendered.contains("ATM_IDENTITY=arch-ctm"));
     }
 }
