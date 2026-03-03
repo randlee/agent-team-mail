@@ -2,7 +2,7 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    CanonicalMemberState, query_list_agents, query_team_member_states,
+    canonical_liveness_bool, query_list_agents, query_team_member_state_map,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
@@ -54,7 +54,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     }
 
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-    let daemon_states = load_daemon_states(team_name);
+    let daemon_states = query_team_member_state_map(team_name);
 
     // Count unread messages for each member
     let inbox_counts = count_inbox_messages(&team_dir, &team_config)?;
@@ -81,7 +81,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 json!({
                     "name": m.name,
                     "type": m.agent_type,
-                    "liveness": resolve_member_liveness(&m.name, &daemon_states),
+                    "liveness": canonical_liveness_bool(daemon_states.get(&m.name)),
                     "unreadCount": unread,
                 })
             }).collect::<Vec<_>>(),
@@ -103,7 +103,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         let member_count = team_config.members.len();
         println!("Members ({member_count}):");
         for member in &team_config.members {
-            let active_str = match resolve_member_liveness(&member.name, &daemon_states) {
+            let active_str = match canonical_liveness_bool(daemon_states.get(&member.name)) {
                 Some(true) => "Online ",
                 Some(false) => "Offline",
                 None => "Unknown",
@@ -134,29 +134,6 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     });
 
     Ok(())
-}
-
-fn load_daemon_states(team_name: &str) -> HashMap<String, CanonicalMemberState> {
-    let mut states = HashMap::new();
-    if let Ok(Some(entries)) = query_team_member_states(team_name) {
-        for entry in entries {
-            states.insert(entry.agent.clone(), entry);
-        }
-    }
-    states
-}
-
-fn resolve_member_liveness(
-    member_name: &str,
-    daemon_states: &HashMap<String, CanonicalMemberState>,
-) -> Option<bool> {
-    daemon_states
-        .get(member_name)
-        .and_then(|state| match state.state.as_str() {
-            "active" | "idle" => Some(true),
-            "offline" | "dead" => Some(false),
-            _ => None,
-        })
 }
 
 /// Count unread messages in inboxes
