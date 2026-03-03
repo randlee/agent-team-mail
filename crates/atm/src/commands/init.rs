@@ -21,8 +21,10 @@
 //! `include_str!()` and materialized to disk during `atm init`. This means no
 //! external script files are required post-install.
 
+use agent_team_mail_core::schema::{AgentMember, TeamConfig};
 use anyhow::{Context, Result};
 use clap::Args;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -95,9 +97,20 @@ pub struct InitArgs {
     /// Name of the ATM team to configure hooks for
     pub team: String,
 
-    /// Install into the global `~/.claude/settings.json` instead of the
-    /// project-local `.claude/settings.json`
+    /// Install hooks into project-local `.claude/settings.json` (default is global)
     #[arg(long)]
+    pub local: bool,
+
+    /// Identity written to `.atm.toml` when it is created
+    #[arg(long)]
+    pub identity: Option<String>,
+
+    /// Skip team creation step (`~/.claude/teams/<team>/config.json`)
+    #[arg(long)]
+    pub skip_team: bool,
+
+    /// Legacy compatibility flag; global install is already the default.
+    #[arg(long, hide = true, conflicts_with = "local")]
     pub global: bool,
 }
 
@@ -119,40 +132,152 @@ pub struct InitArgs {
 /// Returns an error when the home directory cannot be resolved, the settings
 /// file cannot be read or parsed, or the atomic write fails.
 pub fn execute(args: InitArgs) -> Result<()> {
-    let settings_path = resolve_settings_path(args.global)?;
+    let install_global = args.global || !args.local;
+    let identity = args
+        .identity
+        .clone()
+        .unwrap_or_else(|| "team-lead".to_string());
+    let current_dir = std::env::current_dir().context("Cannot determine current directory")?;
+    let atm_toml_path = current_dir.join(".atm.toml");
+    let home_dir = crate::util::settings::get_home_dir()?;
+    let settings_path = resolve_settings_path(install_global)?;
 
-    // Guard: --global installs are passive when not in an ATM repo
-    if args.global {
-        let atm_toml = std::env::current_dir()?.join(".atm.toml");
-        if !atm_toml.exists() {
-            println!(
-                "No .atm.toml found in current directory; skipping global install.\n\
-                 Run `atm init {} --global` from the root of an ATM project.",
-                args.team
-            );
-            return Ok(());
-        }
-    }
+    let atm_toml_status = ensure_atm_toml(&atm_toml_path, &args.team, &identity)?;
+    let team_status = if args.skip_team {
+        TeamStatus::Skipped
+    } else {
+        ensure_team_config(&home_dir, &args.team, &current_dir)?
+    };
 
     // Materialize hook scripts to disk before writing settings
-    let scripts_dir = if args.global {
-        crate::util::settings::get_home_dir()?
-            .join(".claude")
-            .join("scripts")
+    let scripts_dir = if install_global {
+        home_dir.join(".claude").join("scripts")
     } else {
-        std::env::current_dir()?.join(".claude").join("scripts")
+        current_dir.join(".claude").join("scripts")
     };
     materialize_scripts(&scripts_dir)?;
 
     let mut settings = load_settings(&settings_path)?;
 
-    let report = merge_hooks(&mut settings, args.global)?;
+    let report = merge_hooks(&mut settings, install_global)?;
 
     write_settings_atomic(&settings_path, &settings)?;
 
-    print_report(&args.team, &settings_path, &report);
+    print_report(
+        &args.team,
+        &settings_path,
+        &report,
+        install_global,
+        &atm_toml_path,
+        atm_toml_status,
+        team_status,
+    );
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtmTomlStatus {
+    Created,
+    AlreadyPresent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeamStatus {
+    Created,
+    AlreadyPresent,
+    Skipped,
+}
+
+fn ensure_atm_toml(path: &Path, team: &str, identity: &str) -> Result<AtmTomlStatus> {
+    if path.exists() {
+        return Ok(AtmTomlStatus::AlreadyPresent);
+    }
+    let content = format!(
+        "[core]\ndefault_team = {:?}\nidentity = {:?}\n",
+        team, identity
+    );
+    write_text_atomic(path, &content)?;
+    Ok(AtmTomlStatus::Created)
+}
+
+fn ensure_team_config(home_dir: &Path, team: &str, cwd: &Path) -> Result<TeamStatus> {
+    let team_dir = home_dir.join(".claude/teams").join(team);
+    let inboxes_dir = team_dir.join("inboxes");
+    let config_path = team_dir.join("config.json");
+
+    if config_path.exists() {
+        if !inboxes_dir.exists() {
+            std::fs::create_dir_all(&inboxes_dir)
+                .with_context(|| format!("Failed to create {}", inboxes_dir.display()))?;
+        }
+        return Ok(TeamStatus::AlreadyPresent);
+    }
+
+    std::fs::create_dir_all(&inboxes_dir)
+        .with_context(|| format!("Failed to create {}", inboxes_dir.display()))?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let lead_member = AgentMember {
+        agent_id: format!("team-lead@{team}"),
+        name: "team-lead".to_string(),
+        agent_type: "general-purpose".to_string(),
+        model: "unknown".to_string(),
+        prompt: None,
+        color: None,
+        plan_mode_required: None,
+        joined_at: now_ms,
+        tmux_pane_id: None,
+        cwd: cwd.to_string_lossy().to_string(),
+        subscriptions: Vec::new(),
+        backend_type: None,
+        is_active: Some(false),
+        last_active: None,
+        session_id: None,
+        external_backend_type: None,
+        external_model: None,
+        unknown_fields: HashMap::new(),
+    };
+
+    let team_config = TeamConfig {
+        name: team.to_string(),
+        description: Some("Team initialized by atm init".to_string()),
+        created_at: now_ms,
+        lead_agent_id: format!("team-lead@{team}"),
+        lead_session_id: String::new(),
+        members: vec![lead_member],
+        unknown_fields: HashMap::new(),
+    };
+
+    write_json_atomic(&config_path, &team_config)?;
+    Ok(TeamStatus::Created)
+}
+
+fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+    }
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, content.as_bytes())
+        .with_context(|| format!("Failed to write temp file {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "Failed to rename {} to {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn write_json_atomic(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    let mut serialized =
+        serde_json::to_string_pretty(value).context("Failed to serialize JSON value")?;
+    serialized.push('\n');
+    write_text_atomic(path, &serialized)
 }
 
 // ---------------------------------------------------------------------------
@@ -496,7 +621,30 @@ fn hook_command_present(array: &[serde_json::Value], cmd: &str) -> bool {
 // Output
 // ---------------------------------------------------------------------------
 
-fn print_report(team: &str, settings_path: &Path, report: &MergeReport) {
+fn print_report(
+    team: &str,
+    settings_path: &Path,
+    report: &MergeReport,
+    install_global: bool,
+    atm_toml_path: &Path,
+    atm_toml_status: AtmTomlStatus,
+    team_status: TeamStatus,
+) {
+    match atm_toml_status {
+        AtmTomlStatus::Created => {
+            println!("Created .atm.toml at {}", atm_toml_path.display());
+        }
+        AtmTomlStatus::AlreadyPresent => {
+            println!(".atm.toml already present at {}", atm_toml_path.display());
+        }
+    }
+
+    match team_status {
+        TeamStatus::Created => println!("Created team '{}'", team),
+        TeamStatus::AlreadyPresent => println!("Team '{}' already exists", team),
+        TeamStatus::Skipped => println!("Skipped team creation (--skip-team)"),
+    }
+
     if report.all_present() {
         println!(
             "ATM hooks already configured for team '{}' in {}",
@@ -528,6 +676,11 @@ fn print_report(team: &str, settings_path: &Path, report: &MergeReport) {
         print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
         print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
     }
+
+    println!(
+        "Hook scope: {}",
+        if install_global { "global" } else { "local" }
+    );
 }
 
 fn print_hook_line(label: &str, status: &HookStatus) {
@@ -805,35 +958,55 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Global guard test (no .atm.toml)
+    // Execute bootstrap test
     // -----------------------------------------------------------------------
 
-    /// When `--global` is used from a directory without `.atm.toml`,
-    /// `execute()` must return `Ok(())` without writing any files.
     #[test]
     #[serial]
-    fn test_global_guard_no_atm_toml() {
-        // Create a temp dir WITHOUT .atm.toml
+    fn test_execute_creates_atm_toml_team_and_global_hooks() {
         let dir = TempDir::new().expect("tempdir");
-        let settings_path = dir.path().join(".claude").join("settings.json");
-
-        // Change cwd temporarily to the temp dir (no .atm.toml)
+        let repo_dir = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).expect("create repo");
         let original_dir = env::current_dir().expect("original cwd");
-        env::set_current_dir(dir.path()).expect("set cwd");
+        let old_home = env::var("ATM_HOME").ok();
+
+        // SAFETY: serialized test controls process env and cwd.
+        unsafe {
+            env::set_var("ATM_HOME", dir.path());
+        }
+        env::set_current_dir(&repo_dir).expect("set cwd");
 
         let result = execute(InitArgs {
             team: "atm-dev".to_string(),
-            global: true,
+            local: false,
+            identity: Some("team-lead".to_string()),
+            skip_team: false,
+            global: false,
         });
 
-        // Restore cwd
         env::set_current_dir(original_dir).expect("restore cwd");
+        // SAFETY: serialized test cleanup.
+        unsafe {
+            match old_home {
+                Some(v) => env::set_var("ATM_HOME", v),
+                None => env::remove_var("ATM_HOME"),
+            }
+        }
 
-        // Guard should have returned Ok without writing anything
         assert!(result.is_ok());
         assert!(
-            !settings_path.exists(),
-            "settings.json should NOT be created when .atm.toml is absent"
+            repo_dir.join(".atm.toml").exists(),
+            ".atm.toml should be created in repo"
+        );
+        assert!(
+            dir.path()
+                .join(".claude/teams/atm-dev/config.json")
+                .exists(),
+            "team config should be created under ATM_HOME"
+        );
+        assert!(
+            dir.path().join(".claude/settings.json").exists(),
+            "global settings should be created by default"
         );
     }
 
