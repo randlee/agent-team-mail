@@ -683,6 +683,7 @@ fn join_member(args: JoinArgs) -> Result<()> {
     }
     println!("Launch command:");
     println!("{launch_command}");
+    println!("  # Note: adjust quoting for Windows PowerShell/cmd");
     Ok(())
 }
 

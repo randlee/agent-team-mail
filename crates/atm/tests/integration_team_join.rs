@@ -153,6 +153,39 @@ fn test_teams_join_requires_team_in_self_join_mode() {
 }
 
 #[test]
+fn test_teams_join_self_join_success_with_explicit_team() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_team(&temp_dir, "atm-dev");
+    let folder = temp_dir.path().join("repo-self");
+    fs::create_dir_all(&folder).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env_remove("ATM_TEAM")
+        .env_remove("ATM_IDENTITY")
+        .args([
+            "teams",
+            "join",
+            "self-join-agent",
+            "--team",
+            "atm-dev",
+            "--folder",
+            folder.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let output = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed["team"], "atm-dev");
+    assert_eq!(parsed["agent"], "self-join-agent");
+    assert_eq!(parsed["mode"], "self_join");
+    assert!(has_member(&team_dir, "self-join-agent"));
+}
+
+#[test]
 fn test_teams_join_human_output_contains_folder_and_launch_command() {
     let temp_dir = TempDir::new().unwrap();
     setup_team(&temp_dir, "atm-dev");
