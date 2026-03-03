@@ -1,6 +1,6 @@
 //! Teams command implementation
 
-use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::daemon_client::{LaunchConfig, launch_agent, query_session_for_team};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
@@ -42,6 +42,8 @@ pub struct TeamsArgs {
 pub enum TeamsCommand {
     /// Spawn a team member via daemon with runtime-specific adapter behavior
     Spawn(SpawnArgs),
+    /// Join an existing team and print a copy-pastable resume launch command
+    Join(JoinArgs),
     /// Add a member to a team without launching an agent
     AddMember(AddMemberArgs),
     /// Update fields on an existing team member
@@ -111,8 +113,35 @@ pub struct SpawnArgs {
     json: bool,
 }
 
-/// Add a member to a team (no agent spawn)
+/// Join an existing team and return launch guidance for the joined identity
 #[derive(Args, Debug)]
+pub struct JoinArgs {
+    /// Agent name to add/join
+    agent: String,
+
+    /// Team name (required in self-join mode; optional verification in team-lead-initiated mode)
+    #[arg(long)]
+    team: Option<String>,
+
+    /// Agent type to persist (default: codex, matching add-member behavior)
+    #[arg(long)]
+    agent_type: Option<String>,
+
+    /// Model identifier validated against the ATM model registry
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Working directory used in roster entry and launch command
+    #[arg(long)]
+    folder: Option<PathBuf>,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+/// Add a member to a team (no agent spawn)
+#[derive(Args, Debug, Clone)]
 pub struct AddMemberArgs {
     /// Team name
     team: String,
@@ -270,6 +299,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
     if let Some(command) = args.command {
         return match command {
             TeamsCommand::Spawn(spawn_args) => spawn_member(spawn_args),
+            TeamsCommand::Join(join_args) => join_member(join_args),
             TeamsCommand::AddMember(add_args) => add_member(add_args),
             TeamsCommand::UpdateMember(update_args) => update_member(update_args),
             TeamsCommand::Resume(resume_args) => resume(resume_args),
@@ -484,7 +514,209 @@ fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, 
     Ok(map)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinMode {
+    TeamLeadInitiated,
+    SelfJoin,
+}
+
+impl JoinMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TeamLeadInitiated => "team_lead_initiated",
+            Self::SelfJoin => "self_join",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddMemberOutcome {
+    Added,
+    UpdatedInactive,
+    UpdatedPaneId,
+    AlreadyRegistered,
+}
+
+fn resolve_join_folder(folder: Option<PathBuf>) -> Result<PathBuf> {
+    let selected = match folder {
+        Some(path) => path,
+        None => std::env::current_dir()?,
+    };
+    if !selected.exists() {
+        anyhow::bail!(
+            "Folder '{}' does not exist. Pass --folder <existing-path>.",
+            selected.display()
+        );
+    }
+    let canonical = fs::canonicalize(&selected).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to resolve folder '{}': {e}. Pass --folder <readable-path>.",
+            selected.display()
+        )
+    })?;
+    Ok(canonical)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'"'"'"#))
+}
+
+fn resolve_caller_team_context(home_dir: &Path, current_dir: &Path) -> Result<Option<String>> {
+    let config = resolve_config(&ConfigOverrides::default(), current_dir, home_dir)?;
+    let configured_team = config.core.default_team.trim().to_string();
+    if configured_team.is_empty() {
+        return Ok(None);
+    }
+
+    let caller_identity = resolve_identity(&config.core.identity, &config.roles, &config.aliases);
+    if caller_identity.is_empty() || caller_identity == "human" {
+        return Ok(None);
+    }
+
+    let config_path = home_dir
+        .join(".claude/teams")
+        .join(&configured_team)
+        .join("config.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let team_config = read_team_config(&config_path)?;
+    let is_member = team_config
+        .members
+        .iter()
+        .any(|m| m.name == caller_identity);
+    if is_member {
+        Ok(Some(configured_team))
+    } else {
+        Ok(None)
+    }
+}
+
+fn join_member(args: JoinArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let caller_team = resolve_caller_team_context(&home_dir, &current_dir)?;
+
+    let (mode, target_team) = if let Some(caller_team) = caller_team {
+        if let Some(requested_team) = args.team.as_deref()
+            && requested_team != caller_team
+        {
+            anyhow::bail!(
+                "--team '{}' does not match your current team '{}'. \
+                 Remove --team or pass --team '{}'.",
+                requested_team,
+                caller_team,
+                caller_team
+            );
+        }
+        (JoinMode::TeamLeadInitiated, caller_team)
+    } else {
+        let explicit_team = args.team.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--team is required when caller has no current team context. \
+                 Set ATM_TEAM/ATM_IDENTITY for team-lead-initiated mode, or pass --team <team>."
+            )
+        })?;
+        (JoinMode::SelfJoin, explicit_team)
+    };
+
+    let team_dir = home_dir.join(".claude/teams").join(&target_team);
+    if !team_dir.exists() {
+        anyhow::bail!(
+            "Team '{}' not found (directory {} doesn't exist)",
+            target_team,
+            team_dir.display()
+        );
+    }
+
+    let config_path = team_dir.join("config.json");
+    if !config_path.exists() {
+        anyhow::bail!("Team config not found at {}", config_path.display());
+    }
+
+    let folder = resolve_join_folder(args.folder)?;
+    let folder_display = folder.to_string_lossy().to_string();
+    let member_outcome = add_member_internal(AddMemberArgs {
+        team: target_team.clone(),
+        agent: args.agent.clone(),
+        agent_type: args.agent_type.unwrap_or_else(|| "codex".to_string()),
+        model: args.model.unwrap_or_else(|| "unknown".to_string()),
+        cwd: Some(folder.clone()),
+        inactive: false,
+        pane_id: None,
+        session_id: None,
+        backend_type: None,
+    })?;
+
+    let roster_state = match member_outcome {
+        AddMemberOutcome::Added | AddMemberOutcome::UpdatedInactive => "added",
+        AddMemberOutcome::UpdatedPaneId | AddMemberOutcome::AlreadyRegistered => "already_present",
+    };
+
+    let launch_command = format!(
+        "cd {} && env ATM_TEAM={} ATM_IDENTITY={} claude --resume",
+        shell_quote(&folder_display),
+        shell_quote(&target_team),
+        shell_quote(&args.agent)
+    );
+
+    if args.json {
+        let output = json!({
+            "team": target_team,
+            "agent": args.agent,
+            "folder": folder_display,
+            "launch_command": launch_command,
+            "mode": mode.as_str(),
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("Mode: {}", mode.as_str());
+    println!("Team: {}", target_team);
+    println!("Agent: {}", args.agent);
+    println!("Folder: {}", folder_display);
+    println!("Roster: {}", roster_state);
+    if roster_state == "already_present" {
+        println!("Requested team member is already in the roster.");
+    }
+    println!("Launch command:");
+    println!("{launch_command}");
+    println!("  # Note: adjust quoting for Windows PowerShell/cmd");
+    Ok(())
+}
+
 fn add_member(args: AddMemberArgs) -> Result<()> {
+    match add_member_internal(args.clone())? {
+        AddMemberOutcome::UpdatedPaneId => {
+            println!(
+                "Updated tmuxPaneId for '{}' in team '{}' (paneId='{}')",
+                args.agent,
+                args.team,
+                args.pane_id.as_deref().unwrap_or_default()
+            );
+        }
+        AddMemberOutcome::AlreadyRegistered => {
+            println!("Member already registered (idempotent)");
+        }
+        AddMemberOutcome::UpdatedInactive => {
+            println!(
+                "Updated inactive member '{}' in team '{}' (agentType='{}')",
+                args.agent, args.team, args.agent_type
+            );
+        }
+        AddMemberOutcome::Added => {
+            println!(
+                "Added member '{}' to team '{}' (agentType='{}')",
+                args.agent, args.team, args.agent_type
+            );
+        }
+    }
+    Ok(())
+}
+
+fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     let home_dir = get_home_dir()?;
     let team_dir = home_dir.join(".claude/teams").join(&args.team);
     if !team_dir.exists() {
@@ -536,14 +768,10 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
             if let Some(ref pane_id) = args.pane_id {
                 team_config.members[idx].tmux_pane_id = Some(pane_id.clone());
                 write_team_config(&config_path, &team_config)?;
-                println!(
-                    "Updated tmuxPaneId for '{}' in team '{}' (paneId='{}')",
-                    args.agent, args.team, pane_id
-                );
+                return Ok(AddMemberOutcome::UpdatedPaneId);
             } else {
-                println!("Member already registered (idempotent)");
+                return Ok(AddMemberOutcome::AlreadyRegistered);
             }
-            return Ok(());
         }
 
         // Collision guard: active member with a different agent_id → reject.
@@ -578,11 +806,7 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
             m.tmux_pane_id = Some(pane_id.clone());
         }
         write_team_config(&config_path, &team_config)?;
-        println!(
-            "Updated inactive member '{}' in team '{}' (agentType='{}')",
-            args.agent, args.team, args.agent_type
-        );
-        return Ok(());
+        return Ok(AddMemberOutcome::UpdatedInactive);
     }
 
     // Brand-new member.
@@ -616,13 +840,7 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
 
     team_config.members.push(member);
     write_team_config(&config_path, &team_config)?;
-
-    println!(
-        "Added member '{}' to team '{}' (agentType='{}')",
-        args.agent, args.team, args.agent_type
-    );
-
-    Ok(())
+    Ok(AddMemberOutcome::Added)
 }
 
 /// Implement `atm teams update-member <team> <agent> [flags]`
