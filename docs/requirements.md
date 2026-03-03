@@ -1,7 +1,7 @@
 # agent-team-mail (`atm`) — Requirements Document
 
-**Version**: 0.3
-**Date**: 2026-02-25
+**Version**: 0.4
+**Date**: 2026-03-03
 **Status**: Draft
 
 ---
@@ -755,6 +755,10 @@ atm doctor --full
 - `atm doctor` must be diagnostics-first and report-producing by default:
   daemon probe/autostart failures must be captured as findings in the report,
   not treated as fatal preconditions that suppress report generation.
+- `atm doctor`, `atm status`, and `atm members` MUST consume daemon-provided
+  canonical member-state snapshots for liveness/status rendering.
+- `config.json` activity hints (`isActive`, `lastActive`) MUST NOT be used to
+  infer offline/dead liveness in these command surfaces.
 
 **JSON output schema (`--json`)**:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
@@ -856,6 +860,38 @@ Acceptance checks:
 - Panel-consistency tests fail on divergent left/right state and pass on unified state.
 - Message list/detail and mark-read persistence tests pass for representative inbox fixtures.
 - Header-render tests assert visible version string in normal TUI startup.
+
+### 4.3.3c Daemon Canonical Member-State Contract
+
+Daemon is the single source of truth for liveness/status surfaces. Team config
+activity fields are advisory only.
+
+Canonical team member-state snapshot (daemon -> CLI) must include:
+- `agent`
+- `state` (`active|idle|offline|unknown`)
+- `activity` (`busy|idle|unknown`)
+- `session_id` (optional)
+- `process_id` (optional)
+- `reason`
+- `source`
+
+Required behavior:
+- `atm doctor`, `atm status`, and `atm members` must read liveness/status from
+  this snapshot.
+- No command-level fallback may map `isActive=false` directly to offline/dead.
+- Per-member status derivation logic must not be duplicated across commands;
+  command handlers consume daemon snapshot values directly.
+
+#### Operational State Variable Inventory
+
+| Variable | Owner | Persistence location | Allowed values | Semantics |
+|----------|-------|----------------------|----------------|-----------|
+| `isActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`isActive`) | `true`, `false`, `null` | Busy/idle hint only. Not a liveness source. |
+| `lastActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`lastActive`) | `u64` epoch-millis or `null` | Last activity timestamp only. Not a liveness source. |
+| `session_id` | Daemon session registry (`session_start`/`session_end`) | `.claude/daemon/session-registry.json` | Non-empty string or absent | Session identity tracked by daemon lifecycle registry. |
+| `process_id` | Daemon session registry | `.claude/daemon/session-registry.json` | Integer PID (`>1`) or absent | Process identity used for liveness checks. |
+| `status` (`state`) | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `active`, `idle`, `offline`, `unknown` | Canonical liveness/status consumed by doctor/status/members. |
+| `activity` | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `busy`, `idle`, `unknown` | Canonical activity hint exposed separately from liveness. |
 
 ### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
 
@@ -1478,6 +1514,8 @@ Acceptance checks:
 - Supported baseline states: `unknown`, `active`, `idle`, `offline`.
 - State transitions must record `reason` and `source` for troubleshooting.
 - Team/status outputs must reflect reconciled state within one poll window.
+- `isActive`/`lastActive` from `config.json` must remain activity hints and must
+  not override daemon-derived liveness status.
 
 Acceptance checks:
 - `session_start` drives `unknown/offline -> active`.
@@ -2277,6 +2315,6 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 ---
 
-**Document Version**: 0.3
-**Last Updated**: 2026-02-25
+**Document Version**: 0.4
+**Last Updated**: 2026-03-03
 **Maintained By**: Claude

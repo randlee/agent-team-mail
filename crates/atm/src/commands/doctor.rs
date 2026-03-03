@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, SessionQueryResult, daemon_is_running, daemon_pid_path, daemon_socket_path,
-    query_list_agents, query_list_agents_for_team, query_session_for_team,
+    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_pid_path,
+    daemon_socket_path, query_list_agents, query_list_agents_for_team, query_session_for_team,
+    query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
@@ -103,6 +104,9 @@ struct MemberSnapshot {
     agent_type: String,
     model: String,
     status: String,
+    activity: String,
+    session_id: Option<String>,
+    process_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -255,6 +259,15 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         counts,
     };
 
+    let daemon_states_by_agent: HashMap<String, CanonicalMemberState> =
+        query_team_member_states(team)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| (entry.agent.clone(), entry))
+            .collect();
+
     Ok(DoctorReport {
         summary,
         findings,
@@ -273,7 +286,18 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
                         name: m.name.clone(),
                         agent_type: m.agent_type.clone(),
                         model: m.model.clone(),
-                        status: status_from_daemon_session(team, &m.name),
+                        status: snapshot_status_from_canonical_state(
+                            daemon_states_by_agent.get(&m.name),
+                        ),
+                        activity: snapshot_activity_from_canonical_state(
+                            daemon_states_by_agent.get(&m.name),
+                        ),
+                        session_id: daemon_states_by_agent
+                            .get(&m.name)
+                            .and_then(|s| s.session_id.clone()),
+                        process_id: daemon_states_by_agent
+                            .get(&m.name)
+                            .and_then(|s| s.process_id),
                     })
                     .collect()
             })
@@ -281,22 +305,19 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     })
 }
 
-fn status_from_daemon_session(team: &str, member_name: &str) -> String {
-    status_from_daemon_session_with_query(team, member_name, query_session_for_team)
+fn snapshot_status_from_canonical_state(state: Option<&CanonicalMemberState>) -> String {
+    match state.map(|s| s.state.as_str()) {
+        Some("active") | Some("idle") => "Online".to_string(),
+        Some("offline") | Some("dead") => "Offline".to_string(),
+        _ => "Unknown".to_string(),
+    }
 }
 
-fn status_from_daemon_session_with_query<F>(
-    team: &str,
-    member_name: &str,
-    query_session: F,
-) -> String
-where
-    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
-{
-    match query_session(team, member_name) {
-        Ok(Some(session)) if session.alive => "Online".to_string(),
-        Ok(Some(_)) => "Offline".to_string(),
-        Ok(None) | Err(_) => "Unknown".to_string(),
+fn snapshot_activity_from_canonical_state(state: Option<&CanonicalMemberState>) -> String {
+    match state.map(|s| s.activity.as_str()) {
+        Some("busy") => "Busy".to_string(),
+        Some("idle") => "Idle".to_string(),
+        _ => "Unknown".to_string(),
     }
 }
 
@@ -871,14 +892,19 @@ fn render_human(report: &DoctorReport) -> String {
     if !report.member_snapshot.is_empty() {
         out.push_str("Members:\n");
         out.push_str(&format!(
-            "  {:<20} {:<20} {:<16}\n",
-            "Name", "Type", "Status"
+            "  {:<20} {:<20} {:<10} {:<10} {:<8} {}\n",
+            "Name", "Type", "Status", "Activity", "PID", "Session ID"
         ));
-        out.push_str(&format!("  {}\n", "─".repeat(58)));
+        out.push_str(&format!("  {}\n", "─".repeat(95)));
         for m in &report.member_snapshot {
+            let pid = m
+                .process_id
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let session = m.session_id.as_deref().unwrap_or("-");
             out.push_str(&format!(
-                "  {:<20} {:<20} {:<16}\n",
-                m.name, m.agent_type, m.status
+                "  {:<20} {:<20} {:<10} {:<10} {:<8} {}\n",
+                m.name, m.agent_type, m.status, m.activity, pid, session
             ));
         }
         out.push('\n');
@@ -977,43 +1003,37 @@ mod tests {
     }
 
     #[test]
-    fn status_from_daemon_session_maps_alive_dead_unknown_and_error() {
-        let alive = SessionQueryResult {
-            session_id: "s1".to_string(),
-            process_id: 1234,
-            alive: true,
-            runtime: None,
-            runtime_session_id: None,
-            pane_id: None,
-            runtime_home: None,
+    fn snapshot_status_from_canonical_state_maps_active_offline_unknown() {
+        let active = CanonicalMemberState {
+            agent: "a".to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: Some("s1".to_string()),
+            process_id: Some(1234),
+            reason: "x".to_string(),
+            source: "session_registry".to_string(),
         };
-        let dead = SessionQueryResult {
-            session_id: "s2".to_string(),
-            process_id: 5678,
-            alive: false,
-            runtime: None,
-            runtime_session_id: None,
-            pane_id: None,
-            runtime_home: None,
+        let dead = CanonicalMemberState {
+            state: "offline".to_string(),
+            ..active.clone()
+        };
+        let unknown = CanonicalMemberState {
+            state: "unknown".to_string(),
+            ..active.clone()
         };
         assert_eq!(
-            status_from_daemon_session_with_query("atm-dev", "a", |_, _| Ok(Some(alive.clone()))),
-            "Online"
+            snapshot_status_from_canonical_state(Some(&active)),
+            "Online".to_string()
         );
         assert_eq!(
-            status_from_daemon_session_with_query("atm-dev", "a", |_, _| Ok(Some(dead.clone()))),
-            "Offline"
+            snapshot_status_from_canonical_state(Some(&dead)),
+            "Offline".to_string()
         );
         assert_eq!(
-            status_from_daemon_session_with_query("atm-dev", "a", |_, _| Ok(None)),
-            "Unknown"
+            snapshot_status_from_canonical_state(Some(&unknown)),
+            "Unknown".to_string()
         );
-        assert_eq!(
-            status_from_daemon_session_with_query("atm-dev", "a", |_, _| {
-                Err(anyhow::anyhow!("daemon unavailable"))
-            }),
-            "Unknown"
-        );
+        assert_eq!(snapshot_status_from_canonical_state(None), "Unknown");
     }
 
     #[test]
@@ -1400,6 +1420,9 @@ mod tests {
                 agent_type: "team-lead".to_string(),
                 model: "claude".to_string(),
                 status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4242),
             }],
         };
         let rendered = render_human(&report);
