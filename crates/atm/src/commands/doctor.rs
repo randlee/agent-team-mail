@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_pid_path,
-    daemon_socket_path, query_list_agents, query_list_agents_for_team, query_session_for_team,
+    AgentSummary, CanonicalMemberState, SessionQueryResult, canonical_activity_label,
+    canonical_status_label, daemon_is_running, daemon_pid_path, daemon_socket_path,
+    query_list_agents, query_list_agents_for_team, query_session_for_team,
     query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
@@ -91,16 +92,17 @@ struct LogWindow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DoctorReport {
     summary: Summary,
+    #[serde(default)]
+    member_snapshot: Vec<MemberSnapshot>,
     findings: Vec<Finding>,
     recommendations: Vec<Recommendation>,
     log_window: LogWindow,
-    #[serde(skip_serializing, skip_deserializing, default)]
-    member_snapshot: Vec<MemberSnapshot>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct MemberSnapshot {
     name: String,
+    agent_id: String,
     agent_type: String,
     model: String,
     status: String,
@@ -270,6 +272,27 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
 
     Ok(DoctorReport {
         summary,
+        member_snapshot: team_config
+            .as_ref()
+            .map(|cfg| {
+                cfg.members
+                    .iter()
+                    .map(|m| {
+                        let daemon_state = daemon_states_by_agent.get(&m.name);
+                        MemberSnapshot {
+                            name: m.name.clone(),
+                            agent_id: m.agent_id.clone(),
+                            agent_type: m.agent_type.clone(),
+                            model: m.model.clone(),
+                            status: canonical_status_label(daemon_state).to_string(),
+                            activity: canonical_activity_label(daemon_state).to_string(),
+                            session_id: daemon_state.and_then(|s| s.session_id.clone()),
+                            process_id: daemon_state.and_then(|s| s.process_id),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         findings,
         recommendations,
         log_window: LogWindow {
@@ -277,48 +300,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
             start: window_start.to_rfc3339(),
             end: window_end.to_rfc3339(),
         },
-        member_snapshot: team_config
-            .as_ref()
-            .map(|cfg| {
-                cfg.members
-                    .iter()
-                    .map(|m| MemberSnapshot {
-                        name: m.name.clone(),
-                        agent_type: m.agent_type.clone(),
-                        model: m.model.clone(),
-                        status: snapshot_status_from_canonical_state(
-                            daemon_states_by_agent.get(&m.name),
-                        ),
-                        activity: snapshot_activity_from_canonical_state(
-                            daemon_states_by_agent.get(&m.name),
-                        ),
-                        session_id: daemon_states_by_agent
-                            .get(&m.name)
-                            .and_then(|s| s.session_id.clone()),
-                        process_id: daemon_states_by_agent
-                            .get(&m.name)
-                            .and_then(|s| s.process_id),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
     })
-}
-
-fn snapshot_status_from_canonical_state(state: Option<&CanonicalMemberState>) -> String {
-    match state.map(|s| s.state.as_str()) {
-        Some("active") | Some("idle") => "Online".to_string(),
-        Some("offline") | Some("dead") => "Offline".to_string(),
-        _ => "Unknown".to_string(),
-    }
-}
-
-fn snapshot_activity_from_canonical_state(state: Option<&CanonicalMemberState>) -> String {
-    match state.map(|s| s.activity.as_str()) {
-        Some("busy") => "Busy".to_string(),
-        Some("idle") => "Idle".to_string(),
-        _ => "Unknown".to_string(),
-    }
 }
 
 fn finding(severity: Severity, check: &str, code: &str, message: String) -> Finding {
@@ -892,10 +874,10 @@ fn render_human(report: &DoctorReport) -> String {
     if !report.member_snapshot.is_empty() {
         out.push_str("Members:\n");
         out.push_str(&format!(
-            "  {:<20} {:<20} {:<10} {:<10} {:<8} {}\n",
-            "Name", "Type", "Status", "Activity", "PID", "Session ID"
+            "  {:<18} {:<28} {:<16} {:<24} {:<8} {:<20} {:<8} {}\n",
+            "Name", "Agent ID", "Type", "Model", "PID", "Session ID", "Status", "Activity"
         ));
-        out.push_str(&format!("  {}\n", "─".repeat(95)));
+        out.push_str(&format!("  {}\n", "─".repeat(146)));
         for m in &report.member_snapshot {
             let pid = m
                 .process_id
@@ -903,8 +885,8 @@ fn render_human(report: &DoctorReport) -> String {
                 .unwrap_or_else(|| "-".to_string());
             let session = m.session_id.as_deref().unwrap_or("-");
             out.push_str(&format!(
-                "  {:<20} {:<20} {:<10} {:<10} {:<8} {}\n",
-                m.name, m.agent_type, m.status, m.activity, pid, session
+                "  {:<18} {:<28} {:<16} {:<24} {:<8} {:<20} {:<8} {}\n",
+                m.name, m.agent_id, m.agent_type, m.model, pid, session, m.status, m.activity
             ));
         }
         out.push('\n');
@@ -1003,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_status_from_canonical_state_maps_active_offline_unknown() {
+    fn canonical_status_label_maps_active_dead_unknown() {
         let active = CanonicalMemberState {
             agent: "a".to_string(),
             state: "active".to_string(),
@@ -1021,19 +1003,10 @@ mod tests {
             state: "unknown".to_string(),
             ..active.clone()
         };
-        assert_eq!(
-            snapshot_status_from_canonical_state(Some(&active)),
-            "Online".to_string()
-        );
-        assert_eq!(
-            snapshot_status_from_canonical_state(Some(&dead)),
-            "Offline".to_string()
-        );
-        assert_eq!(
-            snapshot_status_from_canonical_state(Some(&unknown)),
-            "Unknown".to_string()
-        );
-        assert_eq!(snapshot_status_from_canonical_state(None), "Unknown");
+        assert_eq!(canonical_status_label(Some(&active)), "Active");
+        assert_eq!(canonical_status_label(Some(&dead)), "Dead");
+        assert_eq!(canonical_status_label(Some(&unknown)), "Unknown");
+        assert_eq!(canonical_status_label(None), "Unknown");
     }
 
     #[test]
@@ -1417,9 +1390,10 @@ mod tests {
             },
             member_snapshot: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
+                agent_id: "team-lead@atm-dev".to_string(),
                 agent_type: "team-lead".to_string(),
                 model: "claude".to_string(),
-                status: "Online".to_string(),
+                status: "Active".to_string(),
                 activity: "Busy".to_string(),
                 session_id: Some("sess-1".to_string()),
                 process_id: Some(4242),
@@ -1432,7 +1406,49 @@ mod tests {
     }
 
     #[test]
-    fn doctor_json_schema_excludes_member_snapshot() {
+    fn render_human_member_snapshot_has_required_columns() {
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+            },
+            member_snapshot: vec![MemberSnapshot {
+                name: "team-lead".to_string(),
+                agent_id: "team-lead@atm-dev".to_string(),
+                agent_type: "team-lead".to_string(),
+                model: "claude-sonnet".to_string(),
+                status: "Active".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(1234),
+            }],
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+            },
+        };
+        let rendered = render_human(&report);
+        assert!(rendered.contains("Name"));
+        assert!(rendered.contains("Agent ID"));
+        assert!(rendered.contains("Type"));
+        assert!(rendered.contains("Model"));
+        assert!(rendered.contains("PID"));
+        assert!(rendered.contains("Session ID"));
+        assert!(rendered.contains("Status"));
+        assert!(rendered.contains("Activity"));
+    }
+
+    #[test]
+    fn doctor_json_schema_includes_member_snapshot_before_findings() {
         let report = DoctorReport {
             summary: Summary {
                 team: "atm-dev".to_string(),
@@ -1451,9 +1467,20 @@ mod tests {
                 start: "2026-03-02T00:00:00Z".to_string(),
                 end: "2026-03-02T00:01:00Z".to_string(),
             },
-            member_snapshot: vec![MemberSnapshot::default()],
+            member_snapshot: vec![MemberSnapshot {
+                name: "team-lead".to_string(),
+                agent_id: "team-lead@atm-dev".to_string(),
+                agent_type: "team-lead".to_string(),
+                model: "claude".to_string(),
+                status: "Active".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some("s1".to_string()),
+                process_id: Some(100),
+            }],
         };
         let value = serde_json::to_value(report).unwrap();
-        assert!(value.get("member_snapshot").is_none());
+        assert!(value.get("member_snapshot").is_some());
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(json.find("\"member_snapshot\"").unwrap() < json.find("\"findings\"").unwrap());
     }
 }

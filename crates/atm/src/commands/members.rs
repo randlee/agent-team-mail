@@ -2,7 +2,8 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    CanonicalMemberState, query_list_agents, query_team_member_states,
+    CanonicalMemberState, canonical_activity_label, canonical_liveness_bool,
+    canonical_status_label, query_list_agents, query_team_member_states,
 };
 use agent_team_mail_core::schema::TeamConfig;
 use anyhow::Result;
@@ -63,7 +64,9 @@ pub fn execute(args: MembersArgs) -> Result<()> {
                 "name": m.name,
                 "type": m.agent_type,
                 "model": m.model,
-                "liveness": resolve_member_liveness(&m.name, &daemon_states),
+                "status": canonical_status_label(daemon_states.get(&m.name)),
+                "activity": canonical_activity_label(daemon_states.get(&m.name)),
+                "liveness": canonical_liveness_bool(daemon_states.get(&m.name)),
             })).collect::<Vec<_>>()
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -74,19 +77,19 @@ pub fn execute(args: MembersArgs) -> Result<()> {
         if team_config.members.is_empty() {
             println!("  No members");
         } else {
-            println!("  {:<20} {:<20} {:<25} Status", "Name", "Type", "Model");
-            println!("  {}", "─".repeat(72));
+            println!(
+                "  {:<20} {:<20} {:<25} {:<10} Activity",
+                "Name", "Type", "Model", "Status"
+            );
+            println!("  {}", "─".repeat(84));
 
             for member in &team_config.members {
-                let active = match resolve_member_liveness(&member.name, &daemon_states) {
-                    Some(true) => "Online",
-                    Some(false) => "Offline",
-                    None => "Unknown",
-                };
+                let status = canonical_status_label(daemon_states.get(&member.name));
+                let activity = canonical_activity_label(daemon_states.get(&member.name));
                 let name = &member.name;
                 let agent_type = &member.agent_type;
                 let model = &member.model;
-                println!("  {name:<20} {agent_type:<20} {model:<25} {active}");
+                println!("  {name:<20} {agent_type:<20} {model:<25} {status:<10} {activity}");
             }
         }
     }
@@ -102,17 +105,4 @@ fn load_daemon_states(team_name: &str) -> HashMap<String, CanonicalMemberState> 
         }
     }
     states
-}
-
-fn resolve_member_liveness(
-    member_name: &str,
-    daemon_states: &HashMap<String, CanonicalMemberState>,
-) -> Option<bool> {
-    daemon_states
-        .get(member_name)
-        .and_then(|state| match state.state.as_str() {
-            "active" | "idle" => Some(true),
-            "offline" | "dead" => Some(false),
-            _ => None,
-        })
 }

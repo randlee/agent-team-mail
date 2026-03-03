@@ -182,6 +182,38 @@ pub struct CanonicalMemberState {
     pub source: String,
 }
 
+/// Render CLI-facing status taxonomy from daemon canonical member state.
+///
+/// Output values are constrained to `Active|Idle|Dead|Unknown`.
+pub fn canonical_status_label(state: Option<&CanonicalMemberState>) -> &'static str {
+    match state.map(|s| s.state.as_str()) {
+        Some("active") => "Active",
+        Some("idle") => "Idle",
+        Some("offline") | Some("dead") => "Dead",
+        _ => "Unknown",
+    }
+}
+
+/// Render CLI-facing activity taxonomy from daemon canonical member state.
+///
+/// Output values are constrained to `Busy|Idle|Unknown`.
+pub fn canonical_activity_label(state: Option<&CanonicalMemberState>) -> &'static str {
+    match state.map(|s| s.activity.as_str()) {
+        Some("busy") => "Busy",
+        Some("idle") => "Idle",
+        _ => "Unknown",
+    }
+}
+
+/// Return best-effort binary liveness from daemon canonical member state.
+pub fn canonical_liveness_bool(state: Option<&CanonicalMemberState>) -> Option<bool> {
+    match state.map(|s| s.state.as_str()) {
+        Some("active") | Some("idle") => Some(true),
+        Some("offline") | Some("dead") => Some(false),
+        _ => None,
+    }
+}
+
 /// Configuration for launching a new agent via the daemon.
 ///
 /// Sent as the payload of a `"launch"` socket command.
@@ -1859,6 +1891,44 @@ sleep 2
         assert_eq!(decoded.activity, "busy");
         assert_eq!(decoded.session_id.as_deref(), Some("sess-123"));
         assert_eq!(decoded.process_id, Some(4242));
+    }
+
+    #[test]
+    fn test_canonical_status_activity_labels_and_liveness() {
+        let active = CanonicalMemberState {
+            agent: "arch-ctm".to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: None,
+            process_id: None,
+            reason: String::new(),
+            source: String::new(),
+        };
+        let idle = CanonicalMemberState {
+            state: "idle".to_string(),
+            activity: "idle".to_string(),
+            ..active.clone()
+        };
+        let dead = CanonicalMemberState {
+            state: "offline".to_string(),
+            activity: "unknown".to_string(),
+            ..active.clone()
+        };
+
+        assert_eq!(canonical_status_label(Some(&active)), "Active");
+        assert_eq!(canonical_status_label(Some(&idle)), "Idle");
+        assert_eq!(canonical_status_label(Some(&dead)), "Dead");
+        assert_eq!(canonical_status_label(None), "Unknown");
+
+        assert_eq!(canonical_activity_label(Some(&active)), "Busy");
+        assert_eq!(canonical_activity_label(Some(&idle)), "Idle");
+        assert_eq!(canonical_activity_label(Some(&dead)), "Unknown");
+        assert_eq!(canonical_activity_label(None), "Unknown");
+
+        assert_eq!(canonical_liveness_bool(Some(&active)), Some(true));
+        assert_eq!(canonical_liveness_bool(Some(&idle)), Some(true));
+        assert_eq!(canonical_liveness_bool(Some(&dead)), Some(false));
+        assert_eq!(canonical_liveness_bool(None), None);
     }
 
     // Unix-only: test PID alive check for the current process

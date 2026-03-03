@@ -2166,31 +2166,42 @@ fn derive_canonical_member_state(
                 source: "session_registry".to_string(),
             };
         }
-        if matches!(tracker_state, Some(AgentState::Idle)) {
-            let reason = tracker_meta
-                .map(|m| m.reason.clone())
-                .unwrap_or_else(|| "idle lifecycle signal".to_string());
-            let source = tracker_meta
-                .map(|m| m.source.clone())
-                .unwrap_or_else(|| "hook_event".to_string());
-            return CanonicalMemberState {
+        return match tracker_state {
+            Some(AgentState::Idle) => {
+                let reason = tracker_meta
+                    .map(|m| m.reason.clone())
+                    .unwrap_or_else(|| "idle lifecycle signal".to_string());
+                let source = tracker_meta
+                    .map(|m| m.source.clone())
+                    .unwrap_or_else(|| "hook_event".to_string());
+                CanonicalMemberState {
+                    agent: agent.to_string(),
+                    state: "idle".to_string(),
+                    activity: "idle".to_string(),
+                    session_id: Some(session.session_id.clone()),
+                    process_id: Some(session.process_id),
+                    reason,
+                    source,
+                }
+            }
+            Some(AgentState::Active) => CanonicalMemberState {
                 agent: agent.to_string(),
-                state: "idle".to_string(),
-                activity: "idle".to_string(),
+                state: "active".to_string(),
+                activity: "busy".to_string(),
                 session_id: Some(session.session_id.clone()),
                 process_id: Some(session.process_id),
-                reason,
-                source,
-            };
-        }
-        return CanonicalMemberState {
-            agent: agent.to_string(),
-            state: "active".to_string(),
-            activity: "busy".to_string(),
-            session_id: Some(session.session_id.clone()),
-            process_id: Some(session.process_id),
-            reason: "session active with live pid".to_string(),
-            source: "session_registry".to_string(),
+                reason: "session active with live pid".to_string(),
+                source: "session_registry".to_string(),
+            },
+            Some(AgentState::Offline) | Some(AgentState::Unknown) | None => CanonicalMemberState {
+                agent: agent.to_string(),
+                state: "active".to_string(),
+                activity: "unknown".to_string(),
+                session_id: Some(session.session_id.clone()),
+                process_id: Some(session.process_id),
+                reason: "session active with unknown lifecycle activity".to_string(),
+                source: "session_registry".to_string(),
+            },
         };
     }
 
@@ -2631,6 +2642,28 @@ mod tests {
         let agents = resp.payload.unwrap();
         let arr = agents.as_array().unwrap();
         assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn test_derive_canonical_member_state_live_session_without_activity_is_unknown_activity() {
+        use crate::daemon::session_registry::{SessionRecord, SessionState};
+
+        let session = SessionRecord {
+            team: "atm-dev".to_string(),
+            agent_name: "arch-ctm".to_string(),
+            session_id: "sess-1".to_string(),
+            process_id: std::process::id(),
+            state: SessionState::Active,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        };
+
+        let canonical = derive_canonical_member_state("arch-ctm", None, Some(&session), None);
+        assert_eq!(canonical.state, "active");
+        assert_eq!(canonical.activity, "unknown");
     }
 
     #[test]
