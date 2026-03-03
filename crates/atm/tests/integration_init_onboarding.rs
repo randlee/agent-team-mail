@@ -143,7 +143,11 @@ fn test_init_with_existing_atm_toml_installs_hooks_only() {
     // Hooks should be installed
     assert!(home.path().join(".claude/settings.json").exists());
     // Team should be created
-    assert!(home.path().join(".claude/teams/my-team/config.json").exists());
+    assert!(
+        home.path()
+            .join(".claude/teams/my-team/config.json")
+            .exists()
+    );
     // .atm.toml should be unchanged (custom identity preserved)
     let toml = fs::read_to_string(repo.join(".atm.toml")).unwrap();
     assert!(
