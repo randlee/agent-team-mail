@@ -52,39 +52,72 @@ const ATM_HOOK_LIB_PY: &str = include_str!("../../scripts/atm_hook_lib.py");
 // These will be addressed in a follow-on sprint.
 
 /// Return the SessionStart hook command string for local or global install.
-fn session_start_cmd(global: bool) -> String {
-    if global {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/session-start.py\" || true'".to_string()
-    } else {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/session-start.py\" || true'".to_string()
-    }
+fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "session-start.py");
+    format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+    )
 }
 
 /// Return the PreToolUse(Bash) hook command string for local or global install.
-fn pre_tool_use_bash_cmd(global: bool) -> String {
-    if global {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/atm-identity-write.py\" || true'".to_string()
-    } else {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.claude/scripts/atm-identity-write.py\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/atm-identity-write.py\" || true'".to_string()
+fn pre_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "atm-identity-write.py");
+    match global_scripts_dir {
+        Some(_) => {
+            format!(
+                "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+            )
+        }
+        None => {
+            format!("bash -c 'test -f \"{script}\" && python3 \"{script}\" || true'")
+        }
     }
 }
 
 /// Return the PreToolUse(Task) hook command string for local or global install.
-fn pre_tool_use_task_cmd(global: bool) -> String {
-    if global {
-        "bash -c 'if test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\"; then python3 \"${HOME}/.claude/scripts/gate-agent-spawns.py\"; else exit 0; fi'".to_string()
-    } else {
-        "bash -c 'if test -f \"${CLAUDE_PROJECT_DIR}/.claude/scripts/gate-agent-spawns.py\"; then python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/gate-agent-spawns.py\"; else exit 0; fi'".to_string()
+fn pre_tool_use_task_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "gate-agent-spawns.py");
+    match global_scripts_dir {
+        Some(_) => format!(
+            "bash -c 'if test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\"; then python3 \"{script}\"; else exit 0; fi'"
+        ),
+        None => {
+            format!("bash -c 'if test -f \"{script}\"; then python3 \"{script}\"; else exit 0; fi'")
+        }
     }
 }
 
 /// Return the PostToolUse(Bash) hook command string for local or global install.
-fn post_tool_use_bash_cmd(global: bool) -> String {
-    if global {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/atm-identity-cleanup.py\" || true'".to_string()
-    } else {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.claude/scripts/atm-identity-cleanup.py\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/atm-identity-cleanup.py\" || true'".to_string()
+fn post_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "atm-identity-cleanup.py");
+    match global_scripts_dir {
+        Some(_) => {
+            format!(
+                "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+            )
+        }
+        None => {
+            format!("bash -c 'test -f \"{script}\" && python3 \"{script}\" || true'")
+        }
     }
+}
+
+/// Return a hook script path expression:
+/// - Local: uses `$CLAUDE_PROJECT_DIR` so settings remain repo-portable.
+/// - Global: uses a resolved absolute per-user path for robustness.
+fn hook_script_path(global_scripts_dir: Option<&Path>, script_name: &str) -> String {
+    match global_scripts_dir {
+        Some(dir) => normalize_for_bash_quoted_path(&dir.join(script_name)),
+        None => format!("${{CLAUDE_PROJECT_DIR}}/.claude/scripts/{script_name}"),
+    }
+}
+
+/// Normalize a filesystem path for inclusion inside a double-quoted `bash -c`
+/// command string.
+fn normalize_for_bash_quoted_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace('"', "\\\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +192,14 @@ pub fn execute(args: InitArgs) -> Result<()> {
 
     let mut settings = load_settings(&settings_path)?;
 
-    let report = merge_hooks(&mut settings, install_global)?;
+    let report = merge_hooks(
+        &mut settings,
+        if install_global {
+            Some(&scripts_dir)
+        } else {
+            None
+        },
+    )?;
 
     write_settings_atomic(&settings_path, &settings)?;
 
@@ -462,7 +502,10 @@ impl MergeReport {
 ///
 /// Returns an error when the JSON structure is malformed in a way that
 /// prevents safe merging (e.g. `hooks` key exists but is not an object).
-fn merge_hooks(settings: &mut serde_json::Value, global: bool) -> Result<MergeReport> {
+fn merge_hooks(
+    settings: &mut serde_json::Value,
+    global_scripts_dir: Option<&Path>,
+) -> Result<MergeReport> {
     // Ensure `hooks` key is a JSON object.
     {
         let obj = settings
@@ -476,10 +519,10 @@ fn merge_hooks(settings: &mut serde_json::Value, global: bool) -> Result<MergeRe
         }
     }
 
-    let ss_cmd = session_start_cmd(global);
-    let ptu_bash = pre_tool_use_bash_cmd(global);
-    let ptu_task = pre_tool_use_task_cmd(global);
-    let post_bash = post_tool_use_bash_cmd(global);
+    let ss_cmd = session_start_cmd(global_scripts_dir);
+    let ptu_bash = pre_tool_use_bash_cmd(global_scripts_dir);
+    let ptu_task = pre_tool_use_task_cmd(global_scripts_dir);
+    let post_bash = post_tool_use_bash_cmd(global_scripts_dir);
 
     let session_start = merge_session_start_hook(settings, &ss_cmd)?;
     let pre_tool_use_bash = merge_matcher_hook(settings, "PreToolUse", "Bash", &ptu_bash)?;
@@ -723,7 +766,7 @@ mod tests {
         assert!(!path.exists());
 
         let mut settings = load_settings(&path).expect("load");
-        let report = merge_hooks(&mut settings, false).expect("merge");
+        let report = merge_hooks(&mut settings, None).expect("merge");
         write_settings_atomic(&path, &settings).expect("write");
 
         assert!(path.exists());
@@ -741,7 +784,7 @@ mod tests {
             .as_array()
             .expect("SessionStart array");
         assert!(
-            hook_command_present(session_start, &session_start_cmd(false)),
+            hook_command_present(session_start, &session_start_cmd(None)),
             "SessionStart hook missing"
         );
 
@@ -755,7 +798,7 @@ mod tests {
         let bash_hooks = bash_matcher["hooks"].as_array().expect("hooks array");
         assert!(hook_command_present(
             bash_hooks,
-            &pre_tool_use_bash_cmd(false)
+            &pre_tool_use_bash_cmd(None)
         ));
 
         let task_matcher = pre_tool_use
@@ -765,7 +808,7 @@ mod tests {
         let task_hooks = task_matcher["hooks"].as_array().expect("hooks array");
         assert!(hook_command_present(
             task_hooks,
-            &pre_tool_use_task_cmd(false)
+            &pre_tool_use_task_cmd(None)
         ));
 
         let post_tool_use = parsed["hooks"]["PostToolUse"]
@@ -778,7 +821,7 @@ mod tests {
         let post_hooks = post_bash["hooks"].as_array().expect("hooks array");
         assert!(hook_command_present(
             post_hooks,
-            &post_tool_use_bash_cmd(false)
+            &post_tool_use_bash_cmd(None)
         ));
     }
 
@@ -794,12 +837,12 @@ mod tests {
 
         // First install
         let mut settings = load_settings(&path).expect("load 1");
-        merge_hooks(&mut settings, false).expect("merge 1");
+        merge_hooks(&mut settings, None).expect("merge 1");
         write_settings_atomic(&path, &settings).expect("write 1");
 
         // Second install on the freshly written file
         let mut settings2 = load_settings(&path).expect("load 2");
-        let report = merge_hooks(&mut settings2, false).expect("merge 2");
+        let report = merge_hooks(&mut settings2, None).expect("merge 2");
         write_settings_atomic(&path, &settings2).expect("write 2");
 
         // All hooks must be reported as already present
@@ -819,7 +862,7 @@ mod tests {
             .filter(|e| {
                 e.get("command")
                     .and_then(|c| c.as_str())
-                    .map(|c| c == session_start_cmd(false))
+                    .map(|c| c == session_start_cmd(None))
                     .unwrap_or(false)
             })
             .count();
@@ -843,7 +886,7 @@ mod tests {
             .filter(|e| {
                 e.get("command")
                     .and_then(|c| c.as_str())
-                    .map(|c| c == pre_tool_use_bash_cmd(false))
+                    .map(|c| c == pre_tool_use_bash_cmd(None))
                     .unwrap_or(false)
             })
             .count();
@@ -884,7 +927,7 @@ mod tests {
 
         // Install ATM hooks
         let mut settings = load_settings(&path).expect("load");
-        merge_hooks(&mut settings, false).expect("merge");
+        merge_hooks(&mut settings, None).expect("merge");
         write_settings_atomic(&path, &settings).expect("write");
 
         let result_content = std::fs::read_to_string(&path).expect("read");
@@ -916,7 +959,7 @@ mod tests {
 
         // ATM hook must also be present
         assert!(
-            hook_command_present(bash_hooks, &pre_tool_use_bash_cmd(false)),
+            hook_command_present(bash_hooks, &pre_tool_use_bash_cmd(None)),
             "ATM PreToolUse(Bash) hook missing after merge"
         );
     }
@@ -955,6 +998,37 @@ mod tests {
                 None => env::remove_var("ATM_HOME"),
             }
         }
+    }
+
+    /// Global hook commands must use resolved absolute script paths, not
+    /// `${HOME}` expansion.
+    #[test]
+    fn test_global_hook_commands_use_absolute_script_paths() {
+        let dir = TempDir::new().expect("tempdir");
+        let scripts_dir = dir.path().join("scripts with spaces");
+        let expected_session =
+            normalize_for_bash_quoted_path(&scripts_dir.join("session-start.py"));
+        let expected_write =
+            normalize_for_bash_quoted_path(&scripts_dir.join("atm-identity-write.py"));
+        let expected_gate =
+            normalize_for_bash_quoted_path(&scripts_dir.join("gate-agent-spawns.py"));
+        let expected_cleanup =
+            normalize_for_bash_quoted_path(&scripts_dir.join("atm-identity-cleanup.py"));
+
+        let session = session_start_cmd(Some(&scripts_dir));
+        let write = pre_tool_use_bash_cmd(Some(&scripts_dir));
+        let gate = pre_tool_use_task_cmd(Some(&scripts_dir));
+        let cleanup = post_tool_use_bash_cmd(Some(&scripts_dir));
+
+        assert!(session.contains(&expected_session));
+        assert!(write.contains(&expected_write));
+        assert!(gate.contains(&expected_gate));
+        assert!(cleanup.contains(&expected_cleanup));
+
+        assert!(!session.contains("${HOME}"));
+        assert!(!write.contains("${HOME}"));
+        assert!(!gate.contains("${HOME}"));
+        assert!(!cleanup.contains("${HOME}"));
     }
 
     // -----------------------------------------------------------------------

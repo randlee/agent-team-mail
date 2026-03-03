@@ -354,7 +354,7 @@ MCP subcommands:
   mcp status
 
 Init command:
-  init <team> [--local] [--identity <name>] [--skip-team] [--check]
+  init <team> [--local] [--identity <name>] [--skip-team]
 ```
 
 ### 4.2 Messaging Commands
@@ -1743,17 +1743,17 @@ ATM binary and materialized at install time.
 
 **Claude hook path reference**:
 - Canonical docs: https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
-- Follow "Reference scripts by path": use `"$CLAUDE_PROJECT_DIR"/...` for project-scoped scripts and `"${HOME}/.claude/scripts/"...` for globally-installed scripts.
+- Follow "Reference scripts by path": use `"$CLAUDE_PROJECT_DIR"/...` for project-local scripts.
+- Global installs must use absolute per-user script paths resolved at install time (for example `~/.claude/scripts/...` on Unix/macOS and the equivalent home path on Windows). Do not use `${CLAUDE_PLUGIN_ROOT}` for ATM hook wiring.
 
 #### 4.9.1 Command Forms
 
 ```bash
 atm init <team>
+atm init <team> --global      # legacy compatibility flag (hidden)
 atm init <team> --local
 atm init <team> --identity <name>
 atm init <team> --skip-team
-atm init --check
-atm init <team> --check
 ```
 
 **Arguments and flags**:
@@ -1761,7 +1761,6 @@ atm init <team> --check
 - `--local`: install hooks in project scope (`.claude/settings.json`) instead of default global scope.
 - `--identity <name>`: identity value written to `.atm.toml` (`team-lead` default).
 - `--skip-team`: skip team creation step (join-existing-team workflows).
-- `--check`: read-only validation; report missing/misaligned wiring without modifying files.
 
 #### 4.9.2 Behavior
 
@@ -1793,14 +1792,14 @@ atm init <team> --check
 - Preserve unknown fields and non-ATM hook entries.
 - Use atomic writes (temp + rename) and create parent directories as needed.
 - Report exact file path(s) modified in command output.
-- Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` (project scope) for project-local hook scripts and `"${HOME}/.claude/scripts/"` (global scope) for globally-installed hook scripts, not repo-absolute paths.
+- Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` for project-local scripts and absolute per-user script paths for global installs; do not use `${CLAUDE_PLUGIN_ROOT}`.
 - `atm init` success output must include whether hooks were installed globally or locally.
 
 #### 4.9.4 Exit and Result Semantics
 
-- Exit `0` for `installed`, `updated`, `already-configured`, and `check-ok`.
+- Exit `0` for `installed`, `updated`, and `already-configured`.
+- Exit `0` for `--global` no-op when `.atm.toml` is missing in the current project root (with actionable guidance in output).
 - Exit `1` for malformed config, unsupported environment, or write/permission failures.
-- `--check` output must include actionable guidance for each missing/misaligned hook entry.
 - Idempotent no-op cases (`.atm.toml` exists, team exists, hooks already configured)
   are success states and must be explicitly reported in human output.
 
