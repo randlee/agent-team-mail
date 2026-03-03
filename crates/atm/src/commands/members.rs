@@ -2,12 +2,13 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    canonical_liveness_bool, query_list_agents, query_team_member_state_map,
+    canonical_liveness_bool, query_list_agents, query_team_member_states,
 };
 use agent_team_mail_core::schema::TeamConfig;
 use anyhow::Result;
 use clap::Args;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 
 use crate::util::settings::get_home_dir;
@@ -52,7 +53,13 @@ pub fn execute(args: MembersArgs) -> Result<()> {
     }
 
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-    let daemon_states = query_team_member_state_map(team_name);
+    let daemon_states: HashMap<_, _> = query_team_member_states(team_name)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.agent.clone(), s))
+        .collect();
 
     // Output results
     if args.json {

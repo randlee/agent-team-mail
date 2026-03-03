@@ -182,6 +182,29 @@ pub struct CanonicalMemberState {
     pub source: String,
 }
 
+/// Render CLI-facing status taxonomy from daemon canonical member state.
+///
+/// Output values are constrained to `Active|Idle|Dead|Unknown`.
+pub fn canonical_status_label(state: Option<&CanonicalMemberState>) -> &'static str {
+    match state.map(|s| s.state.as_str()) {
+        Some("active") => "Active",
+        Some("idle") => "Idle",
+        Some("offline") | Some("dead") => "Dead",
+        _ => "Unknown",
+    }
+}
+
+/// Render CLI-facing activity taxonomy from daemon canonical member state.
+///
+/// Output values are constrained to `Busy|Idle|Unknown`.
+pub fn canonical_activity_label(state: Option<&CanonicalMemberState>) -> &'static str {
+    match state.map(|s| s.activity.as_str()) {
+        Some("busy") => "Busy",
+        Some("idle") => "Idle",
+        _ => "Unknown",
+    }
+}
+
 /// Return best-effort binary liveness from daemon canonical member state.
 pub fn canonical_liveness_bool(state: Option<&CanonicalMemberState>) -> Option<bool> {
     match state.map(|s| s.state.as_str()) {
@@ -547,7 +570,10 @@ pub fn query_list_agents_for_team(team: &str) -> anyhow::Result<Option<Vec<Agent
 
 /// Query the daemon for canonical member-state snapshots scoped to one team.
 ///
-/// Returns `Ok(None)` when the daemon is not reachable.
+/// Returns:
+/// - `Ok(None)` when the daemon is not reachable.
+/// - `Err(...)` when daemon response payload is present but does not match the
+///   canonical state schema.
 pub fn query_team_member_states(team: &str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>> {
     let request = SocketRequest {
         version: PROTOCOL_VERSION,
@@ -570,26 +596,17 @@ pub fn query_team_member_states(team: &str) -> anyhow::Result<Option<Vec<Canonic
         None => return Ok(None),
     };
 
-    match serde_json::from_value::<Vec<CanonicalMemberState>>(payload) {
-        Ok(states) => Ok(Some(states)),
-        Err(_) => Ok(None),
-    }
+    decode_canonical_member_states_payload(payload).map(Some)
 }
 
-/// Query daemon canonical member states and return a map keyed by agent name.
-///
-/// If the daemon is unavailable or does not return states, this returns an
-/// empty map so callers can render `Unknown` without failing command output.
-pub fn query_team_member_state_map(
-    team: &str,
-) -> std::collections::HashMap<String, CanonicalMemberState> {
-    query_team_member_states(team)
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|entry| (entry.agent.clone(), entry))
-        .collect()
+fn decode_canonical_member_states_payload(
+    payload: serde_json::Value,
+) -> anyhow::Result<Vec<CanonicalMemberState>> {
+    serde_json::from_value::<Vec<CanonicalMemberState>>(payload).map_err(|err| {
+        anyhow::anyhow!(
+            "invalid canonical member-state payload from daemon list-agents(team): {err}"
+        )
+    })
 }
 
 /// Pane and log file information returned by the `agent-pane` command.
@@ -1675,6 +1692,95 @@ sleep 2
     }
 
     #[test]
+    #[serial]
+    fn test_query_team_member_states_offline_returns_none() {
+        with_autostart_disabled(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let old_home = std::env::var("ATM_HOME").ok();
+            // SAFETY: serialized test env mutation.
+            unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+            let result = query_team_member_states("atm-dev");
+
+            // SAFETY: serialized test env mutation cleanup.
+            unsafe {
+                match old_home {
+                    Some(v) => std::env::set_var("ATM_HOME", v),
+                    None => std::env::remove_var("ATM_HOME"),
+                }
+            }
+
+            assert!(
+                matches!(result, Ok(None)),
+                "offline daemon must map to Ok(None), got: {result:?}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_query_team_member_states_invalid_payload_returns_err() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        with_autostart_disabled(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let daemon_dir = tmp.path().join(".claude/daemon");
+            std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+            let socket_path = daemon_dir.join("atm-daemon.sock");
+
+            let listener = UnixListener::bind(&socket_path).expect("bind socket");
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut request_line = String::new();
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                reader.read_line(&mut request_line).expect("read request");
+                assert!(
+                    request_line.contains("\"command\":\"list-agents\""),
+                    "expected list-agents request, got: {request_line}"
+                );
+
+                let response = SocketResponse {
+                    version: PROTOCOL_VERSION,
+                    request_id: "req-test".to_string(),
+                    status: "ok".to_string(),
+                    payload: Some(serde_json::json!({
+                        "agent": "arch-ctm",
+                        "state": "active"
+                    })),
+                    error: None,
+                };
+                let line = serde_json::to_string(&response).expect("serialize response");
+                stream.write_all(line.as_bytes()).expect("write response");
+                stream.write_all(b"\n").expect("write newline");
+            });
+
+            let old_home = std::env::var("ATM_HOME").ok();
+            // SAFETY: serialized test env mutation.
+            unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+            let result = query_team_member_states("atm-dev");
+
+            // SAFETY: serialized test env mutation cleanup.
+            unsafe {
+                match old_home {
+                    Some(v) => std::env::set_var("ATM_HOME", v),
+                    None => std::env::remove_var("ATM_HOME"),
+                }
+            }
+
+            handle.join().expect("mock daemon thread");
+            let err = result.expect_err("invalid payload must return Err");
+            assert!(
+                err.to_string()
+                    .contains("invalid canonical member-state payload"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[test]
     fn test_agent_pane_info_deserialization() {
         let json = r#"{"pane_id":"%42","log_path":"/home/user/.claude/logs/arch-ctm.log"}"#;
         let info: AgentPaneInfo = serde_json::from_str(json).unwrap();
@@ -1887,8 +1993,8 @@ sleep 2
     }
 
     #[test]
-    fn test_canonical_liveness_bool_mapping() {
-        let mut state = CanonicalMemberState {
+    fn test_canonical_status_activity_labels_and_liveness() {
+        let active = CanonicalMemberState {
             agent: "arch-ctm".to_string(),
             state: "active".to_string(),
             activity: "busy".to_string(),
@@ -1897,14 +2003,63 @@ sleep 2
             reason: String::new(),
             source: String::new(),
         };
-        assert_eq!(canonical_liveness_bool(Some(&state)), Some(true));
-        state.state = "idle".to_string();
-        assert_eq!(canonical_liveness_bool(Some(&state)), Some(true));
-        state.state = "offline".to_string();
-        assert_eq!(canonical_liveness_bool(Some(&state)), Some(false));
-        state.state = "unknown".to_string();
-        assert_eq!(canonical_liveness_bool(Some(&state)), None);
+        let idle = CanonicalMemberState {
+            state: "idle".to_string(),
+            activity: "idle".to_string(),
+            ..active.clone()
+        };
+        let dead = CanonicalMemberState {
+            state: "offline".to_string(),
+            activity: "unknown".to_string(),
+            ..active.clone()
+        };
+
+        assert_eq!(canonical_status_label(Some(&active)), "Active");
+        assert_eq!(canonical_status_label(Some(&idle)), "Idle");
+        assert_eq!(canonical_status_label(Some(&dead)), "Dead");
+        assert_eq!(canonical_status_label(None), "Unknown");
+
+        assert_eq!(canonical_activity_label(Some(&active)), "Busy");
+        assert_eq!(canonical_activity_label(Some(&idle)), "Idle");
+        assert_eq!(canonical_activity_label(Some(&dead)), "Unknown");
+        assert_eq!(canonical_activity_label(None), "Unknown");
+
+        assert_eq!(canonical_liveness_bool(Some(&active)), Some(true));
+        assert_eq!(canonical_liveness_bool(Some(&idle)), Some(true));
+        assert_eq!(canonical_liveness_bool(Some(&dead)), Some(false));
         assert_eq!(canonical_liveness_bool(None), None);
+    }
+
+    #[test]
+    fn test_decode_canonical_member_states_payload_rejects_invalid_schema() {
+        let invalid = serde_json::json!({
+            "agent": "arch-ctm",
+            "state": "active"
+        });
+        let err = decode_canonical_member_states_payload(invalid).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid canonical member-state payload")
+        );
+    }
+
+    #[test]
+    fn test_decode_canonical_member_states_payload_accepts_valid_schema() {
+        let valid = serde_json::json!([
+            {
+                "agent": "arch-ctm",
+                "state": "active",
+                "activity": "busy",
+                "session_id": "sess-1",
+                "process_id": 1234,
+                "reason": "session active",
+                "source": "session_registry"
+            }
+        ]);
+        let states = decode_canonical_member_states_payload(valid).expect("valid payload");
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].agent, "arch-ctm");
+        assert_eq!(states[0].state, "active");
     }
 
     // Unix-only: test PID alive check for the current process
