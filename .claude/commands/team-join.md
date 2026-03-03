@@ -14,7 +14,7 @@ exact launch command for the teammate session.
 ## Usage
 
 ```bash
-/team-join <agent> [--team <team>] [--agent-type <type>] [--model <model>] [--folder <path>]
+/team-join <agent> [--team <team>] [--agent-type <type>] [--model <model>] [--folder <path>] [--json]
 ```
 
 ## Behavior Contract
@@ -38,7 +38,7 @@ exact launch command for the teammate session.
 - optional: `--team`, `--agent-type`, `--model`, `--folder`
 2. Run:
 ```bash
-atm teams join <agent> [--team <team>] [--agent-type <type>] [--model <model>] [--folder <path>]
+atm teams join <agent> [--team <team>] [--agent-type <type>] [--model <model>] [--folder <path>] [--json]
 ```
 3. If command fails, return ATM error text unchanged.
 4. If command succeeds, return output unchanged.

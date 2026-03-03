@@ -122,12 +122,18 @@ fn test_teams_join_rejects_team_mismatch_in_lead_mode() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
-    cmd.env("ATM_TEAM", "atm-dev")
+    let assert = cmd
+        .env("ATM_TEAM", "atm-dev")
         .env("ATM_IDENTITY", "team-lead")
         .args(["teams", "join", "arch-ctm", "--team", "other-team"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("does not match your current team"));
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.trim().is_empty(),
+        "stdout must be empty on mismatch error, got: {stdout:?}"
+    );
 }
 
 #[test]
