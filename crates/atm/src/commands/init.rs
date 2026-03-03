@@ -545,7 +545,7 @@ fn merge_hooks(
 /// Merge a single hook entry into the `hooks.SessionStart` array.
 ///
 /// Canonical format for SessionStart/SessionEnd entries is:
-/// `{ "matcher": {}, "hooks": [{ "type": "command", "command": "..." }] }`.
+/// `{ "matcher": "", "hooks": [{ "type": "command", "command": "..." }] }`.
 ///
 /// This function also migrates legacy entries in-place:
 /// - bare `{ "type": "command", "command": "..." }`
@@ -659,7 +659,7 @@ fn command_hook_entry(command: &str) -> serde_json::Value {
 
 fn catch_all_hook_entry(command: &str) -> serde_json::Value {
     serde_json::json!({
-        "matcher": {},
+        "matcher": "",
         "hooks": [command_hook_entry(command)]
     })
 }
@@ -683,7 +683,7 @@ fn normalize_catch_all_hook_entries(array: &mut [serde_json::Value]) -> Result<(
             hooks
                 .as_array_mut()
                 .context("catch-all hook `hooks` field is not an array")?;
-            obj.insert("matcher".to_string(), serde_json::json!({}));
+            obj.insert("matcher".to_string(), serde_json::json!(""));
         }
     }
 
@@ -862,8 +862,8 @@ mod tests {
         assert!(
             session_start
                 .iter()
-                .all(|e| e.get("matcher").and_then(|m| m.as_object()).is_some()),
-            "SessionStart entries must include matcher object"
+                .all(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("")),
+            "SessionStart entries must include empty-string matcher"
         );
 
         let pre_tool_use = parsed["hooks"]["PreToolUse"]
@@ -1086,8 +1086,8 @@ mod tests {
         assert!(
             session_start
                 .iter()
-                .all(|e| e.get("matcher").and_then(|m| m.as_object()).is_some()),
-            "all SessionStart entries must have matcher object after migration"
+                .all(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("")),
+            "all SessionStart entries must have empty-string matcher after migration"
         );
         assert!(
             session_start.iter().all(|e| e.get("hooks").is_some()),
@@ -1100,8 +1100,8 @@ mod tests {
         assert!(
             session_end
                 .iter()
-                .all(|e| e.get("matcher").and_then(|m| m.as_object()).is_some()),
-            "all SessionEnd entries must have matcher object after migration"
+                .all(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("")),
+            "all SessionEnd entries must have empty-string matcher after migration"
         );
         assert!(
             session_end.iter().all(|e| e.get("hooks").is_some()),
