@@ -2,8 +2,7 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    CanonicalMemberState, canonical_activity_label, canonical_liveness_bool,
-    canonical_status_label, query_list_agents, query_team_member_states,
+    canonical_liveness_bool, query_list_agents, query_team_member_state_map,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
@@ -55,7 +54,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     }
 
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-    let daemon_states = load_daemon_states(team_name);
+    let daemon_states = query_team_member_state_map(team_name);
 
     // Count unread messages for each member
     let inbox_counts = count_inbox_messages(&team_dir, &team_config)?;
@@ -82,8 +81,6 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 json!({
                     "name": m.name,
                     "type": m.agent_type,
-                    "status": canonical_status_label(daemon_states.get(&m.name)),
-                    "activity": canonical_activity_label(daemon_states.get(&m.name)),
                     "liveness": canonical_liveness_bool(daemon_states.get(&m.name)),
                     "unreadCount": unread,
                 })
@@ -106,14 +103,15 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         let member_count = team_config.members.len();
         println!("Members ({member_count}):");
         for member in &team_config.members {
-            let status_str = canonical_status_label(daemon_states.get(&member.name));
-            let activity_str = canonical_activity_label(daemon_states.get(&member.name));
+            let active_str = match canonical_liveness_bool(daemon_states.get(&member.name)) {
+                Some(true) => "Online ",
+                Some(false) => "Offline",
+                None => "Unknown",
+            };
             let unread = inbox_counts.get(&member.name).copied().unwrap_or(0);
             let name = &member.name;
             let agent_type = &member.agent_type;
-            println!(
-                "  {name:<20} {agent_type:<20} {status_str:<8} {activity_str:<8} {unread} unread"
-            );
+            println!("  {name:<20} {agent_type:<20} {active_str:<6}    {unread} unread");
         }
 
         if pending_tasks > 0 || completed_tasks > 0 {
@@ -136,16 +134,6 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     });
 
     Ok(())
-}
-
-fn load_daemon_states(team_name: &str) -> HashMap<String, CanonicalMemberState> {
-    let mut states = HashMap::new();
-    if let Ok(Some(entries)) = query_team_member_states(team_name) {
-        for entry in entries {
-            states.insert(entry.agent.clone(), entry);
-        }
-    }
-    states
 }
 
 /// Count unread messages in inboxes

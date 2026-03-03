@@ -8,9 +8,8 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, SessionQueryResult, canonical_activity_label,
-    canonical_status_label, daemon_is_running, daemon_pid_path, daemon_socket_path,
-    query_list_agents, query_list_agents_for_team, query_session_for_team,
+    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_pid_path,
+    daemon_socket_path, query_list_agents, query_list_agents_for_team, query_session_for_team,
     query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
@@ -92,17 +91,16 @@ struct LogWindow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DoctorReport {
     summary: Summary,
-    #[serde(default)]
-    member_snapshot: Vec<MemberSnapshot>,
     findings: Vec<Finding>,
     recommendations: Vec<Recommendation>,
     log_window: LogWindow,
+    #[serde(skip_serializing, skip_deserializing, default)]
+    member_snapshot: Vec<MemberSnapshot>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct MemberSnapshot {
     name: String,
-    agent_id: String,
     agent_type: String,
     model: String,
     status: String,
@@ -197,6 +195,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     let config_path = team_dir.join("config.json");
 
     let mut findings: Vec<Finding> = Vec::new();
+    let mut daemon_states_by_agent: HashMap<String, CanonicalMemberState> = HashMap::new();
 
     if !team_dir.exists() {
         findings.push(finding(
@@ -226,7 +225,10 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
 
     // Check 2 + 3 + 4: session/roster/mailbox integrity
     if let Some(cfg) = &team_config {
-        findings.extend(check_pid_session_reconciliation(team, cfg));
+        let (pid_findings, daemon_states) =
+            check_pid_session_reconciliation_with_query(team, cfg, query_team_member_states);
+        daemon_states_by_agent = daemon_states;
+        findings.extend(pid_findings);
         findings.extend(check_roster_session_integrity(team, cfg));
         findings.extend(check_mailbox_integrity(team_dir.join("inboxes"), team, cfg));
     }
@@ -261,38 +263,8 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         counts,
     };
 
-    let daemon_states_by_agent: HashMap<String, CanonicalMemberState> =
-        query_team_member_states(team)
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| (entry.agent.clone(), entry))
-            .collect();
-
     Ok(DoctorReport {
         summary,
-        member_snapshot: team_config
-            .as_ref()
-            .map(|cfg| {
-                cfg.members
-                    .iter()
-                    .map(|m| {
-                        let daemon_state = daemon_states_by_agent.get(&m.name);
-                        MemberSnapshot {
-                            name: m.name.clone(),
-                            agent_id: m.agent_id.clone(),
-                            agent_type: m.agent_type.clone(),
-                            model: m.model.clone(),
-                            status: canonical_status_label(daemon_state).to_string(),
-                            activity: canonical_activity_label(daemon_state).to_string(),
-                            session_id: daemon_state.and_then(|s| s.session_id.clone()),
-                            process_id: daemon_state.and_then(|s| s.process_id),
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
         findings,
         recommendations,
         log_window: LogWindow {
@@ -300,7 +272,48 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
             start: window_start.to_rfc3339(),
             end: window_end.to_rfc3339(),
         },
+        member_snapshot: team_config
+            .as_ref()
+            .map(|cfg| {
+                cfg.members
+                    .iter()
+                    .map(|m| MemberSnapshot {
+                        name: m.name.clone(),
+                        agent_type: m.agent_type.clone(),
+                        model: m.model.clone(),
+                        status: snapshot_status_from_canonical_state(
+                            daemon_states_by_agent.get(&m.name),
+                        ),
+                        activity: snapshot_activity_from_canonical_state(
+                            daemon_states_by_agent.get(&m.name),
+                        ),
+                        session_id: daemon_states_by_agent
+                            .get(&m.name)
+                            .and_then(|s| s.session_id.clone()),
+                        process_id: daemon_states_by_agent
+                            .get(&m.name)
+                            .and_then(|s| s.process_id),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
+}
+
+fn snapshot_status_from_canonical_state(state: Option<&CanonicalMemberState>) -> String {
+    match state.map(|s| s.state.as_str()) {
+        Some("active") | Some("idle") => "Online".to_string(),
+        Some("offline") | Some("dead") => "Offline".to_string(),
+        _ => "Unknown".to_string(),
+    }
+}
+
+fn snapshot_activity_from_canonical_state(state: Option<&CanonicalMemberState>) -> String {
+    match state.map(|s| s.activity.as_str()) {
+        Some("busy") => "Busy".to_string(),
+        Some("idle") => "Idle".to_string(),
+        _ => "Unknown".to_string(),
+    }
 }
 
 fn finding(severity: Severity, check: &str, code: &str, message: String) -> Finding {
@@ -386,58 +399,108 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     findings
 }
 
-fn check_pid_session_reconciliation(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
-    check_pid_session_reconciliation_with_query(team, cfg, query_session_for_team)
-}
-
 fn check_pid_session_reconciliation_with_query<F>(
     team: &str,
     cfg: &TeamConfig,
-    query_session: F,
-) -> Vec<Finding>
+    query_states: F,
+) -> (Vec<Finding>, HashMap<String, CanonicalMemberState>)
 where
-    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+    F: Fn(&str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>>,
 {
     let mut findings = Vec::new();
+    let (daemon_states, query_unreachable, unreachable_reason): (
+        HashMap<String, CanonicalMemberState>,
+        bool,
+        Option<String>,
+    ) = match query_states(team) {
+        Ok(Some(states)) => (
+            states
+                .into_iter()
+                .map(|s| (s.agent.clone(), s))
+                .collect::<HashMap<_, _>>(),
+            false,
+            None,
+        ),
+        Ok(None) => (
+            HashMap::new(),
+            true,
+            Some(format!(
+                "Daemon team-scoped state query unavailable for team '{team}'"
+            )),
+        ),
+        Err(err) => (
+            HashMap::new(),
+            true,
+            Some(format!(
+                "Daemon team-scoped state query failed for team '{team}': {err}"
+            )),
+        ),
+    };
+
+    if let Some(reason) = unreachable_reason {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "DAEMON_UNREACHABLE",
+            reason,
+        ));
+    }
 
     for member in &cfg.members {
-        if member.is_active == Some(true) {
-            match query_session(team, &member.name) {
-                Ok(Some(s)) if !s.alive => findings.push(finding(
+        let daemon_state = daemon_states.get(&member.name);
+        match daemon_state.map(|s| s.state.as_str()) {
+            Some("offline") | Some("dead") if member.is_active == Some(true) => {
+                findings.push(finding(
                     Severity::Warn,
                     "pid_session_reconciliation",
                     "ACTIVE_FLAG_STALE",
                     format!(
-                        "Member '{}' marked active but daemon session is dead (pid={})",
-                        member.name, s.process_id
+                        "Member '{}' has activity hint isActive=true but daemon state is dead (pid={})",
+                        member.name,
+                        daemon_state
+                            .and_then(|s| s.process_id)
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
                     ),
-                )),
-                Ok(None) => findings.push(finding(
-                    Severity::Warn,
-                    "pid_session_reconciliation",
-                    "ACTIVE_WITHOUT_SESSION",
-                    format!(
-                        "Member '{}' marked active but no daemon session record found",
-                        member.name
-                    ),
-                )),
-                // V.3 contract: daemon query errors are treated as unknown/missing
-                // session state (doctor remains non-failing and emits diagnostics).
-                Err(_) => findings.push(finding(
-                    Severity::Warn,
-                    "pid_session_reconciliation",
-                    "ACTIVE_WITHOUT_SESSION",
-                    format!(
-                        "Member '{}' marked active but daemon session query failed",
-                        member.name
-                    ),
-                )),
-                _ => {}
+                ))
             }
+            Some("active") | Some("idle") if member.is_active != Some(true) => {
+                findings.push(finding(
+                    Severity::Warn,
+                    "pid_session_reconciliation",
+                    "GHOST_SESSION",
+                    format!(
+                        "Member '{}' has activity hint isActive!=true but daemon reports live state '{}'",
+                        member.name,
+                        daemon_state
+                            .map(|s| s.state.as_str())
+                            .unwrap_or("unknown")
+                    ),
+                ))
+            }
+            _ if member.is_active == Some(true) && query_unreachable => findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "ACTIVE_WITHOUT_SESSION",
+                format!(
+                    "Member '{}' has activity hint isActive=true but daemon state query unavailable",
+                    member.name
+                ),
+            )),
+            _ if member.is_active == Some(true) => findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "ACTIVE_WITHOUT_SESSION",
+                format!(
+                    "Member '{}' has activity hint isActive=true but no daemon state record found",
+                    member.name
+                ),
+            )),
+            _ => {}
         }
     }
 
-    findings
+    (findings, daemon_states)
 }
 
 fn check_roster_session_integrity(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
@@ -813,7 +876,7 @@ fn build_recommendations(
 
     let has = |code: &str| findings.iter().any(|f| f.code == code);
 
-    if has("DAEMON_NOT_RUNNING") {
+    if has("DAEMON_NOT_RUNNING") || has("DAEMON_UNREACHABLE") {
         recs.push(Recommendation {
             command: "atm-daemon".to_string(),
             reason: "Start daemon to enable session/teardown reconciliation".to_string(),
@@ -828,7 +891,7 @@ fn build_recommendations(
         });
     }
 
-    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") {
+    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") || has("GHOST_SESSION") {
         recs.push(Recommendation {
             command: format!("atm teams cleanup {team}"),
             reason: "Reconcile stale non-lead session state and mailbox/roster drift".to_string(),
@@ -874,10 +937,10 @@ fn render_human(report: &DoctorReport) -> String {
     if !report.member_snapshot.is_empty() {
         out.push_str("Members:\n");
         out.push_str(&format!(
-            "  {:<18} {:<28} {:<16} {:<24} {:<8} {:<20} {:<8} {}\n",
-            "Name", "Agent ID", "Type", "Model", "PID", "Session ID", "Status", "Activity"
+            "  {:<20} {:<20} {:<24} {:<10} {:<10} {:<8} {}\n",
+            "Name", "Type", "Model", "Status", "Activity", "PID", "Session ID"
         ));
-        out.push_str(&format!("  {}\n", "─".repeat(146)));
+        out.push_str(&format!("  {}\n", "─".repeat(120)));
         for m in &report.member_snapshot {
             let pid = m
                 .process_id
@@ -885,8 +948,8 @@ fn render_human(report: &DoctorReport) -> String {
                 .unwrap_or_else(|| "-".to_string());
             let session = m.session_id.as_deref().unwrap_or("-");
             out.push_str(&format!(
-                "  {:<18} {:<28} {:<16} {:<24} {:<8} {:<20} {:<8} {}\n",
-                m.name, m.agent_id, m.agent_type, m.model, pid, session, m.status, m.activity
+                "  {:<20} {:<20} {:<24} {:<10} {:<10} {:<8} {}\n",
+                m.name, m.agent_type, m.model, m.status, m.activity, pid, session
             ));
         }
         out.push('\n');
@@ -985,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_status_label_maps_active_dead_unknown() {
+    fn snapshot_status_from_canonical_state_maps_active_offline_unknown() {
         let active = CanonicalMemberState {
             agent: "a".to_string(),
             state: "active".to_string(),
@@ -1003,10 +1066,19 @@ mod tests {
             state: "unknown".to_string(),
             ..active.clone()
         };
-        assert_eq!(canonical_status_label(Some(&active)), "Active");
-        assert_eq!(canonical_status_label(Some(&dead)), "Dead");
-        assert_eq!(canonical_status_label(Some(&unknown)), "Unknown");
-        assert_eq!(canonical_status_label(None), "Unknown");
+        assert_eq!(
+            snapshot_status_from_canonical_state(Some(&active)),
+            "Online".to_string()
+        );
+        assert_eq!(
+            snapshot_status_from_canonical_state(Some(&dead)),
+            "Offline".to_string()
+        );
+        assert_eq!(
+            snapshot_status_from_canonical_state(Some(&unknown)),
+            "Unknown".to_string()
+        );
+        assert_eq!(snapshot_status_from_canonical_state(None), "Unknown");
     }
 
     #[test]
@@ -1015,6 +1087,18 @@ mod tests {
             Severity::Critical,
             "daemon_health",
             "DAEMON_NOT_RUNNING",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm-daemon"));
+    }
+
+    #[test]
+    fn build_recommendations_includes_daemon_start_for_unreachable() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "daemon_health",
+            "DAEMON_UNREACHABLE",
             "x".to_string(),
         )];
         let recs = build_recommendations("atm-dev", &findings, true);
@@ -1169,6 +1253,52 @@ mod tests {
     }
 
     #[test]
+    fn check_roster_session_integrity_ignores_foreign_team_name_collision() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![
+                member("team-lead", Some(true), 0),
+                member("shared-agent", None, 0),
+            ],
+            unknown_fields: HashMap::new(),
+        };
+
+        let atm_dev_agents = vec![
+            AgentSummary {
+                agent: "team-lead".to_string(),
+                state: "idle".to_string(),
+            },
+            AgentSummary {
+                agent: "shared-agent".to_string(),
+                state: "idle".to_string(),
+            },
+        ];
+        let other_team_agents = vec![AgentSummary {
+            agent: "shared-agent".to_string(),
+            state: "active".to_string(),
+        }];
+
+        let findings = check_roster_session_integrity_with_query("atm-dev", &cfg, |team| {
+            if team == "atm-dev" {
+                Ok(Some(atm_dev_agents.clone()))
+            } else {
+                Ok(Some(other_team_agents.clone()))
+            }
+        });
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.code == "DAEMON_TRACKS_UNKNOWN_AGENT"),
+            "foreign-team same-name agents must not bleed into this team's roster checks"
+        );
+    }
+
+    #[test]
     fn build_recommendations_routes_lead_recovery_to_register_only() {
         let findings = vec![finding(
             Severity::Warn,
@@ -1317,14 +1447,90 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        let findings = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_, _| {
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
             Err(anyhow::anyhow!("daemon unavailable"))
         });
+        assert!(findings.iter().any(|f| {
+            f.code == "ACTIVE_WITHOUT_SESSION" && f.message.contains("query unavailable")
+        }));
+        assert!(findings.iter().any(|f| f.code == "DAEMON_UNREACHABLE"));
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_query_none_maps_to_daemon_unreachable() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| Ok(None));
         assert!(
-            findings.iter().any(|f| {
-                f.code == "ACTIVE_WITHOUT_SESSION" && f.message.contains("query failed")
-            })
+            findings
+                .iter()
+                .any(|f| f.code == "DAEMON_UNREACHABLE" && f.message.contains("unavailable"))
         );
+        assert!(findings.iter().any(|f| f.code == "ACTIVE_WITHOUT_SESSION"));
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_ignores_foreign_state_entries() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(Some(vec![CanonicalMemberState {
+                agent: "foreign-agent".to_string(),
+                state: "offline".to_string(),
+                activity: "unknown".to_string(),
+                session_id: Some("foreign-sess".to_string()),
+                process_id: Some(9),
+                reason: "foreign team state".to_string(),
+                source: "session_registry".to_string(),
+            }]))
+        });
+        assert!(
+            findings.is_empty(),
+            "foreign-team daemon states must not create findings for this team's inactive members"
+        );
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_detects_ghost_session_for_inactive_hint() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", None, 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(Some(vec![CanonicalMemberState {
+                agent: "worker-a".to_string(),
+                state: "active".to_string(),
+                activity: "busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4321),
+                reason: "session active".to_string(),
+                source: "session_registry".to_string(),
+            }]))
+        });
+        assert!(findings.iter().any(|f| f.code == "GHOST_SESSION"));
     }
 
     #[test]
@@ -1390,65 +1596,23 @@ mod tests {
             },
             member_snapshot: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
-                agent_id: "team-lead@atm-dev".to_string(),
                 agent_type: "team-lead".to_string(),
                 model: "claude".to_string(),
-                status: "Active".to_string(),
+                status: "Online".to_string(),
                 activity: "Busy".to_string(),
                 session_id: Some("sess-1".to_string()),
                 process_id: Some(4242),
             }],
         };
         let rendered = render_human(&report);
+        assert!(rendered.contains("Model"));
         let members_idx = rendered.find("Members:").unwrap();
         let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
         assert!(members_idx < findings_idx);
     }
 
     #[test]
-    fn render_human_member_snapshot_has_required_columns() {
-        let report = DoctorReport {
-            summary: Summary {
-                team: "atm-dev".to_string(),
-                generated_at: "2026-03-02T00:00:00Z".to_string(),
-                has_critical: false,
-                counts: FindingCounts {
-                    critical: 0,
-                    warn: 0,
-                    info: 0,
-                },
-            },
-            member_snapshot: vec![MemberSnapshot {
-                name: "team-lead".to_string(),
-                agent_id: "team-lead@atm-dev".to_string(),
-                agent_type: "team-lead".to_string(),
-                model: "claude-sonnet".to_string(),
-                status: "Active".to_string(),
-                activity: "Busy".to_string(),
-                session_id: Some("sess-1".to_string()),
-                process_id: Some(1234),
-            }],
-            findings: vec![],
-            recommendations: vec![],
-            log_window: LogWindow {
-                mode: "default_incremental".to_string(),
-                start: "2026-03-02T00:00:00Z".to_string(),
-                end: "2026-03-02T00:01:00Z".to_string(),
-            },
-        };
-        let rendered = render_human(&report);
-        assert!(rendered.contains("Name"));
-        assert!(rendered.contains("Agent ID"));
-        assert!(rendered.contains("Type"));
-        assert!(rendered.contains("Model"));
-        assert!(rendered.contains("PID"));
-        assert!(rendered.contains("Session ID"));
-        assert!(rendered.contains("Status"));
-        assert!(rendered.contains("Activity"));
-    }
-
-    #[test]
-    fn doctor_json_schema_includes_member_snapshot_before_findings() {
+    fn doctor_json_schema_excludes_member_snapshot() {
         let report = DoctorReport {
             summary: Summary {
                 team: "atm-dev".to_string(),
@@ -1467,20 +1631,9 @@ mod tests {
                 start: "2026-03-02T00:00:00Z".to_string(),
                 end: "2026-03-02T00:01:00Z".to_string(),
             },
-            member_snapshot: vec![MemberSnapshot {
-                name: "team-lead".to_string(),
-                agent_id: "team-lead@atm-dev".to_string(),
-                agent_type: "team-lead".to_string(),
-                model: "claude".to_string(),
-                status: "Active".to_string(),
-                activity: "Busy".to_string(),
-                session_id: Some("s1".to_string()),
-                process_id: Some(100),
-            }],
+            member_snapshot: vec![MemberSnapshot::default()],
         };
         let value = serde_json::to_value(report).unwrap();
-        assert!(value.get("member_snapshot").is_some());
-        let json = serde_json::to_string(&value).unwrap();
-        assert!(json.find("\"member_snapshot\"").unwrap() < json.find("\"findings\"").unwrap());
+        assert!(value.get("member_snapshot").is_none());
     }
 }

@@ -2,14 +2,12 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    CanonicalMemberState, canonical_activity_label, canonical_liveness_bool,
-    canonical_status_label, query_list_agents, query_team_member_states,
+    canonical_liveness_bool, query_list_agents, query_team_member_state_map,
 };
 use agent_team_mail_core::schema::TeamConfig;
 use anyhow::Result;
 use clap::Args;
 use serde_json::json;
-use std::collections::HashMap;
 use std::fs;
 
 use crate::util::settings::get_home_dir;
@@ -54,7 +52,7 @@ pub fn execute(args: MembersArgs) -> Result<()> {
     }
 
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-    let daemon_states = load_daemon_states(team_name);
+    let daemon_states = query_team_member_state_map(team_name);
 
     // Output results
     if args.json {
@@ -64,8 +62,6 @@ pub fn execute(args: MembersArgs) -> Result<()> {
                 "name": m.name,
                 "type": m.agent_type,
                 "model": m.model,
-                "status": canonical_status_label(daemon_states.get(&m.name)),
-                "activity": canonical_activity_label(daemon_states.get(&m.name)),
                 "liveness": canonical_liveness_bool(daemon_states.get(&m.name)),
             })).collect::<Vec<_>>()
         });
@@ -77,32 +73,22 @@ pub fn execute(args: MembersArgs) -> Result<()> {
         if team_config.members.is_empty() {
             println!("  No members");
         } else {
-            println!(
-                "  {:<20} {:<20} {:<25} {:<10} Activity",
-                "Name", "Type", "Model", "Status"
-            );
-            println!("  {}", "─".repeat(84));
+            println!("  {:<20} {:<20} {:<25} Status", "Name", "Type", "Model");
+            println!("  {}", "─".repeat(72));
 
             for member in &team_config.members {
-                let status = canonical_status_label(daemon_states.get(&member.name));
-                let activity = canonical_activity_label(daemon_states.get(&member.name));
+                let active = match canonical_liveness_bool(daemon_states.get(&member.name)) {
+                    Some(true) => "Online",
+                    Some(false) => "Offline",
+                    None => "Unknown",
+                };
                 let name = &member.name;
                 let agent_type = &member.agent_type;
                 let model = &member.model;
-                println!("  {name:<20} {agent_type:<20} {model:<25} {status:<10} {activity}");
+                println!("  {name:<20} {agent_type:<20} {model:<25} {active}");
             }
         }
     }
 
     Ok(())
-}
-
-fn load_daemon_states(team_name: &str) -> HashMap<String, CanonicalMemberState> {
-    let mut states = HashMap::new();
-    if let Ok(Some(entries)) = query_team_member_states(team_name) {
-        for entry in entries {
-            states.insert(entry.agent.clone(), entry);
-        }
-    }
-    states
 }

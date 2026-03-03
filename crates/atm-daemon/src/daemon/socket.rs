@@ -1971,13 +1971,6 @@ fn handle_session_query_team(
 ///
 /// Payload: `{"agent": "<name>", "team": "<team>"}`  (team is currently informational)
 /// Response: `{"state": "<state>", "last_transition": "<iso8601 or null>"}`
-///
-/// Protocol note:
-/// - `agent-state` is intentionally a backward-compatible, minimal response
-///   surface (state + transition metadata + reason/source hints).
-/// - Team-scoped `list-agents` is the canonical full member-state surface and
-///   includes richer fields (`activity`, `session_id`, `process_id`).
-/// - Consumers that need full canonical state should prefer `list-agents`.
 fn handle_agent_state(
     request: &agent_team_mail_core::daemon_client::SocketRequest,
     state_store: &SharedStateStore,
@@ -2076,11 +2069,7 @@ fn handle_agent_state(
 /// Handle the `list-agents` command.
 ///
 /// Payload: `{}`
-/// Response:
-/// - Unscoped: array of lightweight `{"agent": "<name>", "state": "<state>"}`
-///   entries for compatibility with legacy callers.
-/// - Team-scoped (`{"team":"..."}`): array of full canonical member-state
-///   objects used by doctor/status/members surfaces.
+/// Response: array of `{"agent": "<name>", "state": "<state>"}`
 fn handle_list_agents(
     request: &agent_team_mail_core::daemon_client::SocketRequest,
     state_store: &SharedStateStore,
@@ -2177,42 +2166,31 @@ fn derive_canonical_member_state(
                 source: "session_registry".to_string(),
             };
         }
-        return match tracker_state {
-            Some(AgentState::Idle) => {
-                let reason = tracker_meta
-                    .map(|m| m.reason.clone())
-                    .unwrap_or_else(|| "idle lifecycle signal".to_string());
-                let source = tracker_meta
-                    .map(|m| m.source.clone())
-                    .unwrap_or_else(|| "hook_event".to_string());
-                CanonicalMemberState {
-                    agent: agent.to_string(),
-                    state: "idle".to_string(),
-                    activity: "idle".to_string(),
-                    session_id: Some(session.session_id.clone()),
-                    process_id: Some(session.process_id),
-                    reason,
-                    source,
-                }
-            }
-            Some(AgentState::Active) => CanonicalMemberState {
+        if matches!(tracker_state, Some(AgentState::Idle)) {
+            let reason = tracker_meta
+                .map(|m| m.reason.clone())
+                .unwrap_or_else(|| "idle lifecycle signal".to_string());
+            let source = tracker_meta
+                .map(|m| m.source.clone())
+                .unwrap_or_else(|| "hook_event".to_string());
+            return CanonicalMemberState {
                 agent: agent.to_string(),
-                state: "active".to_string(),
-                activity: "busy".to_string(),
+                state: "idle".to_string(),
+                activity: "idle".to_string(),
                 session_id: Some(session.session_id.clone()),
                 process_id: Some(session.process_id),
-                reason: "session active with live pid".to_string(),
-                source: "session_registry".to_string(),
-            },
-            Some(AgentState::Offline) | Some(AgentState::Unknown) | None => CanonicalMemberState {
-                agent: agent.to_string(),
-                state: "active".to_string(),
-                activity: "unknown".to_string(),
-                session_id: Some(session.session_id.clone()),
-                process_id: Some(session.process_id),
-                reason: "session active with unknown lifecycle activity".to_string(),
-                source: "session_registry".to_string(),
-            },
+                reason,
+                source,
+            };
+        }
+        return CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: Some(session.session_id.clone()),
+            process_id: Some(session.process_id),
+            reason: "session active with live pid".to_string(),
+            source: "session_registry".to_string(),
         };
     }
 
@@ -2653,28 +2631,6 @@ mod tests {
         let agents = resp.payload.unwrap();
         let arr = agents.as_array().unwrap();
         assert_eq!(arr.len(), 2);
-    }
-
-    #[test]
-    fn test_derive_canonical_member_state_live_session_without_activity_is_unknown_activity() {
-        use crate::daemon::session_registry::{SessionRecord, SessionState};
-
-        let session = SessionRecord {
-            team: "atm-dev".to_string(),
-            agent_name: "arch-ctm".to_string(),
-            session_id: "sess-1".to_string(),
-            process_id: std::process::id(),
-            state: SessionState::Active,
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            runtime: None,
-            runtime_session_id: None,
-            pane_id: None,
-            runtime_home: None,
-        };
-
-        let canonical = derive_canonical_member_state("arch-ctm", None, Some(&session), None);
-        assert_eq!(canonical.state, "active");
-        assert_eq!(canonical.activity, "unknown");
     }
 
     #[test]

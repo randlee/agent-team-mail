@@ -550,13 +550,7 @@ atm members                      # default team
 atm members <team>               # specific team
 ```
 
-**Output**:
-- Agent name, type, model.
-- Daemon-derived `status` and `activity` fields using the canonical CLI taxonomy:
-  - `status`: `Active | Idle | Dead | Unknown`
-  - `activity`: `Busy | Idle | Unknown`
-- `config.json` `isActive`/`lastActive` are activity hints only and must not be used
-  as liveness status overrides.
+**Output**: Agent name, type, model, active status (from `config.json`).
 
 #### `atm status`
 
@@ -567,10 +561,7 @@ atm status                       # default team
 atm status <team>                # specific team
 ```
 
-**Output**:
-- Team info, member list, unread message counts, pending tasks.
-- Member rows must include daemon-derived `status` and `activity` using the same
-  taxonomy as `atm members` (`Active|Idle|Dead|Unknown`, `Busy|Idle|Unknown`).
+**Output**: Team info, member list with activity, unread message counts, pending tasks.
 
 #### `atm teams add-member`
 
@@ -754,14 +745,14 @@ atm doctor --full
   must not be coerced into a valid range.
 
 **Output requirements**:
-- Human-readable output MUST start with a concise team member snapshot table, followed by
-  ordered findings by severity, then recommended remediation commands.
-- Required member snapshot columns (in order): `Name`, `Agent ID`, `Type`, `Model`,
-  `PID`, `Session ID`, `Status`, `Activity`.
-- Member snapshot `Status` values are restricted to `Active|Idle|Dead|Unknown`.
-- Member snapshot `Activity` values are restricted to `Busy|Idle|Unknown`.
-- JSON output (`--json`): stable schema with `summary`, `member_snapshot[]`,
-  `findings[]`, `recommendations[]`, `log_window`.
+- Human-readable output MUST start with a concise team member snapshot table (equivalent
+  core fields to `atm members`: name/type/model/status), followed by ordered findings by
+  severity, then recommended remediation commands.
+- JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
+- Daemon-unreachable member-state queries MUST emit explicit finding code
+  `DAEMON_UNREACHABLE`.
+- When daemon member-state queries are unreachable/unavailable, member liveness in
+  snapshot/status surfaces MUST render `Unknown` (not `Offline`/`Dead`).
 - Recommendations must include directly runnable commands when applicable and MUST be
   context-aware/actionable for the reported finding class (for example, avoid suggesting
   commands that require unavailable session context without explicit fallback guidance).
@@ -775,8 +766,6 @@ atm doctor --full
 
 **JSON output schema (`--json`)**:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
-- `member_snapshot[]`: `name`, `agent_id`, `agent_type`, `model`, `process_id`,
-  `session_id`, `status`, `activity`
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
 - `log_window`: `mode`, `start`, `end`
@@ -785,20 +774,12 @@ atm doctor --full
 
 `atm doctor --json` must return a stable top-level object (`DoctorReport`) with:
 - `summary`
-- `member_snapshot`
 - `findings`
 - `recommendations`
 - `log_window`
 
-`DoctorReport` field order requirement:
-- `summary` first
-- `member_snapshot` before `findings`
-- `findings`, `recommendations`, `log_window` after snapshot section
-
 Current required `DoctorReport` shape:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts`
-- `member_snapshot[]`: `name`, `agent_id`, `agent_type`, `model`, `process_id`,
-  `session_id`, `status`, `activity`
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
 - `log_window`: `mode`, `start`, `end`
@@ -830,6 +811,8 @@ Doctor non-failing requirement:
 - Failure to contact or auto-start daemon must not cause immediate process error
   if team/config inputs are otherwise readable; doctor must still emit a report
   with daemon health findings and return severity-based exit (`0` or `2`).
+- When report generation succeeds (including daemon-unreachable scenarios), doctor
+  MUST NOT return exit code `1`.
 - Exit `1` is reserved for true execution failures that prevent report creation
   (for example unreadable/malformed required team config or unrecoverable output
   serialization/write failure).
@@ -904,19 +887,8 @@ Required behavior:
 - No command-level fallback may map `isActive=false` directly to offline/dead.
 - Per-member status derivation logic must not be duplicated across commands;
   command handlers consume daemon snapshot values directly.
-- CLI-facing display mapping from canonical daemon state:
-  - `active` -> `Active`
-  - `idle` -> `Idle`
-  - `offline|dead` -> `Dead`
-  - otherwise -> `Unknown`
-- CLI-facing display mapping from canonical daemon activity:
-  - `busy` -> `Busy`
-  - `idle` -> `Idle`
-  - otherwise -> `Unknown`
-- Activity semantics:
-  - `isActive=true` lifecycle evidence must map to `activity=Busy`.
-  - `isActive=false` lifecycle evidence must map to `activity=Idle`.
-  - If lifecycle activity evidence is missing/contradictory, `activity=Unknown`.
+- Reconciliation and diagnostics must be team-scoped:
+  daemon state for team `A` must not create findings for team `B`.
 
 #### Operational State Variable Inventory
 
