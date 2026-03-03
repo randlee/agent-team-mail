@@ -9,6 +9,7 @@ use agent_team_mail_daemon::plugins::issues::{
     Issue, IssueLabel, IssueState, IssuesPlugin, MockCall, MockProvider,
 };
 use agent_team_mail_daemon::roster::RosterService;
+use serial_test::serial;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -116,6 +117,7 @@ fn create_test_issue(number: u64, title: &str, labels: Vec<&str>) -> Issue {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_issue_created_delivers_inbox_message() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -194,6 +196,7 @@ async fn test_issue_created_delivers_inbox_message() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_inbox_reply_posts_comment() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -276,6 +279,7 @@ async fn test_inbox_reply_posts_comment() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_issue_filter_applies_labels() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -365,6 +369,7 @@ async fn test_issue_filter_applies_labels() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_issue_updates_deliver_multiple_messages() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -447,6 +452,7 @@ async fn test_issue_updates_deliver_multiple_messages() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_synthetic_member_lifecycle() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -496,6 +502,7 @@ async fn test_synthetic_member_lifecycle() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_disabled_plugin_skips_init() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -547,6 +554,7 @@ async fn test_disabled_plugin_skips_init() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_full_lifecycle_init_run_shutdown() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -597,6 +605,7 @@ async fn test_full_lifecycle_init_run_shutdown() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_shutdown_without_init() {
     let mut plugin = IssuesPlugin::new();
 
@@ -606,6 +615,7 @@ async fn test_shutdown_without_init() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_missing_provider_init_fails() {
     let temp_dir = TempDir::new().unwrap();
 
