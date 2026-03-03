@@ -56,7 +56,9 @@ Pass criteria: folder semantics and startup guidance are consistent across suppo
 | Check | Command / Test | Expected |
 |---|---|---|
 | Fresh init end-to-end | `atm init my-team` in fresh repo | Creates `.atm.toml`, creates team, installs global hooks |
-| Idempotent rerun | Run same command twice | No duplicate hooks, no destructive rewrites |
+| Has `.atm.toml`, no hooks | `atm init my-team` in repo with existing `.atm.toml` | Installs hooks; `.atm.toml` content unchanged |
+| Has hooks, no `.atm.toml` | `atm init my-team` in repo where hooks installed but `.atm.toml` removed | Creates `.atm.toml` and team; no duplicate hooks added |
+| Fully initialized (idempotent) | Run same command twice on fully-configured repo | No duplicate hooks, no destructive rewrites, no `.atm.toml` overwrite |
 | Identity flag | `atm init my-team --identity arch-ctm` | `.atm.toml` identity set to `arch-ctm` |
 | Skip team creation | `atm init my-team --skip-team` | Team create step skipped; other init steps still run |
 | Local install override | `atm init my-team --local` | Hooks installed project-locally, global untouched |
