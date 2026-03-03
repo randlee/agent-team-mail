@@ -1156,6 +1156,7 @@ hook installation defaults.
 
 **Integration branch**: `integrate/phase-X` off `develop`.
 **Dependency graph**: X.1 → {X.2, X.3}; X.4/X.5/X.6 deferred follow-on.
+**Canonical sprint-to-issue mapping**: X.1=`#351`, X.2=`#361`, X.3=`#357`, X.4=`#287`, X.5=`#337`, X.6=`#338`.
 
 **Dependency rationale**:
 - X.2 depends on X.1 because join/launch output contracts must settle canonical
