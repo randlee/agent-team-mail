@@ -680,27 +680,32 @@ fn check_log_diagnostics(
     findings
 }
 
-fn parse_since_input(input: &str) -> Option<DateTime<Utc>> {
+fn parse_since_input(input: &str) -> Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(input) {
-        return Some(dt.with_timezone(&Utc));
+        return Ok(dt.with_timezone(&Utc));
     }
 
     let trimmed = input.trim().to_ascii_lowercase();
     if trimmed.is_empty() {
-        return None;
+        anyhow::bail!("value cannot be empty");
     }
 
     let (num, suffix) = trimmed.split_at(trimmed.len().saturating_sub(1));
-    let value: i64 = num.parse().ok()?;
+    let value: i64 = num
+        .parse()
+        .with_context(|| format!("invalid duration number: '{num}'"))?;
+    if value <= 0 {
+        anyhow::bail!("duration must be a positive integer (got {value})");
+    }
     let dur = match suffix {
         "s" => Duration::seconds(value),
         "m" => Duration::minutes(value),
         "h" => Duration::hours(value),
         "d" => Duration::days(value),
-        _ => return None,
+        _ => anyhow::bail!("invalid duration unit '{suffix}' (expected one of: s, m, h, d)"),
     };
 
-    Some(Utc::now() - dur)
+    Ok(Utc::now() - dur)
 }
 
 fn read_doctor_state(home_dir: &Path) -> DoctorState {
@@ -733,10 +738,12 @@ fn compute_log_window_start(
     args: &DoctorArgs,
 ) -> Result<(DateTime<Utc>, String)> {
     if let Some(since) = &args.since {
-        if let Some(dt) = parse_since_input(since) {
-            return Ok((dt, "since_override".to_string()));
-        }
-        anyhow::bail!("Invalid --since value: '{since}'. Use ISO-8601 or duration like 30m/2h/1d");
+        let dt = parse_since_input(since).with_context(|| {
+            format!(
+                "Invalid --since value: '{since}'. Use ISO-8601 or positive duration like 30m/2h/1d"
+            )
+        })?;
+        return Ok((dt, "since_override".to_string()));
     }
 
     let fallback = Utc::now() - Duration::hours(1);
@@ -935,16 +942,38 @@ mod tests {
 
     #[test]
     fn parse_since_input_supports_duration() {
-        assert!(parse_since_input("30m").is_some());
-        assert!(parse_since_input("2h").is_some());
-        assert!(parse_since_input("1d").is_some());
-        assert!(parse_since_input("bogus").is_none());
+        assert!(parse_since_input("30m").is_ok());
+        assert!(parse_since_input("2h").is_ok());
+        assert!(parse_since_input("1d").is_ok());
+        assert!(parse_since_input("bogus").is_err());
     }
 
     #[test]
     fn parse_since_input_supports_rfc3339() {
-        let dt = parse_since_input("2026-02-27T20:00:00Z").unwrap();
+        let dt = parse_since_input("2026-02-27T20:00:00Z").expect("valid rfc3339");
         assert_eq!(dt.to_rfc3339(), "2026-02-27T20:00:00+00:00");
+    }
+
+    #[test]
+    fn parse_since_input_rejects_zero_duration() {
+        let err = parse_since_input("0m")
+            .expect_err("zero duration must be rejected")
+            .to_string();
+        assert!(err.contains("positive integer"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_since_input_rejects_negative_duration() {
+        let err = parse_since_input("-5m")
+            .expect_err("negative duration must be rejected")
+            .to_string();
+        assert!(err.contains("positive integer"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_since_input_accepts_positive_durations() {
+        assert!(parse_since_input("5m").is_ok());
+        assert!(parse_since_input("1h").is_ok());
     }
 
     #[test]

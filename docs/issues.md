@@ -1,6 +1,6 @@
 # Known Issues
 
-Last updated: 2026-03-02 (Phase V + Phase W)
+Last updated: 2026-03-03
 
 ## Phase V Issues (Doctor/Lifecycle — arch-ctm's V.0–V.7)
 
@@ -55,12 +55,6 @@ These are code-level inconsistencies against the intended model:
 
 | Issue | Summary | Type | Status | Priority | Planned Sprint | Notes |
 |---|---|---|---|---|---|---|
-| [#181](https://github.com/randlee/agent-team-mail/issues/181) | Daemon not auto-starting | Bug | Open | Critical | T.1 | Blocks daemon-dependent features |
-| [#182](https://github.com/randlee/agent-team-mail/issues/182) | Agent roster not seeded from `config.json` | Bug | Open | Critical | T.2 | Daemon can start with empty roster |
-| [#183](https://github.com/randlee/agent-team-mail/issues/183) | Agent state never transitions | Bug | Open | Critical | T.2 | State tracking broken |
-| [#184](https://github.com/randlee/agent-team-mail/issues/184) | TUI right panel contradicts left panel | Bug | Open | High | T.6 | Test coverage closure sprint (`U.1`) |
-| [#185](https://github.com/randlee/agent-team-mail/issues/185) | No message viewing in TUI | Enhancement | Open | Medium | T.6 | Test coverage closure sprint (`U.2`) |
-| [#187](https://github.com/randlee/agent-team-mail/issues/187) | TUI header missing version number | Bug | Open | Low | T.6 | Test coverage closure sprint (`U.3`) |
 | [#45](https://github.com/randlee/agent-team-mail/issues/45) | Tmux Sentinel Injection | Enhancement | Open | Medium | T.11 | Runtime signaling improvement |
 | [#46](https://github.com/randlee/agent-team-mail/issues/46) | Codex Idle Detection via Notify Hook | Enhancement | Open | Medium | T.5c (design) | Availability signaling clarification tranche |
 | [#47](https://github.com/randlee/agent-team-mail/issues/47) | Ephemeral Pub/Sub for Agent Availability | Enhancement | Open | Medium | T.5c (design) | Availability signaling clarification tranche |
@@ -69,6 +63,12 @@ These are code-level inconsistencies against the intended model:
 | [#283](https://github.com/randlee/agent-team-mail/issues/283) | S.2a/S.1 plan deliverable accuracy | Documentation | Open | Medium | T.16 | Planning/doc alignment |
 | [#284](https://github.com/randlee/agent-team-mail/issues/284) | CLI crate fails to publish (`include_str!` paths outside crate) | Bug | Open | High | T.5a | Parallel publishability tranche |
 | [#286](https://github.com/randlee/agent-team-mail/issues/286) | `atm-monitor` operational health monitor implementation | Enhancement | Open | High | T.5b | Health monitoring implementation tracker |
+| [#287](https://github.com/randlee/agent-team-mail/issues/287) | `parse_since_input` accepts `0m` and negative durations | Bug | Open | Medium | X.4 (deferred) | Deferred follow-on from current Phase X onboarding tranche |
+| [#337](https://github.com/randlee/agent-team-mail/issues/337) | Missing `#[serial]` on env-mutating daemon tests (`ATM_HOME`) | Bug | Open | Medium | X.5 (deferred) | Deferred CI-debt cleanup in Phase X follow-on |
+| [#338](https://github.com/randlee/agent-team-mail/issues/338) | `teams add-member` does not create inbox atomically | Bug | Open | High | X.6 (deferred) | Deferred follow-on after X.1-X.3 contract closure |
+| [#351](https://github.com/randlee/agent-team-mail/issues/351) | Add `/team-join` slash command | Enhancement | Open | High | X.1 | Caller-team check first; `--team` optional verification in lead-initiated mode; output `claude --resume` launch command |
+| [#357](https://github.com/randlee/agent-team-mail/issues/357) | `atm init` full one-command setup + default global hooks | Enhancement | Open | High | X.3 | One-command init flow (`.atm.toml` + team + hooks) and quickstart creation |
+| [#361](https://github.com/randlee/agent-team-mail/issues/361) | Spawn path normalization (`--folder` canonical, `--cwd` compatibility) | Enhancement | Open | Medium | X.2 | Replaces Phase X placeholder tracker for spawn normalization |
 
 ## Closed / Superseded (Tracked for Context)
 
@@ -87,13 +87,15 @@ These are code-level inconsistencies against the intended model:
 
 | Item | Type | Priority | Notes |
 |---|---|---|---|
-| Pre-existing env-var serial violations in daemon integration tests | Bug | Medium | `crates/atm-daemon/tests/`: `issues_error_tests.rs` (8 tests), `ci_monitor_error_tests.rs` (10 tests), `issues_integration.rs` (9 tests) all call `set_var("ATM_HOME", ...)` in shared helpers from `#[tokio::test]` without `#[serial]`. Not T.2 regressions — pre-existing flakiness risk. Cleanup sprint deferred. |
+| Phase X deferred follow-on queue (`#287`, `#337`, `#338`) | Bug | Medium/High | Explicitly mapped to X.4/X.5/X.6 with documented deferral rationale in `docs/project-plan.md` and verification stubs in `docs/test-plan-phase-X.md`. |
 
 ## Non-GitHub Planning Gap
 
 | Item | Type | Status | Priority | Notes |
 |---|---|---|---|---|
 | Keep provisional sprint mappings synchronized across planning docs | Documentation | Open | Medium | Source-of-truth sequencing for current draft is `docs/test-plan-phase-T.md`; update `project-plan.md` + `issues.md` together on mapping changes |
+| Spawn directory flag normalization (`--folder` canonical, `--cwd` compatibility alias) | Documentation/Design | Tracked | Medium | Planned Sprint: X.2. GitHub tracker: [#361](https://github.com/randlee/agent-team-mail/issues/361). |
+| Codex/Gemini startup guidance prompt injection for `atm teams spawn` | Documentation/Design | Open | Medium | Phase X requirement: inject ATM usage guidance before/after caller prompt (or guidance-only when prompt omitted) |
 
 ## New Doctor Findings (Issue Creation Completed)
 
@@ -136,8 +138,14 @@ These are code-level inconsistencies against the intended model:
 | Cleanup recommendation loop (`atm teams cleanup`) on lead teardown | `build_recommendations` suggests `atm teams cleanup` for `PARTIAL_TEARDOWN`, but cleanup intentionally does not remove `team-lead`, creating a non-actionable loop for this finding class. | Make recommendation routing code-aware: lead/session repair command for lead findings, cleanup for terminal non-lead findings only. |
 | Missing context table in doctor output | Human output prints findings first without the expected member status snapshot (`atm members` style), reducing triage clarity in degraded states. | Prepend doctor human output with concise member snapshot table before findings; keep JSON schema stable. |
 
-## Recently Resolved (No Longer Open)
+## Recently Resolved (Implemented in `develop`; Issue Cleanup Pending Where Applicable)
 
 | Item | Status | Notes |
 |---|---|---|
+| [#181](https://github.com/randlee/agent-team-mail/issues/181) | Implemented | Delivered in Phase T PR [#288](https://github.com/randlee/agent-team-mail/pull/288); issue may remain open pending verification/closure housekeeping. |
+| [#182](https://github.com/randlee/agent-team-mail/issues/182) | Implemented | Delivered in Phase T PR [#289](https://github.com/randlee/agent-team-mail/pull/289); issue may remain open pending verification/closure housekeeping. |
+| [#183](https://github.com/randlee/agent-team-mail/issues/183) | Implemented/Closed | Delivered in Phase T PR [#289](https://github.com/randlee/agent-team-mail/pull/289) and currently closed on GitHub. |
+| [#184](https://github.com/randlee/agent-team-mail/issues/184) | Implemented | Delivered in Phase T PR [#299](https://github.com/randlee/agent-team-mail/pull/299); issue may remain open pending verification/closure housekeeping. |
+| [#185](https://github.com/randlee/agent-team-mail/issues/185) | Implemented | Delivered in Phase T PR [#299](https://github.com/randlee/agent-team-mail/pull/299); issue may remain open pending verification/closure housekeeping. |
+| [#187](https://github.com/randlee/agent-team-mail/issues/187) | Implemented | Delivered in Phase T PR [#299](https://github.com/randlee/agent-team-mail/pull/299); issue may remain open pending verification/closure housekeeping. |
 | PR #278 QA/CI blockers (`/home/tester` hardcode + Windows PID test) | Resolved | Fixed and merged; removed from open-issues set |
