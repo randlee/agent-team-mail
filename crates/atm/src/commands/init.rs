@@ -552,7 +552,6 @@ fn merge_hooks(
 /// - wrapper entries missing `matcher`
 fn merge_session_start_hook(settings: &mut serde_json::Value, command: &str) -> Result<HookStatus> {
     let array = get_or_create_hook_array(settings, "SessionStart")?;
-    normalize_catch_all_hook_entries(array)?;
 
     if catch_all_hook_command_present(array, command) {
         return Ok(HookStatus::AlreadyPresent);
@@ -683,7 +682,17 @@ fn normalize_catch_all_hook_entries(array: &mut [serde_json::Value]) -> Result<(
             hooks
                 .as_array_mut()
                 .context("catch-all hook `hooks` field is not an array")?;
-            obj.insert("matcher".to_string(), serde_json::json!(""));
+            let should_normalize_matcher = match obj.get("matcher") {
+                None => true,
+                Some(serde_json::Value::Null) => true,
+                Some(serde_json::Value::String(m)) => m.is_empty(),
+                Some(serde_json::Value::Object(m)) => m.is_empty(),
+                _ => false,
+            };
+
+            if should_normalize_matcher {
+                obj.insert("matcher".to_string(), serde_json::json!(""));
+            }
         }
     }
 
@@ -1106,6 +1115,27 @@ mod tests {
         assert!(
             session_end.iter().all(|e| e.get("hooks").is_some()),
             "legacy SessionEnd entries must remain wrapped after migration"
+        );
+    }
+
+    #[test]
+    fn test_normalize_catch_all_hook_entries_preserves_non_catch_all_matcher() {
+        let mut entries = vec![serde_json::json!({
+            "matcher": "Bash",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "echo existing"
+                }
+            ]
+        })];
+
+        normalize_catch_all_hook_entries(&mut entries).expect("normalize");
+
+        assert_eq!(
+            entries[0].get("matcher").and_then(|m| m.as_str()),
+            Some("Bash"),
+            "non-catch-all matcher must not be overwritten"
         );
     }
 
