@@ -182,6 +182,15 @@ pub struct CanonicalMemberState {
     pub source: String,
 }
 
+/// Return best-effort binary liveness from daemon canonical member state.
+pub fn canonical_liveness_bool(state: Option<&CanonicalMemberState>) -> Option<bool> {
+    match state.map(|s| s.state.as_str()) {
+        Some("active") | Some("idle") => Some(true),
+        Some("offline") | Some("dead") => Some(false),
+        _ => None,
+    }
+}
+
 /// Configuration for launching a new agent via the daemon.
 ///
 /// Sent as the payload of a `"launch"` socket command.
@@ -565,6 +574,22 @@ pub fn query_team_member_states(team: &str) -> anyhow::Result<Option<Vec<Canonic
         Ok(states) => Ok(Some(states)),
         Err(_) => Ok(None),
     }
+}
+
+/// Query daemon canonical member states and return a map keyed by agent name.
+///
+/// If the daemon is unavailable or does not return states, this returns an
+/// empty map so callers can render `Unknown` without failing command output.
+pub fn query_team_member_state_map(
+    team: &str,
+) -> std::collections::HashMap<String, CanonicalMemberState> {
+    query_team_member_states(team)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.agent.clone(), entry))
+        .collect()
 }
 
 /// Pane and log file information returned by the `agent-pane` command.
@@ -1859,6 +1884,27 @@ sleep 2
         assert_eq!(decoded.activity, "busy");
         assert_eq!(decoded.session_id.as_deref(), Some("sess-123"));
         assert_eq!(decoded.process_id, Some(4242));
+    }
+
+    #[test]
+    fn test_canonical_liveness_bool_mapping() {
+        let mut state = CanonicalMemberState {
+            agent: "arch-ctm".to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: None,
+            process_id: None,
+            reason: String::new(),
+            source: String::new(),
+        };
+        assert_eq!(canonical_liveness_bool(Some(&state)), Some(true));
+        state.state = "idle".to_string();
+        assert_eq!(canonical_liveness_bool(Some(&state)), Some(true));
+        state.state = "offline".to_string();
+        assert_eq!(canonical_liveness_bool(Some(&state)), Some(false));
+        state.state = "unknown".to_string();
+        assert_eq!(canonical_liveness_bool(Some(&state)), None);
+        assert_eq!(canonical_liveness_bool(None), None);
     }
 
     // Unix-only: test PID alive check for the current process

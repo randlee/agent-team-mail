@@ -405,52 +405,64 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
 }
 
 fn check_pid_session_reconciliation(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
-    check_pid_session_reconciliation_with_query(team, cfg, query_session_for_team)
+    check_pid_session_reconciliation_with_query(team, cfg, query_team_member_states)
 }
 
 fn check_pid_session_reconciliation_with_query<F>(
     team: &str,
     cfg: &TeamConfig,
-    query_session: F,
+    query_states: F,
 ) -> Vec<Finding>
 where
-    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+    F: Fn(&str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>>,
 {
     let mut findings = Vec::new();
+    let queried = query_states(team);
+    let query_failed = queried.is_err();
+    let daemon_states: HashMap<String, CanonicalMemberState> = queried
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.agent.clone(), s))
+        .collect();
 
     for member in &cfg.members {
+        let daemon_state = daemon_states.get(&member.name);
         if member.is_active == Some(true) {
-            match query_session(team, &member.name) {
-                Ok(Some(s)) if !s.alive => findings.push(finding(
+            match daemon_state.map(|s| s.state.as_str()) {
+                Some("offline") | Some("dead") => findings.push(finding(
                     Severity::Warn,
                     "pid_session_reconciliation",
                     "ACTIVE_FLAG_STALE",
                     format!(
-                        "Member '{}' marked active but daemon session is dead (pid={})",
-                        member.name, s.process_id
+                        "Member '{}' marked active but daemon state is dead (pid={})",
+                        member.name,
+                        daemon_state
+                            .and_then(|s| s.process_id)
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
                     ),
                 )),
-                Ok(None) => findings.push(finding(
+                Some("active") | Some("idle") => {}
+                _ if query_failed => findings.push(finding(
                     Severity::Warn,
                     "pid_session_reconciliation",
                     "ACTIVE_WITHOUT_SESSION",
                     format!(
-                        "Member '{}' marked active but no daemon session record found",
+                        "Member '{}' marked active but daemon state query failed",
                         member.name
                     ),
                 )),
-                // V.3 contract: daemon query errors are treated as unknown/missing
-                // session state (doctor remains non-failing and emits diagnostics).
-                Err(_) => findings.push(finding(
+                _ => findings.push(finding(
                     Severity::Warn,
                     "pid_session_reconciliation",
                     "ACTIVE_WITHOUT_SESSION",
                     format!(
-                        "Member '{}' marked active but daemon session query failed",
+                        "Member '{}' marked active but no daemon state record found",
                         member.name
                     ),
                 )),
-                _ => {}
             }
         }
     }
@@ -892,10 +904,10 @@ fn render_human(report: &DoctorReport) -> String {
     if !report.member_snapshot.is_empty() {
         out.push_str("Members:\n");
         out.push_str(&format!(
-            "  {:<20} {:<20} {:<10} {:<10} {:<8} {}\n",
-            "Name", "Type", "Status", "Activity", "PID", "Session ID"
+            "  {:<20} {:<20} {:<24} {:<10} {:<10} {:<8} {}\n",
+            "Name", "Type", "Model", "Status", "Activity", "PID", "Session ID"
         ));
-        out.push_str(&format!("  {}\n", "─".repeat(95)));
+        out.push_str(&format!("  {}\n", "─".repeat(120)));
         for m in &report.member_snapshot {
             let pid = m
                 .process_id
@@ -903,8 +915,8 @@ fn render_human(report: &DoctorReport) -> String {
                 .unwrap_or_else(|| "-".to_string());
             let session = m.session_id.as_deref().unwrap_or("-");
             out.push_str(&format!(
-                "  {:<20} {:<20} {:<10} {:<10} {:<8} {}\n",
-                m.name, m.agent_type, m.status, m.activity, pid, session
+                "  {:<20} {:<20} {:<24} {:<10} {:<10} {:<8} {}\n",
+                m.name, m.agent_type, m.model, m.status, m.activity, pid, session
             ));
         }
         out.push('\n');
@@ -1344,7 +1356,7 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        let findings = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_, _| {
+        let findings = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
             Err(anyhow::anyhow!("daemon unavailable"))
         });
         assert!(
@@ -1426,6 +1438,7 @@ mod tests {
             }],
         };
         let rendered = render_human(&report);
+        assert!(rendered.contains("Model"));
         let members_idx = rendered.find("Members:").unwrap();
         let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
         assert!(members_idx < findings_idx);
