@@ -72,9 +72,16 @@ fn test_init_is_idempotent_on_rerun() {
     let second = fs::read_to_string(&settings_path).unwrap();
     assert_eq!(first, second, "settings should be unchanged on rerun");
 
-    let session_start_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/session-start.py\" || true'";
+    let scripts_dir = home.path().join(".claude/scripts");
+    let session_start_py = scripts_dir
+        .join("session-start.py")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let session_start_cmd = format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{session_start_py}\" || true'"
+    );
     assert_eq!(
-        count_command_in_hooks(&settings_path, "SessionStart", session_start_cmd),
+        count_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
         1,
         "SessionStart hook should not be duplicated"
     );
@@ -182,9 +189,16 @@ fn test_init_with_existing_hooks_creates_atm_toml_without_duplicating_hooks() {
     assert!(repo.join(".atm.toml").exists());
     // Hooks must not be duplicated
     let settings_path = home.path().join(".claude/settings.json");
-    let session_start_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/session-start.py\" || true'";
+    let scripts_dir = home.path().join(".claude/scripts");
+    let session_start_py = scripts_dir
+        .join("session-start.py")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let session_start_cmd = format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{session_start_py}\" || true'"
+    );
     assert_eq!(
-        count_command_in_hooks(&settings_path, "SessionStart", session_start_cmd),
+        count_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
         1,
         "SessionStart hook must not be duplicated when hooks pre-exist"
     );
