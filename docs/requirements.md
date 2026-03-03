@@ -1795,6 +1795,33 @@ atm init <team> --check
 - Idempotent no-op cases (`.atm.toml` exists, team exists, hooks already configured)
   are success states and must be explicitly reported in human output.
 
+### 4.10 Install/Upgrade Daemon Freshness
+
+Upgrades must not leave an older `atm-daemon` process running against newer
+CLI/tooling binaries.
+
+#### 4.10.1 Homebrew Formula Requirement
+
+- Homebrew formulas `agent-team-mail.rb` and `atm.rb` must include a
+  non-fatal post-install daemon termination step:
+  - `pkill -x atm-daemon || true`
+- The post-install command must not fail install/upgrade when no daemon process
+  exists.
+
+#### 4.10.2 Non-Homebrew Upgrade Guidance
+
+- Quickstart documentation must include an upgrade section for `cargo install`
+  and manual binary replacement that instructs:
+  - `pkill -x atm-daemon || true`
+- Documentation must state that daemon-backed `atm` commands auto-start the
+  daemon on next invocation.
+
+Acceptance checks:
+- `brew upgrade` path terminates stale daemon process and completes even when
+  daemon is not running.
+- `cargo`/manual upgrade path includes explicit manual kill guidance.
+- Post-upgrade first daemon-backed `atm` invocation starts the upgraded daemon.
+
 ---
 
 ## 5. Plugin System (Daemon Only)
