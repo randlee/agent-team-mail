@@ -354,7 +354,7 @@ MCP subcommands:
   mcp status
 
 Init command:
-  init <team> [--local] [--identity <name>] [--skip-team] [--check]
+  init <team> [--local] [--identity <name>] [--skip-team]
 ```
 
 ### 4.2 Messaging Commands
@@ -1743,17 +1743,17 @@ ATM binary and materialized at install time.
 
 **Claude hook path reference**:
 - Canonical docs: https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
-- Follow "Reference scripts by path": use `"$CLAUDE_PROJECT_DIR"/...` for project scripts and `"${CLAUDE_PLUGIN_ROOT}"/...` for plugin-bundled scripts.
+- Follow "Reference scripts by path": use `"$CLAUDE_PROJECT_DIR"/...` for project-local scripts.
+- Global installs must use absolute per-user script paths resolved at install time (for example `~/.claude/scripts/...` on Unix/macOS and the equivalent home path on Windows). Do not use `${CLAUDE_PLUGIN_ROOT}` for ATM hook wiring.
 
 #### 4.9.1 Command Forms
 
 ```bash
 atm init <team>
+atm init <team> --global      # legacy compatibility flag (hidden)
 atm init <team> --local
 atm init <team> --identity <name>
 atm init <team> --skip-team
-atm init --check
-atm init <team> --check
 ```
 
 **Arguments and flags**:
@@ -1761,7 +1761,6 @@ atm init <team> --check
 - `--local`: install hooks in project scope (`.claude/settings.json`) instead of default global scope.
 - `--identity <name>`: identity value written to `.atm.toml` (`team-lead` default).
 - `--skip-team`: skip team creation step (join-existing-team workflows).
-- `--check`: read-only validation; report missing/misaligned wiring without modifying files.
 
 #### 4.9.2 Behavior
 
@@ -1777,6 +1776,15 @@ atm init <team> --check
 - Global-installed hooks must remain passive in non-ATM repositories; `.atm.toml` guard is the first hook operation.
 - Embedded hook scripts are the runtime source of truth.
 
+**Required test scenarios** (each must be independently tested):
+
+| Scenario | Pre-state | Expected outcome |
+|----------|-----------|-----------------|
+| Fresh setup | No `.atm.toml`, no hooks, no team | Creates all three; reports each as "created" |
+| Has `.atm.toml`, no hooks | `.atm.toml` present, hooks absent | Installs hooks; does not overwrite `.atm.toml` |
+| Has hooks, no `.atm.toml` | Hooks present, `.atm.toml` absent | Creates `.atm.toml` and team; does not duplicate hooks |
+| Fully initialized | `.atm.toml`, hooks, and team all present | No changes; all three reported as "already configured" |
+
 #### 4.9.3 File and Write Requirements
 
 - Use read-modify-write semantics; never wholesale rewrite settings files.
@@ -1784,16 +1792,43 @@ atm init <team> --check
 - Preserve unknown fields and non-ATM hook entries.
 - Use atomic writes (temp + rename) and create parent directories as needed.
 - Report exact file path(s) modified in command output.
-- Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` (project scope) or `"${CLAUDE_PLUGIN_ROOT}"` (plugin scope), not repo-absolute paths.
+- Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` for project-local scripts and absolute per-user script paths for global installs; do not use `${CLAUDE_PLUGIN_ROOT}`.
 - `atm init` success output must include whether hooks were installed globally or locally.
 
 #### 4.9.4 Exit and Result Semantics
 
-- Exit `0` for `installed`, `updated`, `already-configured`, and `check-ok`.
+- Exit `0` for `installed`, `updated`, and `already-configured`.
+- Exit `0` for `--global` no-op when `.atm.toml` is missing in the current project root (with actionable guidance in output).
 - Exit `1` for malformed config, unsupported environment, or write/permission failures.
-- `--check` output must include actionable guidance for each missing/misaligned hook entry.
 - Idempotent no-op cases (`.atm.toml` exists, team exists, hooks already configured)
   are success states and must be explicitly reported in human output.
+
+### 4.10 Install/Upgrade Daemon Freshness
+
+Upgrades must not leave an older `atm-daemon` process running against newer
+CLI/tooling binaries.
+
+#### 4.10.1 Homebrew Formula Requirement
+
+- Homebrew formulas `agent-team-mail.rb` and `atm.rb` must include a
+  non-fatal post-install daemon termination step:
+  - `pkill -x atm-daemon || true`
+- The post-install command must not fail install/upgrade when no daemon process
+  exists.
+
+#### 4.10.2 Non-Homebrew Upgrade Guidance
+
+- Quickstart documentation must include an upgrade section for `cargo install`
+  and manual binary replacement that instructs:
+  - `pkill -x atm-daemon || true`
+- Documentation must state that daemon-backed `atm` commands auto-start the
+  daemon on next invocation.
+
+Acceptance checks:
+- `brew upgrade` path terminates stale daemon process and completes even when
+  daemon is not running.
+- `cargo`/manual upgrade path includes explicit manual kill guidance.
+- Post-upgrade first daemon-backed `atm` invocation starts the upgraded daemon.
 
 ---
 

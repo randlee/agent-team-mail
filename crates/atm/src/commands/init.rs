@@ -21,8 +21,10 @@
 //! `include_str!()` and materialized to disk during `atm init`. This means no
 //! external script files are required post-install.
 
+use agent_team_mail_core::schema::{AgentMember, TeamConfig};
 use anyhow::{Context, Result};
 use clap::Args;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -50,39 +52,72 @@ const ATM_HOOK_LIB_PY: &str = include_str!("../../scripts/atm_hook_lib.py");
 // These will be addressed in a follow-on sprint.
 
 /// Return the SessionStart hook command string for local or global install.
-fn session_start_cmd(global: bool) -> String {
-    if global {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/session-start.py\" || true'".to_string()
-    } else {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/session-start.py\" || true'".to_string()
-    }
+fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "session-start.py");
+    format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+    )
 }
 
 /// Return the PreToolUse(Bash) hook command string for local or global install.
-fn pre_tool_use_bash_cmd(global: bool) -> String {
-    if global {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/atm-identity-write.py\" || true'".to_string()
-    } else {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.claude/scripts/atm-identity-write.py\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/atm-identity-write.py\" || true'".to_string()
+fn pre_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "atm-identity-write.py");
+    match global_scripts_dir {
+        Some(_) => {
+            format!(
+                "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+            )
+        }
+        None => {
+            format!("bash -c 'test -f \"{script}\" && python3 \"{script}\" || true'")
+        }
     }
 }
 
 /// Return the PreToolUse(Task) hook command string for local or global install.
-fn pre_tool_use_task_cmd(global: bool) -> String {
-    if global {
-        "bash -c 'if test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\"; then python3 \"${HOME}/.claude/scripts/gate-agent-spawns.py\"; else exit 0; fi'".to_string()
-    } else {
-        "bash -c 'if test -f \"${CLAUDE_PROJECT_DIR}/.claude/scripts/gate-agent-spawns.py\"; then python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/gate-agent-spawns.py\"; else exit 0; fi'".to_string()
+fn pre_tool_use_task_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "gate-agent-spawns.py");
+    match global_scripts_dir {
+        Some(_) => format!(
+            "bash -c 'if test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\"; then python3 \"{script}\"; else exit 0; fi'"
+        ),
+        None => {
+            format!("bash -c 'if test -f \"{script}\"; then python3 \"{script}\"; else exit 0; fi'")
+        }
     }
 }
 
 /// Return the PostToolUse(Bash) hook command string for local or global install.
-fn post_tool_use_bash_cmd(global: bool) -> String {
-    if global {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${HOME}/.claude/scripts/atm-identity-cleanup.py\" || true'".to_string()
-    } else {
-        "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.claude/scripts/atm-identity-cleanup.py\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/atm-identity-cleanup.py\" || true'".to_string()
+fn post_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "atm-identity-cleanup.py");
+    match global_scripts_dir {
+        Some(_) => {
+            format!(
+                "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+            )
+        }
+        None => {
+            format!("bash -c 'test -f \"{script}\" && python3 \"{script}\" || true'")
+        }
     }
+}
+
+/// Return a hook script path expression:
+/// - Local: uses `$CLAUDE_PROJECT_DIR` so settings remain repo-portable.
+/// - Global: uses a resolved absolute per-user path for robustness.
+fn hook_script_path(global_scripts_dir: Option<&Path>, script_name: &str) -> String {
+    match global_scripts_dir {
+        Some(dir) => normalize_for_bash_quoted_path(&dir.join(script_name)),
+        None => format!("${{CLAUDE_PROJECT_DIR}}/.claude/scripts/{script_name}"),
+    }
+}
+
+/// Normalize a filesystem path for inclusion inside a double-quoted `bash -c`
+/// command string.
+fn normalize_for_bash_quoted_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace('"', "\\\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -95,9 +130,20 @@ pub struct InitArgs {
     /// Name of the ATM team to configure hooks for
     pub team: String,
 
-    /// Install into the global `~/.claude/settings.json` instead of the
-    /// project-local `.claude/settings.json`
+    /// Install hooks into project-local `.claude/settings.json` (default is global)
     #[arg(long)]
+    pub local: bool,
+
+    /// Identity written to `.atm.toml` when it is created
+    #[arg(long)]
+    pub identity: Option<String>,
+
+    /// Skip team creation step (`~/.claude/teams/<team>/config.json`)
+    #[arg(long)]
+    pub skip_team: bool,
+
+    /// Legacy compatibility flag; global install is already the default.
+    #[arg(long, hide = true, conflicts_with = "local")]
     pub global: bool,
 }
 
@@ -119,40 +165,159 @@ pub struct InitArgs {
 /// Returns an error when the home directory cannot be resolved, the settings
 /// file cannot be read or parsed, or the atomic write fails.
 pub fn execute(args: InitArgs) -> Result<()> {
-    let settings_path = resolve_settings_path(args.global)?;
+    let install_global = args.global || !args.local;
+    let identity = args
+        .identity
+        .clone()
+        .unwrap_or_else(|| "team-lead".to_string());
+    let current_dir = std::env::current_dir().context("Cannot determine current directory")?;
+    let atm_toml_path = current_dir.join(".atm.toml");
+    let home_dir = crate::util::settings::get_home_dir()?;
+    let settings_path = resolve_settings_path(install_global)?;
 
-    // Guard: --global installs are passive when not in an ATM repo
-    if args.global {
-        let atm_toml = std::env::current_dir()?.join(".atm.toml");
-        if !atm_toml.exists() {
-            println!(
-                "No .atm.toml found in current directory; skipping global install.\n\
-                 Run `atm init {} --global` from the root of an ATM project.",
-                args.team
-            );
-            return Ok(());
-        }
-    }
+    let atm_toml_status = ensure_atm_toml(&atm_toml_path, &args.team, &identity)?;
+    let team_status = if args.skip_team {
+        TeamStatus::Skipped
+    } else {
+        ensure_team_config(&home_dir, &args.team, &current_dir)?
+    };
 
     // Materialize hook scripts to disk before writing settings
-    let scripts_dir = if args.global {
-        crate::util::settings::get_home_dir()?
-            .join(".claude")
-            .join("scripts")
+    let scripts_dir = if install_global {
+        home_dir.join(".claude").join("scripts")
     } else {
-        std::env::current_dir()?.join(".claude").join("scripts")
+        current_dir.join(".claude").join("scripts")
     };
     materialize_scripts(&scripts_dir)?;
 
     let mut settings = load_settings(&settings_path)?;
 
-    let report = merge_hooks(&mut settings, args.global)?;
+    let report = merge_hooks(
+        &mut settings,
+        if install_global {
+            Some(&scripts_dir)
+        } else {
+            None
+        },
+    )?;
 
     write_settings_atomic(&settings_path, &settings)?;
 
-    print_report(&args.team, &settings_path, &report);
+    print_report(
+        &args.team,
+        &settings_path,
+        &report,
+        install_global,
+        &atm_toml_path,
+        atm_toml_status,
+        team_status,
+    );
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtmTomlStatus {
+    Created,
+    AlreadyPresent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeamStatus {
+    Created,
+    AlreadyPresent,
+    Skipped,
+}
+
+fn ensure_atm_toml(path: &Path, team: &str, identity: &str) -> Result<AtmTomlStatus> {
+    if path.exists() {
+        return Ok(AtmTomlStatus::AlreadyPresent);
+    }
+    let content = format!(
+        "[core]\ndefault_team = {:?}\nidentity = {:?}\n",
+        team, identity
+    );
+    write_text_atomic(path, &content)?;
+    Ok(AtmTomlStatus::Created)
+}
+
+fn ensure_team_config(home_dir: &Path, team: &str, cwd: &Path) -> Result<TeamStatus> {
+    let team_dir = home_dir.join(".claude/teams").join(team);
+    let inboxes_dir = team_dir.join("inboxes");
+    let config_path = team_dir.join("config.json");
+
+    if config_path.exists() {
+        if !inboxes_dir.exists() {
+            std::fs::create_dir_all(&inboxes_dir)
+                .with_context(|| format!("Failed to create {}", inboxes_dir.display()))?;
+        }
+        return Ok(TeamStatus::AlreadyPresent);
+    }
+
+    std::fs::create_dir_all(&inboxes_dir)
+        .with_context(|| format!("Failed to create {}", inboxes_dir.display()))?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let lead_member = AgentMember {
+        agent_id: format!("team-lead@{team}"),
+        name: "team-lead".to_string(),
+        agent_type: "general-purpose".to_string(),
+        model: "unknown".to_string(),
+        prompt: None,
+        color: None,
+        plan_mode_required: None,
+        joined_at: now_ms,
+        tmux_pane_id: None,
+        cwd: cwd.to_string_lossy().to_string(),
+        subscriptions: Vec::new(),
+        backend_type: None,
+        is_active: Some(false),
+        last_active: None,
+        session_id: None,
+        external_backend_type: None,
+        external_model: None,
+        unknown_fields: HashMap::new(),
+    };
+
+    let team_config = TeamConfig {
+        name: team.to_string(),
+        description: Some("Team initialized by atm init".to_string()),
+        created_at: now_ms,
+        lead_agent_id: format!("team-lead@{team}"),
+        lead_session_id: String::new(),
+        members: vec![lead_member],
+        unknown_fields: HashMap::new(),
+    };
+
+    write_json_atomic(&config_path, &team_config)?;
+    Ok(TeamStatus::Created)
+}
+
+fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+    }
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, content.as_bytes())
+        .with_context(|| format!("Failed to write temp file {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "Failed to rename {} to {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn write_json_atomic(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    let mut serialized =
+        serde_json::to_string_pretty(value).context("Failed to serialize JSON value")?;
+    serialized.push('\n');
+    write_text_atomic(path, &serialized)
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +502,10 @@ impl MergeReport {
 ///
 /// Returns an error when the JSON structure is malformed in a way that
 /// prevents safe merging (e.g. `hooks` key exists but is not an object).
-fn merge_hooks(settings: &mut serde_json::Value, global: bool) -> Result<MergeReport> {
+fn merge_hooks(
+    settings: &mut serde_json::Value,
+    global_scripts_dir: Option<&Path>,
+) -> Result<MergeReport> {
     // Ensure `hooks` key is a JSON object.
     {
         let obj = settings
@@ -351,10 +519,10 @@ fn merge_hooks(settings: &mut serde_json::Value, global: bool) -> Result<MergeRe
         }
     }
 
-    let ss_cmd = session_start_cmd(global);
-    let ptu_bash = pre_tool_use_bash_cmd(global);
-    let ptu_task = pre_tool_use_task_cmd(global);
-    let post_bash = post_tool_use_bash_cmd(global);
+    let ss_cmd = session_start_cmd(global_scripts_dir);
+    let ptu_bash = pre_tool_use_bash_cmd(global_scripts_dir);
+    let ptu_task = pre_tool_use_task_cmd(global_scripts_dir);
+    let post_bash = post_tool_use_bash_cmd(global_scripts_dir);
 
     let session_start = merge_session_start_hook(settings, &ss_cmd)?;
     let pre_tool_use_bash = merge_matcher_hook(settings, "PreToolUse", "Bash", &ptu_bash)?;
@@ -496,7 +664,30 @@ fn hook_command_present(array: &[serde_json::Value], cmd: &str) -> bool {
 // Output
 // ---------------------------------------------------------------------------
 
-fn print_report(team: &str, settings_path: &Path, report: &MergeReport) {
+fn print_report(
+    team: &str,
+    settings_path: &Path,
+    report: &MergeReport,
+    install_global: bool,
+    atm_toml_path: &Path,
+    atm_toml_status: AtmTomlStatus,
+    team_status: TeamStatus,
+) {
+    match atm_toml_status {
+        AtmTomlStatus::Created => {
+            println!("Created .atm.toml at {}", atm_toml_path.display());
+        }
+        AtmTomlStatus::AlreadyPresent => {
+            println!(".atm.toml already present at {}", atm_toml_path.display());
+        }
+    }
+
+    match team_status {
+        TeamStatus::Created => println!("Created team '{}'", team),
+        TeamStatus::AlreadyPresent => println!("Team '{}' already exists", team),
+        TeamStatus::Skipped => println!("Skipped team creation (--skip-team)"),
+    }
+
     if report.all_present() {
         println!(
             "ATM hooks already configured for team '{}' in {}",
@@ -528,6 +719,11 @@ fn print_report(team: &str, settings_path: &Path, report: &MergeReport) {
         print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
         print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
     }
+
+    println!(
+        "Hook scope: {}",
+        if install_global { "global" } else { "local" }
+    );
 }
 
 fn print_hook_line(label: &str, status: &HookStatus) {
@@ -570,7 +766,7 @@ mod tests {
         assert!(!path.exists());
 
         let mut settings = load_settings(&path).expect("load");
-        let report = merge_hooks(&mut settings, false).expect("merge");
+        let report = merge_hooks(&mut settings, None).expect("merge");
         write_settings_atomic(&path, &settings).expect("write");
 
         assert!(path.exists());
@@ -588,7 +784,7 @@ mod tests {
             .as_array()
             .expect("SessionStart array");
         assert!(
-            hook_command_present(session_start, &session_start_cmd(false)),
+            hook_command_present(session_start, &session_start_cmd(None)),
             "SessionStart hook missing"
         );
 
@@ -602,7 +798,7 @@ mod tests {
         let bash_hooks = bash_matcher["hooks"].as_array().expect("hooks array");
         assert!(hook_command_present(
             bash_hooks,
-            &pre_tool_use_bash_cmd(false)
+            &pre_tool_use_bash_cmd(None)
         ));
 
         let task_matcher = pre_tool_use
@@ -612,7 +808,7 @@ mod tests {
         let task_hooks = task_matcher["hooks"].as_array().expect("hooks array");
         assert!(hook_command_present(
             task_hooks,
-            &pre_tool_use_task_cmd(false)
+            &pre_tool_use_task_cmd(None)
         ));
 
         let post_tool_use = parsed["hooks"]["PostToolUse"]
@@ -625,7 +821,7 @@ mod tests {
         let post_hooks = post_bash["hooks"].as_array().expect("hooks array");
         assert!(hook_command_present(
             post_hooks,
-            &post_tool_use_bash_cmd(false)
+            &post_tool_use_bash_cmd(None)
         ));
     }
 
@@ -641,12 +837,12 @@ mod tests {
 
         // First install
         let mut settings = load_settings(&path).expect("load 1");
-        merge_hooks(&mut settings, false).expect("merge 1");
+        merge_hooks(&mut settings, None).expect("merge 1");
         write_settings_atomic(&path, &settings).expect("write 1");
 
         // Second install on the freshly written file
         let mut settings2 = load_settings(&path).expect("load 2");
-        let report = merge_hooks(&mut settings2, false).expect("merge 2");
+        let report = merge_hooks(&mut settings2, None).expect("merge 2");
         write_settings_atomic(&path, &settings2).expect("write 2");
 
         // All hooks must be reported as already present
@@ -666,7 +862,7 @@ mod tests {
             .filter(|e| {
                 e.get("command")
                     .and_then(|c| c.as_str())
-                    .map(|c| c == session_start_cmd(false))
+                    .map(|c| c == session_start_cmd(None))
                     .unwrap_or(false)
             })
             .count();
@@ -690,7 +886,7 @@ mod tests {
             .filter(|e| {
                 e.get("command")
                     .and_then(|c| c.as_str())
-                    .map(|c| c == pre_tool_use_bash_cmd(false))
+                    .map(|c| c == pre_tool_use_bash_cmd(None))
                     .unwrap_or(false)
             })
             .count();
@@ -731,7 +927,7 @@ mod tests {
 
         // Install ATM hooks
         let mut settings = load_settings(&path).expect("load");
-        merge_hooks(&mut settings, false).expect("merge");
+        merge_hooks(&mut settings, None).expect("merge");
         write_settings_atomic(&path, &settings).expect("write");
 
         let result_content = std::fs::read_to_string(&path).expect("read");
@@ -763,7 +959,7 @@ mod tests {
 
         // ATM hook must also be present
         assert!(
-            hook_command_present(bash_hooks, &pre_tool_use_bash_cmd(false)),
+            hook_command_present(bash_hooks, &pre_tool_use_bash_cmd(None)),
             "ATM PreToolUse(Bash) hook missing after merge"
         );
     }
@@ -804,36 +1000,87 @@ mod tests {
         }
     }
 
+    /// Global hook commands must use resolved absolute script paths, not
+    /// `${HOME}` expansion.
+    #[test]
+    fn test_global_hook_commands_use_absolute_script_paths() {
+        let dir = TempDir::new().expect("tempdir");
+        let scripts_dir = dir.path().join("scripts with spaces");
+        let expected_session =
+            normalize_for_bash_quoted_path(&scripts_dir.join("session-start.py"));
+        let expected_write =
+            normalize_for_bash_quoted_path(&scripts_dir.join("atm-identity-write.py"));
+        let expected_gate =
+            normalize_for_bash_quoted_path(&scripts_dir.join("gate-agent-spawns.py"));
+        let expected_cleanup =
+            normalize_for_bash_quoted_path(&scripts_dir.join("atm-identity-cleanup.py"));
+
+        let session = session_start_cmd(Some(&scripts_dir));
+        let write = pre_tool_use_bash_cmd(Some(&scripts_dir));
+        let gate = pre_tool_use_task_cmd(Some(&scripts_dir));
+        let cleanup = post_tool_use_bash_cmd(Some(&scripts_dir));
+
+        assert!(session.contains(&expected_session));
+        assert!(write.contains(&expected_write));
+        assert!(gate.contains(&expected_gate));
+        assert!(cleanup.contains(&expected_cleanup));
+
+        assert!(!session.contains("${HOME}"));
+        assert!(!write.contains("${HOME}"));
+        assert!(!gate.contains("${HOME}"));
+        assert!(!cleanup.contains("${HOME}"));
+    }
+
     // -----------------------------------------------------------------------
-    // Global guard test (no .atm.toml)
+    // Execute bootstrap test
     // -----------------------------------------------------------------------
 
-    /// When `--global` is used from a directory without `.atm.toml`,
-    /// `execute()` must return `Ok(())` without writing any files.
     #[test]
     #[serial]
-    fn test_global_guard_no_atm_toml() {
-        // Create a temp dir WITHOUT .atm.toml
+    fn test_execute_creates_atm_toml_team_and_global_hooks() {
         let dir = TempDir::new().expect("tempdir");
-        let settings_path = dir.path().join(".claude").join("settings.json");
-
-        // Change cwd temporarily to the temp dir (no .atm.toml)
+        let repo_dir = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).expect("create repo");
         let original_dir = env::current_dir().expect("original cwd");
-        env::set_current_dir(dir.path()).expect("set cwd");
+        let old_home = env::var("ATM_HOME").ok();
+
+        // SAFETY: serialized test controls process env and cwd.
+        unsafe {
+            env::set_var("ATM_HOME", dir.path());
+        }
+        env::set_current_dir(&repo_dir).expect("set cwd");
 
         let result = execute(InitArgs {
             team: "atm-dev".to_string(),
-            global: true,
+            local: false,
+            identity: Some("team-lead".to_string()),
+            skip_team: false,
+            global: false,
         });
 
-        // Restore cwd
         env::set_current_dir(original_dir).expect("restore cwd");
+        // SAFETY: serialized test cleanup.
+        unsafe {
+            match old_home {
+                Some(v) => env::set_var("ATM_HOME", v),
+                None => env::remove_var("ATM_HOME"),
+            }
+        }
 
-        // Guard should have returned Ok without writing anything
         assert!(result.is_ok());
         assert!(
-            !settings_path.exists(),
-            "settings.json should NOT be created when .atm.toml is absent"
+            repo_dir.join(".atm.toml").exists(),
+            ".atm.toml should be created in repo"
+        );
+        assert!(
+            dir.path()
+                .join(".claude/teams/atm-dev/config.json")
+                .exists(),
+            "team config should be created under ATM_HOME"
+        );
+        assert!(
+            dir.path().join(".claude/settings.json").exists(),
+            "global settings should be created by default"
         );
     }
 
