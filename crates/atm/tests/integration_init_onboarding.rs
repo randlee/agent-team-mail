@@ -23,7 +23,16 @@ fn count_command_in_hooks(settings_path: &Path, hook_category: &str, command: &s
             .as_array()
             .unwrap_or(&Vec::new())
             .iter()
-            .filter(|h| h["command"].as_str() == Some(command))
+            .filter(|h| {
+                h["hooks"]
+                    .as_array()
+                    .map(|hooks| {
+                        hooks.iter().any(|entry| {
+                            entry.get("command").and_then(|c| c.as_str()) == Some(command)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
             .count(),
         _ => 0,
     }

@@ -73,6 +73,8 @@ pub fn execute(args: SendArgs) -> Result<()> {
     // Resolve configuration
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
+    let sender_config = resolve_config(&ConfigOverrides::default(), &current_dir, &home_dir)?;
+    let sender_team = sender_config.core.default_team.clone();
 
     let overrides = ConfigOverrides {
         team: args.team.clone(),
@@ -143,8 +145,10 @@ pub fn execute(args: SendArgs) -> Result<()> {
     // Get message text from appropriate source
     let message_text = get_message_text(&args)?;
 
-    // Self-send check: warn and prepend warning when sender == recipient
-    let message_text = if config.core.identity == agent_name {
+    // Self-send check: warn and prepend warning only when sender and recipient
+    // are the same identity in the same team.
+    let message_text = if is_self_send(&config.core.identity, &sender_team, &agent_name, &team_name)
+    {
         let session_id =
             std::env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "unknown".to_string());
         let session_short = &session_id[..8.min(session_id.len())];
@@ -416,6 +420,15 @@ fn resolve_offline_action(args: &SendArgs, config: &Config) -> String {
     String::new()
 }
 
+fn is_self_send(
+    sender_identity: &str,
+    sender_team: &str,
+    recipient_agent: &str,
+    recipient_team: &str,
+) -> bool {
+    sender_identity == recipient_agent && sender_team == recipient_team
+}
+
 fn destination_target(agent_name: &str, team_name: &str) -> String {
     format!("{agent_name}@{team_name}")
 }
@@ -583,16 +596,18 @@ mod tests {
     #[test]
     fn test_self_send_warning_prepended() {
         // When sender identity == target agent name, the warning should be
-        // prepended to the message text.
+        // prepended to the message text when teams also match.
         let sender = "team-lead";
+        let sender_team = "atm-dev";
         let agent_name = "team-lead"; // same as sender → self-send
+        let target_team = "atm-dev";
         let raw_message = "Hello self!";
 
         // Simulate the self-send check logic (extracted for unit testing)
         let session_id = "test-session-1234567890";
         let session_short = &session_id[..8.min(session_id.len())];
 
-        let message_text = if sender == agent_name {
+        let message_text = if is_self_send(sender, sender_team, agent_name, target_team) {
             let warning = format!(
                 "[WARNING: Sent to self — identity={sender}, session={session_short}. Check ATM_IDENTITY.]"
             );
@@ -610,10 +625,12 @@ mod tests {
     #[test]
     fn test_self_send_warning_not_added_for_different_recipient() {
         let sender = "team-lead";
+        let sender_team = "atm-dev";
         let agent_name = "arch-ctm"; // different → no warning
+        let target_team = "atm-dev";
         let raw_message = "Hello other!";
 
-        let message_text = if sender == agent_name {
+        let message_text = if is_self_send(sender, sender_team, agent_name, target_team) {
             format!("[WARNING: Sent to self — identity={sender}]\n{raw_message}")
         } else {
             raw_message.to_string()
@@ -621,6 +638,15 @@ mod tests {
 
         assert_eq!(message_text, "Hello other!");
         assert!(!message_text.contains("WARNING"));
+    }
+
+    #[test]
+    fn test_self_send_warning_not_added_for_cross_team_same_name() {
+        let sender = "team-lead";
+        let sender_team = "p3-setup";
+        let agent_name = "team-lead";
+        let target_team = "atm-dev";
+        assert!(!is_self_send(sender, sender_team, agent_name, target_team));
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! Members command implementation
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
-use agent_team_mail_core::daemon_client::query_list_agents;
+use agent_team_mail_core::daemon_client::{
+    canonical_liveness_bool, query_list_agents, query_team_member_states,
+};
 use agent_team_mail_core::schema::TeamConfig;
 use anyhow::Result;
 use clap::Args;
@@ -51,7 +53,13 @@ pub fn execute(args: MembersArgs) -> Result<()> {
     }
 
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-    let daemon_liveness = load_daemon_liveness(team_name, &team_config);
+    let daemon_states: HashMap<_, _> = query_team_member_states(team_name)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.agent.clone(), s))
+        .collect();
 
     // Output results
     if args.json {
@@ -61,7 +69,7 @@ pub fn execute(args: MembersArgs) -> Result<()> {
                 "name": m.name,
                 "type": m.agent_type,
                 "model": m.model,
-                "liveness": resolve_member_liveness(m, &daemon_liveness),
+                "liveness": canonical_liveness_bool(daemon_states.get(&m.name)),
             })).collect::<Vec<_>>()
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -76,7 +84,7 @@ pub fn execute(args: MembersArgs) -> Result<()> {
             println!("  {}", "─".repeat(72));
 
             for member in &team_config.members {
-                let active = match resolve_member_liveness(member, &daemon_liveness) {
+                let active = match canonical_liveness_bool(daemon_states.get(&member.name)) {
                     Some(true) => "Online",
                     Some(false) => "Offline",
                     None => "Unknown",
@@ -90,23 +98,4 @@ pub fn execute(args: MembersArgs) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn load_daemon_liveness(team_name: &str, team_config: &TeamConfig) -> HashMap<String, bool> {
-    let mut liveness = HashMap::new();
-    for member in &team_config.members {
-        if let Ok(Some(info)) =
-            agent_team_mail_core::daemon_client::query_session_for_team(team_name, &member.name)
-        {
-            liveness.insert(member.name.clone(), info.alive);
-        }
-    }
-    liveness
-}
-
-fn resolve_member_liveness(
-    member: &agent_team_mail_core::schema::AgentMember,
-    daemon_liveness: &HashMap<String, bool>,
-) -> Option<bool> {
-    daemon_liveness.get(&member.name).copied()
 }

@@ -89,6 +89,10 @@ async fn test_gemini_shutdown_escalates_to_sigkill_after_sigterm() {
     let log_dir = temp.path().join("logs");
     fs::create_dir_all(&log_dir).expect("create log dir");
     let mut backend = CodexTmuxBackend::new("atm-test-session".to_string(), log_dir.clone());
+    let runtime_home = std::env::temp_dir()
+        .join("runtime/gemini/atm-dev/arch-ctm/home")
+        .to_string_lossy()
+        .into_owned();
 
     let handle = WorkerHandle {
         agent_id: "arch-ctm".to_string(),
@@ -100,7 +104,7 @@ async fn test_gemini_shutdown_escalates_to_sigkill_after_sigterm() {
             window_name: "arch-ctm".to_string(),
             runtime: "gemini".to_string(),
             runtime_session_id: Some("gemini-session-123".to_string()),
-            runtime_home: Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+            runtime_home: Some(runtime_home),
         })),
     };
 

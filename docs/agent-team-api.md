@@ -386,8 +386,16 @@ With a tag, the pattern has been 100% reliable in testing. Without one, the mess
 - `findings`
 - `recommendations`
 - `log_window`
+- `env_overrides`
 
-`member_snapshot` is intentionally omitted from JSON output (it is rendered in human output only).
+`env_overrides` fields (present only when the env var is set to a non-empty value):
+- `atm_home`: `{ "source": "env", "value": "<ATM_HOME>" }`
+- `atm_team`: `{ "source": "env", "value": "<ATM_TEAM>" }`
+- `atm_identity`: `{ "source": "env", "value": "<ATM_IDENTITY>" }`
+
+Change-control note:
+- Changed in Phase Y: `env_overrides` was added as a first-class top-level JSON
+  field for diagnostics triage.
 
 ---
 

@@ -1699,7 +1699,12 @@ mod tests {
             Some("gemini".to_string()),
             Some("sess-existing".to_string()),
             Some("%1".to_string()),
-            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+            Some(
+                std::env::temp_dir()
+                    .join("runtime/gemini/atm-dev/arch-ctm/home")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         );
         plugin.set_session_registry(registry);
 
@@ -1754,7 +1759,12 @@ mod tests {
             Some("gemini".to_string()),
             Some("sess-existing".to_string()),
             Some("%1".to_string()),
-            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+            Some(
+                std::env::temp_dir()
+                    .join("runtime/gemini/atm-dev/arch-ctm/home")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         );
         plugin.set_session_registry(registry);
 
@@ -1809,7 +1819,12 @@ mod tests {
             Some("codex".to_string()),
             Some("sess-codex".to_string()),
             Some("%1".to_string()),
-            Some("/tmp/runtime/codex/atm-dev/arch-ctm/home".to_string()),
+            Some(
+                std::env::temp_dir()
+                    .join("runtime/codex/atm-dev/arch-ctm/home")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         );
         plugin.set_session_registry(registry);
 
@@ -1862,7 +1877,12 @@ mod tests {
             Some("gemini".to_string()),
             None,
             Some("%1".to_string()),
-            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+            Some(
+                std::env::temp_dir()
+                    .join("runtime/gemini/atm-dev/arch-ctm/home")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         );
         plugin.set_session_registry(registry);
 

@@ -121,9 +121,14 @@ pub struct ClaudeAdapter;
 
 impl RuntimeAdapter for ClaudeAdapter {
     fn build_command(&self, spec: &SpawnSpec) -> Result<String> {
+        let agent_id = format!("{}@{}", spec.agent, spec.team);
         Ok(format!(
-            "cd {} && claude",
-            shell_quote(&spec.cwd.to_string_lossy())
+            "env ATM_TEAM={} ATM_IDENTITY={} CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --agent-id {} --agent-name {} --team-name {} --dangerously-skip-permissions",
+            shell_quote(&spec.team),
+            shell_quote(&spec.agent),
+            agent_id,
+            spec.agent,
+            spec.team
         ))
     }
 
@@ -236,15 +241,22 @@ mod tests {
     }
 
     #[test]
-    fn claude_build_command_prefixes_cd() {
+    fn claude_build_command_includes_agent_team_flags() {
         let adapter = ClaudeAdapter;
         let spec = base_spec();
         let cmd = adapter.build_command(&spec).unwrap();
-        let expected = format!(
-            "cd {} && claude",
-            shell_quote(&expected_test_cwd().to_string_lossy())
+        assert!(cmd.contains("ATM_TEAM='atm-dev'"));
+        assert!(cmd.contains("ATM_IDENTITY='arch-ctm'"));
+        assert!(cmd.contains("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"));
+        assert!(cmd.contains("claude"));
+        assert!(cmd.contains("--agent-id arch-ctm@atm-dev"));
+        assert!(cmd.contains("--agent-name arch-ctm"));
+        assert!(cmd.contains("--team-name atm-dev"));
+        assert!(cmd.contains("--dangerously-skip-permissions"));
+        assert!(
+            !cmd.contains("cd "),
+            "claude adapter command should be pure launch command without cd prefix"
         );
-        assert_eq!(cmd, expected);
     }
 
     #[test]
