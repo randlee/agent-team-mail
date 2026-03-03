@@ -397,10 +397,10 @@ consumers aligned with human output ordering.
 - `agent_id`
 - `agent_type`
 - `model`
-- `process_id` (nullable)
-- `session_id` (nullable)
 - `status`
 - `activity`
+- `session_id` (nullable)
+- `process_id` (nullable)
 
 Change-control note:
 - Changed in Phase Y: `member_snapshot` was promoted to first-class JSON output

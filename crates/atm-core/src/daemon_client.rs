@@ -1692,6 +1692,95 @@ sleep 2
     }
 
     #[test]
+    #[serial]
+    fn test_query_team_member_states_offline_returns_none() {
+        with_autostart_disabled(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let old_home = std::env::var("ATM_HOME").ok();
+            // SAFETY: serialized test env mutation.
+            unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+            let result = query_team_member_states("atm-dev");
+
+            // SAFETY: serialized test env mutation cleanup.
+            unsafe {
+                match old_home {
+                    Some(v) => std::env::set_var("ATM_HOME", v),
+                    None => std::env::remove_var("ATM_HOME"),
+                }
+            }
+
+            assert!(
+                matches!(result, Ok(None)),
+                "offline daemon must map to Ok(None), got: {result:?}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_query_team_member_states_invalid_payload_returns_err() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        with_autostart_disabled(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let daemon_dir = tmp.path().join(".claude/daemon");
+            std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+            let socket_path = daemon_dir.join("atm-daemon.sock");
+
+            let listener = UnixListener::bind(&socket_path).expect("bind socket");
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut request_line = String::new();
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                reader.read_line(&mut request_line).expect("read request");
+                assert!(
+                    request_line.contains("\"command\":\"list-agents\""),
+                    "expected list-agents request, got: {request_line}"
+                );
+
+                let response = SocketResponse {
+                    version: PROTOCOL_VERSION,
+                    request_id: "req-test".to_string(),
+                    status: "ok".to_string(),
+                    payload: Some(serde_json::json!({
+                        "agent": "arch-ctm",
+                        "state": "active"
+                    })),
+                    error: None,
+                };
+                let line = serde_json::to_string(&response).expect("serialize response");
+                stream.write_all(line.as_bytes()).expect("write response");
+                stream.write_all(b"\n").expect("write newline");
+            });
+
+            let old_home = std::env::var("ATM_HOME").ok();
+            // SAFETY: serialized test env mutation.
+            unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+            let result = query_team_member_states("atm-dev");
+
+            // SAFETY: serialized test env mutation cleanup.
+            unsafe {
+                match old_home {
+                    Some(v) => std::env::set_var("ATM_HOME", v),
+                    None => std::env::remove_var("ATM_HOME"),
+                }
+            }
+
+            handle.join().expect("mock daemon thread");
+            let err = result.expect_err("invalid payload must return Err");
+            assert!(
+                err.to_string()
+                    .contains("invalid canonical member-state payload"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[test]
     fn test_agent_pane_info_deserialization() {
         let json = r#"{"pane_id":"%42","log_path":"/home/user/.claude/logs/arch-ctm.log"}"#;
         let info: AgentPaneInfo = serde_json::from_str(json).unwrap();
