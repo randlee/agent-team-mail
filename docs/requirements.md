@@ -334,6 +334,7 @@ Commands:
   members     List agents in a team
   status      Show team status overview
   doctor      Run daemon/team health diagnostics
+  logs        View and follow unified ATM logs
   config      Show/set configuration
   cleanup     Apply retention policies
   mcp         MCP server setup and management
@@ -650,6 +651,11 @@ Required baseline behavior:
 - Support resume-aware launch by passing parent session when available (for example,
   `leadSessionId`-derived handoff).
 - Deliver initial prompt/body content after launch using ATM messaging path.
+- Before invoking the runtime executable, `atm teams spawn` MUST persist static
+  teammate metadata to team `config.json` for the target member:
+  - `model` (resolved from `--model` when provided, else resolved agent metadata)
+  - `external_backend_type` (resolved runtime backend identity)
+  This write is required even though lifecycle/session state remains daemon-owned.
 - Before reporting launch success or failure, `atm teams spawn` must print the
   fully constructed launch command (with resolved team/agent/runtime flags and
   env vars) so operators/agents can retry manually when launch fails.
@@ -750,10 +756,18 @@ atm doctor --full
   must not be coerced into a valid range.
 
 **Output requirements**:
-- Human-readable output MUST start with a concise team member snapshot table (equivalent
-  core fields to `atm members`: name/type/model/status), followed by ordered findings by
-  severity, then recommended remediation commands.
-- JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
+- Human-readable output MUST start with a concise team member snapshot table before
+  findings. Required columns: `Name`, `Type`, `Model`, `Status`, `Activity`,
+  `PID`, `Session ID`, `Unread`.
+- Human-readable output must render generated time in UTC as
+  `YYYY-MM-DD HH:mm:ss UTC`.
+- Human-readable log-window label must prefer relative duration first:
+  - default incremental window: `last <elapsed>`
+  - `--since <duration>`: `last <duration>`
+  - `--since <timestamp>`: `since YYYY-MM-DD HH:mm:ss UTC (<elapsed>)`
+  - `--full`: `since session start (<elapsed>)`
+- JSON output (`--json`): stable schema with `summary`, `findings[]`,
+  `recommendations[]`, `log_window`, `member_snapshot`.
 - Both human and JSON output MUST surface active env overrides for `ATM_HOME`,
   `ATM_TEAM`, and `ATM_IDENTITY` when set to non-empty values.
 - Daemon-unreachable member-state queries MUST emit explicit finding code
@@ -768,6 +782,13 @@ atm doctor --full
   not treated as fatal preconditions that suppress report generation.
 - `atm doctor`, `atm status`, and `atm members` MUST consume daemon-provided
   canonical member-state snapshots for liveness/status rendering.
+- Deliberate metadata exception: `model` and backend display metadata are
+  config-derived static roster fields (not daemon lifecycle fields). These
+  metadata fields must be read from team `config.json` and joined onto daemon
+  liveness/activity state for rendering.
+- The model-source exception above MUST be documented inline at the doctor model
+  read/join callsite (for example the `doctor.rs` model mapping block) to
+  prevent regressions back to daemon-derived model assumptions.
 - `config.json` activity hints (`isActive`, `lastActive`) MUST NOT be used to
   infer offline/dead liveness in these command surfaces.
 
@@ -775,7 +796,8 @@ atm doctor --full
 - `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
-- `log_window`: `mode`, `start`, `end`
+- `log_window`: `mode`, `start`, `end`, `elapsed_secs`
+- `member_snapshot[]`: daemon-canonical team member snapshot
 - `env_overrides`: optional object fields `atm_home`, `atm_team`,
   `atm_identity`; each value shape is `{ source, value }`
 
@@ -786,13 +808,15 @@ atm doctor --full
 - `findings`
 - `recommendations`
 - `log_window`
+- `member_snapshot`
 - `env_overrides`
 
 Current required `DoctorReport` shape:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts`
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
-- `log_window`: `mode`, `start`, `end`
+- `log_window`: `mode`, `start`, `end`, `elapsed_secs`
+- `member_snapshot[]`: `CanonicalMemberState` records from daemon
 - `env_overrides`: optional `atm_home`, `atm_team`, `atm_identity`, each with:
   - `source`: override source tag (`"env"`)
   - `value`: resolved non-empty value
@@ -944,6 +968,7 @@ Canonical team member-state snapshot (daemon -> CLI) must include:
 - `agent`
 - `state` (`active|idle|offline|unknown`)
 - `activity` (`busy|idle|unknown`)
+- `in_config` (optional bool, defaults to `true` when omitted)
 - `session_id` (optional)
 - `process_id` (optional)
 - `reason`
@@ -952,6 +977,12 @@ Canonical team member-state snapshot (daemon -> CLI) must include:
 Required behavior:
 - `atm doctor`, `atm status`, and `atm members` must read liveness/status from
   this snapshot.
+- Static roster metadata (`model`, `external_backend_type`) remains
+  `config.json`-derived and must be joined with daemon snapshot output for
+  presentation; daemon remains authoritative for liveness/activity/session state.
+- `in_config` semantics:
+  - `true`: member exists in both daemon state and team `config.json`
+  - `false`: daemon-only member (not present in current `config.json` roster)
 - No command-level fallback may map `isActive=false` directly to offline/dead.
 - Per-member status derivation logic must not be duplicated across commands;
   command handlers consume daemon snapshot values directly.
@@ -964,8 +995,11 @@ Required behavior:
 |----------|-------|----------------------|----------------|-----------|
 | `isActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`isActive`) | `true`, `false`, `null` | Busy/idle hint only. Not a liveness source. |
 | `lastActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`lastActive`) | `u64` epoch-millis or `null` | Last activity timestamp only. Not a liveness source. |
+| `model` | Team mutation/spawn CLI paths (`add-member`, `teams spawn`) | Team `config.json` member field (`model`) | String or `null` | Static display metadata for runtime/model labeling; not a liveness source. |
+| `external_backend_type` | Team mutation/spawn CLI paths (`add-member`, `teams spawn`) | Team `config.json` member field (`external_backend_type`) | Enum/string backend id or absent | Static backend identity metadata for display/routing hints; not a liveness source. |
 | `session_id` | Daemon session registry (`session_start`/`session_end`) | `.claude/daemon/session-registry.json` | Non-empty string or absent | Session identity tracked by daemon lifecycle registry. |
 | `process_id` | Daemon session registry | `.claude/daemon/session-registry.json` | Integer PID (`>1`) or absent | Process identity used for liveness checks. |
+| `in_config` | Daemon roster reconciliation snapshot | Daemon socket payload (`list-agents` team-scoped) | `true`, `false` (default `true` when omitted) | Indicates whether member currently exists in team `config.json` roster. |
 | `status` (`state`) | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `active`, `idle`, `offline`, `unknown` | Canonical liveness/status consumed by doctor/status/members. |
 | `activity` | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `busy`, `idle`, `unknown` | Canonical activity hint exposed separately from liveness. |
 
@@ -1222,7 +1256,7 @@ team-lead = "arch-atm"   # role-name → inbox-identity mapping
 | `ATM_DAEMON_AUTOSTART` | Daemon autostart toggle (`1/true/yes` enables, `0/false/no` disables); defaults to enabled when unset |
 | `ATM_DAEMON_BIN` | Optional daemon binary override for test/ops harnesses |
 | `ATM_LOG` | Stderr log level (`trace|debug|info|warn|error`), default `info` |
-| `ATM_LOG_MSG` | Message text logging policy (`none|truncated|full`), default `truncated` |
+| `ATM_LOG_MSG` | Human send-line preview toggle (`1` enables; unset/other disables), default disabled |
 | `ATM_LOG_FILE` | Canonical unified log file path override for test/ops |
 
 Environment value rules:
@@ -1267,10 +1301,11 @@ Lifecycle tracking must use one daemon command path (`hook-event`) with a single
 extensible payload shape, not separate packet types per integration.
 
 Required baseline fields:
-- `event`: `session_start` | `teammate_idle` | `session_end`
+- `event`: `session_start` | `pre_compact` | `compact` | `teammate_idle` | `session_end`
 - `team`
 - `agent` (or canonical `agent_id` where available)
 - `source`: source-kind enum
+- `outcome`: `success` | `failure`
 
 `source` should be expandable and include at least:
 - `claude_hook` — Claude Code lifecycle hooks
@@ -1279,7 +1314,8 @@ Required baseline fields:
 - `unknown` — reserved fallback
 
 Expected producer coverage:
-- Claude hooks emit `session_start`, `teammate_idle`, `session_end`
+- Claude hooks emit `session_start`, `pre_compact`, `compact`,
+  `teammate_idle`, `session_end` (including failure variants where applicable)
 - `atm-agent-mcp` should emit equivalent lifecycle events for MCP-managed agents
 - Future adapters should map provider lifecycle callbacks into the same envelope
   and daemon command path
@@ -1359,6 +1395,24 @@ Validation rules:
 - `action` MUST be stable snake_case. Canonical baseline action vocabulary is
   defined in `docs/logging-l1a-spec.md` and is the source of truth for
   dashboard/alert naming.
+
+Action-specific payload requirements:
+- For `action = send`, `fields` MUST include:
+  - `sender_agent`, `sender_team`, `sender_pid`
+  - `recipient_agent`, `recipient_team`, `recipient_pid`
+- For `action = send`, human-readable `atm logs` rendering MUST use stable format:
+  `send <from>@<team> [<pid|->] -> <to>@<team> [<pid|->] "<preview>"`
+  with sender first and recipient second in all cases.
+- Unknown/missing PID values in rendered output MUST be shown as `-`.
+- `read` and `read_mark` actions MUST remain first-class logged actions at INFO
+  level and include count metadata in `fields`.
+
+Message preview gating requirements:
+- Send-line preview text is controlled by `ATM_LOG_MSG`.
+- `ATM_LOG_MSG=1` enables preview text; any other value (including unset)
+  disables preview text.
+- When enabled, preview must be quoted and truncated to 20 characters with
+  ellipsis when truncation occurs.
 
 #### Sink Paths and Files
 
@@ -1456,13 +1510,23 @@ No legacy `events.jsonl` sink code remains in any crate.
 
 - `atm`: `send`, `broadcast`, `request`, `read` outcomes, watermark updates, teams ops
 - `atm-daemon`: lifecycle, session registry transitions, plugin lifecycle/errors
+  plus explicit state-transition logs:
+  - `Offline ↔ Online` transitions at INFO
+  - `session_id` and `process_id` changes at INFO (old/new values)
+  - `Busy ↔ Idle` transitions at DEBUG only
+  - exactly one log event per state transition occurrence
+- Hook lifecycle events (`session_start`, `pre_compact`, `compact`, `session_end`,
+  including failure variants) must be logged at INFO unconditionally (not debug-gated).
 - `atm-agent-mcp`: tool-call audit + lifecycle context
 - `atm-tui`: startup/shutdown, stream attach/detach, control-send/ack summaries
 
 #### Runtime Controls
 
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
-- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy (default: `truncated`).
+- `ATM_LOG_MSG=1` enables human send-line message preview; any other value
+  (including unset) disables preview text.
+- Migration note: previous values (`none|truncated|full`) are deprecated.
+  Users should migrate to `ATM_LOG_MSG=1` (enabled) or unset/other (disabled).
 - `ATM_LOG_FILE` may override file path for tests/ops.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
@@ -1549,6 +1613,27 @@ identity and liveness.
 - **Lookup semantics**:
   - Team-scoped lead check must resolve by `(team, agent=team-lead)`
   - CLI `teams resume` refusal logic must use this team-scoped daemon result, not bare-name process lookup
+
+Authorized daemon command for CLI registration hints:
+- `register-hint` (dedicated socket command) is the required CLI path for
+  updating daemon session/activity hints from high-traffic CLI operations
+  (for example `atm send`) without direct session/PID writes to `config.json`.
+- Request payload (minimum):
+  - `team` (string)
+  - `agent` (string)
+  - `session_id` (string)
+  - `process_id` (optional integer)
+  - `backend_type` (optional string/enum)
+- Success response payload (minimum):
+  - `registered` (bool)
+  - `agent` (string)
+  - `team` (string)
+  - `session_registered` (bool)
+  - `activity_updated` (bool)
+- Backward-compatibility requirement:
+  - When CLI sends `register-hint` to an older daemon that does not implement
+    the command, CLI must fail gracefully with actionable daemon-upgrade guidance
+    and must not silently fall back to direct `config.json` session/PID writes.
 
 Minimum record shape:
 
@@ -2413,8 +2498,10 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 5. **Large inbox strategy**: For inboxes with 10K+ messages, should `atm-core` support streaming JSON parsing, or is read-all-into-memory acceptable for MVP?
 
+6. **Team-scoped roster query contract (`#417`)**: Does daemon require a new query to return full canonical member snapshots (including daemon-only/ghost members), or can current list APIs be extended without breaking existing consumers?
+
 ---
 
 **Document Version**: 0.4
-**Last Updated**: 2026-03-03
+**Last Updated**: 2026-03-04
 **Maintained By**: Claude
