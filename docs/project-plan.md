@@ -1432,7 +1432,7 @@ Z.2 (log format)   ├──→ Z.3 (SSoT fast path) ──→ Z.4 (SSoT complet
 Z.5 (lifecycle)  ──┘
 ```
 Z.1 and Z.2 can execute in parallel (independent tracks).
-Z.3 depends on Z.1 (doctor fix needed to validate SSoT path changes).
+Z.3 depends on Z.1 because Z.3 acceptance criteria (#415: `atm doctor --json` includes `member_snapshot`) requires a corrected `atm doctor` from Z.1 to provide reliable test signal.
 Z.4 depends on Z.3 (builds on daemon-sync pattern established in Z.3).
 Z.5 is independent and can run in parallel with Z.3/Z.4.
 
@@ -1474,10 +1474,12 @@ Z.5 is independent and can run in parallel with Z.3/Z.4.
 3. **#412**: Gate message preview on `ATM_LOG_MSG=1` env var: when set, include
    quoted 20-char truncated preview with ellipsis; when unset, omit preview text
    entirely. Add tests for both modes.
-4. **#419**: Improve doctor Log Window label: default `last 10m`; `--since <dur>`
-   shows `last <dur>`; `--since <ts>` shows `since YYYY-MM-DD HH:mm UTC (<elapsed>)`;
-   `--full` shows `since session start (<elapsed>)`. JSON preserves precise
-   `start`/`end` ISO timestamps + `elapsed_secs`.
+4. **#419**: Improve doctor Log Window label using dynamic computed elapsed duration:
+   default incremental window shows `last <elapsed>` (computed from actual window
+   start); `--since <dur>` shows `last <dur>`; `--since <ts>` shows
+   `since YYYY-MM-DD HH:mm:ss UTC (<elapsed>)`; `--full` shows
+   `since session start (<elapsed>)`. JSON preserves precise `start`/`end` ISO
+   timestamps + `elapsed_secs`.
 
 **Acceptance criteria**:
 - `atm logs` entries for sends include all 6 identity+PID fields.
@@ -1582,7 +1584,7 @@ Advanced observability items deferred to post-Z planning (tracked recommendation
 - `atm logs` shows `state_transition` events for every Offline↔Online change.
 - Hook lifecycle events appear in `atm logs` at INFO level unconditionally.
 - No state transition or hook event is emitted more than once per occurrence.
-- `atm doctor` includes mailbox health metrics column (or separate section).
+- Mailbox health metrics deferred to Phase Z+1 (obs #4).
 
 ### Deferred from Phase Z (follow-on)
 
@@ -1594,7 +1596,7 @@ Advanced observability items deferred to post-Z planning (tracked recommendation
 | [#351](https://github.com/randlee/agent-team-mail/issues/351) | /team-join slash command — Phase X planned |
 | [#361](https://github.com/randlee/agent-team-mail/issues/361) | Spawn --folder normalization — Phase X planned |
 | [#357](https://github.com/randlee/agent-team-mail/issues/357) | atm init improvements — Phase X planned |
-| arch-ctm obs #1 | Canonical state_transition events (old→new/reason/source/seq) — Phase Z+1 |
+| arch-ctm obs #1 | Canonical state_transition `seq` field + formal enum stabilization — Phase Z+1 (`reason`/`source` fields partially addressed in Z.5 #420) |
 | arch-ctm obs #2 | Daemon heartbeat/health block in doctor — Phase Z+1 |
 | arch-ctm obs #3 | Message lifecycle correlation (send→delivered→read→ack) — Phase Z+1 |
 | arch-ctm obs #4 | Full mailbox health model in doctor/logs — Phase Z+1 |

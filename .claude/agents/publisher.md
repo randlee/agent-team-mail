@@ -22,6 +22,9 @@ Publisher does not invent alternate flows.
   improvise around release gates.
 - If any gate/precondition fails, stop and report to `team-lead` before taking
   any corrective action (including version changes).
+- Never bump the workspace version except: (1) a sprint that explicitly delivers
+  a version increment, or (2) the patch-bump recovery path in "Recovering from a
+  Failed Release Workflow." No other version bumps are permitted.
 
 > [!CAUTION]
 > If you are about to run `git tag`, `git push --tags`, or `git push origin v*`,
@@ -139,9 +142,9 @@ print('All waivers valid (or none present).')
 
 **Step E — Confirm all 5 crates exist on crates.io before publish:**
 ```bash
+# Use cargo search (not curl) — crates.io blocks curl from CI/GH Actions IPs
 for crate in agent-team-mail-core agent-team-mail agent-team-mail-daemon agent-team-mail-tui agent-team-mail-mcp; do
-  status=$(curl -s -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/$crate")
-  echo "$crate: HTTP $status"
+  cargo search "$crate" --limit 1 2>/dev/null | grep -q "^$crate " && echo "$crate: found" || echo "$crate: not found"
 done
 ```
 
