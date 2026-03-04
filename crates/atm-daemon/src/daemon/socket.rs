@@ -35,7 +35,9 @@ use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 
 use crate::daemon::log_writer::LogEventQueue;
-use crate::daemon::pid_backend_validation::{PidBackendValidation, validate_pid_backend};
+use crate::daemon::pid_backend_validation::{
+    PidBackendValidation, roster_process_id, validate_pid_backend,
+};
 
 use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
 use crate::daemon::session_registry::SharedSessionRegistry;
@@ -2817,22 +2819,35 @@ fn handle_list_agents(
         };
         let members = load_team_members(&home, team_name).unwrap_or_default();
         let tracker = state_store.lock().unwrap();
-        let session_guard = session_registry.lock().unwrap();
-        let agents: Vec<serde_json::Value> = members
-            .into_iter()
-            .map(|m| {
-                let tracker_state = tracker.get_state(&m.name);
-                let tracker_meta = tracker.transition_meta(&m.name);
-                let session = session_guard.query_for_team(team_name, &m.name);
-                let state = derive_canonical_member_state(
-                    team_name,
-                    &m,
-                    tracker_state,
-                    session,
-                    tracker_meta,
-                );
+        let mut session_guard = session_registry.lock().unwrap();
+        let mut merged_states: std::collections::BTreeMap<String, CanonicalMemberState> =
+            std::collections::BTreeMap::new();
+
+        for m in members {
+            bootstrap_session_from_member_hint(team_name, &m, &mut session_guard);
+            let tracker_state = tracker.get_state(&m.name);
+            let tracker_meta = tracker.transition_meta(&m.name);
+            let session = session_guard.query_for_team(team_name, &m.name);
+            let state =
+                derive_canonical_member_state(team_name, &m, tracker_state, session, tracker_meta);
+            merged_states.insert(m.name.clone(), state);
+        }
+
+        for session in session_guard.sessions_for_team(team_name) {
+            if merged_states.contains_key(&session.agent_name) {
+                continue;
+            }
+            let tracker_state = tracker.get_state(&session.agent_name);
+            let tracker_meta = tracker.transition_meta(&session.agent_name);
+            let state = derive_unregistered_member_state(&session, tracker_state, tracker_meta);
+            merged_states.insert(session.agent_name.clone(), state);
+        }
+
+        let agents: Vec<serde_json::Value> = merged_states
+            .into_values()
+            .map(|state| {
                 serde_json::to_value(state)
-                    .unwrap_or_else(|_| serde_json::json!({"agent": m.name, "state": "unknown"}))
+                    .unwrap_or_else(|_| serde_json::json!({"agent": "unknown", "state": "unknown"}))
             })
             .collect();
         return make_ok_response(&request.request_id, serde_json::json!(agents));
@@ -2908,6 +2923,62 @@ fn emit_pid_process_mismatch(
     });
 }
 
+fn runtime_for_member(member: &AgentMember) -> Option<String> {
+    member.effective_backend_type().and_then(|bt| match bt {
+        agent_team_mail_core::schema::BackendType::ClaudeCode => Some("claude".to_string()),
+        agent_team_mail_core::schema::BackendType::Codex => Some("codex".to_string()),
+        agent_team_mail_core::schema::BackendType::Gemini => Some("gemini".to_string()),
+        agent_team_mail_core::schema::BackendType::External
+        | agent_team_mail_core::schema::BackendType::Human(_) => None,
+    })
+}
+
+fn bootstrap_session_from_member_hint(
+    team: &str,
+    member: &AgentMember,
+    session_registry: &mut crate::daemon::session_registry::SessionRegistry,
+) {
+    if session_registry
+        .query_for_team(team, &member.name)
+        .is_some()
+    {
+        return;
+    }
+
+    let Some(pid) = roster_process_id(member).filter(|pid| *pid > 1) else {
+        return;
+    };
+    if !agent_team_mail_core::pid::is_pid_alive(pid) {
+        return;
+    }
+
+    let validation = validate_pid_backend(member, pid);
+    if validation.is_alive_mismatch() {
+        emit_pid_process_mismatch(team, &member.name, &validation, "bootstrap");
+        return;
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let session_id = member
+        .session_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("local:{}:{now_ms}:{pid}", member.name));
+    let runtime = runtime_for_member(member);
+    let runtime_session_id = runtime.as_ref().map(|_| session_id.clone());
+
+    session_registry.upsert_runtime_for_team(
+        team,
+        &member.name,
+        &session_id,
+        pid,
+        runtime,
+        runtime_session_id,
+        member.tmux_pane_id.clone(),
+        None,
+    );
+}
+
 fn derive_canonical_member_state(
     team: &str,
     member: &AgentMember,
@@ -2928,6 +2999,7 @@ fn derive_canonical_member_state(
                 process_id: Some(session.process_id),
                 reason: "session inactive or pid dead".to_string(),
                 source: "session_registry".to_string(),
+                in_config: true,
             };
         }
         let validation = validate_pid_backend(member, session.process_id);
@@ -2953,6 +3025,7 @@ fn derive_canonical_member_state(
                 process_id: Some(session.process_id),
                 reason: mismatch_reason,
                 source: "pid_backend_validation".to_string(),
+                in_config: true,
             };
         }
         if matches!(tracker_state, Some(AgentState::Idle)) {
@@ -2970,6 +3043,7 @@ fn derive_canonical_member_state(
                 process_id: Some(session.process_id),
                 reason,
                 source,
+                in_config: true,
             };
         }
         return CanonicalMemberState {
@@ -2980,6 +3054,7 @@ fn derive_canonical_member_state(
             process_id: Some(session.process_id),
             reason: "session active with live pid".to_string(),
             source: "session_registry".to_string(),
+            in_config: true,
         };
     }
 
@@ -2996,6 +3071,7 @@ fn derive_canonical_member_state(
             source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
+            in_config: true,
         },
         Some(AgentState::Active) => CanonicalMemberState {
             agent: agent.to_string(),
@@ -3009,6 +3085,7 @@ fn derive_canonical_member_state(
             source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
+            in_config: true,
         },
         Some(AgentState::Offline) => CanonicalMemberState {
             agent: agent.to_string(),
@@ -3022,6 +3099,7 @@ fn derive_canonical_member_state(
             source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
+            in_config: true,
         },
         Some(AgentState::Unknown) | None => CanonicalMemberState {
             agent: agent.to_string(),
@@ -3035,7 +3113,57 @@ fn derive_canonical_member_state(
             source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
+            in_config: true,
         },
+    }
+}
+
+fn derive_unregistered_member_state(
+    session: &crate::daemon::session_registry::SessionRecord,
+    tracker_state: Option<AgentState>,
+    tracker_meta: Option<&crate::plugins::worker_adapter::TransitionMeta>,
+) -> CanonicalMemberState {
+    if session.state != crate::daemon::session_registry::SessionState::Active
+        || !session.is_process_alive()
+    {
+        return CanonicalMemberState {
+            agent: session.agent_name.clone(),
+            state: "offline".to_string(),
+            activity: "unknown".to_string(),
+            session_id: Some(session.session_id.clone()),
+            process_id: Some(session.process_id),
+            reason: "session tracked but member missing from config".to_string(),
+            source: "session_registry".to_string(),
+            in_config: false,
+        };
+    }
+
+    if matches!(tracker_state, Some(AgentState::Idle)) {
+        return CanonicalMemberState {
+            agent: session.agent_name.clone(),
+            state: "idle".to_string(),
+            activity: "idle".to_string(),
+            session_id: Some(session.session_id.clone()),
+            process_id: Some(session.process_id),
+            reason: tracker_meta
+                .map(|m| m.reason.clone())
+                .unwrap_or_else(|| "idle lifecycle signal".to_string()),
+            source: tracker_meta
+                .map(|m| m.source.clone())
+                .unwrap_or_else(|| "hook_event".to_string()),
+            in_config: false,
+        };
+    }
+
+    CanonicalMemberState {
+        agent: session.agent_name.clone(),
+        state: "active".to_string(),
+        activity: "busy".to_string(),
+        session_id: Some(session.session_id.clone()),
+        process_id: Some(session.process_id),
+        reason: "session tracked but member missing from config".to_string(),
+        source: "session_registry".to_string(),
+        in_config: false,
     }
 }
 
@@ -3454,6 +3582,82 @@ mod tests {
         assert_eq!(arch["state"].as_str(), Some("idle"));
         assert!(arch["reason"].as_str().is_some());
         assert!(arch["source"].as_str().is_some());
+        assert!(
+            arch.get("in_config").is_none() || arch["in_config"].as_bool() == Some(true),
+            "configured members should serialize in_config as omitted (default true) or explicit true"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_team_scope_includes_daemon_only_sessions_as_unregistered() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_runtime_for_team(
+                "atm-dev",
+                "arch-ctm",
+                "sess-ghost-1",
+                std::process::id(),
+                Some("codex".to_string()),
+                Some("sess-ghost-1".to_string()),
+                None,
+                None,
+            );
+        }
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+        let arr = resp.payload.unwrap().as_array().unwrap().clone();
+
+        let ghost = arr
+            .iter()
+            .find(|a| a["agent"].as_str() == Some("arch-ctm"))
+            .expect("daemon-only member missing");
+        assert_eq!(ghost["in_config"].as_bool(), Some(false));
+        assert_eq!(ghost["state"].as_str(), Some("active"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_bootstraps_session_from_config_process_hint() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let members = cfg["members"].as_array_mut().unwrap();
+        let target = members
+            .iter_mut()
+            .find(|m| m["name"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm in config");
+        target["processId"] = serde_json::json!(std::process::id());
+        target["sessionId"] = serde_json::json!("hint-session-1");
+        target["externalBackendType"] = serde_json::json!("external");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+        let arr = resp.payload.unwrap().as_array().unwrap().clone();
+        let member = arr
+            .iter()
+            .find(|a| a["agent"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm entry missing");
+        assert_eq!(member["state"].as_str(), Some("active"));
+        assert_eq!(member["session_id"].as_str(), Some("hint-session-1"));
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("session registry upserted");
+        assert_eq!(session.session_id, "hint-session-1");
+        assert_eq!(session.process_id, std::process::id());
     }
 
     #[test]

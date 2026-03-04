@@ -180,6 +180,20 @@ pub struct CanonicalMemberState {
     /// Source of truth used for state derivation.
     #[serde(default)]
     pub source: String,
+    /// Whether this member currently exists in team `config.json`.
+    ///
+    /// Defaults to `true` for backward compatibility with older daemon payloads
+    /// that did not include this field.
+    #[serde(default = "default_in_config_true", skip_serializing_if = "is_true")]
+    pub in_config: bool,
+}
+
+fn default_in_config_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Render CLI-facing status taxonomy from daemon canonical member state.
@@ -2080,6 +2094,7 @@ sleep 2
             process_id: Some(4242),
             reason: "session active with live pid".to_string(),
             source: "session_registry".to_string(),
+            in_config: true,
         };
         let json = serde_json::to_string(&state).unwrap();
         let decoded: CanonicalMemberState = serde_json::from_str(&json).unwrap();
@@ -2088,6 +2103,7 @@ sleep 2
         assert_eq!(decoded.activity, "busy");
         assert_eq!(decoded.session_id.as_deref(), Some("sess-123"));
         assert_eq!(decoded.process_id, Some(4242));
+        assert!(decoded.in_config);
     }
 
     #[test]
@@ -2100,6 +2116,7 @@ sleep 2
             process_id: None,
             reason: String::new(),
             source: String::new(),
+            in_config: true,
         };
         let idle = CanonicalMemberState {
             state: "idle".to_string(),
@@ -2151,13 +2168,57 @@ sleep 2
                 "session_id": "sess-1",
                 "process_id": 1234,
                 "reason": "session active",
-                "source": "session_registry"
+                "source": "session_registry",
+                "in_config": false
             }
         ]);
         let states = decode_canonical_member_states_payload(valid).expect("valid payload");
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].agent, "arch-ctm");
         assert_eq!(states[0].state, "active");
+        assert!(!states[0].in_config);
+    }
+
+    #[test]
+    fn test_decode_canonical_member_state_defaults_in_config_true_when_missing() {
+        let json = r#"{
+            "agent":"arch-ctm",
+            "state":"active",
+            "activity":"busy",
+            "reason":"session active",
+            "source":"session_registry"
+        }"#;
+        let state: CanonicalMemberState = serde_json::from_str(json).expect("decode");
+        assert!(state.in_config);
+    }
+
+    #[test]
+    fn test_decode_register_hint_response_ok_registered() {
+        let response = SocketResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "req-1".to_string(),
+            status: "ok".to_string(),
+            payload: Some(serde_json::json!({ "processed": true })),
+            error: None,
+        };
+        let outcome = decode_register_hint_response(response).expect("ok response");
+        assert_eq!(outcome, RegisterHintOutcome::Registered);
+    }
+
+    #[test]
+    fn test_decode_register_hint_response_unknown_command_maps_to_unsupported() {
+        let response = SocketResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "req-1".to_string(),
+            status: "error".to_string(),
+            payload: None,
+            error: Some(SocketError {
+                code: "UNKNOWN_COMMAND".to_string(),
+                message: "Unknown command: 'register-hint'".to_string(),
+            }),
+        };
+        let outcome = decode_register_hint_response(response).expect("unknown command handled");
+        assert_eq!(outcome, RegisterHintOutcome::UnsupportedDaemon);
     }
 
     #[test]
