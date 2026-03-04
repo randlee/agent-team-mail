@@ -164,6 +164,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
 | X | Team Onboarding + TUI/Doctor Stability | `/team-join`, spawn path normalization, `atm init` one-command setup, and carry-forward bug-debt mapping | PLANNED |
+| Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency | IN PROGRESS |
 
 ---
 
@@ -1405,10 +1406,28 @@ the current tranche focused on onboarding contract closure.
 | **Q** | Q.2 | Integration tests + cross-platform validation | COMPLETE | [#253](https://github.com/randlee/agent-team-mail/pull/253) |
 | **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | COMPLETE | — |
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
+| **Z** | Z.1 | Quick Wins: Doctor + Release Fix | COMPLETE | [#423](https://github.com/randlee/agent-team-mail/pull/423) |
+| **Z** | Z.2 | Log Format + Doctor UX | IN REVIEW | [#425](https://github.com/randlee/agent-team-mail/pull/425) |
+| **Z** | Z.3 | SSoT Fast Path (`register-hint`, send-path daemon sync) | IN REVIEW | [#427](https://github.com/randlee/agent-team-mail/pull/427) |
+| **Z** | Z.4 | Canonical Member State Completion | IN PROGRESS | — |
 
 **Completed**: 99+ sprints across 23 phases (CI green)
-**Current version**: v0.27.0
-**Next**: Phase X (planning)
+**Current version**: v0.33.2
+**Current phase**: Phase Z (planning)
+
+---
+
+## 17.11 Phase Z: Daemon SSoT + Observability Hardening
+
+### Sprint Summary
+
+| Sprint | Name | PR/Branch | Issues | Status |
+|--------|------|-----------|--------|--------|
+| Z.1 | Quick Wins: Doctor + Release Fix | [#423](https://github.com/randlee/agent-team-mail/pull/423) / `feature/pZ-s1-quick-wins` | #407, #408, #403, #399 | COMPLETE |
+| Z.2 | Log Format + Doctor UX | `feature/pZ-s2-log-format` | #410, #411, #412, #419 | IN REVIEW |
+| Z.3 | SSoT Fast Path (`register-hint`, send-path daemon sync) | [#427](https://github.com/randlee/agent-team-mail/pull/427) / `feature/pZ-s3-ssot-fast-path` | #413, #415, #409 | IN REVIEW |
+| Z.4 | Canonical Member State Completion | `feature/pZ-s4-canonical-state` | #414, #416, #417, #418, #401, #402 | IN PROGRESS |
+| Z.5 | Lifecycle Logging + Hook Events | `feature/pZ-s5-observability` | #420, #421 | PLANNED |
 
 ---
 

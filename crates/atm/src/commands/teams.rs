@@ -1,7 +1,9 @@
 //! Teams command implementation
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
-use agent_team_mail_core::daemon_client::{LaunchConfig, launch_agent, query_session_for_team};
+use agent_team_mail_core::daemon_client::{
+    LaunchConfig, RegisterHintOutcome, launch_agent, query_session_for_team, register_hint,
+};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::inbox_update;
@@ -994,6 +996,14 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
         }
         write_team_config(&config_path, &team_config)?;
         ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+        if let Some(ref session_id) = args.session_id {
+            sync_member_session_hint_from_config(
+                &config_path,
+                &args.team,
+                &args.agent,
+                session_id,
+            )?;
+        }
         return Ok(AddMemberOutcome::UpdatedInactive);
     }
 
@@ -1020,7 +1030,7 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
         backend_type: None,
         is_active: Some(!args.inactive),
         last_active: if !args.inactive { Some(now_ms) } else { None },
-        session_id: args.session_id,
+        session_id: args.session_id.clone(),
         external_backend_type: parsed_backend_type,
         external_model: Some(parsed_model),
         unknown_fields: std::collections::HashMap::new(),
@@ -1029,6 +1039,9 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     team_config.members.push(member);
     write_team_config(&config_path, &team_config)?;
     ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+    if let Some(ref session_id) = args.session_id {
+        sync_member_session_hint_from_config(&config_path, &args.team, &args.agent, session_id)?;
+    }
     Ok(AddMemberOutcome::Added)
 }
 
@@ -1053,6 +1066,71 @@ fn ensure_member_inbox_atomic(team_dir: &Path, team_name: &str, agent_name: &str
     })?;
 
     Ok(())
+}
+
+fn runtime_for_member(member: &agent_team_mail_core::schema::AgentMember) -> Option<&'static str> {
+    member.effective_backend_type().and_then(|bt| match bt {
+        BackendType::ClaudeCode => Some("claude"),
+        BackendType::Codex => Some("codex"),
+        BackendType::Gemini => Some("gemini"),
+        BackendType::External | BackendType::Human(_) => None,
+    })
+}
+
+fn sync_member_session_hint_from_config(
+    config_path: &Path,
+    team: &str,
+    agent: &str,
+    session_id: &str,
+) -> Result<()> {
+    let cfg: TeamConfig = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+    let member = cfg.members.iter().find(|m| m.name == agent);
+    sync_member_session_hint(team, agent, session_id, member)
+}
+
+fn sync_member_session_hint(
+    team: &str,
+    agent: &str,
+    session_id: &str,
+    member: Option<&agent_team_mail_core::schema::AgentMember>,
+) -> Result<()> {
+    let mut runtime = member.and_then(runtime_for_member).map(str::to_string);
+    let process_hint = member
+        .and_then(|m| m.process_id_hint())
+        .filter(|pid| *pid > 1);
+
+    let daemon_session = query_session_for_team(team, agent).ok().flatten();
+    let process_id = process_hint.or_else(|| daemon_session.as_ref().map(|s| s.process_id));
+    if runtime.is_none() {
+        runtime = daemon_session.and_then(|s| s.runtime);
+    }
+
+    let Some(process_id) = process_id.filter(|pid| *pid > 1) else {
+        warn!("session-id for {agent}@{team} not synced to daemon: no process_id hint available");
+        return Ok(());
+    };
+    let runtime_ref = runtime.as_deref();
+    let runtime_session_id = runtime_ref.map(|_| session_id);
+
+    match register_hint(
+        team,
+        agent,
+        session_id,
+        process_id,
+        runtime_ref,
+        runtime_session_id,
+        None,
+        None,
+    ) {
+        Ok(RegisterHintOutcome::Registered | RegisterHintOutcome::DaemonUnavailable) => Ok(()),
+        Ok(RegisterHintOutcome::UnsupportedDaemon) => anyhow::bail!(
+            "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry."
+        ),
+        Err(e) => {
+            warn!("daemon sync failed for {agent}@{team} session hint: {e}");
+            Ok(())
+        }
+    }
 }
 
 /// Implement `atm teams update-member <team> <agent> [flags]`
@@ -1104,9 +1182,11 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
         })?;
 
     let mut updated_fields: Vec<&str> = Vec::new();
+    let mut session_id_to_sync: Option<String> = None;
 
     if let Some(session_id) = args.session_id {
-        member.session_id = Some(session_id);
+        member.session_id = Some(session_id.clone());
+        session_id_to_sync = Some(session_id);
         updated_fields.push("session_id");
     }
 
@@ -1143,6 +1223,9 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
     }
 
     write_team_config(&config_path, &team_config)?;
+    if let Some(ref session_id) = session_id_to_sync {
+        sync_member_session_hint_from_config(&config_path, &args.team, &args.agent, session_id)?;
+    }
 
     println!(
         "Updated member '{}' in team '{}': {}",

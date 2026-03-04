@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -125,6 +125,8 @@ struct MemberSnapshot {
     session_id: Option<String>,
     process_id: Option<u32>,
 }
+
+const UNREGISTERED_MARKER: &str = "[unregistered]";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct DoctorState {
@@ -290,32 +292,70 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
             end: window_end.to_rfc3339(),
         },
         env_overrides: active_env_overrides(),
-        member_snapshot: team_config
-            .as_ref()
-            .map(|cfg| {
-                cfg.members
-                    .iter()
-                    .map(|m| MemberSnapshot {
-                        name: m.name.clone(),
-                        agent_type: m.agent_type.clone(),
-                        model: m.model.clone(),
-                        status: snapshot_status_from_canonical_state(
-                            daemon_states_by_agent.get(&m.name),
-                        ),
-                        activity: snapshot_activity_from_canonical_state(
-                            daemon_states_by_agent.get(&m.name),
-                        ),
-                        session_id: daemon_states_by_agent
-                            .get(&m.name)
-                            .and_then(|s| s.session_id.clone()),
-                        process_id: daemon_states_by_agent
-                            .get(&m.name)
-                            .and_then(|s| s.process_id),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        member_snapshot: build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent),
     })
+}
+
+fn build_member_snapshot(
+    team_config: Option<&TeamConfig>,
+    daemon_states_by_agent: &HashMap<String, CanonicalMemberState>,
+) -> Vec<MemberSnapshot> {
+    let mut names = BTreeSet::new();
+    let mut config_members: HashMap<&str, &agent_team_mail_core::schema::AgentMember> =
+        HashMap::new();
+
+    if let Some(cfg) = team_config {
+        for member in &cfg.members {
+            names.insert(member.name.clone());
+            config_members.insert(member.name.as_str(), member);
+        }
+    }
+    for state in daemon_states_by_agent.values() {
+        names.insert(state.agent.clone());
+    }
+
+    names
+        .into_iter()
+        .map(|name| {
+            if let Some(member) = config_members.get(name.as_str()) {
+                MemberSnapshot {
+                    name: name.clone(),
+                    agent_type: member.agent_type.clone(),
+                    model: member.model.clone(),
+                    status: snapshot_status_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    activity: snapshot_activity_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    session_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.session_id.clone()),
+                    process_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.process_id),
+                }
+            } else {
+                MemberSnapshot {
+                    name: format!("{name} {UNREGISTERED_MARKER}"),
+                    agent_type: UNREGISTERED_MARKER.to_string(),
+                    model: UNREGISTERED_MARKER.to_string(),
+                    status: snapshot_status_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    activity: snapshot_activity_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    session_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.session_id.clone()),
+                    process_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.process_id),
+                }
+            }
+        })
+        .collect()
 }
 
 fn snapshot_status_from_canonical_state(state: Option<&CanonicalMemberState>) -> String {
@@ -1211,6 +1251,7 @@ mod tests {
             process_id: Some(1234),
             reason: "x".to_string(),
             source: "session_registry".to_string(),
+            in_config: true,
         };
         let dead = CanonicalMemberState {
             state: "offline".to_string(),
@@ -1233,6 +1274,45 @@ mod tests {
             "Unknown".to_string()
         );
         assert_eq!(snapshot_status_from_canonical_state(None), "Unknown");
+    }
+
+    #[test]
+    fn build_member_snapshot_includes_daemon_only_members_as_unregistered() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "sess-0".to_string(),
+            members: vec![member("team-lead", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+        let mut daemon_states = HashMap::new();
+        daemon_states.insert(
+            "arch-ctm".to_string(),
+            CanonicalMemberState {
+                agent: "arch-ctm".to_string(),
+                state: "active".to_string(),
+                activity: "busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4242),
+                reason: "session active".to_string(),
+                source: "session_registry".to_string(),
+                in_config: false,
+            },
+        );
+
+        let snapshot = build_member_snapshot(Some(&cfg), &daemon_states);
+        let ghost = snapshot
+            .iter()
+            .find(|m| m.name.contains("arch-ctm"))
+            .expect("daemon-only member missing from snapshot");
+        assert!(
+            ghost.name.contains(UNREGISTERED_MARKER),
+            "daemon-only member name should include marker"
+        );
+        assert_eq!(ghost.agent_type, UNREGISTERED_MARKER);
+        assert_eq!(ghost.model, UNREGISTERED_MARKER);
     }
 
     #[test]
@@ -1653,6 +1733,7 @@ mod tests {
                 process_id: Some(9),
                 reason: "foreign team state".to_string(),
                 source: "session_registry".to_string(),
+                in_config: false,
             }]))
         });
         assert!(
@@ -1682,6 +1763,7 @@ mod tests {
                 process_id: Some(4321),
                 reason: "session active".to_string(),
                 source: "session_registry".to_string(),
+                in_config: true,
             }]))
         });
         assert!(findings.iter().any(|f| f.code == "GHOST_SESSION"));

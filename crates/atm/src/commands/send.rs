@@ -545,16 +545,6 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     if let Some(member) = config.members.iter_mut().find(|m| m.name == sender_name) {
         member.is_active = Some(true);
         member.last_active = Some(now_ms);
-
-        // Opportunistically infer backend type for external agents when absent.
-        let detected_pid = detect_sender_process_pid(member);
-        if member.external_backend_type.is_none()
-            && let Some(pid) = detected_pid
-            && let Some(proc_name) = process_name_for_pid(pid)
-            && let Some(inferred) = infer_backend_from_process_name(&proc_name)
-        {
-            member.external_backend_type = Some(inferred);
-        }
     } else {
         // Sender not in team members — this is unusual but not fatal
         return Ok(());
@@ -588,15 +578,18 @@ fn detect_sender_session_id() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn backend_expected_process_tokens(member: &AgentMember) -> Option<&'static [&'static str]> {
-    const CLAUDE: &[&str] = &["claude", "node"];
-    const CODEX: &[&str] = &["codex"];
-    const GEMINI: &[&str] = &["gemini"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendRule {
+    Claude,
+    Codex,
+    Gemini,
+}
 
+fn backend_expected_rule(member: &AgentMember) -> Option<BackendRule> {
     match member.effective_backend_type() {
-        Some(BackendType::ClaudeCode) => Some(CLAUDE),
-        Some(BackendType::Codex) => Some(CODEX),
-        Some(BackendType::Gemini) => Some(GEMINI),
+        Some(BackendType::ClaudeCode) => Some(BackendRule::Claude),
+        Some(BackendType::Codex) => Some(BackendRule::Codex),
+        Some(BackendType::Gemini) => Some(BackendRule::Gemini),
         Some(BackendType::External) | Some(BackendType::Human(_)) => None,
         None => {
             if member.name == "team-lead"
@@ -605,7 +598,7 @@ fn backend_expected_process_tokens(member: &AgentMember) -> Option<&'static [&'s
                     "general-purpose" | "Explore" | "Plan"
                 )
             {
-                Some(CLAUDE)
+                Some(BackendRule::Claude)
             } else {
                 None
             }
@@ -613,44 +606,41 @@ fn backend_expected_process_tokens(member: &AgentMember) -> Option<&'static [&'s
     }
 }
 
-fn process_name_for_pid(pid: u32) -> Option<String> {
-    use sysinfo::{Pid, System};
-
-    if pid == 0 {
-        return None;
-    }
-
-    let sys = System::new_all();
-    sys.process(Pid::from_u32(pid))
-        .map(|p| p.name().to_string_lossy().to_lowercase())
+fn process_observation(sys: &sysinfo::System, pid: sysinfo::Pid) -> Option<(String, String)> {
+    let process = sys.process(pid)?;
+    let comm = process.name().to_string_lossy().to_lowercase();
+    let args = process
+        .cmd()
+        .iter()
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    Some((comm, args))
 }
 
-fn infer_backend_from_process_name(process_name: &str) -> Option<BackendType> {
-    let lower = process_name.to_lowercase();
-    if lower.contains("codex") {
-        return Some(BackendType::Codex);
+fn process_matches_rule(rule: BackendRule, comm: &str, args: &str) -> bool {
+    match rule {
+        BackendRule::Claude => comm == "claude",
+        BackendRule::Codex => comm == "codex",
+        BackendRule::Gemini => comm == "node" && args.contains("gemini"),
     }
-    if lower.contains("gemini") {
-        return Some(BackendType::Gemini);
-    }
-    if lower.contains("claude") || lower.contains("node") {
-        return Some(BackendType::ClaudeCode);
-    }
-    None
 }
 
 fn detect_sender_process_pid(member: &AgentMember) -> Option<u32> {
+    use sysinfo::{Pid, System};
+    let expected_rule = backend_expected_rule(member)?;
+
+    let sys = System::new_all();
     if let Ok(Some(hook)) = read_hook_file()
         && hook.pid > 1
+        && let Some((comm, args)) = process_observation(&sys, Pid::from_u32(hook.pid))
+        && process_matches_rule(expected_rule, &comm, &args)
     {
         return Some(hook.pid);
     }
 
-    use sysinfo::{Pid, System};
-    let expected_tokens = backend_expected_process_tokens(member);
-    let sys = System::new_all();
     let mut cursor = Pid::from_u32(std::process::id());
-    let mut fallback_parent: Option<u32> = None;
 
     for _ in 0..8 {
         let Some(proc_info) = sys.process(cursor) else {
@@ -660,26 +650,15 @@ fn detect_sender_process_pid(member: &AgentMember) -> Option<u32> {
             break;
         };
         let parent_u32 = parent.as_u32();
-        if fallback_parent.is_none() {
-            fallback_parent = Some(parent_u32);
-        }
-
-        if let Some(tokens) = expected_tokens {
-            if let Some(parent_name) = sys
-                .process(parent)
-                .map(|p| p.name().to_string_lossy().to_lowercase())
-                && tokens.iter().any(|tok| parent_name.contains(tok))
-            {
-                return Some(parent_u32);
-            }
-        } else {
+        if let Some((comm, args)) = process_observation(&sys, parent)
+            && process_matches_rule(expected_rule, &comm, &args)
+        {
             return Some(parent_u32);
         }
-
         cursor = parent;
     }
 
-    fallback_parent
+    None
 }
 
 #[cfg(test)]
@@ -748,38 +727,35 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_backend_from_process_name() {
-        assert_eq!(
-            infer_backend_from_process_name("codex"),
-            Some(BackendType::Codex)
-        );
-        assert_eq!(
-            infer_backend_from_process_name("gemini-cli"),
-            Some(BackendType::Gemini)
-        );
-        assert_eq!(
-            infer_backend_from_process_name("claude"),
-            Some(BackendType::ClaudeCode)
-        );
-        assert_eq!(
-            infer_backend_from_process_name("node"),
-            Some(BackendType::ClaudeCode)
-        );
-        assert_eq!(infer_backend_from_process_name("python3"), None);
-    }
-
-    #[test]
-    fn test_backend_expected_process_tokens_prefers_backend_type() {
+    fn test_backend_expected_rule_prefers_backend_type() {
         let codex_member = make_member("arch-ctm", "codex", Some(BackendType::Codex));
-        let tokens = backend_expected_process_tokens(&codex_member).unwrap();
-        assert_eq!(tokens, &["codex"]);
+        assert_eq!(
+            backend_expected_rule(&codex_member),
+            Some(BackendRule::Codex)
+        );
     }
 
     #[test]
-    fn test_backend_expected_process_tokens_defaults_team_lead_to_claude() {
+    fn test_backend_expected_rule_defaults_team_lead_to_claude() {
         let lead = make_member("team-lead", "general-purpose", None);
-        let tokens = backend_expected_process_tokens(&lead).unwrap();
-        assert_eq!(tokens, &["claude", "node"]);
+        assert_eq!(backend_expected_rule(&lead), Some(BackendRule::Claude));
+    }
+
+    #[test]
+    fn test_process_matches_rule_uses_daemon_strict_semantics() {
+        assert!(process_matches_rule(BackendRule::Claude, "claude", ""));
+        assert!(!process_matches_rule(BackendRule::Claude, "node", "claude"));
+        assert!(process_matches_rule(BackendRule::Codex, "codex", ""));
+        assert!(process_matches_rule(
+            BackendRule::Gemini,
+            "node",
+            "gemini --model 2.5-pro"
+        ));
+        assert!(!process_matches_rule(
+            BackendRule::Gemini,
+            "gemini",
+            "gemini --model 2.5-pro"
+        ));
     }
 
     #[test]

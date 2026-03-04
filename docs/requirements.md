@@ -946,12 +946,19 @@ Canonical team member-state snapshot (daemon -> CLI) must include:
 - `activity` (`busy|idle|unknown`)
 - `session_id` (optional)
 - `process_id` (optional)
+- `in_config` (optional bool; default `true`; `false` means daemon session exists for
+  an agent not present in team `config.json`)
 - `reason`
 - `source`
 
 Required behavior:
 - `atm doctor`, `atm status`, and `atm members` must read liveness/status from
   this snapshot.
+- `atm status` and `atm members` must iterate the union of:
+  1) team `config.json` members and 2) daemon-tracked sessions for the same team.
+  Daemon-only rows must be rendered as unregistered/ghost entries.
+- `atm doctor` member snapshot must include daemon-only rows with an explicit
+  unregistered marker.
 - No command-level fallback may map `isActive=false` directly to offline/dead.
 - Per-member status derivation logic must not be duplicated across commands;
   command handlers consume daemon snapshot values directly.
@@ -960,6 +967,13 @@ Required behavior:
 - `atm send` must not write session/process ownership fields (`session_id`,
   `process_id`) directly in team `config.json`; these are daemon-owned via
   session registry.
+- On daemon cold start (or when no live registry record exists for a configured
+  member), daemon may bootstrap a session-registry record from roster hints only
+  when `processId` is present, alive, and backend validation does not report a
+  mismatch.
+- `atm send` PID fallback detection must use the same strict backend rules as the
+  daemon validator (`claude=comm:claude`, `codex=comm:codex`,
+  `gemini=comm:node+args~gemini`) and must not stamp unmatched fallback PIDs.
 
 #### Operational State Variable Inventory
 
@@ -1246,7 +1260,7 @@ team-lead = "arch-atm"   # role-name → inbox-identity mapping
 | `ATM_DAEMON_AUTOSTART` | Daemon autostart toggle (`1/true/yes` enables, `0/false/no` disables); defaults to enabled when unset |
 | `ATM_DAEMON_BIN` | Optional daemon binary override for test/ops harnesses |
 | `ATM_LOG` | Stderr log level (`trace|debug|info|warn|error`), default `info` |
-| `ATM_LOG_MSG` | Message text logging policy (`none|truncated|full`), default `truncated` |
+| `ATM_LOG_MSG` | Message preview toggle: `1` enables 20-char preview; unset/other values disable preview |
 | `ATM_LOG_FILE` | Canonical unified log file path override for test/ops |
 
 Environment value rules:
@@ -1486,7 +1500,8 @@ No legacy `events.jsonl` sink code remains in any crate.
 #### Runtime Controls
 
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
-- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy (default: `truncated`).
+- `ATM_LOG_MSG=1` enables message preview text; unset (or legacy string values
+  `none|truncated|full`) disables preview text.
 - `ATM_LOG_FILE` may override file path for tests/ops.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
