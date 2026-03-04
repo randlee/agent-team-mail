@@ -1512,7 +1512,8 @@ Z.5 is independent and can run in parallel with Z.3/Z.4.
 **`register-hint` protocol design** (from arch investigation):
 - New socket command `"register-hint"`, payload: `{team, agent, session_id, process_id?, backend_type?}`
 - Response: `{registered, agent, team, session_registered, activity_updated}`
-- Daemon unavailable → silent skip (`Ok(None)`, same as existing `subscribe_to_agent()` pattern)
+- Daemon unreachable (socket not found/refused) → silent skip (`Ok(None)`, same as `subscribe_to_agent()` pattern)
+- Daemon running but returns unknown-command error (older daemon) → fail gracefully with actionable upgrade guidance; must NOT silently fall back to config.json writes
 - In `set_sender_heartbeat()`: keep `is_active`/`last_active`; remove `session_id`, `set_process_id_hint()`, `external_backend_type` writes; add best-effort `register_hint()` call
 - Handler: synchronous in `parse_and_dispatch()`, uses `session_registry.upsert_for_team()` + `state_store.register_agent()`
 
