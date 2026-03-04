@@ -66,7 +66,7 @@ def main() -> int:
             "agent": identity,
             "team": default_team,
             "source": {"kind": "claude_hook"},
-            "process_id": os.getppid(),
+            "process_id": os.getpid(),
         }
         send_hook_event(payload)
 
