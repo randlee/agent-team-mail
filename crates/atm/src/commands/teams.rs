@@ -609,7 +609,9 @@ fn ensure_spawn_member_metadata(
     let team_dir = home_dir.join(".claude/teams").join(team);
     let config_path = team_dir.join("config.json");
     if !config_path.exists() {
-        anyhow::bail!("Team config not found at {}", config_path.display());
+        // Spawn must remain resilient when team config does not yet exist.
+        // Metadata persistence is best-effort in this case.
+        return Ok(());
     }
 
     let lock_path = config_path.with_extension("lock");
@@ -618,12 +620,14 @@ fn ensure_spawn_member_metadata(
 
     let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
     let backend = backend_type_for_runtime(runtime);
-    let model_text = model_override.unwrap_or("unknown");
-    let parsed_model =
-        ModelId::from_str(model_text).map_err(|e| anyhow::anyhow!("Invalid --model: {e}"))?;
+    let parsed_model_override = model_override.map(|model| {
+        ModelId::from_str(model).unwrap_or_else(|_| ModelId::Custom(model.to_string()))
+    });
 
     if let Some(member) = team_config.members.iter_mut().find(|m| m.name == agent) {
-        if let Some(model) = model_override {
+        if let Some(model) = model_override
+            && let Some(parsed_model) = parsed_model_override
+        {
             member.model = model.to_string();
             member.external_model = Some(parsed_model);
         } else if member.external_model.is_none() {
@@ -642,7 +646,7 @@ fn ensure_spawn_member_metadata(
                 agent_id: format!("{agent}@{team}"),
                 name: agent.to_string(),
                 agent_type: runtime_name(runtime).to_string(),
-                model: model_text.to_string(),
+                model: model_override.unwrap_or("unknown").to_string(),
                 prompt: None,
                 color: None,
                 plan_mode_required: None,
@@ -655,7 +659,7 @@ fn ensure_spawn_member_metadata(
                 last_active: None,
                 session_id: None,
                 external_backend_type: Some(backend),
-                external_model: Some(parsed_model),
+                external_model: Some(parsed_model_override.unwrap_or(ModelId::Unknown)),
                 unknown_fields: std::collections::HashMap::new(),
             });
     }
