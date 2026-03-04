@@ -968,6 +968,7 @@ Canonical team member-state snapshot (daemon -> CLI) must include:
 - `agent`
 - `state` (`active|idle|offline|unknown`)
 - `activity` (`busy|idle|unknown`)
+- `in_config` (optional bool, defaults to `true` when omitted)
 - `session_id` (optional)
 - `process_id` (optional)
 - `reason`
@@ -979,6 +980,9 @@ Required behavior:
 - Static roster metadata (`model`, `external_backend_type`) remains
   `config.json`-derived and must be joined with daemon snapshot output for
   presentation; daemon remains authoritative for liveness/activity/session state.
+- `in_config` semantics:
+  - `true`: member exists in both daemon state and team `config.json`
+  - `false`: daemon-only member (not present in current `config.json` roster)
 - No command-level fallback may map `isActive=false` directly to offline/dead.
 - Per-member status derivation logic must not be duplicated across commands;
   command handlers consume daemon snapshot values directly.
@@ -995,6 +999,7 @@ Required behavior:
 | `external_backend_type` | Team mutation/spawn CLI paths (`add-member`, `teams spawn`) | Team `config.json` member field (`external_backend_type`) | Enum/string backend id or absent | Static backend identity metadata for display/routing hints; not a liveness source. |
 | `session_id` | Daemon session registry (`session_start`/`session_end`) | `.claude/daemon/session-registry.json` | Non-empty string or absent | Session identity tracked by daemon lifecycle registry. |
 | `process_id` | Daemon session registry | `.claude/daemon/session-registry.json` | Integer PID (`>1`) or absent | Process identity used for liveness checks. |
+| `in_config` | Daemon roster reconciliation snapshot | Daemon socket payload (`list-agents` team-scoped) | `true`, `false` (default `true` when omitted) | Indicates whether member currently exists in team `config.json` roster. |
 | `status` (`state`) | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `active`, `idle`, `offline`, `unknown` | Canonical liveness/status consumed by doctor/status/members. |
 | `activity` | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `busy`, `idle`, `unknown` | Canonical activity hint exposed separately from liveness. |
 
@@ -1608,6 +1613,27 @@ identity and liveness.
 - **Lookup semantics**:
   - Team-scoped lead check must resolve by `(team, agent=team-lead)`
   - CLI `teams resume` refusal logic must use this team-scoped daemon result, not bare-name process lookup
+
+Authorized daemon command for CLI registration hints:
+- `register-hint` (dedicated socket command) is the required CLI path for
+  updating daemon session/activity hints from high-traffic CLI operations
+  (for example `atm send`) without direct session/PID writes to `config.json`.
+- Request payload (minimum):
+  - `team` (string)
+  - `agent` (string)
+  - `session_id` (string)
+  - `process_id` (optional integer)
+  - `backend_type` (optional string/enum)
+- Success response payload (minimum):
+  - `registered` (bool)
+  - `agent` (string)
+  - `team` (string)
+  - `session_registered` (bool)
+  - `activity_updated` (bool)
+- Backward-compatibility requirement:
+  - When CLI sends `register-hint` to an older daemon that does not implement
+    the command, CLI must fail gracefully with actionable daemon-upgrade guidance
+    and must not silently fall back to direct `config.json` session/PID writes.
 
 Minimum record shape:
 
@@ -2472,9 +2498,7 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 5. **Large inbox strategy**: For inboxes with 10K+ messages, should `atm-core` support streaming JSON parsing, or is read-all-into-memory acceptable for MVP?
 
-6. **Register-hint daemon protocol (`#413`)**: Should `register-hint` be introduced as a dedicated daemon command (for example `register-hint`) or as an extension of `hook-event` with `source=cli_send`? Backward-compat behavior must be explicit when CLI is newer than daemon.
-
-7. **Team-scoped roster query contract (`#417`)**: Does daemon require a new query to return full canonical member snapshots (including daemon-only/ghost members), or can current list APIs be extended without breaking existing consumers?
+6. **Team-scoped roster query contract (`#417`)**: Does daemon require a new query to return full canonical member snapshots (including daemon-only/ghost members), or can current list APIs be extended without breaking existing consumers?
 
 ---
 
