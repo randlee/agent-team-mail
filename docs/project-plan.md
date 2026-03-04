@@ -1407,8 +1407,188 @@ the current tranche focused on onboarding contract closure.
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
 
 **Completed**: 99+ sprints across 23 phases (CI green)
-**Current version**: v0.27.0
-**Next**: Phase X (planning)
+**Current version**: v0.33.2
+**Current phase**: Phase Z (planning)
+
+---
+
+## 17.11 Phase Z: Daemon SSoT + Observability Hardening
+
+**Goal**: Fix the two interconnected gaps revealed during Phase Y dogfood testing:
+(1) daemon team-roster SSoT bypasses — CLI commands writing state directly to
+`config.json` without daemon sync, causing stale/incorrect doctor/status output;
+(2) observability gaps — missing structured log events for lifecycle transitions,
+hook events, and send-line format inconsistencies that prevent reliable log
+analysis.
+
+**Execution model**: arch-ctm sequential development, quality-mgr QA in parallel.
+
+**Integration branch**: `integrate/phase-Z` off `develop`.
+
+**Dependency graph**:
+```
+Z.1 (quick wins) ──┐
+Z.2 (log format)   ├──→ Z.3 (SSoT fast path) ──→ Z.4 (SSoT complete)
+Z.5 (lifecycle)  ──┘
+```
+Z.1 and Z.2 can execute in parallel (independent tracks).
+Z.3 depends on Z.1 (doctor fix needed to validate SSoT path changes).
+Z.4 depends on Z.3 (builds on daemon-sync pattern established in Z.3).
+Z.5 is independent and can run in parallel with Z.3/Z.4.
+
+### Z.1 — Quick Wins: Doctor Correctness + Release Fix
+
+**Issues**: [#407](https://github.com/randlee/agent-team-mail/issues/407), [#408](https://github.com/randlee/agent-team-mail/issues/408), [#403](https://github.com/randlee/agent-team-mail/issues/403), [#399](https://github.com/randlee/agent-team-mail/issues/399)
+
+**Deliverables**:
+1. **#407**: `pid_backend_validation.rs` — treat `sysinfo::None` (process not found)
+   as inconclusive rather than mismatch; do not emit `PID_PROCESS_MISMATCH` when
+   process lookup returns `None`.
+2. **#408**: Add `format_session_short()` utility — show concise prefix of real
+   session UUIDs (8 chars) and `local:<name>` prefix for synthetic IDs; apply at
+   `doctor.rs:1023` and all other session-id display callsites.
+3. **#403**: `event_loop` reconcile — after setting a member offline due to
+   `pid_backend_mismatch`, do not overwrite back to `Active` in the same pass;
+   backend mismatch must remain sticky until re-registration.
+4. **#399**: Switch `post-publish-verify` CI job from `curl` to `cargo search`
+   to avoid Cloudflare 403 blocks from GH Actions runner IPs.
+
+**Acceptance criteria**:
+- `atm doctor` shows `team-lead` as Online when the session is active.
+- Session ID column shows `abc12345` (8-char prefix) for real UUIDs and
+  `local:team-lead` for synthetic IDs — never the full 50+ char string.
+- Backend-mismatch-offline state is not overwritten to Active in same reconcile pass.
+- `post-publish-verify` CI job passes without manual intervention.
+
+### Z.2 — Log Format + Doctor UX (Observability Easy Wins)
+
+**Issues**: [#410](https://github.com/randlee/agent-team-mail/issues/410), [#411](https://github.com/randlee/agent-team-mail/issues/411), [#412](https://github.com/randlee/agent-team-mail/issues/412), [#419](https://github.com/randlee/agent-team-mail/issues/419)
+
+**Deliverables**:
+1. **#410**: Ensure all send-path log events carry `sender_agent`, `sender_team`,
+   `sender_pid`, `recipient_agent`, `recipient_team`, `recipient_pid` fields for
+   deterministic downstream rendering.
+2. **#411**: Normalize send-line human-readable format to
+   `send <from>@<team> [<pid|->] -> <to>@<team> [<pid|->] "<preview>"` with
+   stable sender→recipient ordering; use `-` when PID unavailable.
+3. **#412**: Gate message preview on `ATM_LOG_MSG=1` env var: when set, include
+   quoted 20-char truncated preview with ellipsis; when unset, omit preview text
+   entirely. Add tests for both modes.
+4. **#419**: Improve doctor Log Window label: default `last 10m`; `--since <dur>`
+   shows `last <dur>`; `--since <ts>` shows `since YYYY-MM-DD HH:mm UTC (<elapsed>)`;
+   `--full` shows `since session start (<elapsed>)`. JSON preserves precise
+   `start`/`end` ISO timestamps + `elapsed_secs`.
+
+**Acceptance criteria**:
+- `atm logs` entries for sends include all 6 identity+PID fields.
+- Human send-line format is stable across ATM_LOG_MSG=0/1.
+- `atm doctor` Log Window header matches the specified formats.
+- `atm doctor --json` Log Window object has `start`, `end`, `elapsed_secs`.
+
+### Z.3 — SSoT Fast Path: send.rs + MemberSnapshot + Model Field
+
+**Issues**: [#413](https://github.com/randlee/agent-team-mail/issues/413), [#415](https://github.com/randlee/agent-team-mail/issues/415), [#409](https://github.com/randlee/agent-team-mail/issues/409)
+
+**Deliverables**:
+1. **#413** (highest-traffic bypass): Remove `session_id` and `process_id` writes
+   from `send.rs::set_sender_heartbeat()`. Add a `register-hint` daemon command
+   that CLI sends instead; daemon updates its session registry from this hint
+   rather than CLI writing directly to `config.json`.
+2. **#415**: Remove `#[serde(skip_serializing, skip_deserializing)]` from
+   `DoctorReport.member_snapshot` — expose daemon-sourced `CanonicalMemberState`
+   in `atm doctor --json` output. Add integration test asserting `--json` output
+   includes `member_snapshot` array.
+3. **#409**: Add `model: Option<String>` field to `CanonicalMemberState` struct;
+   populate from daemon session registry (not `config.json`). Daemon updates
+   `model` field when it receives a registration event that includes model info.
+   Doctor reads `model` from `CanonicalMemberState` snapshot, not `cfg.members`.
+
+**Acceptance criteria**:
+- `atm send` no longer writes `session_id`/`processId` to `config.json`.
+- `atm doctor --json` output includes `member_snapshot` array with daemon state.
+- `atm doctor` Model column reflects daemon canonical state; not config.json.
+- Tests cover register-hint daemon path and MemberSnapshot JSON serialization.
+
+### Z.4 — SSoT Complete: register, teams, status, cold-start
+
+**Issues**: [#414](https://github.com/randlee/agent-team-mail/issues/414), [#416](https://github.com/randlee/agent-team-mail/issues/416), [#417](https://github.com/randlee/agent-team-mail/issues/417), [#418](https://github.com/randlee/agent-team-mail/issues/418), [#401](https://github.com/randlee/agent-team-mail/issues/401), [#402](https://github.com/randlee/agent-team-mail/issues/402)
+
+**Deliverables**:
+1. **#414**: Route `register.rs` session_id writes through daemon session-registry
+   command (same register-hint channel established in Z.3); remove direct
+   `config.json` writes for session/PID state from `register.rs`.
+2. **#416**: Audit and remove remaining `session_id`/`backend_type` direct writes
+   in `teams.rs` and `send.rs` backend-inference path; route through daemon or
+   remove if daemon already has authoritative state.
+3. **#417**: Fix `status.rs` member iteration to query daemon roster first; fall
+   back to `config.json` only for members not yet registered with daemon. Daemon
+   ghost agents (registered but not in config) must appear in `atm status`.
+4. **#418**: Bootstrap cold-start `process_id_hint` from `config.json` into the
+   daemon session registry on daemon startup (before first hook event fires).
+5. **#401**: Align `send.rs` backend heuristics with daemon strict validation rules
+   (`claude=comm:claude`, `codex=comm:codex`, `gemini=node+args contains gemini`).
+6. **#402**: Replace `fallback_parent` PID walk in `send.rs` with a safer approach
+   that avoids stamping shell/tmux PIDs as `processId` hints.
+
+**Acceptance criteria**:
+- `register.rs` writes no session/PID fields directly to `config.json`.
+- `atm status` shows daemon-registered agents not present in `config.json`.
+- Cold-start: daemon session registry pre-populated from `config.json` hints
+  before first hook event.
+- Send-side backend heuristics match daemon validation rules exactly.
+- No false `PID_PROCESS_MISMATCH` from parent process walk PID contamination.
+
+### Z.5 — Lifecycle Logging + Hook Events as First-Class Logs
+
+**Issues**: [#420](https://github.com/randlee/agent-team-mail/issues/420), [#421](https://github.com/randlee/agent-team-mail/issues/421)
+
+**Deliverables**:
+1. **#420**: Emit structured `state_transition` INFO log events for all
+   `Offline↔Online` state changes and `session_id`/`PID` field changes, with
+   fields: `agent`, `team`, `old_state`, `new_state`, `reason`, `source=daemon`,
+   `old_session_id`, `new_session_id`, `old_pid`, `new_pid`. Log `Busy↔Idle`
+   at DEBUG level only. Add tests asserting one event emitted per transition.
+2. **#421**: Emit always-on INFO lifecycle log events for all hook path events:
+   `session_start`, `pre_compact`, `compact`, `session_end` (and their failure
+   variants). Each event must include `timestamp`, `agent`, `team`, `pid`,
+   `session_id`, `outcome` (success/fail). Add tests asserting once-per-event
+   emission and no debug-only gating.
+3. **Advanced observability** (arch-ctm grouping, medium effort):
+   - Canonical `state_transition` event with `old_value`/`new_value`/`reason`/
+     `source`/`seq` (sequence number for ordering).
+   - Mailbox health metrics surfaced in doctor table (queue depth, last-delivered
+     age, stale message count).
+
+**Acceptance criteria**:
+- `atm logs` shows `state_transition` events for every Offline↔Online change.
+- Hook lifecycle events appear in `atm logs` at INFO level unconditionally.
+- No state transition or hook event is emitted more than once per occurrence.
+- `atm doctor` includes mailbox health metrics column (or separate section).
+
+### Deferred from Phase Z (follow-on)
+
+| Issue | Reason Deferred |
+|-------|----------------|
+| [#287](https://github.com/randlee/agent-team-mail/issues/287) | Doctor duration parser boundary — isolated, low-impact |
+| [#337](https://github.com/randlee/agent-team-mail/issues/337) | Serial env-mutating tests — CI debt, low urgency |
+| [#338](https://github.com/randlee/agent-team-mail/issues/338) | add-member inbox atomicity — not blocking SSoT work |
+| [#351](https://github.com/randlee/agent-team-mail/issues/351) | /team-join slash command — Phase X planned |
+| [#361](https://github.com/randlee/agent-team-mail/issues/361) | Spawn --folder normalization — Phase X planned |
+| [#357](https://github.com/randlee/agent-team-mail/issues/357) | atm init improvements — Phase X planned |
+| arch-ctm obs #2 | Daemon heartbeat/health block in doctor — Phase Z+1 |
+| arch-ctm obs #6 | Reconciliation audit events — Phase Z+1 |
+| arch-ctm obs #9 | Schema version + stable action enum — Phase Z+1 |
+| arch-ctm obs #3 | Message lifecycle correlation (send→delivered→read→ack) — Phase Z+1 |
+
+### Sprint Summary
+
+| Sprint | Name | Issues | Depends On | Size | Status |
+|--------|------|--------|------------|------|--------|
+| Z.1 | Quick Wins: Doctor + Release Fix | #407, #408, #403, #399 | — | S | PLANNED |
+| Z.2 | Log Format + Doctor UX | #410, #411, #412, #419 | — | M | PLANNED |
+| Z.3 | SSoT Fast Path: send.rs + MemberSnapshot + Model | #413, #415, #409 | Z.1 | M | PLANNED |
+| Z.4 | SSoT Complete: register/teams/status/cold-start | #414, #416, #417, #418, #401, #402 | Z.3 | L | PLANNED |
+| Z.5 | Lifecycle Logging + Hook Events | #420, #421 + advanced obs | — | M | PLANNED |
 
 ---
 
