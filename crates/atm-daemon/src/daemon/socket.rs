@@ -24,10 +24,10 @@
 use agent_team_mail_core::control::{
     CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,
 };
-use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
+use agent_team_mail_core::daemon_client::{CanonicalMemberState, LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging_event::LogEventV1;
-use agent_team_mail_core::schema::TeamConfig;
+use agent_team_mail_core::schema::{AgentMember, TeamConfig};
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -35,6 +35,7 @@ use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 
 use crate::daemon::log_writer::LogEventQueue;
+use crate::daemon::pid_backend_validation::{PidBackendValidation, validate_pid_backend};
 
 use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
 use crate::daemon::session_registry::SharedSessionRegistry;
@@ -1009,6 +1010,7 @@ async fn handle_hook_event_command(
         auth.source,
         LifecycleSourceKind::ClaudeHook | LifecycleSourceKind::Unknown
     );
+    let agent_pid = process_id.unwrap_or(0);
 
     match event_type.as_str() {
         "session_start" => {
@@ -1018,11 +1020,91 @@ async fn handle_hook_event_command(
                     serde_json::json!({"processed": false, "reason": "missing session_id"}),
                 );
             }
-            let pid = process_id.unwrap_or(0);
+            let home = match agent_team_mail_core::home::get_home_dir() {
+                Ok(h) => h,
+                Err(e) => {
+                    return make_ok_response(
+                        &request.request_id,
+                        serde_json::json!({"processed": false, "reason": format!("home resolution failed: {e}")}),
+                    );
+                }
+            };
+            let Some(member) = load_team_member(&home, &team, &agent) else {
+                return make_ok_response(
+                    &request.request_id,
+                    serde_json::json!({"processed": false, "reason": "agent not in team"}),
+                );
+            };
+            let has_existing_session = session_registry
+                .lock()
+                .unwrap()
+                .query_for_team(&team, &agent)
+                .is_some();
+            let has_activity_hint = member.is_active == Some(true)
+                || member.last_active.is_some()
+                || member
+                    .session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|s| !s.is_empty());
+            if !has_existing_session && has_activity_hint {
+                let msg = format!(
+                    "ACTIVE_WITHOUT_SESSION: agent='{}' had activity hint before session_start registration (isActive={:?}, lastActive={:?}, sessionHint={:?})",
+                    agent, member.is_active, member.last_active, member.session_id
+                );
+                warn!("{msg}");
+                emit_event_best_effort(EventFields {
+                    level: "warn",
+                    source: "atm-daemon",
+                    action: "ACTIVE_WITHOUT_SESSION",
+                    team: Some(team.clone()),
+                    agent_name: Some(agent.clone()),
+                    result: Some("registration".to_string()),
+                    error: Some(msg),
+                    ..Default::default()
+                });
+            }
+            if agent_pid > 1 {
+                let validation = validate_pid_backend(&member, agent_pid);
+                if validation.is_alive_mismatch() {
+                    emit_pid_process_mismatch(&team, &agent, &validation, "registration");
+                    {
+                        let mut tracker = state_store.lock().unwrap();
+                        if tracker.get_state(&agent).is_none() {
+                            tracker.register_agent(&agent);
+                        }
+                        tracker.set_state_with_context(
+                            &agent,
+                            AgentState::Offline,
+                            &format!(
+                                "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
+                                validation.backend,
+                                validation.expected_display(),
+                                validation.actual_display(),
+                                validation.pid
+                            ),
+                            "pid_backend_validation",
+                        );
+                    }
+                    return make_ok_response(
+                        &request.request_id,
+                        serde_json::json!({
+                            "processed": false,
+                            "reason": format!(
+                                "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
+                                validation.backend,
+                                validation.expected_display(),
+                                validation.actual_display(),
+                                validation.pid
+                            )
+                        }),
+                    );
+                }
+            }
             session_registry
                 .lock()
                 .unwrap()
-                .upsert_for_team(&team, &agent, &session_id, pid);
+                .upsert_for_team(&team, &agent, &session_id, agent_pid);
             {
                 let mut tracker = state_store.lock().unwrap();
                 let current = tracker.get_state(&agent);
@@ -1043,7 +1125,7 @@ async fn handle_hook_event_command(
                     );
                 }
             }
-            info!(agent = %agent, session_id = %session_id, "hook_event.session_start");
+            info!(agent = %agent, agent_pid = agent_pid, session_id = %session_id, "hook_event.session_start");
         }
         "teammate_idle" => {
             {
@@ -1065,7 +1147,7 @@ async fn handle_hook_event_command(
                     );
                 }
             }
-            info!("hook_event teammate_idle: agent={agent}");
+            info!(agent = %agent, agent_pid = agent_pid, "hook_event teammate_idle");
         }
         "session_end" => {
             if require_lead_for_session_end && !auth.is_team_lead {
@@ -1091,7 +1173,7 @@ async fn handle_hook_event_command(
                     );
                 }
             }
-            info!("hook_event session_end: agent={agent}");
+            info!(agent = %agent, agent_pid = agent_pid, "hook_event session_end");
         }
         other => {
             debug!("hook_event unknown event type: {other}");
@@ -2047,7 +2129,8 @@ fn handle_agent_state(
         .unwrap()
         .query_for_team(&team, &agent)
         .cloned();
-    let (canonical_state, reason, source) = derive_canonical_state(
+    let canonical = derive_canonical_member_state(
+        &team,
         &member,
         tracker_state,
         session.as_ref(),
@@ -2057,11 +2140,11 @@ fn handle_agent_state(
     make_ok_response(
         &request.request_id,
         serde_json::json!({
-            "state": canonical_state,
-            "baseline_state": canonical_state,
+            "state": canonical.state.clone(),
+            "baseline_state": canonical.state,
             "last_transition": last_transition,
-            "reason": reason,
-            "source": source,
+            "reason": canonical.reason,
+            "source": canonical.source,
         }),
     )
 }
@@ -2096,14 +2179,15 @@ fn handle_list_agents(
                 let tracker_state = tracker.get_state(&m.name);
                 let tracker_meta = tracker.transition_meta(&m.name);
                 let session = session_guard.query_for_team(team_name, &m.name);
-                let (state, reason, source) =
-                    derive_canonical_state(&m, tracker_state, session, tracker_meta);
-                serde_json::json!({
-                    "agent": m.name,
-                    "state": state,
-                    "reason": reason,
-                    "source": source,
-                })
+                let state = derive_canonical_member_state(
+                    team_name,
+                    &m,
+                    tracker_state,
+                    session,
+                    tracker_meta,
+                );
+                serde_json::to_value(state)
+                    .unwrap_or_else(|_| serde_json::json!({"agent": m.name, "state": "unknown"}))
             })
             .collect();
         return make_ok_response(&request.request_id, serde_json::json!(agents));
@@ -2150,21 +2234,81 @@ fn load_team_member(
         .find(|m| m.name == agent || m.agent_id == format!("{agent}@{team}"))
 }
 
-fn derive_canonical_state(
-    member: &agent_team_mail_core::schema::AgentMember,
+fn emit_pid_process_mismatch(
+    team: &str,
+    agent: &str,
+    validation: &PidBackendValidation,
+    stage: &str,
+) {
+    let msg = format!(
+        "pid/backend mismatch at {}: agent='{}' backend='{}' expected='{}' actual='{}' pid={}",
+        stage,
+        agent,
+        validation.backend,
+        validation.expected_display(),
+        validation.actual_display(),
+        validation.pid
+    );
+    warn!("{msg}");
+    emit_event_best_effort(EventFields {
+        level: "warn",
+        source: "atm-daemon",
+        action: "PID_PROCESS_MISMATCH",
+        team: Some(team.to_string()),
+        agent_name: Some(agent.to_string()),
+        target: Some(format!("pid:{}", validation.pid)),
+        result: Some(stage.to_string()),
+        error: Some(msg),
+        ..Default::default()
+    });
+}
+
+fn derive_canonical_member_state(
+    team: &str,
+    member: &AgentMember,
     tracker_state: Option<AgentState>,
     session: Option<&crate::daemon::session_registry::SessionRecord>,
     tracker_meta: Option<&crate::plugins::worker_adapter::TransitionMeta>,
-) -> (&'static str, String, String) {
+) -> CanonicalMemberState {
+    let agent = member.name.as_str();
     if let Some(session) = session {
         let session_alive = session.state == crate::daemon::session_registry::SessionState::Active
             && session.is_process_alive();
         if !session_alive {
-            return (
-                "offline",
-                "session inactive or pid dead".to_string(),
-                "session_registry".to_string(),
+            return CanonicalMemberState {
+                agent: agent.to_string(),
+                state: "offline".to_string(),
+                activity: "unknown".to_string(),
+                session_id: Some(session.session_id.clone()),
+                process_id: Some(session.process_id),
+                reason: "session inactive or pid dead".to_string(),
+                source: "session_registry".to_string(),
+            };
+        }
+        let validation = validate_pid_backend(member, session.process_id);
+        if validation.is_alive_mismatch() {
+            let mismatch_reason = format!(
+                "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
+                validation.backend,
+                validation.expected_display(),
+                validation.actual_display(),
+                validation.pid
             );
+            let already_reported = tracker_meta.is_some_and(|meta| {
+                meta.source == "pid_backend_validation" && meta.reason == mismatch_reason
+            });
+            if !already_reported {
+                emit_pid_process_mismatch(team, agent, &validation, "liveness");
+            }
+            return CanonicalMemberState {
+                agent: agent.to_string(),
+                state: "offline".to_string(),
+                activity: "unknown".to_string(),
+                session_id: Some(session.session_id.clone()),
+                process_id: Some(session.process_id),
+                reason: mismatch_reason,
+                source: "pid_backend_validation".to_string(),
+            };
         }
         if matches!(tracker_state, Some(AgentState::Idle)) {
             let reason = tracker_meta
@@ -2173,68 +2317,79 @@ fn derive_canonical_state(
             let source = tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "hook_event".to_string());
-            return ("idle", reason, source);
+            return CanonicalMemberState {
+                agent: agent.to_string(),
+                state: "idle".to_string(),
+                activity: "idle".to_string(),
+                session_id: Some(session.session_id.clone()),
+                process_id: Some(session.process_id),
+                reason,
+                source,
+            };
         }
-        return (
-            "active",
-            "session active with live pid".to_string(),
-            "session_registry".to_string(),
-        );
+        return CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: Some(session.session_id.clone()),
+            process_id: Some(session.process_id),
+            reason: "session active with live pid".to_string(),
+            source: "session_registry".to_string(),
+        };
     }
 
     match tracker_state {
-        Some(AgentState::Idle) => (
-            "idle",
-            tracker_meta
+        Some(AgentState::Idle) => CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "idle".to_string(),
+            activity: "idle".to_string(),
+            session_id: None,
+            process_id: None,
+            reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "idle tracker state".to_string()),
-            tracker_meta
+            source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
-        ),
-        Some(AgentState::Active) => (
-            "active",
-            tracker_meta
+        },
+        Some(AgentState::Active) => CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: None,
+            process_id: None,
+            reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "active tracker state".to_string()),
-            tracker_meta
+            source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
-        ),
-        Some(AgentState::Offline) => (
-            "offline",
-            tracker_meta
+        },
+        Some(AgentState::Offline) => CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "offline".to_string(),
+            activity: "unknown".to_string(),
+            session_id: None,
+            process_id: None,
+            reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "offline tracker state".to_string()),
-            tracker_meta
+            source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
-        ),
-        Some(AgentState::Unknown) => (
-            "unknown",
-            tracker_meta
+        },
+        Some(AgentState::Unknown) | None => CanonicalMemberState {
+            agent: agent.to_string(),
+            state: "unknown".to_string(),
+            activity: "unknown".to_string(),
+            session_id: None,
+            process_id: None,
+            reason: tracker_meta
                 .map(|m| m.reason.clone())
-                .unwrap_or_else(|| "unknown/no lifecycle yet".to_string()),
-            tracker_meta
+                .unwrap_or_else(|| "no lifecycle/session evidence".to_string()),
+            source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
-        ),
-        None => match member.is_active {
-            Some(true) => (
-                "active",
-                "config isActive=true".to_string(),
-                "config".to_string(),
-            ),
-            Some(false) => (
-                "offline",
-                "config isActive=false".to_string(),
-                "config".to_string(),
-            ),
-            None => (
-                "unknown",
-                "no lifecycle/session evidence".to_string(),
-                "config".to_string(),
-            ),
         },
     }
 }
@@ -3864,6 +4019,51 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
+    async fn test_hook_event_session_start_rejects_backend_pid_mismatch() {
+        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+
+        // Mark arch-ctm as codex backend in team config.
+        let team_cfg = fixture
+            ._temp
+            .path()
+            .join(".claude/teams/atm-dev/config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&team_cfg).unwrap()).unwrap();
+        let members = cfg["members"].as_array_mut().unwrap();
+        let arch = members
+            .iter_mut()
+            .find(|m| m["name"].as_str() == Some("arch-ctm"))
+            .unwrap();
+        arch["externalBackendType"] = serde_json::json!("codex");
+        std::fs::write(&team_cfg, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = format!(
+            "{{\"version\":1,\"request_id\":\"r-backend-mismatch\",\"command\":\"hook-event\",\"payload\":{{\"event\":\"session_start\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\",\"session_id\":\"sess-mismatch\",\"process_id\":{}}}}}",
+            std::process::id()
+        );
+        let resp = handle_hook_event_command(&req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert!(
+            payload["reason"]
+                .as_str()
+                .unwrap()
+                .contains("pid/backend mismatch")
+        );
+
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query_for_team("atm-dev", "arch-ctm").is_none(),
+            "mismatched pid/backend must not upsert session registry"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
     async fn test_socket_server_hook_event_roundtrip() {
         use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -3914,7 +4114,9 @@ mod tests {
                 "event": "session_start",
                 "agent": "team-lead",
                 "session_id": "sess-roundtrip",
-                "process_id": std::process::id(),
+                // This roundtrip test validates socket lifecycle plumbing, not
+                // backend-specific process signature checks.
+                "process_id": 0,
                 "team": "atm-dev",
                 "source": "init",
             }),
@@ -4254,6 +4456,10 @@ mod tests {
     #[test]
     fn test_session_query_includes_runtime_metadata_fields() {
         let sr = make_sr();
+        let runtime_home = std::env::temp_dir()
+            .join("runtime/gemini/atm-dev/arch-ctm/home")
+            .to_string_lossy()
+            .into_owned();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_runtime_for_team(
@@ -4264,7 +4470,7 @@ mod tests {
                 Some("gemini".to_string()),
                 Some("gemini-session-123".to_string()),
                 Some("%42".to_string()),
-                Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string()),
+                Some(runtime_home.clone()),
             );
         }
         let req = make_request(
@@ -4281,7 +4487,7 @@ mod tests {
         );
         assert_eq!(
             payload["runtime_home"].as_str(),
-            Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home")
+            Some(runtime_home.as_str())
         );
     }
 

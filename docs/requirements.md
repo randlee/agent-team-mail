@@ -1,7 +1,7 @@
 # agent-team-mail (`atm`) — Requirements Document
 
-**Version**: 0.3
-**Date**: 2026-02-25
+**Version**: 0.4
+**Date**: 2026-03-03
 **Status**: Draft
 
 ---
@@ -650,6 +650,9 @@ Required baseline behavior:
 - Support resume-aware launch by passing parent session when available (for example,
   `leadSessionId`-derived handoff).
 - Deliver initial prompt/body content after launch using ATM messaging path.
+- Before reporting launch success or failure, `atm teams spawn` must print the
+  fully constructed launch command (with resolved team/agent/runtime flags and
+  env vars) so operators/agents can retry manually when launch fails.
 
 Hook/path compatibility requirements:
 - Generated hook commands must use `"$CLAUDE_PROJECT_DIR"` for project scripts and guard
@@ -721,6 +724,8 @@ atm doctor --full
   (roster removed xor mailbox present).
 - Config/runtime drift: detect path/env mismatches relevant to daemon/team operation.
 - Unified log diagnostics: summarize warning/error events in the configured time window.
+- PID cross-validate: for each member with a registered PID, verify the live process name
+  matches the declared backend (see PID verification requirement in section 4.3.3d).
 
 **Default warning/error log window**:
 - `since = max(team-lead session start, last doctor call time)`.
@@ -749,18 +754,30 @@ atm doctor --full
   core fields to `atm members`: name/type/model/status), followed by ordered findings by
   severity, then recommended remediation commands.
 - JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
+- Both human and JSON output MUST surface active env overrides for `ATM_HOME`,
+  `ATM_TEAM`, and `ATM_IDENTITY` when set to non-empty values.
+- Daemon-unreachable member-state queries MUST emit explicit finding code
+  `DAEMON_UNREACHABLE`.
+- When daemon member-state queries are unreachable/unavailable, member liveness in
+  snapshot/status surfaces MUST render `Unknown` (not `Offline`/`Dead`).
 - Recommendations must include directly runnable commands when applicable and MUST be
   context-aware/actionable for the reported finding class (for example, avoid suggesting
   commands that require unavailable session context without explicit fallback guidance).
 - `atm doctor` must be diagnostics-first and report-producing by default:
   daemon probe/autostart failures must be captured as findings in the report,
   not treated as fatal preconditions that suppress report generation.
+- `atm doctor`, `atm status`, and `atm members` MUST consume daemon-provided
+  canonical member-state snapshots for liveness/status rendering.
+- `config.json` activity hints (`isActive`, `lastActive`) MUST NOT be used to
+  infer offline/dead liveness in these command surfaces.
 
 **JSON output schema (`--json`)**:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
 - `log_window`: `mode`, `start`, `end`
+- `env_overrides`: optional object fields `atm_home`, `atm_team`,
+  `atm_identity`; each value shape is `{ source, value }`
 
 #### `DoctorReport` Schema Contract and Compatibility
 
@@ -769,12 +786,16 @@ atm doctor --full
 - `findings`
 - `recommendations`
 - `log_window`
+- `env_overrides`
 
 Current required `DoctorReport` shape:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts`
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
 - `log_window`: `mode`, `start`, `end`
+- `env_overrides`: optional `atm_home`, `atm_team`, `atm_identity`, each with:
+  - `source`: override source tag (`"env"`)
+  - `value`: resolved non-empty value
 
 Logging-health expansion contract:
 - Target shape adds `logging` object with at least:
@@ -803,9 +824,66 @@ Doctor non-failing requirement:
 - Failure to contact or auto-start daemon must not cause immediate process error
   if team/config inputs are otherwise readable; doctor must still emit a report
   with daemon health findings and return severity-based exit (`0` or `2`).
+- When report generation succeeds (including daemon-unreachable scenarios), doctor
+  MUST NOT return exit code `1`.
 - Exit `1` is reserved for true execution failures that prevent report creation
   (for example unreadable/malformed required team config or unrecoverable output
   serialization/write failure).
+
+### 4.3.3d PID Verification and Cross-Validate Requirements
+
+#### PID Registration Verification (REQUIRED)
+
+When a PID is registered (via hook event or Codex/Gemini self-registration), the daemon
+MUST verify that the process name for that PID matches the expected token for the declared
+backend:
+
+| Backend | Expected process name (`comm`) |
+|---------|-------------------------------|
+| Claude Code | `claude` |
+| Codex | `codex` (native binary — NOT `node`) |
+| Gemini | `node` AND full args contain `gemini` |
+
+If the process name does not match, the daemon MUST:
+1. Reject the registration (mark PID as invalid in the session registry).
+2. Emit a WARN log including: agent name, backend type, expected process name, actual
+   process name, and PID.
+
+#### Liveness Cross-Validate at Read Time (REQUIRED)
+
+During liveness checks (triggered by `atm doctor`, `atm status`, or `atm members`
+queries), the daemon MUST:
+1. Confirm the process is alive (`kill -0` or platform equivalent).
+2. Re-verify the process name against the backend's expected token.
+3. If the process is alive but the name no longer matches (PID was reused by an
+   unrelated process), emit a `PID_PROCESS_MISMATCH` WARN finding in `atm doctor`
+   output.
+
+The WARN finding MUST include: agent name, backend type, expected process name,
+actual process name, and PID.
+
+#### Self-Registration for External Agents (Codex, Gemini) (REQUIRED)
+
+Codex and Gemini agents do not have a Claude Code hook system. The daemon MUST
+support self-registration for these agents via:
+- Implicit: `atm send` writes the agent's own PID and session ID to their roster entry
+  in `config.json` and creates a daemon state record if one does not exist.
+- Explicit: `atm register <team> <name>` performs the same registration explicitly.
+
+Self-registration uses `os.getpid()` of the calling Codex/Gemini process as the
+registered agent session PID.
+
+When self-registration creates a new daemon state record where an activity hint already
+existed, the daemon MUST emit an `ACTIVE_WITHOUT_SESSION` WARN finding to surface the
+gap, and MUST then create the daemon state record to resolve it.
+
+#### Logging Level Requirements for PID/Process Events (REQUIRED)
+
+- INFO log lines MUST show `agent_pid=<registered session PID>` for registration and
+  liveness events.
+- The subprocess pid and ppid of hook invocations MUST be logged at DEBUG level only.
+- WARN and DEBUG log entries reporting inconsistencies MUST include subprocess pid/ppid
+  as contextual fields to support root-cause analysis without polluting INFO output.
 
 ### 4.3.3a Operational Health Monitor (`atm-monitor`)
 
@@ -856,6 +934,40 @@ Acceptance checks:
 - Panel-consistency tests fail on divergent left/right state and pass on unified state.
 - Message list/detail and mark-read persistence tests pass for representative inbox fixtures.
 - Header-render tests assert visible version string in normal TUI startup.
+
+### 4.3.3c Daemon Canonical Member-State Contract
+
+Daemon is the single source of truth for liveness/status surfaces. Team config
+activity fields are advisory only.
+
+Canonical team member-state snapshot (daemon -> CLI) must include:
+- `agent`
+- `state` (`active|idle|offline|unknown`)
+- `activity` (`busy|idle|unknown`)
+- `session_id` (optional)
+- `process_id` (optional)
+- `reason`
+- `source`
+
+Required behavior:
+- `atm doctor`, `atm status`, and `atm members` must read liveness/status from
+  this snapshot.
+- No command-level fallback may map `isActive=false` directly to offline/dead.
+- Per-member status derivation logic must not be duplicated across commands;
+  command handlers consume daemon snapshot values directly.
+- Reconciliation and diagnostics must be team-scoped:
+  daemon state for team `A` must not create findings for team `B`.
+
+#### Operational State Variable Inventory
+
+| Variable | Owner | Persistence location | Allowed values | Semantics |
+|----------|-------|----------------------|----------------|-----------|
+| `isActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`isActive`) | `true`, `false`, `null` | Busy/idle hint only. Not a liveness source. |
+| `lastActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`lastActive`) | `u64` epoch-millis or `null` | Last activity timestamp only. Not a liveness source. |
+| `session_id` | Daemon session registry (`session_start`/`session_end`) | `.claude/daemon/session-registry.json` | Non-empty string or absent | Session identity tracked by daemon lifecycle registry. |
+| `process_id` | Daemon session registry | `.claude/daemon/session-registry.json` | Integer PID (`>1`) or absent | Process identity used for liveness checks. |
+| `status` (`state`) | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `active`, `idle`, `offline`, `unknown` | Canonical liveness/status consumed by doctor/status/members. |
+| `activity` | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `busy`, `idle`, `unknown` | Canonical activity hint exposed separately from liveness. |
 
 ### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
 
@@ -1063,6 +1175,14 @@ Acceptance checks:
 4. Global config (`~/.config/atm/config.toml`)
 5. Defaults
 
+Additional config-path override:
+- `--config <path>` and `ATM_CONFIG=<path>` add an explicit config file layer
+  merged after repo/global config and before env/flag field overrides.
+- Explicit config path overrides are strict: unreadable/invalid files are
+  errors (no silent fallback to other sources).
+- `ATM_HOME` is a filesystem-root override (path anchor for ATM runtime data),
+  not a config-value override in this resolution order.
+
 #### Configuration File (`.atm.toml`)
 
 ```toml
@@ -1094,10 +1214,22 @@ team-lead = "arch-atm"   # role-name → inbox-identity mapping
 
 | Variable | Description |
 |----------|-------------|
+| `ATM_HOME` | Home-root override used by canonical path resolution (`{ATM_HOME}/.config/atm`, `{ATM_HOME}/.claude`, etc.) |
 | `ATM_TEAM` | Default team name |
 | `ATM_IDENTITY` | Sender identity |
 | `ATM_CONFIG` | Path to config file override |
 | `ATM_NO_COLOR` | Disable colored output |
+| `ATM_DAEMON_AUTOSTART` | Daemon autostart toggle (`1/true/yes` enables, `0/false/no` disables); defaults to enabled when unset |
+| `ATM_DAEMON_BIN` | Optional daemon binary override for test/ops harnesses |
+| `ATM_LOG` | Stderr log level (`trace|debug|info|warn|error`), default `info` |
+| `ATM_LOG_MSG` | Message text logging policy (`none|truncated|full`), default `truncated` |
+| `ATM_LOG_FILE` | Canonical unified log file path override for test/ops |
+
+Environment value rules:
+- Empty/whitespace-only values for `ATM_TEAM` and `ATM_IDENTITY` are ignored
+  and must not erase config/default values.
+- `ATM_DAEMON_BIN` and `ATM_DAEMON_AUTOSTART` are operational/test controls and
+  must not be required for normal production usage.
 
 ### 4.5 Recommended Hooks (Agent Teams)
 
@@ -1257,7 +1389,7 @@ Spool filename convention:
   only after successful merge.
 - Merge ordering: timestamp then file order, append-only.
 - Daemon startup spool merge and daemon runtime writer MUST target the same canonical
-  path resolved from `ATM_LOG_FILE`/`ATM_LOG_PATH` (or default `atm.log.jsonl`).
+  path resolved from `ATM_LOG_FILE` (or default `atm.log.jsonl`).
   Divergent startup/runtime sink paths are forbidden.
 
 #### Default-On and Health State Requirements
@@ -1330,8 +1462,8 @@ No legacy `events.jsonl` sink code remains in any crate.
 #### Runtime Controls
 
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
-- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy.
-- `ATM_LOG_FILE` may override file path for tests/ops; `ATM_LOG_PATH` remains alias.
+- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy (default: `truncated`).
+- `ATM_LOG_FILE` may override file path for tests/ops.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
 
@@ -1478,6 +1610,8 @@ Acceptance checks:
 - Supported baseline states: `unknown`, `active`, `idle`, `offline`.
 - State transitions must record `reason` and `source` for troubleshooting.
 - Team/status outputs must reflect reconciled state within one poll window.
+- `isActive`/`lastActive` from `config.json` must remain activity hints and must
+  not override daemon-derived liveness status.
 
 Acceptance checks:
 - `session_start` drives `unknown/offline -> active`.
@@ -1774,7 +1908,11 @@ atm init <team> --skip-team
 - Existing `.atm.toml` is preserved (no silent overwrite); command reports that existing config was found.
 - Existing team is preserved (no duplicate recreation); command reports "team already exists".
 - Global-installed hooks must remain passive in non-ATM repositories; `.atm.toml` guard is the first hook operation.
-- Embedded hook scripts are the runtime source of truth.
+- Embedded hook scripts are the runtime source of truth. Hook script bodies are compiled
+  into the ATM binary via `include_str!()` at build time. **After upgrading `atm`, users
+  MUST re-run `atm init <team>` to materialize updated hook scripts on disk.** The binary
+  holds the authoritative script content; on-disk scripts from prior versions are stale
+  until overwritten by `atm init`.
 
 **Required test scenarios** (each must be independently tested):
 
@@ -2277,6 +2415,6 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 ---
 
-**Document Version**: 0.3
-**Last Updated**: 2026-02-25
+**Document Version**: 0.4
+**Last Updated**: 2026-03-03
 **Maintained By**: Claude

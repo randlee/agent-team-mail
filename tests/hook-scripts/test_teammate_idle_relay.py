@@ -46,13 +46,19 @@ _TOML_WITH_TEAM = '[core]\ndefault_team = "atm-dev"\nidentity = "arch-ctm"\n'
 class TestTeammateIdleRelayFileWrite(unittest.TestCase):
     """Original file-write behaviour must still work (with .atm.toml present)."""
 
-    def _run(self, stdin_data: dict, *, atm_home: Path) -> int:
+    def _run(self, stdin_data: dict, *, atm_home: Path, parent_pid: int | None = None) -> int:
         """Run in current working directory (caller must ensure .atm.toml is present)."""
         stdin_text = json.dumps(stdin_data)
         with patch("sys.stdin", StringIO(stdin_text)), \
-             patch.dict(os.environ, {"ATM_HOME": str(atm_home)}):
+             patch.dict(
+                 os.environ,
+                 {"ATM_HOME": str(atm_home), "ATM_TEAM": "", "ATM_IDENTITY": ""},
+             ):
             mod = _load_module("teammate_idle_relay", _RELAY_PATH)
-            return mod.main()
+            if parent_pid is None:
+                return mod.main()
+            with patch("os.getppid", return_value=parent_pid):
+                return mod.main()
 
     def test_appends_jsonl_event(self):
         """Event is written to events.jsonl when .atm.toml is present."""
@@ -110,18 +116,19 @@ class TestTeammateIdleRelayFileWrite(unittest.TestCase):
 
     def test_event_contains_process_id(self):
         """Event dict includes process_id field."""
+        expected_parent_pid = 6262
         with tempfile.TemporaryDirectory() as tmpdir:
             atm_home = Path(tmpdir)
             orig_dir = os.getcwd()
             try:
                 os.chdir(tmpdir)
                 Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
-                rc = self._run(_make_payload(), atm_home=atm_home)
+                rc = self._run(_make_payload(), atm_home=atm_home, parent_pid=expected_parent_pid)
                 self.assertEqual(rc, 0)
                 events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
                 event = json.loads(events_file.read_text().strip().splitlines()[0])
                 self.assertIn("process_id", event)
-                self.assertIsInstance(event["process_id"], int)
+                self.assertEqual(event["process_id"], expected_parent_pid)
             finally:
                 os.chdir(orig_dir)
 
@@ -153,6 +160,7 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
         toml_content: str | None = None,
         socket_file_exists: bool = True,
         socket_side_effect=None,
+        parent_pid: int | None = None,
     ) -> tuple[int, list[bytes]]:
         send_calls: list[bytes] = []
 
@@ -185,10 +193,17 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
                 if toml_content is not None:
                     Path(run_dir, ".atm.toml").write_text(toml_content)
                 with patch("sys.stdin", StringIO(stdin_text)), \
-                     patch.dict(os.environ, {"ATM_HOME": str(atm_home)}), \
+                     patch.dict(
+                         os.environ,
+                         {"ATM_HOME": str(atm_home), "ATM_TEAM": "", "ATM_IDENTITY": ""},
+                     ), \
                      patch("socket.socket", return_value=mock_sock):
                     mod = _load_module("teammate_idle_relay", _RELAY_PATH)
-                    rc = mod.main()
+                    if parent_pid is None:
+                        rc = mod.main()
+                    else:
+                        with patch("os.getppid", return_value=parent_pid):
+                            rc = mod.main()
             finally:
                 os.chdir(orig_dir)
 
@@ -232,18 +247,20 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
     def test_socket_payload_contains_process_id(self):
         """Socket payload includes process_id field."""
         toml = '[core]\ndefault_team = "atm-dev"\nidentity = "team-lead"\n'
+        expected_parent_pid = 7373
         with tempfile.TemporaryDirectory() as tmpdir:
             atm_home = Path(tmpdir)
             rc, calls = self._run_with_mock_socket(
                 _make_payload(agent="arch-ctm", team="atm-dev", session_id="sess-pid"),
                 atm_home=atm_home,
                 toml_content=toml,
+                parent_pid=expected_parent_pid,
             )
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)
         request = json.loads(calls[0].decode().strip())
         self.assertIn("process_id", request["payload"])
-        self.assertIsInstance(request["payload"]["process_id"], int)
+        self.assertEqual(request["payload"]["process_id"], expected_parent_pid)
 
     def test_socket_error_file_write_still_succeeds(self):
         """Socket error must not prevent the file write from succeeding."""

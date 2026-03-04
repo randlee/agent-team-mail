@@ -310,6 +310,74 @@ Adds to team config at `~/.claude/teams/{team_name}/config.json`:
 
 ## Agent Lifecycle & Message Delivery
 
+### PID and Session Registration Semantics
+
+Daemon liveness/state uses backend-aware PID registration. The canonical status
+surface (`atm members`, `atm status`, `atm doctor`) is daemon-derived.
+
+The PID shown in `atm doctor` output and stored in the daemon session registry is the
+**agent session process PID** — the long-lived process running the agent (for example,
+the `claude` or `codex` process itself). It is NOT the PID of the `atm` subprocess
+that ran the registration command. For Claude Code agents this is obtained via
+`os.getppid()` from hook scripts (the hook's parent is the stable agent process). For
+external agents (Codex, Gemini) it is the process's own PID (`os.getpid()`) written
+at self-registration time.
+
+**Registration sources by backend type**:
+
+| Backend | Registration mechanism | PID source |
+|---------|----------------------|------------|
+| Claude Code | `session_start` hook event | `os.getppid()` from hook script |
+| Codex | Self-registration on `atm send` or explicit `atm register` | `os.getpid()` of codex process |
+| Gemini | Self-registration on `atm send` or explicit `atm register` | `os.getpid()` of gemini process |
+
+Codex and Gemini do not have a Claude Code hook system. They write their PID and
+session ID directly to their roster entry in `config.json` when sending messages,
+or via the explicit `atm register <team> <name>` command.
+
+**Validation chain**:
+1. **Register**: a candidate PID/session is provided by hook or sender self-registration.
+2. **Registration-time backend validation**: daemon inspects process name for that PID and compares to expected backend tokens:
+
+   | Backend | Expected `comm` / process name |
+   |---------|-------------------------------|
+   | Claude Code | `claude` |
+   | Codex | `codex` (native binary — NOT `node`) |
+   | Gemini | `node` AND full args contain `gemini` |
+
+3. **Liveness check**: daemon validates process existence (`kill -0` / platform equivalent),
+   then re-verifies process name against backend token (cross-validate). Detects PID reuse
+   by unrelated processes that happened to acquire the same PID after the agent exited.
+4. **Cross-validation at read time**: daemon re-checks process-name/backend alignment during
+   status queries to detect PID reuse by unrelated processes.
+
+**Mismatch behavior** (`WARN` finding in `atm doctor`):
+- If PID is alive but process name does not match declared backend, daemon rejects/marks
+  registration as invalid, emits a WARN log, and surfaces a WARN diagnostic in `atm doctor`.
+- WARN details include: agent name, backend type, expected process name token(s), actual
+  process name, and PID.
+
+**Cross-validate WARN finding schema** (in `atm doctor --json` `findings[]` array):
+
+```json
+{
+  "severity": "warn",
+  "check": "pid_cross_validate",
+  "code": "PID_PROCESS_MISMATCH",
+  "message": "agent '<name>' PID <pid> is alive but process name '<actual>' does not match expected '<expected>' for backend '<backend>'"
+}
+```
+
+**`ACTIVE_WITHOUT_SESSION` finding**: When an activity hint is present for a member but no
+daemon state record exists (for example after an `atm send` self-registration was
+interrupted before creating the daemon record), the daemon creates the missing daemon state
+record alongside PID registration and emits an `ACTIVE_WITHOUT_SESSION` WARN finding in
+`atm doctor` to surface the anomaly for operator awareness.
+
+Notes:
+- `isActive` remains an activity hint (`busy` vs `idle`) and is not treated as liveness truth.
+- Team-scoped daemon state is authoritative; config fields are advisory inputs for reconciliation/registration.
+
 ### Shutdown Behavior
 
 Daemon-managed shutdown uses a shutdown-first flow:
@@ -386,8 +454,16 @@ With a tag, the pattern has been 100% reliable in testing. Without one, the mess
 - `findings`
 - `recommendations`
 - `log_window`
+- `env_overrides`
 
-`member_snapshot` is intentionally omitted from JSON output (it is rendered in human output only).
+`env_overrides` fields (present only when the env var is set to a non-empty value):
+- `atm_home`: `{ "source": "env", "value": "<ATM_HOME>" }`
+- `atm_team`: `{ "source": "env", "value": "<ATM_TEAM>" }`
+- `atm_identity`: `{ "source": "env", "value": "<ATM_IDENTITY>" }`
+
+Change-control note:
+- Changed in Phase Y: `env_overrides` was added as a first-class top-level JSON
+  field for diagnostics triage.
 
 ---
 

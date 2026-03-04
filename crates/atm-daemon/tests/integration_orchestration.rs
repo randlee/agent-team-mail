@@ -444,13 +444,18 @@ async fn test_launch_gemini_runtime_metadata_roundtrip() {
         command: "gemini".to_string(),
         prompt: None,
         timeout_secs: 5,
-        env_vars: HashMap::from([
-            (
-                "ATM_RUNTIME_HOME".to_string(),
-                "/tmp/runtime/gemini/atm-dev/arch-ctm/home".to_string(),
-            ),
-            ("ATM_RUNTIME".to_string(), "gemini".to_string()),
-        ]),
+        // Build runtime-home with cross-platform temp dir.
+        // Keep a stable string for request payload + later assertion.
+        env_vars: {
+            let runtime_home = std::env::temp_dir()
+                .join("runtime/gemini/atm-dev/arch-ctm/home")
+                .to_string_lossy()
+                .into_owned();
+            HashMap::from([
+                ("ATM_RUNTIME_HOME".to_string(), runtime_home),
+                ("ATM_RUNTIME".to_string(), "gemini".to_string()),
+            ])
+        },
         runtime: Some("gemini".to_string()),
         resume_session_id: Some("gemini-session-123".to_string()),
     };
@@ -508,9 +513,13 @@ async fn test_launch_gemini_runtime_metadata_roundtrip() {
         payload["runtime_session_id"].as_str(),
         Some("gemini-session-123")
     );
+    let expected_runtime_home = std::env::temp_dir()
+        .join("runtime/gemini/atm-dev/arch-ctm/home")
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
         payload["runtime_home"].as_str(),
-        Some("/tmp/runtime/gemini/atm-dev/arch-ctm/home")
+        Some(expected_runtime_home.as_str())
     );
 
     cancel.cancel();

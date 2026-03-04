@@ -296,18 +296,13 @@ impl Plugin for IssuesPlugin {
             source: None,
         })?;
 
-        // Determine ATM home directory
-        // When ATM_HOME is set, use it directly (test-friendly)
-        let atm_home = if let Ok(atm_home_env) = std::env::var("ATM_HOME") {
-            PathBuf::from(atm_home_env)
-        } else {
-            agent_team_mail_core::home::get_home_dir()
-                .map_err(|e| PluginError::Init {
-                    message: format!("Could not determine home directory: {e}"),
-                    source: None,
-                })?
-                .join(".config/atm")
-        };
+        // Determine ATM config root from canonical home resolution.
+        let atm_home = agent_team_mail_core::home::get_home_dir()
+            .map_err(|e| PluginError::Init {
+                message: format!("Could not determine home directory: {e}"),
+                source: None,
+            })?
+            .join(".config/atm");
 
         // Build the provider registry
         let registry = self.build_registry(&atm_home);
