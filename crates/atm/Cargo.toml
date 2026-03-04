@@ -29,6 +29,7 @@ dirs = "5"
 thiserror = "2"
 notify = "7"
 tracing.workspace = true
+sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

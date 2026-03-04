@@ -1,5 +1,6 @@
 //! Main daemon event loop
 
+use crate::daemon::pid_backend_validation::{roster_process_id, validate_pid_backend};
 use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
 use crate::daemon::{
     InboxEvent, InboxEventKind, LogEventQueue, SharedDedupeStore, SharedPubSubStore,
@@ -547,7 +548,7 @@ fn reconcile_team_member_activity_with_mode(
         let mut terminal_non_lead_members: Vec<String> = Vec::new();
         for member in &mut config.members {
             desired_agent_names.insert(member.name.clone());
-            let record = {
+            let mut record = {
                 let reg = session_registry.lock().unwrap();
                 reg.query_for_team(&team_name, &member.name).cloned()
             };
@@ -577,6 +578,70 @@ fn reconcile_team_member_activity_with_mode(
                         "config isActive missing",
                         "config_watcher",
                     ),
+                }
+            }
+
+            // External/self-registration path: if config carries a session/PID hint
+            // and daemon does not have that exact record yet, validate and upsert.
+            let session_hint = member
+                .session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let pid_hint = roster_process_id(member);
+            let needs_registration = match (&record, session_hint.as_deref(), pid_hint) {
+                (Some(rec), Some(sess), Some(pid)) => {
+                    rec.session_id != sess || rec.process_id != pid
+                }
+                (None, Some(_), Some(_)) => true,
+                _ => false,
+            };
+
+            if needs_registration
+                && let (Some(sess), Some(pid)) = (session_hint.as_deref(), pid_hint)
+            {
+                let validation = validate_pid_backend(member, pid);
+                if validation.is_alive_mismatch() {
+                    let mismatch_message = format!(
+                        "pid/backend mismatch at registration: agent='{}' backend='{}' expected='{}' actual='{}' pid={}",
+                        member.name,
+                        validation.backend,
+                        validation.expected_display(),
+                        validation.actual_display(),
+                        validation.pid
+                    );
+                    warn!("{mismatch_message}");
+                    emit_event_best_effort(EventFields {
+                        level: "warn",
+                        source: "atm-daemon",
+                        action: "pid_backend_mismatch",
+                        team: Some(team_name.clone()),
+                        agent_name: Some(member.name.clone()),
+                        target: Some(format!("pid:{}", validation.pid)),
+                        result: Some("registration".to_string()),
+                        error: Some(mismatch_message.clone()),
+                        ..Default::default()
+                    });
+
+                    state_store.lock().unwrap().set_state_with_context(
+                        &member.name,
+                        AgentState::Offline,
+                        &mismatch_message,
+                        "pid_backend_validation",
+                    );
+                } else {
+                    session_registry.lock().unwrap().upsert_for_team(
+                        &team_name,
+                        &member.name,
+                        sess,
+                        pid,
+                    );
+                    record = session_registry
+                        .lock()
+                        .unwrap()
+                        .query_for_team(&team_name, &member.name)
+                        .cloned();
                 }
             }
 

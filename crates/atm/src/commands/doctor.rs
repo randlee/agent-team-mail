@@ -488,6 +488,20 @@ where
 
     for member in &cfg.members {
         let daemon_state = daemon_states.get(&member.name);
+        if let Some(state) = daemon_state
+            && state.source == "pid_backend_validation"
+        {
+            findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "PID_BACKEND_MISMATCH",
+                format!(
+                    "Member '{}' failed daemon PID/backend validation: {}",
+                    member.name, state.reason
+                ),
+            ));
+            continue;
+        }
         match daemon_state.map(|s| s.state.as_str()) {
             Some("offline") | Some("dead") if member.is_active == Some(true) => {
                 findings.push(finding(

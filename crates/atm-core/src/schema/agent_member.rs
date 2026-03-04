@@ -250,6 +250,30 @@ impl AgentMember {
         }
         None
     }
+
+    /// Returns the optional roster PID hint from unknown extension fields.
+    ///
+    /// Stored under `processId` to avoid schema-breaking changes while
+    /// preserving forward-compatible round-trips.
+    pub fn process_id_hint(&self) -> Option<u32> {
+        self.unknown_fields
+            .get("processId")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+    }
+
+    /// Sets or clears the roster PID hint extension field (`processId`).
+    pub fn set_process_id_hint(&mut self, pid: Option<u32>) {
+        match pid {
+            Some(value) => {
+                self.unknown_fields
+                    .insert("processId".to_string(), serde_json::json!(value));
+            }
+            None => {
+                self.unknown_fields.remove("processId");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -433,6 +457,18 @@ mod tests {
         member.external_backend_type = None;
         // "tmux" does not map to any BackendType variant → falls back to None
         assert!(member.effective_backend_type().is_none());
+    }
+
+    #[test]
+    fn test_process_id_hint_roundtrip() {
+        let mut member = make_minimal_member();
+        assert_eq!(member.process_id_hint(), None);
+
+        member.set_process_id_hint(Some(4242));
+        assert_eq!(member.process_id_hint(), Some(4242));
+
+        member.set_process_id_hint(None);
+        assert_eq!(member.process_id_hint(), None);
     }
 
     // ── BackendType tests ─────────────────────────────────────────────────

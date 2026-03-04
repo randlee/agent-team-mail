@@ -36,6 +36,7 @@ async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 globset = "0.4"
 sha2 = "0.10"
+sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 # SSH/SFTP support (optional, behind feature flag)
 ssh2 = { version = "0.9", optional = true }
 

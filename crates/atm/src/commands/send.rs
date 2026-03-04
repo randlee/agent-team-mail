@@ -6,7 +6,7 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
 use agent_team_mail_core::io::lock::acquire_lock;
-use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::schema::{AgentMember, BackendType, InboxMessage, TeamConfig};
 use anyhow::Result;
 use chrono::Utc;
 use clap::Args;
@@ -22,7 +22,7 @@ use agent_team_mail_core::text::{
 
 use crate::util::addressing::parse_address;
 use crate::util::file_policy::check_file_reference;
-use crate::util::hook_identity::read_hook_file_identity;
+use crate::util::hook_identity::{read_hook_file, read_hook_file_identity};
 use crate::util::settings::get_home_dir;
 
 /// Send a message to a specific agent
@@ -496,6 +496,34 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     if let Some(member) = config.members.iter_mut().find(|m| m.name == sender_name) {
         member.is_active = Some(true);
         member.last_active = Some(now_ms);
+
+        let detected_pid = detect_sender_process_pid(member);
+        if let Some(pid) = detected_pid {
+            member.set_process_id_hint(Some(pid));
+        }
+
+        if let Some(session_id) = detect_sender_session_id() {
+            member.session_id = Some(session_id);
+        } else if member
+            .session_id
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+            && let Some(pid) = detected_pid
+        {
+            // External runtimes may not expose CLAUDE_SESSION_ID; keep a local
+            // non-empty session hint so daemon can track roster registration.
+            member.session_id = Some(format!("local:{sender_name}:{now_ms}:{pid}"));
+        }
+
+        // Opportunistically infer backend type for external agents when absent.
+        if member.external_backend_type.is_none()
+            && let Some(pid) = detected_pid
+            && let Some(proc_name) = process_name_for_pid(pid)
+            && let Some(inferred) = infer_backend_from_process_name(&proc_name)
+        {
+            member.external_backend_type = Some(inferred);
+        }
     } else {
         // Sender not in team members — this is unusual but not fatal
         return Ok(());
@@ -516,10 +544,118 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     Ok(())
 }
 
+fn detect_sender_session_id() -> Option<String> {
+    if let Ok(Some(hook)) = read_hook_file() {
+        let trimmed = hook.session_id.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    std::env::var("CLAUDE_SESSION_ID")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn backend_expected_process_tokens(member: &AgentMember) -> Option<&'static [&'static str]> {
+    const CLAUDE: &[&str] = &["claude", "node"];
+    const CODEX: &[&str] = &["codex"];
+    const GEMINI: &[&str] = &["gemini"];
+
+    match member.effective_backend_type() {
+        Some(BackendType::ClaudeCode) => Some(CLAUDE),
+        Some(BackendType::Codex) => Some(CODEX),
+        Some(BackendType::Gemini) => Some(GEMINI),
+        Some(BackendType::External) | Some(BackendType::Human(_)) => None,
+        None => {
+            if member.name == "team-lead"
+                || matches!(
+                    member.agent_type.as_str(),
+                    "general-purpose" | "Explore" | "Plan"
+                )
+            {
+                Some(CLAUDE)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn process_name_for_pid(pid: u32) -> Option<String> {
+    use sysinfo::{Pid, System};
+
+    if pid == 0 {
+        return None;
+    }
+
+    let sys = System::new_all();
+    sys.process(Pid::from_u32(pid))
+        .map(|p| p.name().to_string_lossy().to_lowercase())
+}
+
+fn infer_backend_from_process_name(process_name: &str) -> Option<BackendType> {
+    let lower = process_name.to_lowercase();
+    if lower.contains("codex") {
+        return Some(BackendType::Codex);
+    }
+    if lower.contains("gemini") {
+        return Some(BackendType::Gemini);
+    }
+    if lower.contains("claude") || lower.contains("node") {
+        return Some(BackendType::ClaudeCode);
+    }
+    None
+}
+
+fn detect_sender_process_pid(member: &AgentMember) -> Option<u32> {
+    if let Ok(Some(hook)) = read_hook_file()
+        && hook.pid > 1
+    {
+        return Some(hook.pid);
+    }
+
+    use sysinfo::{Pid, System};
+    let expected_tokens = backend_expected_process_tokens(member);
+    let sys = System::new_all();
+    let mut cursor = Pid::from_u32(std::process::id());
+    let mut fallback_parent: Option<u32> = None;
+
+    for _ in 0..8 {
+        let Some(proc_info) = sys.process(cursor) else {
+            break;
+        };
+        let Some(parent) = proc_info.parent() else {
+            break;
+        };
+        let parent_u32 = parent.as_u32();
+        if fallback_parent.is_none() {
+            fallback_parent = Some(parent_u32);
+        }
+
+        if let Some(tokens) = expected_tokens {
+            if let Some(parent_name) = sys
+                .process(parent)
+                .map(|p| p.name().to_string_lossy().to_lowercase())
+                && tokens.iter().any(|tok| parent_name.contains(tok))
+            {
+                return Some(parent_u32);
+            }
+        } else {
+            return Some(parent_u32);
+        }
+
+        cursor = parent;
+    }
+
+    fallback_parent
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::anyhow;
+    use std::collections::HashMap;
 
     #[test]
     fn test_generate_summary_short() {
@@ -554,6 +690,64 @@ mod tests {
             offline_action,
             from: None,
         }
+    }
+
+    fn make_member(name: &str, agent_type: &str, backend: Option<BackendType>) -> AgentMember {
+        AgentMember {
+            agent_id: format!("{name}@atm-dev"),
+            name: name.to_string(),
+            agent_type: agent_type.to_string(),
+            model: "unknown".to_string(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 0,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: None,
+            last_active: None,
+            session_id: None,
+            external_backend_type: backend,
+            external_model: None,
+            unknown_fields: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_infer_backend_from_process_name() {
+        assert_eq!(
+            infer_backend_from_process_name("codex"),
+            Some(BackendType::Codex)
+        );
+        assert_eq!(
+            infer_backend_from_process_name("gemini-cli"),
+            Some(BackendType::Gemini)
+        );
+        assert_eq!(
+            infer_backend_from_process_name("claude"),
+            Some(BackendType::ClaudeCode)
+        );
+        assert_eq!(
+            infer_backend_from_process_name("node"),
+            Some(BackendType::ClaudeCode)
+        );
+        assert_eq!(infer_backend_from_process_name("python3"), None);
+    }
+
+    #[test]
+    fn test_backend_expected_process_tokens_prefers_backend_type() {
+        let codex_member = make_member("arch-ctm", "codex", Some(BackendType::Codex));
+        let tokens = backend_expected_process_tokens(&codex_member).unwrap();
+        assert_eq!(tokens, &["codex"]);
+    }
+
+    #[test]
+    fn test_backend_expected_process_tokens_defaults_team_lead_to_claude() {
+        let lead = make_member("team-lead", "general-purpose", None);
+        let tokens = backend_expected_process_tokens(&lead).unwrap();
+        assert_eq!(tokens, &["claude", "node"]);
     }
 
     #[test]
