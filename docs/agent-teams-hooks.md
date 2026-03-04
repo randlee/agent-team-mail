@@ -104,6 +104,8 @@ This enables:
 - **Daemon teardown convergence**: once session death is confirmed, daemon can reconcile
   coupled cleanup (remove roster entry + delete mailbox) without waiting for long PID sweep windows
 
+**PID semantics in hook events**: Hook scripts report `os.getppid()` as the `process_id` in the daemon socket payload — this is the PID of the parent agent session process (the long-lived `claude` process), not the PID of the hook subprocess itself. Each hook invocation runs as a short-lived child; the parent PID is the stable, session-scoped identifier used for liveness correlation. INFO-level log lines emitted by the daemon show `agent_pid=<parent PID>`; subprocess pid/ppid values are emitted at DEBUG level only.
+
 **`.atm.toml` guard**: Both `session-end.py` and `session-start.py` check for `.atm.toml` in `cwd` before contacting the daemon. If `.atm.toml` is absent, the daemon socket call is skipped entirely. This ensures the daemon only receives hook events from ATM project sessions — not from unrelated Claude Code sessions on the same machine.
 
 **Fail-open**: The hook always exits `0`. If the daemon isn't running or `.atm.toml` is absent, the socket call is silently skipped.
@@ -458,7 +460,7 @@ There are two payload layers:
 | `session_id` | Session identifier used by daemon liveness/state tracking |
 | `agent` | ATM member identity |
 | `team` | ATM team name |
-| `process_id` | OS process ID of the parent agent session (`os.getppid()` from hook) used for liveness correlation |
+| `process_id` | OS process ID of the **parent agent session** (`os.getppid()` from hook script — the hook's parent is the stable long-lived agent process, NOT the hook subprocess itself) used for liveness correlation |
 | `source.kind` | Lifecycle source discriminator (`claude_hook`, `atm_mcp`, `agent_hook`, `unknown`) |
 
 ---
@@ -482,7 +484,8 @@ All hook scripts follow these conventions:
 - **Hook scripts resolve from the teammate's `cwd`** (the main repo), not from any worktree. Confirmed via `hook_source` tagging experiment.
 - **PreToolUse payload does NOT include agent/teammate identity.** Only `session_id`, `tool_name`, `tool_input`, `tool_use_id`, `cwd`, `transcript_path`, `permission_mode`. No `teammate_name` or equivalent.
 - **TeammateIdle is the only hook with `teammate_name`.** The field is `teammate_name` (not `name`). It fires after the agent goes idle, not before tool calls.
-- **Each hook invocation gets a fresh PID** but `os.getppid()` from the hook is the stable agent process PID for the session. This can be used for cross-process identity correlation (see Phase N.2 design).
+- **Each hook invocation gets a fresh PID** but `os.getppid()` from the hook is the stable agent process PID for the session — the parent is the long-lived Claude Code process, not the short-lived hook subprocess. This parent PID is used as the registered `process_id` for liveness correlation (see Phase N.2 design and `agent-team-api.md` PID Registration Semantics).
+- **Codex and Gemini agents do not fire Claude Code hooks.** They have no hook system. Instead, they use the self-registration path: their PID and session ID are written to their roster entry when they call `atm send` or the explicit `atm register <team> <name>` command. The registered PID is `os.getpid()` of the Codex/Gemini process itself.
 - **SessionStart may have a race condition for tmux teammates.** The tmux pane may not finish shell initialization before the claude command is sent via `send-keys`. Unverified from official docs but consistent with observed behavior (0 SessionStart entries for teammates).
 - **`SessionStart` is global, not project-scoped.** All sessions on the machine get the hook output, even in unrelated projects. The hook gracefully does nothing if `.atm.toml` is absent.
 - **`leadSessionId` must be current** for Rule 2 to work correctly. If `atm teams resume` has not been run after a session restart, the gate may incorrectly block the team lead. See `atm teams resume` documentation and issue [#141](https://github.com/randlee/agent-team-mail/issues/141).
