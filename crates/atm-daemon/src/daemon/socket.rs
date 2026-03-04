@@ -4114,7 +4114,9 @@ mod tests {
                 "event": "session_start",
                 "agent": "team-lead",
                 "session_id": "sess-roundtrip",
-                "process_id": std::process::id(),
+                // This roundtrip test validates socket lifecycle plumbing, not
+                // backend-specific process signature checks.
+                "process_id": 0,
                 "team": "atm-dev",
                 "source": "init",
             }),
