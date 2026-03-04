@@ -651,6 +651,11 @@ Required baseline behavior:
 - Support resume-aware launch by passing parent session when available (for example,
   `leadSessionId`-derived handoff).
 - Deliver initial prompt/body content after launch using ATM messaging path.
+- Before invoking the runtime executable, `atm teams spawn` MUST persist static
+  teammate metadata to team `config.json` for the target member:
+  - `model` (resolved from `--model` when provided, else resolved agent metadata)
+  - `external_backend_type` (resolved runtime backend identity)
+  This write is required even though lifecycle/session state remains daemon-owned.
 - Before reporting launch success or failure, `atm teams spawn` must print the
   fully constructed launch command (with resolved team/agent/runtime flags and
   env vars) so operators/agents can retry manually when launch fails.
@@ -777,6 +782,13 @@ atm doctor --full
   not treated as fatal preconditions that suppress report generation.
 - `atm doctor`, `atm status`, and `atm members` MUST consume daemon-provided
   canonical member-state snapshots for liveness/status rendering.
+- Deliberate metadata exception: `model` and backend display metadata are
+  config-derived static roster fields (not daemon lifecycle fields). These
+  metadata fields must be read from team `config.json` and joined onto daemon
+  liveness/activity state for rendering.
+- The model-source exception above MUST be documented inline at the doctor model
+  read/join callsite (for example the `doctor.rs` model mapping block) to
+  prevent regressions back to daemon-derived model assumptions.
 - `config.json` activity hints (`isActive`, `lastActive`) MUST NOT be used to
   infer offline/dead liveness in these command surfaces.
 
@@ -964,6 +976,9 @@ Canonical team member-state snapshot (daemon -> CLI) must include:
 Required behavior:
 - `atm doctor`, `atm status`, and `atm members` must read liveness/status from
   this snapshot.
+- Static roster metadata (`model`, `external_backend_type`) remains
+  `config.json`-derived and must be joined with daemon snapshot output for
+  presentation; daemon remains authoritative for liveness/activity/session state.
 - No command-level fallback may map `isActive=false` directly to offline/dead.
 - Per-member status derivation logic must not be duplicated across commands;
   command handlers consume daemon snapshot values directly.
@@ -976,6 +991,8 @@ Required behavior:
 |----------|-------|----------------------|----------------|-----------|
 | `isActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`isActive`) | `true`, `false`, `null` | Busy/idle hint only. Not a liveness source. |
 | `lastActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`lastActive`) | `u64` epoch-millis or `null` | Last activity timestamp only. Not a liveness source. |
+| `model` | Team mutation/spawn CLI paths (`add-member`, `teams spawn`) | Team `config.json` member field (`model`) | String or `null` | Static display metadata for runtime/model labeling; not a liveness source. |
+| `external_backend_type` | Team mutation/spawn CLI paths (`add-member`, `teams spawn`) | Team `config.json` member field (`external_backend_type`) | Enum/string backend id or absent | Static backend identity metadata for display/routing hints; not a liveness source. |
 | `session_id` | Daemon session registry (`session_start`/`session_end`) | `.claude/daemon/session-registry.json` | Non-empty string or absent | Session identity tracked by daemon lifecycle registry. |
 | `process_id` | Daemon session registry | `.claude/daemon/session-registry.json` | Integer PID (`>1`) or absent | Process identity used for liveness checks. |
 | `status` (`state`) | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `active`, `idle`, `offline`, `unknown` | Canonical liveness/status consumed by doctor/status/members. |
@@ -2457,9 +2474,7 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 6. **Register-hint daemon protocol (`#413`)**: Should `register-hint` be introduced as a dedicated daemon command (for example `register-hint`) or as an extension of `hook-event` with `source=cli_send`? Backward-compat behavior must be explicit when CLI is newer than daemon.
 
-7. **Canonical model source (`#409`)**: What is the authoritative model-ingest path into daemon state when hook payloads do not always carry model data? Candidate sources are spawn-time metadata, explicit register payload, and config bootstrap; precedence/order must be defined.
-
-8. **Team-scoped roster query contract (`#417`)**: Does daemon require a new query to return full canonical member snapshots (including daemon-only/ghost members), or can current list APIs be extended without breaking existing consumers?
+7. **Team-scoped roster query contract (`#417`)**: Does daemon require a new query to return full canonical member snapshots (including daemon-only/ghost members), or can current list APIs be extended without breaking existing consumers?
 
 ---
 
