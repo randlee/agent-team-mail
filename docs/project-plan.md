@@ -1498,10 +1498,13 @@ Z.5 is independent and can run in parallel with Z.3/Z.4.
    `DoctorReport.member_snapshot` — expose daemon-sourced `CanonicalMemberState`
    in `atm doctor --json` output. Add integration test asserting `--json` output
    includes `member_snapshot` array.
-3. **#409**: **Deliberate SSoT exception** — model stays config-derived. Claude Code
-   does not expose model via hook payload or env var; no runtime source exists.
-   Add a code comment at `doctor.rs:301` documenting this as an intentional
-   exception to the daemon-canonical rule. Do NOT add `model` to
+3. **#409**: `atm teams spawn` does not write `model` to `config.json` before
+   launching the Claude process — doctor shows `model=unknown` for spawned
+   teammates. Fix: `atm teams spawn` writes `model` (and `external_backend_type`)
+   to config.json before exec (same pattern as `add-member --model`). Model
+   remains config-derived (written by Claude Code at Task-tool creation time, or
+   by `atm spawn` at launch time) — deliberate SSoT exception for static metadata.
+   Add a code comment at `doctor.rs:301` documenting this. Do NOT add `model` to
    `CanonicalMemberState`.
 
 **`register-hint` protocol design** (from arch investigation):
