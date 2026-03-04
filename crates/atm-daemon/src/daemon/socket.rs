@@ -911,6 +911,7 @@ struct TransitionEventSpec {
     action: &'static str,
     old: String,
     new: String,
+    reason: String,
 }
 
 #[cfg(unix)]
@@ -940,6 +941,7 @@ fn activity_label(state: AgentState) -> Option<&'static str> {
 fn collect_member_transition_events(
     old_state: Option<AgentState>,
     new_state: AgentState,
+    reason: &str,
 ) -> Vec<TransitionEventSpec> {
     if old_state == Some(new_state) {
         return Vec::new();
@@ -952,6 +954,7 @@ fn collect_member_transition_events(
             action: "member_state_change",
             old: online_state_label(old_state).to_string(),
             new: online_state_label(Some(new_state)).to_string(),
+            reason: reason.to_string(),
         });
     }
 
@@ -965,6 +968,7 @@ fn collect_member_transition_events(
             action: "member_activity_change",
             old: old.to_string(),
             new: new.to_string(),
+            reason: reason.to_string(),
         });
     }
 
@@ -981,7 +985,7 @@ fn emit_member_transition_events(
     session_id: Option<&str>,
     process_id: Option<u32>,
 ) {
-    for spec in collect_member_transition_events(old_state, new_state) {
+    for spec in collect_member_transition_events(old_state, new_state, reason) {
         let mut extra_fields = serde_json::Map::new();
         extra_fields.insert("old".to_string(), serde_json::Value::String(spec.old));
         extra_fields.insert("new".to_string(), serde_json::Value::String(spec.new));
@@ -991,7 +995,7 @@ fn emit_member_transition_events(
         );
         extra_fields.insert(
             "reason".to_string(),
-            serde_json::Value::String(reason.to_string()),
+            serde_json::Value::String(spec.reason),
         );
         if let Some(pid) = process_id {
             extra_fields.insert("pid".to_string(), serde_json::Value::Number(pid.into()));
@@ -4518,30 +4522,40 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_collect_member_transition_events_emits_online_change_once() {
-        let events =
-            collect_member_transition_events(Some(AgentState::Offline), AgentState::Active);
+        let events = collect_member_transition_events(
+            Some(AgentState::Offline),
+            AgentState::Active,
+            "session_start",
+        );
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].action, "member_state_change");
         assert_eq!(events[0].level, "info");
         assert_eq!(events[0].old, "Offline");
         assert_eq!(events[0].new, "Online");
+        assert_eq!(events[0].reason, "session_start");
     }
 
     #[test]
     #[cfg(unix)]
     fn test_collect_member_transition_events_emits_busy_idle_at_debug_only() {
-        let events = collect_member_transition_events(Some(AgentState::Active), AgentState::Idle);
+        let events = collect_member_transition_events(
+            Some(AgentState::Active),
+            AgentState::Idle,
+            "heartbeat",
+        );
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].action, "member_activity_change");
         assert_eq!(events[0].level, "debug");
         assert_eq!(events[0].old, "Busy");
         assert_eq!(events[0].new, "Idle");
+        assert_eq!(events[0].reason, "heartbeat");
     }
 
     #[test]
     #[cfg(unix)]
     fn test_collect_member_transition_events_no_duplicate_when_state_unchanged() {
-        let events = collect_member_transition_events(Some(AgentState::Idle), AgentState::Idle);
+        let events =
+            collect_member_transition_events(Some(AgentState::Idle), AgentState::Idle, "noop");
         assert!(events.is_empty());
     }
 
