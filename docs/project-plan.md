@@ -1553,11 +1553,13 @@ Z.5 is independent and can run in parallel with Z.3/Z.4.
    variants). Each event must include `timestamp`, `agent`, `team`, `pid`,
    `session_id`, `outcome` (success/fail). Add tests asserting once-per-event
    emission and no debug-only gating.
-3. **Advanced observability** (arch-ctm grouping, medium effort):
-   - Canonical `state_transition` event with `old_value`/`new_value`/`reason`/
-     `source`/`seq` (sequence number for ordering).
-   - Mailbox health metrics surfaced in doctor table (queue depth, last-delivered
-     age, stale message count).
+Advanced observability items deferred to post-Z planning (tracked recommendations):
+- Canonical `state_transition` with `seq`/`source`/`reason` fields (#1)
+- Daemon heartbeat/health block in doctor (#2)
+- Full message lifecycle correlation send→delivered→read→ack (#3)
+- Full mailbox health model in doctor/logs (#4)
+- Reconciliation audit/resolution events (#6)
+- Schema-versioned action enum contract (#9)
 
 **Acceptance criteria**:
 - `atm logs` shows `state_transition` events for every Offline↔Online change.
@@ -1575,10 +1577,12 @@ Z.5 is independent and can run in parallel with Z.3/Z.4.
 | [#351](https://github.com/randlee/agent-team-mail/issues/351) | /team-join slash command — Phase X planned |
 | [#361](https://github.com/randlee/agent-team-mail/issues/361) | Spawn --folder normalization — Phase X planned |
 | [#357](https://github.com/randlee/agent-team-mail/issues/357) | atm init improvements — Phase X planned |
+| arch-ctm obs #1 | Canonical state_transition events (old→new/reason/source/seq) — Phase Z+1 |
 | arch-ctm obs #2 | Daemon heartbeat/health block in doctor — Phase Z+1 |
+| arch-ctm obs #3 | Message lifecycle correlation (send→delivered→read→ack) — Phase Z+1 |
+| arch-ctm obs #4 | Full mailbox health model in doctor/logs — Phase Z+1 |
 | arch-ctm obs #6 | Reconciliation audit events — Phase Z+1 |
 | arch-ctm obs #9 | Schema version + stable action enum — Phase Z+1 |
-| arch-ctm obs #3 | Message lifecycle correlation (send→delivered→read→ack) — Phase Z+1 |
 
 ### Sprint Summary
 
@@ -1588,7 +1592,7 @@ Z.5 is independent and can run in parallel with Z.3/Z.4.
 | Z.2 | Log Format + Doctor UX | #410, #411, #412, #419 | — | M | PLANNED |
 | Z.3 | SSoT Fast Path: send.rs + MemberSnapshot + Model | #413, #415, #409 | Z.1 | M | PLANNED |
 | Z.4 | SSoT Complete: register/teams/status/cold-start | #414, #416, #417, #418, #401, #402 | Z.3 | L | PLANNED |
-| Z.5 | Lifecycle Logging + Hook Events | #420, #421 + advanced obs | — | M | PLANNED |
+| Z.5 | Lifecycle Logging + Hook Events | #420, #421 | — | S | PLANNED |
 
 ---
 
