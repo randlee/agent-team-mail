@@ -1226,7 +1226,7 @@ team-lead = "arch-atm"   # role-name → inbox-identity mapping
 | `ATM_DAEMON_AUTOSTART` | Daemon autostart toggle (`1/true/yes` enables, `0/false/no` disables); defaults to enabled when unset |
 | `ATM_DAEMON_BIN` | Optional daemon binary override for test/ops harnesses |
 | `ATM_LOG` | Stderr log level (`trace|debug|info|warn|error`), default `info` |
-| `ATM_LOG_MSG` | Message text logging policy (`none|truncated|full`), default `truncated` |
+| `ATM_LOG_MSG` | Message preview toggle: `1` enables 20-char preview; unset/other values disable preview |
 | `ATM_LOG_FILE` | Canonical unified log file path override for test/ops |
 
 Environment value rules:
@@ -1466,7 +1466,8 @@ No legacy `events.jsonl` sink code remains in any crate.
 #### Runtime Controls
 
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
-- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy (default: `truncated`).
+- `ATM_LOG_MSG=1` enables message preview text; unset (or legacy string values
+  `none|truncated|full`) disables preview text.
 - `ATM_LOG_FILE` may override file path for tests/ops.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
