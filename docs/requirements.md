@@ -334,6 +334,7 @@ Commands:
   members     List agents in a team
   status      Show team status overview
   doctor      Run daemon/team health diagnostics
+  logs        View and follow unified ATM logs
   config      Show/set configuration
   cleanup     Apply retention policies
   mcp         MCP server setup and management
@@ -750,10 +751,18 @@ atm doctor --full
   must not be coerced into a valid range.
 
 **Output requirements**:
-- Human-readable output MUST start with a concise team member snapshot table (equivalent
-  core fields to `atm members`: name/type/model/status), followed by ordered findings by
-  severity, then recommended remediation commands.
-- JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
+- Human-readable output MUST start with a concise team member snapshot table before
+  findings. Required columns: `Name`, `Type`, `Model`, `Status`, `Activity`,
+  `PID`, `Session ID`, `Unread`.
+- Human-readable output must render generated time in UTC as
+  `YYYY-MM-DD HH:mm:ss UTC`.
+- Human-readable log-window label must prefer relative duration first:
+  - default incremental window: `last <elapsed>`
+  - `--since <duration>`: `last <duration>`
+  - `--since <timestamp>`: `since YYYY-MM-DD HH:mm:ss UTC (<elapsed>)`
+  - `--full`: `since session start (<elapsed>)`
+- JSON output (`--json`): stable schema with `summary`, `findings[]`,
+  `recommendations[]`, `log_window`, `member_snapshot`.
 - Both human and JSON output MUST surface active env overrides for `ATM_HOME`,
   `ATM_TEAM`, and `ATM_IDENTITY` when set to non-empty values.
 - Daemon-unreachable member-state queries MUST emit explicit finding code
@@ -775,7 +784,8 @@ atm doctor --full
 - `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
-- `log_window`: `mode`, `start`, `end`
+- `log_window`: `mode`, `start`, `end`, `elapsed_secs`
+- `member_snapshot[]`: daemon-canonical team member snapshot
 - `env_overrides`: optional object fields `atm_home`, `atm_team`,
   `atm_identity`; each value shape is `{ source, value }`
 
@@ -786,13 +796,15 @@ atm doctor --full
 - `findings`
 - `recommendations`
 - `log_window`
+- `member_snapshot`
 - `env_overrides`
 
 Current required `DoctorReport` shape:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts`
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
-- `log_window`: `mode`, `start`, `end`
+- `log_window`: `mode`, `start`, `end`, `elapsed_secs`
+- `member_snapshot[]`: `CanonicalMemberState` records from daemon
 - `env_overrides`: optional `atm_home`, `atm_team`, `atm_identity`, each with:
   - `source`: override source tag (`"env"`)
   - `value`: resolved non-empty value
@@ -1222,7 +1234,7 @@ team-lead = "arch-atm"   # role-name → inbox-identity mapping
 | `ATM_DAEMON_AUTOSTART` | Daemon autostart toggle (`1/true/yes` enables, `0/false/no` disables); defaults to enabled when unset |
 | `ATM_DAEMON_BIN` | Optional daemon binary override for test/ops harnesses |
 | `ATM_LOG` | Stderr log level (`trace|debug|info|warn|error`), default `info` |
-| `ATM_LOG_MSG` | Message text logging policy (`none|truncated|full`), default `truncated` |
+| `ATM_LOG_MSG` | Human send-line preview toggle (`1` enables; unset/other disables), default disabled |
 | `ATM_LOG_FILE` | Canonical unified log file path override for test/ops |
 
 Environment value rules:
@@ -1267,10 +1279,11 @@ Lifecycle tracking must use one daemon command path (`hook-event`) with a single
 extensible payload shape, not separate packet types per integration.
 
 Required baseline fields:
-- `event`: `session_start` | `teammate_idle` | `session_end`
+- `event`: `session_start` | `pre_compact` | `compact` | `teammate_idle` | `session_end`
 - `team`
 - `agent` (or canonical `agent_id` where available)
 - `source`: source-kind enum
+- `outcome`: `success` | `failure`
 
 `source` should be expandable and include at least:
 - `claude_hook` — Claude Code lifecycle hooks
@@ -1279,7 +1292,8 @@ Required baseline fields:
 - `unknown` — reserved fallback
 
 Expected producer coverage:
-- Claude hooks emit `session_start`, `teammate_idle`, `session_end`
+- Claude hooks emit `session_start`, `pre_compact`, `compact`,
+  `teammate_idle`, `session_end` (including failure variants where applicable)
 - `atm-agent-mcp` should emit equivalent lifecycle events for MCP-managed agents
 - Future adapters should map provider lifecycle callbacks into the same envelope
   and daemon command path
@@ -1359,6 +1373,24 @@ Validation rules:
 - `action` MUST be stable snake_case. Canonical baseline action vocabulary is
   defined in `docs/logging-l1a-spec.md` and is the source of truth for
   dashboard/alert naming.
+
+Action-specific payload requirements:
+- For `action = send`, `fields` MUST include:
+  - `sender_agent`, `sender_team`, `sender_pid`
+  - `recipient_agent`, `recipient_team`, `recipient_pid`
+- For `action = send`, human-readable `atm logs` rendering MUST use stable format:
+  `send <from>@<team> [<pid|->] -> <to>@<team> [<pid|->] "<preview>"`
+  with sender first and recipient second in all cases.
+- Unknown/missing PID values in rendered output MUST be shown as `-`.
+- `read` and `read_mark` actions MUST remain first-class logged actions at INFO
+  level and include count metadata in `fields`.
+
+Message preview gating requirements:
+- Send-line preview text is controlled by `ATM_LOG_MSG`.
+- `ATM_LOG_MSG=1` enables preview text; any other value (including unset)
+  disables preview text.
+- When enabled, preview must be quoted and truncated to 20 characters with
+  ellipsis when truncation occurs.
 
 #### Sink Paths and Files
 
@@ -1456,13 +1488,21 @@ No legacy `events.jsonl` sink code remains in any crate.
 
 - `atm`: `send`, `broadcast`, `request`, `read` outcomes, watermark updates, teams ops
 - `atm-daemon`: lifecycle, session registry transitions, plugin lifecycle/errors
+  plus explicit state-transition logs:
+  - `Offline ↔ Online` transitions at INFO
+  - `session_id` and `process_id` changes at INFO (old/new values)
+  - `Busy ↔ Idle` transitions at DEBUG only
+  - exactly one log event per state transition occurrence
+- Hook lifecycle events (`session_start`, `pre_compact`, `compact`, `session_end`,
+  including failure variants) must be logged at INFO unconditionally (not debug-gated).
 - `atm-agent-mcp`: tool-call audit + lifecycle context
 - `atm-tui`: startup/shutdown, stream attach/detach, control-send/ack summaries
 
 #### Runtime Controls
 
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
-- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy (default: `truncated`).
+- `ATM_LOG_MSG=1` enables human send-line message preview; any other value
+  (including unset) disables preview text.
 - `ATM_LOG_FILE` may override file path for tests/ops.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
