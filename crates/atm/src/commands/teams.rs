@@ -404,13 +404,6 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         .team
         .clone()
         .unwrap_or_else(|| config.core.default_team.clone());
-    ensure_spawn_member_metadata(
-        &team_name,
-        &args.agent,
-        &args.runtime,
-        args.model.as_deref(),
-        &launch_dir,
-    )?;
 
     let parsed_env = parse_env_vars(&args.env)?;
 
@@ -445,6 +438,36 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     }
     let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
     print_launch_command_preview(&launch_command_preview, args.json);
+
+    // Preserve legacy spawn UX when daemon is unavailable: return the daemon
+    // error + launch command guidance without requiring team-config mutation.
+    // When daemon is running, we enforce #409 by persisting model/backend
+    // metadata before sending the launch request.
+    if !agent_team_mail_core::daemon_client::daemon_is_running() {
+        if args.json {
+            let output = json!({
+                "error": "Daemon is not running. Start it with: atm-daemon",
+                "agent": args.agent,
+                "team": team_name,
+                "runtime": runtime_name(&args.runtime),
+                "folder": launch_dir.to_string_lossy(),
+                "launch_command": launch_command_preview,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
+            eprintln!("  Run the launch command above manually in a new tmux pane.");
+        }
+        std::process::exit(1);
+    }
+
+    ensure_spawn_member_metadata(
+        &team_name,
+        &args.agent,
+        &args.runtime,
+        args.model.as_deref(),
+        &launch_dir,
+    )?;
 
     let launch_config = LaunchConfig {
         agent: args.agent.clone(),
