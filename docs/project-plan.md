@@ -1498,15 +1498,23 @@ Z.5 is independent and can run in parallel with Z.3/Z.4.
    `DoctorReport.member_snapshot` — expose daemon-sourced `CanonicalMemberState`
    in `atm doctor --json` output. Add integration test asserting `--json` output
    includes `member_snapshot` array.
-3. **#409**: Add `model: Option<String>` field to `CanonicalMemberState` struct;
-   populate from daemon session registry (not `config.json`). Daemon updates
-   `model` field when it receives a registration event that includes model info.
-   Doctor reads `model` from `CanonicalMemberState` snapshot, not `cfg.members`.
+3. **#409**: **Deliberate SSoT exception** — model stays config-derived. Claude Code
+   does not expose model via hook payload or env var; no runtime source exists.
+   Add a code comment at `doctor.rs:301` documenting this as an intentional
+   exception to the daemon-canonical rule. Do NOT add `model` to
+   `CanonicalMemberState`.
+
+**`register-hint` protocol design** (from arch investigation):
+- New socket command `"register-hint"`, payload: `{team, agent, session_id, process_id?, backend_type?}`
+- Response: `{registered, agent, team, session_registered, activity_updated}`
+- Daemon unavailable → silent skip (`Ok(None)`, same as existing `subscribe_to_agent()` pattern)
+- In `set_sender_heartbeat()`: keep `is_active`/`last_active`; remove `session_id`, `set_process_id_hint()`, `external_backend_type` writes; add best-effort `register_hint()` call
+- Handler: synchronous in `parse_and_dispatch()`, uses `session_registry.upsert_for_team()` + `state_store.register_agent()`
 
 **Acceptance criteria**:
 - `atm send` no longer writes `session_id`/`processId` to `config.json`.
 - `atm doctor --json` output includes `member_snapshot` array with daemon state.
-- `atm doctor` Model column reflects daemon canonical state; not config.json.
+- `atm doctor` Model column remains config-derived with a code comment documenting the deliberate exception.
 - Tests cover register-hint daemon path and MemberSnapshot JSON serialization.
 
 ### Z.4 — SSoT Complete: register, teams, status, cold-start
@@ -1529,6 +1537,12 @@ Z.5 is independent and can run in parallel with Z.3/Z.4.
    (`claude=comm:claude`, `codex=comm:codex`, `gemini=node+args contains gemini`).
 6. **#402**: Replace `fallback_parent` PID walk in `send.rs` with a safer approach
    that avoids stamping shell/tmux PIDs as `processId` hints.
+
+**#417 roster design** (from arch investigation):
+- No new `DaemonRequest` variant needed — extend existing `list-agents` response to union config members + `session_registry.sessions_for_team()` daemon-only registrants
+- Add `in_config: bool` to `CanonicalMemberState` (backward-compatible, defaults `true`)
+- Display: config+daemon = normal; config-only = "Unknown"; daemon-only = `[unregistered]` tag in human output, `"in_config": false` in JSON
+- Daemon fix: `handle_list_agents()` queries session registry after config members, adds daemon-only entries via `derive_daemon_only_member_state()` helper
 
 **Acceptance criteria**:
 - `register.rs` writes no session/PID fields directly to `config.json`.
