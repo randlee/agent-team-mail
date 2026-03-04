@@ -19,11 +19,23 @@ fn count_command_in_hooks(settings_path: &Path, hook_category: &str, command: &s
         serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
 
     match hook_category {
-        "SessionStart" => parsed["hooks"]["SessionStart"]
+        "SessionStart" | "SessionEnd" => parsed["hooks"][hook_category]
             .as_array()
             .unwrap_or(&Vec::new())
             .iter()
-            .filter(|h| h["command"].as_str() == Some(command))
+            .filter(|h| {
+                // Check old flat format: { "type": "command", "command": "..." }
+                if h["command"].as_str() == Some(command) {
+                    return true;
+                }
+                // Check new nested format: { "hooks": [{ "type": "command", "command": "..." }] }
+                if let Some(hooks) = h["hooks"].as_array() {
+                    return hooks
+                        .iter()
+                        .any(|inner| inner["command"].as_str() == Some(command));
+                }
+                false
+            })
             .count(),
         _ => 0,
     }

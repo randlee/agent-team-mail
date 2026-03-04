@@ -162,7 +162,7 @@ mod tests {
                     "model": "claude-haiku-4-5-20251001",
                     "joinedAt": 1770765919076,
                     "tmuxPaneId": "",
-                    "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+                    "cwd": "/tmp/atm-test/workspace",
                     "subscriptions": []
                 },
                 {
@@ -175,7 +175,7 @@ mod tests {
                     "planModeRequired": false,
                     "joinedAt": 1770772206905,
                     "tmuxPaneId": "%14",
-                    "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+                    "cwd": "/tmp/atm-test/workspace",
                     "subscriptions": [],
                     "backendType": "tmux",
                     "isActive": false
@@ -190,7 +190,7 @@ mod tests {
                     "planModeRequired": false,
                     "joinedAt": 1770772207583,
                     "tmuxPaneId": "%15",
-                    "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+                    "cwd": "/tmp/atm-test/workspace",
                     "subscriptions": [],
                     "backendType": "tmux",
                     "isActive": true
@@ -205,7 +205,7 @@ mod tests {
                     "planModeRequired": false,
                     "joinedAt": 1770772208362,
                     "tmuxPaneId": "%16",
-                    "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+                    "cwd": "/tmp/atm-test/workspace",
                     "subscriptions": [],
                     "backendType": "tmux",
                     "isActive": true

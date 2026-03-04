@@ -265,7 +265,7 @@ mod tests {
             "model": "claude-haiku-4-5-20251001",
             "joinedAt": 1770765919076,
             "tmuxPaneId": "",
-            "cwd": "/Users/randlee/Documents/github/test",
+            "cwd": "/tmp/atm-test/workspace",
             "subscriptions": []
         }"#;
 
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(member.agent_type, "general-purpose");
         assert_eq!(member.model, "claude-haiku-4-5-20251001");
         assert_eq!(member.joined_at, 1770765919076);
-        assert_eq!(member.cwd, "/Users/randlee/Documents/github/test");
+        assert_eq!(member.cwd, "/tmp/atm-test/workspace");
         assert!(member.prompt.is_none());
         assert!(member.color.is_none());
         assert!(member.subscriptions.is_empty());
@@ -297,7 +297,7 @@ mod tests {
             "planModeRequired": false,
             "joinedAt": 1770772206905,
             "tmuxPaneId": "%14",
-            "cwd": "/Users/randlee/Documents/github/test",
+            "cwd": "/tmp/atm-test/workspace",
             "subscriptions": [],
             "backendType": "tmux",
             "isActive": false

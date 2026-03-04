@@ -97,7 +97,7 @@ TeamCreate:
 ```json
 {
   "team_name": "backend-ci-team",
-  "team_file_path": "/Users/randlee/.claude/teams/backend-ci-team/config.json",
+  "team_file_path": "~/.claude/teams/backend-ci-team/config.json",
   "lead_agent_id": "team-lead@backend-ci-team"
 }
 ```
@@ -293,7 +293,7 @@ Adds to team config at `~/.claude/teams/{team_name}/config.json`:
   "planModeRequired": false,
   "joinedAt": 1770772206905,
   "tmuxPaneId": "%14",
-  "cwd": "/Users/randlee/work",
+  "cwd": "/home/user/work",
   "subscriptions": [],
   "backendType": "tmux",
   "isActive": true
@@ -903,7 +903,7 @@ Approve or reject agent's implementation plan.
       "model": "claude-haiku-4-5-20251001",
       "joinedAt": 1770765919076,
       "tmuxPaneId": "",
-      "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+      "cwd": "/tmp/atm-test/workspace",
       "subscriptions": []
     },
     {
@@ -916,7 +916,7 @@ Approve or reject agent's implementation plan.
       "planModeRequired": false,
       "joinedAt": 1770772206905,
       "tmuxPaneId": "%14",
-      "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+      "cwd": "/tmp/atm-test/workspace",
       "subscriptions": [],
       "backendType": "tmux",
       "isActive": false
@@ -931,7 +931,7 @@ Approve or reject agent's implementation plan.
       "planModeRequired": false,
       "joinedAt": 1770772207583,
       "tmuxPaneId": "%15",
-      "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+      "cwd": "/tmp/atm-test/workspace",
       "subscriptions": [],
       "backendType": "tmux",
       "isActive": true
@@ -946,7 +946,7 @@ Approve or reject agent's implementation plan.
       "planModeRequired": false,
       "joinedAt": 1770772208362,
       "tmuxPaneId": "%16",
-      "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+      "cwd": "/tmp/atm-test/workspace",
       "subscriptions": [],
       "backendType": "tmux",
       "isActive": true
@@ -1296,7 +1296,7 @@ Recommended convention for easy discovery:
 
 ```bash
 # When in repo directory
-cd /Users/randlee/backend
+cd ~/backend
 
 # Team name matches repo name
 TeamCreate: team_name="backend"

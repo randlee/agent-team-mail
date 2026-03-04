@@ -16,6 +16,8 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::util::settings::get_home_dir;
+
 /// Maximum age in seconds before a hook file is considered stale.
 const HOOK_FILE_TTL_SECS: f64 = 5.0;
 
@@ -120,6 +122,101 @@ pub fn read_hook_file() -> Result<Option<HookFileData>> {
     Ok(Some(data))
 }
 
+/// Data stored in a session file.
+#[derive(Debug, Deserialize)]
+pub struct SessionFileData {
+    pub session_id: String,
+    pub team: String,
+    pub identity: String,
+    #[allow(dead_code)]
+    pub pid: Option<u32>,
+    pub created_at: f64,
+    pub updated_at: Option<f64>,
+}
+
+/// Maximum age in seconds before a session file is considered stale (24 hours).
+const SESSION_FILE_TTL_SECS: f64 = 86400.0;
+
+/// Scan session files for a matching team+identity.
+///
+/// Ambiguity handling:
+/// - 0 matches → Ok(None)
+/// - 1 match → Ok(Some(session_id))
+/// - >1 matches → Err with instruction to set CLAUDE_SESSION_ID
+pub fn read_session_file(team: &str, identity: &str) -> Result<Option<String>> {
+    let home = get_home_dir()?;
+    let sessions_dir = home.join(".claude/sessions");
+    if !sessions_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
+    let mut matches: Vec<SessionFileData> = Vec::new();
+    let entries = match std::fs::read_dir(&sessions_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(None),
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+
+        // Ownership check (Unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let current_uid = unsafe { libc::getuid() };
+                if meta.uid() != current_uid {
+                    continue;
+                }
+            }
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let data: SessionFileData = match serde_json::from_str(&content) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        // TTL check: use updated_at if present, else created_at
+        let timestamp = data.updated_at.unwrap_or(data.created_at);
+        if timestamp <= 0.0 {
+            continue; // Invalid timestamp
+        }
+        let age = now - timestamp;
+        if age > SESSION_FILE_TTL_SECS {
+            continue; // Stale
+        }
+
+        if data.team == team && data.identity == identity {
+            matches.push(data);
+        }
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.into_iter().next().unwrap().session_id)),
+        n => anyhow::bail!(
+            "Ambiguous: {n} active sessions for {identity}@{team}. \
+             Export CLAUDE_SESSION_ID=<your-session-id> to disambiguate."
+        ),
+    }
+}
+
 /// Read the agent identity from the PID-based hook file.
 ///
 /// Returns:
@@ -137,6 +234,7 @@ pub fn read_hook_file_identity() -> Result<Option<String>> {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     #[serial]
@@ -259,5 +357,214 @@ mod tests {
         let result = read_hook_file_identity();
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    // ── Session file tests ──────────────────────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn test_read_session_file_no_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let old_home = std::env::var("ATM_HOME").ok();
+        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+
+        let result = read_session_file("test-team", "team-lead");
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_read_session_file_single_match() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = dir.path().join(".claude/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        let data = serde_json::json!({
+            "session_id": "test-session-123",
+            "team": "test-team",
+            "identity": "team-lead",
+            "pid": 12345,
+            "created_at": now,
+        });
+        std::fs::write(
+            sessions_dir.join("test-session-123.json"),
+            serde_json::to_string(&data).unwrap(),
+        ).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+
+        let result = read_session_file("test-team", "team-lead");
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+
+        let sid = result.unwrap().unwrap();
+        assert_eq!(sid, "test-session-123");
+    }
+
+    #[test]
+    #[serial]
+    fn test_read_session_file_ambiguous() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = dir.path().join(".claude/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        for i in 1..=2 {
+            let data = serde_json::json!({
+                "session_id": format!("session-{i}"),
+                "team": "test-team",
+                "identity": "team-lead",
+                "pid": 12345 + i,
+                "created_at": now,
+            });
+            std::fs::write(
+                sessions_dir.join(format!("session-{i}.json")),
+                serde_json::to_string(&data).unwrap(),
+            ).unwrap();
+        }
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+
+        let result = read_session_file("test-team", "team-lead");
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Ambiguous"), "error should mention ambiguity: {err}");
+        assert!(err.contains("CLAUDE_SESSION_ID"), "error should mention env var: {err}");
+    }
+
+    #[test]
+    #[serial]
+    fn test_read_session_file_stale_skipped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = dir.path().join(".claude/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        let stale_time = now - 100_000.0; // Well beyond 24h TTL
+        let data = serde_json::json!({
+            "session_id": "stale-session",
+            "team": "test-team",
+            "identity": "team-lead",
+            "pid": 12345,
+            "created_at": stale_time,
+        });
+        std::fs::write(
+            sessions_dir.join("stale-session.json"),
+            serde_json::to_string(&data).unwrap(),
+        ).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+
+        let result = read_session_file("test-team", "team-lead");
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none(), "stale session should be skipped");
+    }
+
+    #[test]
+    #[serial]
+    fn test_read_session_file_updated_at_extends_freshness() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = dir.path().join(".claude/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        // created_at is stale but updated_at is fresh
+        let data = serde_json::json!({
+            "session_id": "refreshed-session",
+            "team": "test-team",
+            "identity": "team-lead",
+            "pid": 12345,
+            "created_at": now - 100_000.0,
+            "updated_at": now - 10.0,
+        });
+        std::fs::write(
+            sessions_dir.join("refreshed-session.json"),
+            serde_json::to_string(&data).unwrap(),
+        ).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+
+        let result = read_session_file("test-team", "team-lead");
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+
+        let sid = result.unwrap().unwrap();
+        assert_eq!(sid, "refreshed-session");
+    }
+
+    #[test]
+    #[serial]
+    fn test_read_session_file_custom_atm_home() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = dir.path().join(".claude/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        let data = serde_json::json!({
+            "session_id": "custom-home-session",
+            "team": "test-team",
+            "identity": "team-lead",
+            "pid": 12345,
+            "created_at": now,
+        });
+        std::fs::write(
+            sessions_dir.join("custom-home-session.json"),
+            serde_json::to_string(&data).unwrap(),
+        ).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+
+        let result = read_session_file("test-team", "team-lead");
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+
+        let sid = result.unwrap().unwrap();
+        assert_eq!(sid, "custom-home-session");
     }
 }

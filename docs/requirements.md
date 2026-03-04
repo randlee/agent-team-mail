@@ -291,7 +291,7 @@ pub struct SystemContext {
 
 pub struct RepoContext {
     pub name: String,                     // "agent-team-mail"
-    pub path: PathBuf,                    // /Users/randlee/.../agent-team-mail
+    pub path: PathBuf,                    // e.g., ~/projects/agent-team-mail
     pub remote_url: Option<String>,       // raw git remote URL
     pub provider: Option<GitProvider>,    // detected from remote URL
 }
@@ -430,7 +430,7 @@ The daemon tracks agent activity by monitoring inbox file changes and message ti
 **Example message (path rewritten to share copy)**:
 ```
 [atm] File path rewritten to a local share copy for destination access.
-Original: /Users/randlee/project/secrets/trace.txt
+Original: /home/user/project/secrets/trace.txt
 Copy: ~/.config/atm/share/backend-ci-team/trace.txt
 ```
 

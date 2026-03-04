@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 
 const SESSION_START_PY: &str = include_str!("../../scripts/session-start.py");
+const SESSION_END_PY: &str = include_str!("../../scripts/session-end.py");
 const ATM_IDENTITY_WRITE_PY: &str = include_str!("../../scripts/atm-identity-write.py");
 const ATM_IDENTITY_CLEANUP_PY: &str = include_str!("../../scripts/atm-identity-cleanup.py");
 const GATE_AGENT_SPAWNS_PY: &str = include_str!("../../scripts/gate-agent-spawns.py");
@@ -42,18 +43,23 @@ const ATM_HOOK_LIB_PY: &str = include_str!("../../scripts/atm_hook_lib.py");
 // ---------------------------------------------------------------------------
 
 // Hooks installed by `atm init`:
-// - SessionStart: announce session ID and optionally notify daemon
+// - SessionStart: announce session ID, notify daemon, write session file
+// - SessionEnd: notify daemon, clean up session file
 // - PreToolUse(Bash): write PID-based identity file before `atm` commands
 // - PreToolUse(Task): gate agent spawning pattern enforcement
 // - PostToolUse(Bash): clean up PID identity file after `atm` commands
-//
-// Note: TeammateIdle relay and SessionEnd hooks are used by the project's
-// own .claude/settings.json but are NOT installed by `atm init` in S.2a.
-// These will be addressed in a follow-on sprint.
 
 /// Return the SessionStart hook command string for local or global install.
 fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "session-start.py");
+    format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+    )
+}
+
+/// Return the SessionEnd hook command string for local or global install.
+fn session_end_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "session-end.py");
     format!(
         "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
     )
@@ -344,6 +350,7 @@ fn materialize_scripts(scripts_dir: &Path) -> Result<()> {
 
     let files = [
         ("session-start.py", SESSION_START_PY),
+        ("session-end.py", SESSION_END_PY),
         ("atm-identity-write.py", ATM_IDENTITY_WRITE_PY),
         ("atm-identity-cleanup.py", ATM_IDENTITY_CLEANUP_PY),
         ("gate-agent-spawns.py", GATE_AGENT_SPAWNS_PY),
@@ -465,6 +472,7 @@ enum HookStatus {
 /// Summary of what changed (or was already present) during a merge.
 struct MergeReport {
     session_start: HookStatus,
+    session_end: HookStatus,
     pre_tool_use_bash: HookStatus,
     pre_tool_use_task: HookStatus,
     post_tool_use_bash: HookStatus,
@@ -473,6 +481,7 @@ struct MergeReport {
 impl MergeReport {
     fn all_present(&self) -> bool {
         self.session_start == HookStatus::AlreadyPresent
+            && self.session_end == HookStatus::AlreadyPresent
             && self.pre_tool_use_bash == HookStatus::AlreadyPresent
             && self.pre_tool_use_task == HookStatus::AlreadyPresent
             && self.post_tool_use_bash == HookStatus::AlreadyPresent
@@ -480,6 +489,7 @@ impl MergeReport {
 
     fn any_added(&self) -> bool {
         self.session_start == HookStatus::Added
+            || self.session_end == HookStatus::Added
             || self.pre_tool_use_bash == HookStatus::Added
             || self.pre_tool_use_task == HookStatus::Added
             || self.post_tool_use_bash == HookStatus::Added
@@ -487,6 +497,7 @@ impl MergeReport {
 
     fn all_added(&self) -> bool {
         self.session_start == HookStatus::Added
+            && self.session_end == HookStatus::Added
             && self.pre_tool_use_bash == HookStatus::Added
             && self.pre_tool_use_task == HookStatus::Added
             && self.post_tool_use_bash == HookStatus::Added
@@ -520,40 +531,63 @@ fn merge_hooks(
     }
 
     let ss_cmd = session_start_cmd(global_scripts_dir);
+    let se_cmd = session_end_cmd(global_scripts_dir);
     let ptu_bash = pre_tool_use_bash_cmd(global_scripts_dir);
     let ptu_task = pre_tool_use_task_cmd(global_scripts_dir);
     let post_bash = post_tool_use_bash_cmd(global_scripts_dir);
 
-    let session_start = merge_session_start_hook(settings, &ss_cmd)?;
+    let session_start = merge_session_hook(settings, "SessionStart", &ss_cmd)?;
+    let session_end = merge_session_hook(settings, "SessionEnd", &se_cmd)?;
     let pre_tool_use_bash = merge_matcher_hook(settings, "PreToolUse", "Bash", &ptu_bash)?;
     let pre_tool_use_task = merge_matcher_hook(settings, "PreToolUse", "Task", &ptu_task)?;
     let post_tool_use_bash = merge_matcher_hook(settings, "PostToolUse", "Bash", &post_bash)?;
 
     Ok(MergeReport {
         session_start,
+        session_end,
         pre_tool_use_bash,
         pre_tool_use_task,
         post_tool_use_bash,
     })
 }
 
-/// Merge a single hook entry into the `hooks.SessionStart` array.
+/// Merge a single hook entry into a `hooks.SessionStart` or `hooks.SessionEnd` array.
 ///
-/// The `SessionStart` array contains plain command objects (no `matcher`
-/// wrapper). An entry is considered present when its `command` field matches
-/// `command` exactly.
-fn merge_session_start_hook(settings: &mut serde_json::Value, command: &str) -> Result<HookStatus> {
-    let new_entry = serde_json::json!({
-        "type": "command",
-        "command": command
-    });
+/// Writes in the nested hook schema:
+/// ```json
+/// { "hooks": [{ "type": "command", "command": "..." }] }
+/// ```
+///
+/// Detects existing entries in both the old flat format (for backwards
+/// compatibility) and the new nested format to prevent duplicates.
+fn merge_session_hook(
+    settings: &mut serde_json::Value,
+    category: &str,
+    command: &str,
+) -> Result<HookStatus> {
+    let array = get_or_create_hook_array(settings, category)?;
 
-    let array = get_or_create_hook_array(settings, "SessionStart")?;
-
-    if hook_command_present(array, command) {
-        return Ok(HookStatus::AlreadyPresent);
+    // Check both old (flat) and new (nested) formats for idempotency.
+    for entry in array.iter() {
+        // Old flat format: { "type": "command", "command": "..." }
+        if entry.get("command").and_then(|c| c.as_str()) == Some(command) {
+            return Ok(HookStatus::AlreadyPresent);
+        }
+        // New nested format: { "hooks": [{ "type": "command", "command": "..." }] }
+        if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+            if hook_command_present(hooks, command) {
+                return Ok(HookStatus::AlreadyPresent);
+            }
+        }
     }
 
+    // Write in new nested format.
+    let new_entry = serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": command
+        }]
+    });
     array.push(new_entry);
     Ok(HookStatus::Added)
 }
@@ -695,6 +729,7 @@ fn print_report(
             settings_path.display()
         );
         println!("  \u{2713} SessionStart hook present");
+        println!("  \u{2713} SessionEnd hook present");
         println!("  \u{2713} PreToolUse(Bash) hook present");
         println!("  \u{2713} PreToolUse(Task) hook present");
         println!("  \u{2713} PostToolUse(Bash) hook present");
@@ -705,6 +740,7 @@ fn print_report(
             settings_path.display()
         );
         print_hook_line("SessionStart hook", &report.session_start);
+        print_hook_line("SessionEnd hook", &report.session_end);
         print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash);
         print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
         print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
@@ -715,6 +751,7 @@ fn print_report(
             settings_path.display()
         );
         print_hook_line("SessionStart hook", &report.session_start);
+        print_hook_line("SessionEnd hook", &report.session_end);
         print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash);
         print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
         print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
@@ -771,6 +808,7 @@ mod tests {
 
         assert!(path.exists());
         assert_eq!(report.session_start, HookStatus::Added);
+        assert_eq!(report.session_end, HookStatus::Added);
         assert_eq!(report.pre_tool_use_bash, HookStatus::Added);
         assert_eq!(report.pre_tool_use_task, HookStatus::Added);
         assert_eq!(report.post_tool_use_bash, HookStatus::Added);
@@ -780,13 +818,33 @@ mod tests {
         assert!(content.ends_with('\n'), "file must end with newline");
 
         let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse");
+        // SessionStart uses nested schema: entries have a `hooks` sub-array
         let session_start = parsed["hooks"]["SessionStart"]
             .as_array()
             .expect("SessionStart array");
-        assert!(
-            hook_command_present(session_start, &session_start_cmd(None)),
-            "SessionStart hook missing"
-        );
+        let ss_cmd = session_start_cmd(None);
+        let ss_found = session_start.iter().any(|entry| {
+            entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hooks| hook_command_present(hooks, &ss_cmd))
+                .unwrap_or(false)
+        });
+        assert!(ss_found, "SessionStart hook missing");
+
+        // SessionEnd uses nested schema
+        let session_end = parsed["hooks"]["SessionEnd"]
+            .as_array()
+            .expect("SessionEnd array");
+        let se_cmd = session_end_cmd(None);
+        let se_found = session_end.iter().any(|entry| {
+            entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hooks| hook_command_present(hooks, &se_cmd))
+                .unwrap_or(false)
+        });
+        assert!(se_found, "SessionEnd hook missing");
 
         let pre_tool_use = parsed["hooks"]["PreToolUse"]
             .as_array()
@@ -847,6 +905,7 @@ mod tests {
 
         // All hooks must be reported as already present
         assert_eq!(report.session_start, HookStatus::AlreadyPresent);
+        assert_eq!(report.session_end, HookStatus::AlreadyPresent);
         assert_eq!(report.pre_tool_use_bash, HookStatus::AlreadyPresent);
         assert_eq!(report.pre_tool_use_task, HookStatus::AlreadyPresent);
         assert_eq!(report.post_tool_use_bash, HookStatus::AlreadyPresent);
@@ -855,15 +914,23 @@ mod tests {
         let content = std::fs::read_to_string(&path).expect("read");
         let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse");
 
+        // SessionStart uses nested schema — count wrapper entries that contain the command
+        let ss_cmd = session_start_cmd(None);
         let session_start_count = parsed["hooks"]["SessionStart"]
             .as_array()
             .expect("array")
             .iter()
             .filter(|e| {
-                e.get("command")
-                    .and_then(|c| c.as_str())
-                    .map(|c| c == session_start_cmd(None))
+                // Check nested format
+                e.get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| hook_command_present(hooks, &ss_cmd))
                     .unwrap_or(false)
+                    // Also check legacy flat format for robustness
+                    || e.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|c| c == ss_cmd)
+                        .unwrap_or(false)
             })
             .count();
         assert_eq!(session_start_count, 1, "SessionStart hook duplicated");
@@ -1098,6 +1165,7 @@ mod tests {
 
         for name in &[
             "session-start.py",
+            "session-end.py",
             "atm-identity-write.py",
             "atm-identity-cleanup.py",
             "gate-agent-spawns.py",
@@ -1165,6 +1233,7 @@ mod tests {
     fn test_merge_report_all_added() {
         let report = MergeReport {
             session_start: HookStatus::Added,
+            session_end: HookStatus::Added,
             pre_tool_use_bash: HookStatus::Added,
             pre_tool_use_task: HookStatus::Added,
             post_tool_use_bash: HookStatus::Added,
@@ -1179,6 +1248,7 @@ mod tests {
     fn test_merge_report_partial_update() {
         let report = MergeReport {
             session_start: HookStatus::Added,
+            session_end: HookStatus::AlreadyPresent,
             pre_tool_use_bash: HookStatus::AlreadyPresent,
             pre_tool_use_task: HookStatus::AlreadyPresent,
             post_tool_use_bash: HookStatus::AlreadyPresent,
@@ -1186,5 +1256,43 @@ mod tests {
         assert!(!report.all_added());
         assert!(report.any_added());
         assert!(!report.all_present());
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionEnd and session-end.py tests
+    // -----------------------------------------------------------------------
+
+    /// `atm init` must install SessionEnd alongside SessionStart.
+    #[test]
+    fn test_fresh_file_install_includes_session_end() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = temp_settings(&dir);
+
+        let mut settings = load_settings(&path).expect("load");
+        let report = merge_hooks(&mut settings, None).expect("merge");
+        write_settings_atomic(&path, &settings).expect("write");
+
+        assert_eq!(report.session_end, HookStatus::Added);
+
+        let content = std::fs::read_to_string(&path).expect("read");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse");
+        let session_end = parsed["hooks"]["SessionEnd"]
+            .as_array()
+            .expect("SessionEnd array");
+        assert!(!session_end.is_empty(), "SessionEnd should have entries");
+    }
+
+    /// `materialize_scripts` must now include session-end.py.
+    #[test]
+    fn test_materialize_scripts_includes_session_end() {
+        let dir = TempDir::new().expect("tempdir");
+        let scripts_dir = dir.path().join("scripts");
+
+        materialize_scripts(&scripts_dir).expect("materialize");
+
+        assert!(
+            scripts_dir.join("session-end.py").exists(),
+            "session-end.py was not materialized"
+        );
     }
 }

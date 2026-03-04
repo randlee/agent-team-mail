@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::util::hook_identity::read_hook_file;
+use crate::util::hook_identity::{read_hook_file, read_session_file};
 use crate::util::settings::get_home_dir;
 
 /// Register this agent session with a team.
@@ -61,8 +61,11 @@ pub fn execute(args: RegisterArgs) -> Result<()> {
         );
     }
 
-    // Resolve session ID: hook file → CLAUDE_SESSION_ID env var.
-    let session_id = resolve_session_id()?;
+    // Resolve session ID: hook file → session file → CLAUDE_SESSION_ID env var.
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = resolve_config(&ConfigOverrides::default(), &current_dir, &home_dir)?;
+    let caller_identity = &config.core.identity;
+    let session_id = resolve_session_id(&args.team, caller_identity)?;
 
     if let Some(ref name) = args.name {
         register_teammate(&config_path, &args.team, name, &session_id)
@@ -71,27 +74,39 @@ pub fn execute(args: RegisterArgs) -> Result<()> {
     }
 }
 
-/// Resolve the current session ID from hook file or environment.
-fn resolve_session_id() -> Result<String> {
+/// Resolve the current session ID from hook file, session file, or environment.
+fn resolve_session_id(team: &str, identity: &str) -> Result<String> {
     // 1. Try hook file (written by PreToolUse Bash hook).
     let fallback_reason = match read_hook_file() {
         Ok(Some(data)) if !data.session_id.is_empty() => {
+            tracing::debug!("session resolved via: hook file");
             return Ok(data.session_id);
         }
         Ok(Some(_)) => "hook file has blank session_id".to_string(),
         Ok(None) => "hook file not found".to_string(),
         Err(e) => {
-            anyhow::bail!(
-                "Cannot determine session_id: hook file validation failed: {e}. \
-                 Fix hook setup or use --force only with explicit user confirmation."
+            eprintln!(
+                "WARNING: hook file validation failed: {e}; trying session file..."
             );
+            format!("hook file validation failed: {e}")
         }
     };
 
-    // 2. Bootstrap fallback: CLAUDE_SESSION_ID (register only — with mandatory warning).
+    // 2. Session file (written by session-start.py hook).
+    match read_session_file(team, identity) {
+        Ok(Some(sid)) => {
+            tracing::debug!("session resolved via: session file");
+            return Ok(sid);
+        }
+        Ok(None) => tracing::debug!("no session file found"),
+        Err(e) => eprintln!("WARNING: session file lookup failed: {e}"),
+    }
+
+    // 3. Bootstrap fallback: CLAUDE_SESSION_ID (register only — with mandatory warning).
     if let Ok(id) = std::env::var("CLAUDE_SESSION_ID") {
         let trimmed = id.trim().to_string();
         if !trimmed.is_empty() {
+            tracing::debug!("session resolved via: CLAUDE_SESSION_ID env var");
             eprintln!(
                 "WARNING: {}, falling back to CLAUDE_SESSION_ID. \
                  Ensure atm-identity-write.py hook is configured in .claude/settings.json.",

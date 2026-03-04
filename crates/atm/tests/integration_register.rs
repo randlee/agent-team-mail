@@ -264,6 +264,10 @@ fn test_register_requires_session_id() {
         .stderr(predicate::str::contains("Cannot determine session_id"));
 }
 
+/// A stale/invalid hook file must emit a warning but still allow registration
+/// by falling through to the session file or CLAUDE_SESSION_ID fallback.
+/// (The previous behavior was `bail!` on hook file errors; the new behavior
+/// warns and continues so that Claude Code's subprocess model is supported.)
 #[test]
 fn test_register_invalid_hook_file_does_not_fallback_to_env() {
     let temp_dir = TempDir::new().unwrap();
@@ -290,14 +294,17 @@ fn test_register_invalid_hook_file_does_not_fallback_to_env() {
     cmd.env("TMPDIR", temp_dir.path())
         .env("TMP", temp_dir.path()) // Windows uses TMP/TEMP, not TMPDIR
         .env("TEMP", temp_dir.path())
-        .env("CLAUDE_SESSION_ID", "env-session-should-not-be-used")
+        .env("CLAUDE_SESSION_ID", "env-session-fallback")
         .env("ATM_TEAM", "my-team")
         .current_dir(temp_dir.path().join("workdir"))
         .args(["register", "my-team"]);
 
+    // Hook file validation fails → warning emitted → falls through to
+    // CLAUDE_SESSION_ID → registration succeeds with the env var session.
     cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("hook file validation failed"));
+        .success()
+        .stderr(predicate::str::contains("hook file validation failed"))
+        .stdout(predicate::str::contains("env-session-fallback"));
 }
 
 #[test]
