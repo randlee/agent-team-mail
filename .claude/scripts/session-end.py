@@ -49,6 +49,8 @@ def main() -> int:
     payload: dict[str, Any] = {
         "event": "session_end",
         "session_id": session_id,
+        # Parent PID is the long-lived Claude session process.
+        "process_id": os.getppid(),
         "agent": identity,
         "team": default_team,
         "reason": "session_exit",

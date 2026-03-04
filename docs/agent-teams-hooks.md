@@ -458,7 +458,7 @@ There are two payload layers:
 | `session_id` | Session identifier used by daemon liveness/state tracking |
 | `agent` | ATM member identity |
 | `team` | ATM team name |
-| `process_id` | OS process ID of the hook script (for diagnostics/liveness correlation) |
+| `process_id` | OS process ID of the parent agent session (`os.getppid()` from hook) used for liveness correlation |
 | `source.kind` | Lifecycle source discriminator (`claude_hook`, `atm_mcp`, `agent_hook`, `unknown`) |
 
 ---

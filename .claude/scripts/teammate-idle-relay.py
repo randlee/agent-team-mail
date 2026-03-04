@@ -74,12 +74,15 @@ def main() -> int:
 
     received_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Parent PID is the long-lived Claude session process.
+    process_id = os.getppid()
+
     event = {
         "type": "teammate-idle",
         "agent": agent,
         "team": team,
         "session_id": payload.get("session_id"),
-        "process_id": os.getpid(),
+        "process_id": process_id,
         "received_at": received_at,
         "payload": payload,
     }
@@ -96,7 +99,7 @@ def main() -> int:
         send_hook_event({
             "event": "teammate_idle",
             "session_id": payload.get("session_id"),
-            "process_id": os.getpid(),
+            "process_id": process_id,
             "agent": agent,
             "team": team,
             "received_at": received_at,
