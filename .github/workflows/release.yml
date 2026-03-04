@@ -205,7 +205,7 @@ jobs:
                       "publish": True,
                       "required": True,
                       "verifyCommands": [
-                          f"cargo search agent-team-mail --limit 1 | grep -E '^agent-team-mail = \"{version}\"'",
+                          f"cargo search agent-team-mail --limit 1 | grep -F 'agent-team-mail = \"{version}\"'",
                           f"cargo install agent-team-mail --version {version} --locked --force",
                       ],
                   },
@@ -217,7 +217,7 @@ jobs:
                       "publish": True,
                       "required": True,
                       "verifyCommands": [
-                          f"cargo search agent-team-mail-core --limit 1 | grep -E '^agent-team-mail-core = \"{version}\"'",
+                          f"cargo search agent-team-mail-core --limit 1 | grep -F 'agent-team-mail-core = \"{version}\"'",
                       ],
                   },
                   {
@@ -228,7 +228,7 @@ jobs:
                       "publish": True,
                       "required": True,
                       "verifyCommands": [
-                          f"cargo search agent-team-mail-daemon --limit 1 | grep -E '^agent-team-mail-daemon = \"{version}\"'",
+                          f"cargo search agent-team-mail-daemon --limit 1 | grep -F 'agent-team-mail-daemon = \"{version}\"'",
                       ],
                   },
                   {
@@ -239,7 +239,7 @@ jobs:
                       "publish": True,
                       "required": True,
                       "verifyCommands": [
-                          f"cargo search agent-team-mail-mcp --limit 1 | grep -E '^agent-team-mail-mcp = \"{version}\"'",
+                          f"cargo search agent-team-mail-mcp --limit 1 | grep -F 'agent-team-mail-mcp = \"{version}\"'",
                       ],
                   },
                   {
@@ -250,7 +250,7 @@ jobs:
                       "publish": True,
                       "required": True,
                       "verifyCommands": [
-                          f"cargo search agent-team-mail-tui --limit 1 | grep -E '^agent-team-mail-tui = \"{version}\"'",
+                          f"cargo search agent-team-mail-tui --limit 1 | grep -F 'agent-team-mail-tui = \"{version}\"'",
                       ],
                   },
               ],
@@ -483,9 +483,7 @@ jobs:
           crate_exists() {
             local crate="$1"
             local version="$2"
-            local status
-            status="$(curl -s -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/${crate}/${version}")"
-            [[ "$status" == "200" ]]
+            cargo search "$crate" --limit 1 | grep -F "${crate} = \"${version}\"" >/dev/null
           }
 
           publish_if_missing() {
@@ -876,6 +874,8 @@ jobs:
         with:
           ref: ${{ needs.gate-and-tag.outputs.release_tag }}
           fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Generate consolidated completion report
         shell: bash
@@ -942,16 +942,15 @@ jobs:
               "agent-team-mail-tui",
           ]
           for crate in crates:
-              url = f"https://crates.io/api/v1/crates/{crate}/{version}"
-              req = urllib.request.Request(url, headers={"User-Agent": "atm-release-summary"})
-              ok = False
-              detail = url
-              try:
-                  with urllib.request.urlopen(req) as resp:
-                      ok = resp.getcode() == 200
-                      detail = f"{url} status={resp.getcode()}"
-              except urllib.error.HTTPError as e:
-                  detail = f"{url} status={e.code}"
+              expected = f'{crate} = "{version}"'
+              cmd = ["cargo", "search", crate, "--limit", "1"]
+              result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+              ok = result.returncode == 0 and expected in result.stdout
+              detail = f"cmd={' '.join(cmd)} rc={result.returncode}"
+              if result.stdout.strip():
+                  detail = f"{detail} out={result.stdout.strip()}"
+              elif result.stderr.strip():
+                  detail = f"{detail} err={result.stderr.strip()}"
               checks.append((f"crates.io publish: {crate}@{version}", ok, detail))
 
           formula_urls = [
