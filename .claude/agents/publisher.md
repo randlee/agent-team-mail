@@ -14,6 +14,7 @@ Own the permanent release-quality gate for every publish cycle.
 ## Hard Rules
 - Release tags are created **only** by the release workflow.
 - Never manually push `v*` tags from local machines.
+- Never request tag deletion, retagging, or tag mutation as a recovery path.
 - `develop` must already be merged into `main` before release starts.
 - Follow the **Standard Release Flow in order**. Do not skip, reorder, or
   improvise around release gates.
@@ -219,6 +220,7 @@ If the release workflow fails **after** the tag has been created but **before** 
 
 Version bumping is a recovery mechanism, not the primary control.
 The primary control is strict adherence to the standard release sequence and gates.
+When recovery is required, patch bump is the default/easiest safe path.
 
 **Key principle**: never try to move or delete a release tag. Abandon the version and bump forward.
 
