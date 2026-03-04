@@ -221,11 +221,7 @@ fn determine_archive_dir(policy: &RetentionConfig) -> Result<PathBuf> {
     if let Some(ref dir_str) = policy.archive_dir {
         Ok(PathBuf::from(dir_str))
     } else {
-        // Default: ~/.config/atm/archive/
-        // When ATM_HOME is set, use it directly (test-friendly)
-        if let Ok(atm_home) = std::env::var("ATM_HOME") {
-            return Ok(PathBuf::from(atm_home).join("archive"));
-        }
+        // Default: {ATM_HOME or home}/.config/atm/archive/
         let home = crate::home::get_home_dir()?;
         Ok(home.join(".config/atm/archive"))
     }

@@ -436,6 +436,8 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     for (k, v) in parsed_env {
         env_vars.insert(k, v);
     }
+    let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
+    print_launch_command_preview(&launch_command_preview, args.json);
 
     let launch_config = LaunchConfig {
         agent: args.agent.clone(),
@@ -458,10 +460,12 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
                     "team": team_name,
                     "runtime": runtime_name(&args.runtime),
                     "folder": launch_dir.to_string_lossy(),
+                    "launch_command": launch_command_preview,
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
+                eprintln!("  Run the launch command above manually in a new tmux pane.");
             }
             std::process::exit(1);
         }
@@ -473,10 +477,12 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
                     "team": team_name,
                     "runtime": runtime_name(&args.runtime),
                     "folder": launch_dir.to_string_lossy(),
+                    "launch_command": launch_command_preview,
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 eprintln!("Error: {e}");
+                eprintln!("  Run the launch command above manually in a new tmux pane.");
             }
             std::process::exit(1);
         }
@@ -488,6 +494,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
             "team": team_name,
             "runtime": runtime_name(&args.runtime),
             "folder": launch_dir.to_string_lossy(),
+            "launch_command": launch_command_preview,
             "pane_id": result.pane_id,
             "state": result.state,
             "warning": result.warning,
@@ -510,6 +517,37 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn format_spawn_launch_command(runtime: &RuntimeKind, spec: &SpawnSpec, command: &str) -> String {
+    match runtime {
+        RuntimeKind::Claude => {
+            let agent_id = format!("{}@{}", spec.agent, spec.team);
+            format!(
+                "env ATM_TEAM={} ATM_IDENTITY={} \\\nCLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude \\\n  --agent-id {} \\\n  --agent-name {} \\\n  --team-name {} \\\n  --dangerously-skip-permissions",
+                shell_quote(&spec.team),
+                shell_quote(&spec.agent),
+                agent_id,
+                spec.agent,
+                spec.team
+            )
+        }
+        _ => command.to_string(),
+    }
+}
+
+fn print_launch_command_preview(preview: &str, json_mode: bool) {
+    if json_mode {
+        eprintln!("Launch command:");
+        for line in preview.lines() {
+            eprintln!("  {line}");
+        }
+    } else {
+        println!("Launch command:");
+        for line in preview.lines() {
+            println!("  {line}");
+        }
+    }
 }
 
 fn runtime_name(runtime: &RuntimeKind) -> &'static str {
@@ -3376,5 +3414,48 @@ mod tests {
         assert_eq!(runtime_name(&RuntimeKind::Codex), "codex");
         assert_eq!(runtime_name(&RuntimeKind::Gemini), "gemini");
         assert_eq!(runtime_name(&RuntimeKind::Opencode), "opencode");
+    }
+
+    #[test]
+    fn test_format_spawn_launch_command_claude_includes_required_flags() {
+        let test_cwd = std::env::temp_dir().join("repo");
+        let spec = SpawnSpec {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            cwd: test_cwd,
+            model: None,
+            sandbox: None,
+            approval_mode: None,
+            resume: false,
+            resume_session_id: None,
+            system_prompt: None,
+        };
+
+        let rendered = format_spawn_launch_command(&RuntimeKind::Claude, &spec, "ignored");
+        assert!(rendered.contains("env ATM_TEAM='atm-dev' ATM_IDENTITY='arch-ctm'"));
+        assert!(rendered.contains("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude"));
+        assert!(rendered.contains("--agent-id arch-ctm@atm-dev"));
+        assert!(rendered.contains("--agent-name arch-ctm"));
+        assert!(rendered.contains("--team-name atm-dev"));
+        assert!(rendered.contains("--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn test_format_spawn_launch_command_non_claude_passthrough() {
+        let test_cwd = std::env::temp_dir().join("repo");
+        let spec = SpawnSpec {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            cwd: test_cwd.clone(),
+            model: None,
+            sandbox: None,
+            approval_mode: None,
+            resume: false,
+            resume_session_id: None,
+            system_prompt: None,
+        };
+        let command = format!("cd '{}' && codex --yolo", test_cwd.to_string_lossy());
+        let rendered = format_spawn_launch_command(&RuntimeKind::Codex, &spec, &command);
+        assert_eq!(rendered, command);
     }
 }

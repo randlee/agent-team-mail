@@ -519,6 +519,11 @@ fn merge_hooks(
         }
     }
 
+    // Migrate existing SessionStart/SessionEnd entries to Claude's current
+    // catch-all matcher schema when present.
+    normalize_catch_all_hook_category_if_present(settings, "SessionStart")?;
+    normalize_catch_all_hook_category_if_present(settings, "SessionEnd")?;
+
     let ss_cmd = session_start_cmd(global_scripts_dir);
     let ptu_bash = pre_tool_use_bash_cmd(global_scripts_dir);
     let ptu_task = pre_tool_use_task_cmd(global_scripts_dir);
@@ -539,22 +544,20 @@ fn merge_hooks(
 
 /// Merge a single hook entry into the `hooks.SessionStart` array.
 ///
-/// The `SessionStart` array contains plain command objects (no `matcher`
-/// wrapper). An entry is considered present when its `command` field matches
-/// `command` exactly.
+/// Canonical format for SessionStart/SessionEnd entries is:
+/// `{ "matcher": "", "hooks": [{ "type": "command", "command": "..." }] }`.
+///
+/// This function also migrates legacy entries in-place:
+/// - bare `{ "type": "command", "command": "..." }`
+/// - wrapper entries missing `matcher`
 fn merge_session_start_hook(settings: &mut serde_json::Value, command: &str) -> Result<HookStatus> {
-    let new_entry = serde_json::json!({
-        "type": "command",
-        "command": command
-    });
-
     let array = get_or_create_hook_array(settings, "SessionStart")?;
 
-    if hook_command_present(array, command) {
+    if catch_all_hook_command_present(array, command) {
         return Ok(HookStatus::AlreadyPresent);
     }
 
-    array.push(new_entry);
+    array.push(catch_all_hook_entry(command));
     Ok(HookStatus::Added)
 }
 
@@ -573,10 +576,7 @@ fn merge_matcher_hook(
     matcher_name: &str,
     command: &str,
 ) -> Result<HookStatus> {
-    let new_hook_entry = serde_json::json!({
-        "type": "command",
-        "command": command
-    });
+    let new_hook_entry = command_hook_entry(command);
 
     let category_array = get_or_create_hook_array(settings, hook_category)?;
 
@@ -647,6 +647,87 @@ fn get_or_create_hook_array<'a>(
     entry
         .as_array_mut()
         .with_context(|| format!("hooks.{category} is not an array"))
+}
+
+fn command_hook_entry(command: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "command",
+        "command": command
+    })
+}
+
+fn catch_all_hook_entry(command: &str) -> serde_json::Value {
+    serde_json::json!({
+        "matcher": "",
+        "hooks": [command_hook_entry(command)]
+    })
+}
+
+fn normalize_catch_all_hook_entries(array: &mut [serde_json::Value]) -> Result<()> {
+    for entry in array.iter_mut() {
+        let Some(obj) = entry.as_object_mut() else {
+            continue;
+        };
+
+        if let Some(command) = obj
+            .get("command")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
+        {
+            *entry = catch_all_hook_entry(&command);
+            continue;
+        }
+
+        if let Some(hooks) = obj.get_mut("hooks") {
+            hooks
+                .as_array_mut()
+                .context("catch-all hook `hooks` field is not an array")?;
+            let should_normalize_matcher = match obj.get("matcher") {
+                None => true,
+                Some(serde_json::Value::Null) => true,
+                Some(serde_json::Value::String(m)) => m.is_empty(),
+                Some(serde_json::Value::Object(m)) => m.is_empty(),
+                _ => false,
+            };
+
+            if should_normalize_matcher {
+                obj.insert("matcher".to_string(), serde_json::json!(""));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_catch_all_hook_category_if_present(
+    settings: &mut serde_json::Value,
+    category: &str,
+) -> Result<()> {
+    let hooks = settings
+        .as_object_mut()
+        .context("settings root is not an object")?
+        .get_mut("hooks")
+        .and_then(|h| h.as_object_mut())
+        .context("settings `hooks` is not an object")?;
+
+    let Some(existing) = hooks.get_mut(category) else {
+        return Ok(());
+    };
+
+    let array = existing
+        .as_array_mut()
+        .with_context(|| format!("hooks.{category} is not an array"))?;
+    normalize_catch_all_hook_entries(array)
+}
+
+fn catch_all_hook_command_present(array: &[serde_json::Value], cmd: &str) -> bool {
+    array.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|hooks| hook_command_present(hooks, cmd))
+            .unwrap_or(false)
+    })
 }
 
 /// Return `true` when any entry in `array` has a `command` field equal to `cmd`.
@@ -784,8 +865,14 @@ mod tests {
             .as_array()
             .expect("SessionStart array");
         assert!(
-            hook_command_present(session_start, &session_start_cmd(None)),
+            catch_all_hook_command_present(session_start, &session_start_cmd(None)),
             "SessionStart hook missing"
+        );
+        assert!(
+            session_start
+                .iter()
+                .all(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("")),
+            "SessionStart entries must include empty-string matcher"
         );
 
         let pre_tool_use = parsed["hooks"]["PreToolUse"]
@@ -860,9 +947,9 @@ mod tests {
             .expect("array")
             .iter()
             .filter(|e| {
-                e.get("command")
-                    .and_then(|c| c.as_str())
-                    .map(|c| c == session_start_cmd(None))
+                e.get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| hook_command_present(hooks, &session_start_cmd(None)))
                     .unwrap_or(false)
             })
             .count();
@@ -961,6 +1048,94 @@ mod tests {
         assert!(
             hook_command_present(bash_hooks, &pre_tool_use_bash_cmd(None)),
             "ATM PreToolUse(Bash) hook missing after merge"
+        );
+    }
+
+    #[test]
+    fn test_migrates_legacy_catch_all_hook_entries_to_matcher_schema() {
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": session_start_cmd(None)
+                            }
+                        ]
+                    },
+                    {
+                        "type": "command",
+                        "command": "python3 ~/.claude/scripts/legacy-session-start.py"
+                    }
+                ],
+                "SessionEnd": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python3 ~/.claude/scripts/session-end.py"
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let report = merge_hooks(&mut settings, None).expect("merge");
+        assert_eq!(report.session_start, HookStatus::AlreadyPresent);
+
+        let session_start = settings["hooks"]["SessionStart"]
+            .as_array()
+            .expect("SessionStart array");
+        assert!(
+            catch_all_hook_command_present(session_start, &session_start_cmd(None)),
+            "SessionStart ATM command must still be present after migration"
+        );
+        assert!(
+            session_start
+                .iter()
+                .all(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("")),
+            "all SessionStart entries must have empty-string matcher after migration"
+        );
+        assert!(
+            session_start.iter().all(|e| e.get("hooks").is_some()),
+            "legacy bare SessionStart entries must be wrapped after migration"
+        );
+
+        let session_end = settings["hooks"]["SessionEnd"]
+            .as_array()
+            .expect("SessionEnd array");
+        assert!(
+            session_end
+                .iter()
+                .all(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("")),
+            "all SessionEnd entries must have empty-string matcher after migration"
+        );
+        assert!(
+            session_end.iter().all(|e| e.get("hooks").is_some()),
+            "legacy SessionEnd entries must remain wrapped after migration"
+        );
+    }
+
+    #[test]
+    fn test_normalize_catch_all_hook_entries_preserves_non_catch_all_matcher() {
+        let mut entries = vec![serde_json::json!({
+            "matcher": "Bash",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "echo existing"
+                }
+            ]
+        })];
+
+        normalize_catch_all_hook_entries(&mut entries).expect("normalize");
+
+        assert_eq!(
+            entries[0].get("matcher").and_then(|m| m.as_str()),
+            Some("Bash"),
+            "non-catch-all matcher must not be overwritten"
         );
     }
 
