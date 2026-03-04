@@ -24,6 +24,12 @@ pub struct EventFields {
     pub teardown_stage: Option<String>,
     pub spawn_mode: Option<String>,
     pub extra_fields: serde_json::Map<String, serde_json::Value>,
+    pub sender_agent: Option<String>,
+    pub sender_team: Option<String>,
+    pub sender_pid: Option<u32>,
+    pub recipient_agent: Option<String>,
+    pub recipient_team: Option<String>,
+    pub recipient_pid: Option<u32>,
 }
 
 /// Forward `event` to the unified producer channel if a sender is registered.
@@ -100,6 +106,54 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
                     serde_json::Value::String(spawn_mode.clone()),
                 );
             }
+            if let Some(sender_agent) = &fields.sender_agent {
+                map.insert(
+                    "sender_agent".to_string(),
+                    serde_json::Value::String(sender_agent.clone()),
+                );
+            }
+            if let Some(sender_team) = &fields.sender_team {
+                map.insert(
+                    "sender_team".to_string(),
+                    serde_json::Value::String(sender_team.clone()),
+                );
+            }
+            if let Some(sender_pid) = fields.sender_pid {
+                map.insert(
+                    "sender_pid".to_string(),
+                    serde_json::Value::Number(sender_pid.into()),
+                );
+            }
+            if let Some(recipient_agent) = &fields.recipient_agent {
+                map.insert(
+                    "recipient_agent".to_string(),
+                    serde_json::Value::String(recipient_agent.clone()),
+                );
+            }
+            if let Some(recipient_team) = &fields.recipient_team {
+                map.insert(
+                    "recipient_team".to_string(),
+                    serde_json::Value::String(recipient_team.clone()),
+                );
+            }
+            if let Some(recipient_pid) = fields.recipient_pid {
+                map.insert(
+                    "recipient_pid".to_string(),
+                    serde_json::Value::Number(recipient_pid.into()),
+                );
+            }
+            if fields.action == "send"
+                && std::env::var("ATM_LOG_MSG")
+                    .ok()
+                    .map(|v| v.trim() == "1")
+                    .unwrap_or(false)
+                && let Some(preview) = message_preview(fields.message_text.as_deref())
+            {
+                map.insert(
+                    "message_preview".to_string(),
+                    serde_json::Value::String(preview),
+                );
+            }
             for (k, v) in &fields.extra_fields {
                 map.entry(k.clone()).or_insert_with(|| v.clone());
             }
@@ -135,6 +189,20 @@ pub fn emit_event_best_effort(mut fields: EventFields) {
 
     let event = fields_to_log_event(&fields);
     forward_to_unified(event);
+}
+
+fn message_preview(text: Option<&str>) -> Option<String> {
+    let trimmed = text.map(str::trim).unwrap_or_default();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut chars = trimmed.chars();
+    let preview: String = chars.by_ref().take(20).collect();
+    if chars.next().is_some() {
+        Some(format!("{preview}..."))
+    } else {
+        Some(preview)
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +262,76 @@ mod tests {
             !event.fields.contains_key("message_text"),
             "message_text should be intentionally omitted from persisted log fields"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_fields_to_log_event_send_includes_identity_pid_fields() {
+        // SAFETY: test-scoped environment update.
+        unsafe { std::env::remove_var("ATM_LOG_MSG") };
+        let fields = EventFields {
+            level: "info",
+            source: "atm",
+            action: "send",
+            sender_agent: Some("team-lead".to_string()),
+            sender_team: Some("atm-dev".to_string()),
+            sender_pid: Some(44201),
+            recipient_agent: Some("arch-ctm".to_string()),
+            recipient_team: Some("atm-dev".to_string()),
+            recipient_pid: Some(8009),
+            ..Default::default()
+        };
+        let event = fields_to_log_event(&fields);
+        assert_eq!(
+            event.fields.get("sender_agent").and_then(|v| v.as_str()),
+            Some("team-lead")
+        );
+        assert_eq!(
+            event.fields.get("sender_pid").and_then(|v| v.as_u64()),
+            Some(44201)
+        );
+        assert_eq!(
+            event.fields.get("recipient_agent").and_then(|v| v.as_str()),
+            Some("arch-ctm")
+        );
+        assert_eq!(
+            event.fields.get("recipient_pid").and_then(|v| v.as_u64()),
+            Some(8009)
+        );
+        assert!(
+            event.fields.get("message_preview").is_none(),
+            "preview must be omitted unless ATM_LOG_MSG=1"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_fields_to_log_event_send_preview_gated_by_atm_log_msg() {
+        // SAFETY: test-scoped environment update.
+        unsafe { std::env::set_var("ATM_LOG_MSG", "1") };
+        let fields = EventFields {
+            level: "info",
+            source: "atm",
+            action: "send",
+            message_text: Some("this message should be truncated for preview".to_string()),
+            ..Default::default()
+        };
+        let event = fields_to_log_event(&fields);
+        assert_eq!(
+            event.fields.get("message_preview").and_then(|v| v.as_str()),
+            Some("this message should ...")
+        );
+
+        // SAFETY: test-scoped environment update.
+        unsafe { std::env::set_var("ATM_LOG_MSG", "truncated") };
+        let no_preview_event = fields_to_log_event(&fields);
+        assert!(
+            no_preview_event.fields.get("message_preview").is_none(),
+            "preview should only be emitted when ATM_LOG_MSG=1"
+        );
+
+        // SAFETY: test-scoped environment cleanup.
+        unsafe { std::env::remove_var("ATM_LOG_MSG") };
     }
 
     #[cfg(unix)]

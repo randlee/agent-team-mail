@@ -753,6 +753,10 @@ atm doctor --full
 - Human-readable output MUST start with a concise team member snapshot table (equivalent
   core fields to `atm members`: name/type/model/status), followed by ordered findings by
   severity, then recommended remediation commands.
+- Human-readable output MUST render the log window using an operator-friendly label:
+  - default/incremental and duration windows: `last <elapsed>`
+  - timestamp windows: `since YYYY-MM-DD HH:mm:ss UTC (<elapsed>)`
+  - full mode: `since session start (<elapsed>)`
 - JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
 - Both human and JSON output MUST surface active env overrides for `ATM_HOME`,
   `ATM_TEAM`, and `ATM_IDENTITY` when set to non-empty values.
@@ -775,7 +779,7 @@ atm doctor --full
 - `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
-- `log_window`: `mode`, `start`, `end`
+- `log_window`: `mode`, `start`, `end`, `elapsed_secs`
 - `env_overrides`: optional object fields `atm_home`, `atm_team`,
   `atm_identity`; each value shape is `{ source, value }`
 
@@ -792,7 +796,7 @@ Current required `DoctorReport` shape:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts`
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
-- `log_window`: `mode`, `start`, `end`
+- `log_window`: `mode`, `start`, `end`, `elapsed_secs`
 - `env_overrides`: optional `atm_home`, `atm_team`, `atm_identity`, each with:
   - `source`: override source tag (`"env"`)
   - `value`: resolved non-empty value

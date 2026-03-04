@@ -86,6 +86,7 @@ struct LogWindow {
     mode: String,
     start: String,
     end: String,
+    elapsed_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -288,6 +289,10 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
             mode,
             start: window_start.to_rfc3339(),
             end: window_end.to_rfc3339(),
+            elapsed_secs: window_end
+                .signed_duration_since(window_start)
+                .num_seconds()
+                .max(0) as u64,
         },
         env_overrides: active_env_overrides(),
         member_snapshot: team_config
@@ -858,12 +863,17 @@ fn compute_log_window_start(
     args: &DoctorArgs,
 ) -> Result<(DateTime<Utc>, String)> {
     if let Some(since) = &args.since {
+        let since_mode = if DateTime::parse_from_rfc3339(since.trim()).is_ok() {
+            "since_timestamp"
+        } else {
+            "since_duration"
+        };
         let dt = parse_since_input(since).with_context(|| {
             format!(
                 "Invalid --since value: '{since}'. Use ISO-8601 or positive duration like 30m/2h/1d"
             )
         })?;
-        return Ok((dt, "since_override".to_string()));
+        return Ok((dt, since_mode.to_string()));
     }
 
     let fallback = Utc::now() - Duration::hours(1);
@@ -974,6 +984,38 @@ fn print_human(report: &DoctorReport) {
     print!("{}", render_human(report));
 }
 
+fn format_session_short(session_id: Option<&str>) -> String {
+    let Some(session) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "-".to_string();
+    };
+
+    if looks_like_uuid(session) {
+        return session.chars().take(8).collect();
+    }
+
+    if let Some(rest) = session.strip_prefix("local:")
+        && let Some(name) = rest.split(':').next()
+        && !name.is_empty()
+    {
+        return format!("local:{name}");
+    }
+
+    session.to_string()
+}
+
+fn looks_like_uuid(value: &str) -> bool {
+    let mut parts = value.split('-');
+    for expected_len in [8usize, 4, 4, 4, 12] {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != expected_len || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
 fn render_human(report: &DoctorReport) -> String {
     let mut out = String::new();
     out.push_str(&format!("ATM Doctor — team {}\n", report.summary.team));
@@ -984,8 +1026,8 @@ fn render_human(report: &DoctorReport) -> String {
         report.summary.counts.critical, report.summary.counts.warn, report.summary.counts.info
     ));
     out.push_str(&format!(
-        "Log window: {} -> {} ({})\n\n",
-        report.log_window.start, report.log_window.end, report.log_window.mode
+        "Log window: {}\n\n",
+        render_log_window_human(&report.log_window)
     ));
 
     if report.env_overrides.atm_home.is_some()
@@ -1020,7 +1062,7 @@ fn render_human(report: &DoctorReport) -> String {
                 .process_id
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "-".to_string());
-            let session = m.session_id.as_deref().unwrap_or("-");
+            let session = format_session_short(m.session_id.as_deref());
             out.push_str(&format!(
                 "  {:<20} {:<20} {:<24} {:<10} {:<10} {:<8} {}\n",
                 m.name, m.agent_type, m.model, m.status, m.activity, pid, session
@@ -1055,6 +1097,41 @@ fn render_human(report: &DoctorReport) -> String {
     }
 
     out
+}
+
+fn render_log_window_human(window: &LogWindow) -> String {
+    let elapsed = human_duration(window.elapsed_secs);
+    match window.mode.as_str() {
+        "default_incremental" | "since_duration" => format!("last {elapsed}"),
+        "since_timestamp" => parse_utc_timestamp(&window.start)
+            .map(|dt| format!("since {} ({elapsed})", dt.format("%Y-%m-%d %H:%M:%S UTC")))
+            .unwrap_or_else(|| fallback_log_window_human(window)),
+        "full" => format!("since session start ({elapsed})"),
+        _ => fallback_log_window_human(window),
+    }
+}
+
+fn fallback_log_window_human(window: &LogWindow) -> String {
+    format!("{} -> {} ({})", window.start, window.end, window.mode)
+}
+
+fn parse_utc_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn human_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3_600 {
+        return format!("{}m", seconds / 60);
+    }
+    if seconds < 86_400 {
+        return format!("{}h", seconds / 3_600);
+    }
+    format!("{}d", seconds / 86_400)
 }
 
 #[cfg(test)]
@@ -1152,6 +1229,21 @@ mod tests {
     fn parse_since_input_accepts_positive_durations() {
         assert!(parse_since_input("5m").is_ok());
         assert!(parse_since_input("1h").is_ok());
+    }
+
+    #[test]
+    fn format_session_short_formats_uuid_and_local_ids() {
+        assert_eq!(
+            format_session_short(Some("123e4567-e89b-12d3-a456-426614174000")),
+            "123e4567"
+        );
+        assert_eq!(
+            format_session_short(Some("local:team-lead:1772608955543:20111")),
+            "local:team-lead"
+        );
+        assert_eq!(format_session_short(Some("sess-1")), "sess-1");
+        assert_eq!(format_session_short(None), "-");
+        assert_eq!(format_session_short(Some("   ")), "-");
     }
 
     #[test]
@@ -1288,6 +1380,35 @@ mod tests {
         let (start, mode) = compute_log_window_start(tmp.path(), team, Some(&cfg), &args).unwrap();
         assert_eq!(mode, "default_incremental");
         assert_eq!(start.to_rfc3339(), "2026-02-27T21:00:00+00:00");
+    }
+
+    #[test]
+    fn compute_log_window_since_duration_sets_duration_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = DoctorArgs {
+            team: Some("atm-dev".to_string()),
+            json: false,
+            since: Some("30m".to_string()),
+            errors_only: false,
+            full: false,
+        };
+        let (_start, mode) = compute_log_window_start(tmp.path(), "atm-dev", None, &args).unwrap();
+        assert_eq!(mode, "since_duration");
+    }
+
+    #[test]
+    fn compute_log_window_since_timestamp_sets_timestamp_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = DoctorArgs {
+            team: Some("atm-dev".to_string()),
+            json: false,
+            since: Some("2026-03-03T10:00:00Z".to_string()),
+            errors_only: false,
+            full: false,
+        };
+        let (start, mode) = compute_log_window_start(tmp.path(), "atm-dev", None, &args).unwrap();
+        assert_eq!(mode, "since_timestamp");
+        assert_eq!(start.to_rfc3339(), "2026-03-03T10:00:00+00:00");
     }
 
     #[test]
@@ -1700,6 +1821,7 @@ mod tests {
                 mode: "default_incremental".to_string(),
                 start: "2026-03-02T00:00:00Z".to_string(),
                 end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
             member_snapshot: vec![MemberSnapshot {
@@ -1717,6 +1839,36 @@ mod tests {
         let members_idx = rendered.find("Members:").unwrap();
         let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
         assert!(members_idx < findings_idx);
+    }
+
+    #[test]
+    fn render_log_window_human_uses_elapsed_labels() {
+        let incremental = LogWindow {
+            mode: "default_incremental".to_string(),
+            start: "2026-03-02T00:00:00Z".to_string(),
+            end: "2026-03-02T00:01:00Z".to_string(),
+            elapsed_secs: 60,
+        };
+        assert_eq!(render_log_window_human(&incremental), "last 1m");
+
+        let full = LogWindow {
+            mode: "full".to_string(),
+            start: "2026-03-02T00:00:00Z".to_string(),
+            end: "2026-03-02T02:00:00Z".to_string(),
+            elapsed_secs: 7_200,
+        };
+        assert_eq!(render_log_window_human(&full), "since session start (2h)");
+
+        let since_timestamp = LogWindow {
+            mode: "since_timestamp".to_string(),
+            start: "2026-03-02T00:00:00Z".to_string(),
+            end: "2026-03-02T00:05:00Z".to_string(),
+            elapsed_secs: 300,
+        };
+        assert_eq!(
+            render_log_window_human(&since_timestamp),
+            "since 2026-03-02 00:00:00 UTC (5m)"
+        );
     }
 
     #[test]
@@ -1742,6 +1894,7 @@ mod tests {
                 mode: "default_incremental".to_string(),
                 start: "2026-03-02T00:00:00Z".to_string(),
                 end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
             },
             env_overrides: EnvOverrides {
                 atm_home: Some(EnvOverrideValue {
@@ -1776,6 +1929,10 @@ mod tests {
         assert_eq!(
             value["env_overrides"]["atm_identity"]["value"],
             serde_json::Value::String("arch-ctm".to_string())
+        );
+        assert_eq!(
+            value["log_window"]["elapsed_secs"],
+            serde_json::Value::Number(60u64.into())
         );
     }
 
@@ -1825,6 +1982,7 @@ mod tests {
                 mode: "default_incremental".to_string(),
                 start: "2026-03-02T00:00:00Z".to_string(),
                 end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
             },
             env_overrides: EnvOverrides {
                 atm_home: Some(EnvOverrideValue {

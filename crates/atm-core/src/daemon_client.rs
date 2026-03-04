@@ -680,6 +680,17 @@ pub struct SessionQueryResult {
     pub runtime_home: Option<String>,
 }
 
+/// Result of attempting to register a daemon session hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterHintOutcome {
+    /// Hint was accepted by the daemon.
+    Registered,
+    /// Daemon is unreachable; caller should continue without failing.
+    DaemonUnavailable,
+    /// Connected daemon does not support the register-hint command.
+    UnsupportedDaemon,
+}
+
 /// Query the daemon for the session record of a named agent.
 ///
 /// Returns:
@@ -891,6 +902,71 @@ pub fn send_control(
 
     serde_json::from_value::<crate::control::ControlAck>(payload)
         .map_err(|e| anyhow::anyhow!("Failed to parse ControlAck from daemon response: {e}"))
+}
+
+/// Send a best-effort session registration hint to the daemon.
+///
+/// This command is used by external runtimes (Codex/Gemini) that cannot emit
+/// Claude-style lifecycle hooks. It updates the daemon session registry using
+/// canonical daemon paths instead of writing session identity into config.json.
+///
+/// Backward compatibility contract:
+/// - daemon unreachable -> [`RegisterHintOutcome::DaemonUnavailable`] (silent skip)
+/// - daemon unknown-command -> [`RegisterHintOutcome::UnsupportedDaemon`] so callers can
+///   fail with explicit upgrade guidance.
+#[allow(clippy::too_many_arguments)]
+pub fn register_hint(
+    team: &str,
+    agent: &str,
+    session_id: &str,
+    process_id: u32,
+    runtime: Option<&str>,
+    runtime_session_id: Option<&str>,
+    pane_id: Option<&str>,
+    runtime_home: Option<&str>,
+) -> anyhow::Result<RegisterHintOutcome> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "register-hint".to_string(),
+        payload: serde_json::json!({
+            "team": team,
+            "agent": agent,
+            "session_id": session_id,
+            "process_id": process_id,
+            "runtime": runtime,
+            "runtime_session_id": runtime_session_id,
+            "pane_id": pane_id,
+            "runtime_home": runtime_home,
+        }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(RegisterHintOutcome::DaemonUnavailable),
+    };
+
+    decode_register_hint_response(response)
+}
+
+fn decode_register_hint_response(response: SocketResponse) -> anyhow::Result<RegisterHintOutcome> {
+    if response.is_ok() {
+        return Ok(RegisterHintOutcome::Registered);
+    }
+
+    let Some(err) = response.error else {
+        anyhow::bail!("Daemon returned register-hint error status without error payload");
+    };
+
+    if err.code == "UNKNOWN_COMMAND" {
+        return Ok(RegisterHintOutcome::UnsupportedDaemon);
+    }
+
+    anyhow::bail!(
+        "Daemon returned error for register-hint command: {}: {}",
+        err.code,
+        err.message
+    )
 }
 
 /// Generate a compact request identifier (UUID v4 as a short string).
@@ -1961,6 +2037,28 @@ sleep 2
     }
 
     #[test]
+    #[serial]
+    fn test_register_hint_no_daemon_is_silent_skip() {
+        with_autostart_disabled(|| {
+            if daemon_is_running() {
+                return;
+            }
+            let outcome = register_hint(
+                "atm-dev",
+                "arch-ctm",
+                "local:arch-ctm:test:1234",
+                1234,
+                Some("codex"),
+                Some("local:arch-ctm:test:1234"),
+                None,
+                None,
+            )
+            .expect("register-hint must not error when daemon unavailable");
+            assert_eq!(outcome, RegisterHintOutcome::DaemonUnavailable);
+        });
+    }
+
+    #[test]
     fn test_agent_summary_serialization() {
         let summary = AgentSummary {
             agent: "arch-ctm".to_string(),
@@ -2060,6 +2158,35 @@ sleep 2
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].agent, "arch-ctm");
         assert_eq!(states[0].state, "active");
+    }
+
+    #[test]
+    fn test_decode_register_hint_response_ok_registered() {
+        let response = SocketResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "req-1".to_string(),
+            status: "ok".to_string(),
+            payload: Some(serde_json::json!({ "processed": true })),
+            error: None,
+        };
+        let outcome = decode_register_hint_response(response).expect("ok response");
+        assert_eq!(outcome, RegisterHintOutcome::Registered);
+    }
+
+    #[test]
+    fn test_decode_register_hint_response_unknown_command_maps_to_unsupported() {
+        let response = SocketResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "req-1".to_string(),
+            status: "error".to_string(),
+            payload: None,
+            error: Some(SocketError {
+                code: "UNKNOWN_COMMAND".to_string(),
+                message: "Unknown command: 'register-hint'".to_string(),
+            }),
+        };
+        let outcome = decode_register_hint_response(response).expect("unknown command handled");
+        assert_eq!(outcome, RegisterHintOutcome::UnsupportedDaemon);
     }
 
     // Unix-only: test PID alive check for the current process
