@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 
 const SESSION_START_PY: &str = include_str!("../../scripts/session-start.py");
+const SESSION_END_PY: &str = include_str!("../../scripts/session-end.py");
+const TEAMMATE_IDLE_RELAY_PY: &str = include_str!("../../scripts/teammate-idle-relay.py");
 const ATM_IDENTITY_WRITE_PY: &str = include_str!("../../scripts/atm-identity-write.py");
 const ATM_IDENTITY_CLEANUP_PY: &str = include_str!("../../scripts/atm-identity-cleanup.py");
 const GATE_AGENT_SPAWNS_PY: &str = include_str!("../../scripts/gate-agent-spawns.py");
@@ -47,9 +49,9 @@ const ATM_HOOK_LIB_PY: &str = include_str!("../../scripts/atm_hook_lib.py");
 // - PreToolUse(Task): gate agent spawning pattern enforcement
 // - PostToolUse(Bash): clean up PID identity file after `atm` commands
 //
-// Note: TeammateIdle relay and SessionEnd hooks are used by the project's
-// own .claude/settings.json but are NOT installed by `atm init` in S.2a.
-// These will be addressed in a follow-on sprint.
+// Note: `atm init` installs the core hook commands. SessionEnd and
+// teammate-idle relay scripts are also materialized for lifecycle parity, even
+// when not explicitly wired as hook commands by this command.
 
 /// Return the SessionStart hook command string for local or global install.
 fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
@@ -344,6 +346,8 @@ fn materialize_scripts(scripts_dir: &Path) -> Result<()> {
 
     let files = [
         ("session-start.py", SESSION_START_PY),
+        ("session-end.py", SESSION_END_PY),
+        ("teammate-idle-relay.py", TEAMMATE_IDLE_RELAY_PY),
         ("atm-identity-write.py", ATM_IDENTITY_WRITE_PY),
         ("atm-identity-cleanup.py", ATM_IDENTITY_CLEANUP_PY),
         ("gate-agent-spawns.py", GATE_AGENT_SPAWNS_PY),
@@ -1263,7 +1267,8 @@ mod tests {
     // Script materialization test
     // -----------------------------------------------------------------------
 
-    /// `materialize_scripts` must create all five script files in the target dir.
+    /// `materialize_scripts` must create all embedded script files in the
+    /// target dir.
     #[test]
     fn test_materialize_scripts_creates_all_files() {
         let dir = TempDir::new().expect("tempdir");
@@ -1273,6 +1278,8 @@ mod tests {
 
         for name in &[
             "session-start.py",
+            "session-end.py",
+            "teammate-idle-relay.py",
             "atm-identity-write.py",
             "atm-identity-cleanup.py",
             "gate-agent-spawns.py",

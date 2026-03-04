@@ -494,7 +494,7 @@ where
             findings.push(finding(
                 Severity::Warn,
                 "pid_session_reconciliation",
-                "PID_BACKEND_MISMATCH",
+                "PID_PROCESS_MISMATCH",
                 format!(
                     "Member '{}' failed daemon PID/backend validation: {}",
                     member.name, state.reason

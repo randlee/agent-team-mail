@@ -615,7 +615,7 @@ fn reconcile_team_member_activity_with_mode(
                     emit_event_best_effort(EventFields {
                         level: "warn",
                         source: "atm-daemon",
-                        action: "pid_backend_mismatch",
+                        action: "PID_PROCESS_MISMATCH",
                         team: Some(team_name.clone()),
                         agent_name: Some(member.name.clone()),
                         target: Some(format!("pid:{}", validation.pid)),

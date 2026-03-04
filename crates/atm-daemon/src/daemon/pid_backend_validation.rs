@@ -45,9 +45,7 @@ pub(crate) fn validate_pid_backend(member: &AgentMember, pid: u32) -> PidBackend
     let alive = is_pid_alive(pid);
     let actual_process_name = process_name_for_pid(pid);
     let actual_process_args = process_args_for_pid(pid);
-    let matches_expected = if matches!(rule, BackendRule::Unknown) {
-        true
-    } else if !alive {
+    let matches_expected = if matches!(rule, BackendRule::Unknown) || !alive {
         true
     } else {
         rule.matches(

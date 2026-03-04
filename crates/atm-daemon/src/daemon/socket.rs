@@ -1010,6 +1010,7 @@ async fn handle_hook_event_command(
         auth.source,
         LifecycleSourceKind::ClaudeHook | LifecycleSourceKind::Unknown
     );
+    let agent_pid = process_id.unwrap_or(0);
 
     match event_type.as_str() {
         "session_start" => {
@@ -1019,7 +1020,6 @@ async fn handle_hook_event_command(
                     serde_json::json!({"processed": false, "reason": "missing session_id"}),
                 );
             }
-            let pid = process_id.unwrap_or(0);
             let home = match agent_team_mail_core::home::get_home_dir() {
                 Ok(h) => h,
                 Err(e) => {
@@ -1035,10 +1035,39 @@ async fn handle_hook_event_command(
                     serde_json::json!({"processed": false, "reason": "agent not in team"}),
                 );
             };
-            if pid > 1 {
-                let validation = validate_pid_backend(&member, pid);
+            let has_existing_session = session_registry
+                .lock()
+                .unwrap()
+                .query_for_team(&team, &agent)
+                .is_some();
+            let has_activity_hint = member.is_active == Some(true)
+                || member.last_active.is_some()
+                || member
+                    .session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|s| !s.is_empty());
+            if !has_existing_session && has_activity_hint {
+                let msg = format!(
+                    "ACTIVE_WITHOUT_SESSION: agent='{}' had activity hint before session_start registration (isActive={:?}, lastActive={:?}, sessionHint={:?})",
+                    agent, member.is_active, member.last_active, member.session_id
+                );
+                warn!("{msg}");
+                emit_event_best_effort(EventFields {
+                    level: "warn",
+                    source: "atm-daemon",
+                    action: "ACTIVE_WITHOUT_SESSION",
+                    team: Some(team.clone()),
+                    agent_name: Some(agent.clone()),
+                    result: Some("registration".to_string()),
+                    error: Some(msg),
+                    ..Default::default()
+                });
+            }
+            if agent_pid > 1 {
+                let validation = validate_pid_backend(&member, agent_pid);
                 if validation.is_alive_mismatch() {
-                    emit_pid_backend_mismatch(&team, &agent, &validation, "registration");
+                    emit_pid_process_mismatch(&team, &agent, &validation, "registration");
                     {
                         let mut tracker = state_store.lock().unwrap();
                         if tracker.get_state(&agent).is_none() {
@@ -1075,7 +1104,7 @@ async fn handle_hook_event_command(
             session_registry
                 .lock()
                 .unwrap()
-                .upsert_for_team(&team, &agent, &session_id, pid);
+                .upsert_for_team(&team, &agent, &session_id, agent_pid);
             {
                 let mut tracker = state_store.lock().unwrap();
                 let current = tracker.get_state(&agent);
@@ -1096,7 +1125,7 @@ async fn handle_hook_event_command(
                     );
                 }
             }
-            info!(agent = %agent, session_id = %session_id, "hook_event.session_start");
+            info!(agent = %agent, agent_pid = agent_pid, session_id = %session_id, "hook_event.session_start");
         }
         "teammate_idle" => {
             {
@@ -1118,7 +1147,7 @@ async fn handle_hook_event_command(
                     );
                 }
             }
-            info!("hook_event teammate_idle: agent={agent}");
+            info!(agent = %agent, agent_pid = agent_pid, "hook_event teammate_idle");
         }
         "session_end" => {
             if require_lead_for_session_end && !auth.is_team_lead {
@@ -1144,7 +1173,7 @@ async fn handle_hook_event_command(
                     );
                 }
             }
-            info!("hook_event session_end: agent={agent}");
+            info!(agent = %agent, agent_pid = agent_pid, "hook_event session_end");
         }
         other => {
             debug!("hook_event unknown event type: {other}");
@@ -2205,7 +2234,7 @@ fn load_team_member(
         .find(|m| m.name == agent || m.agent_id == format!("{agent}@{team}"))
 }
 
-fn emit_pid_backend_mismatch(
+fn emit_pid_process_mismatch(
     team: &str,
     agent: &str,
     validation: &PidBackendValidation,
@@ -2224,7 +2253,7 @@ fn emit_pid_backend_mismatch(
     emit_event_best_effort(EventFields {
         level: "warn",
         source: "atm-daemon",
-        action: "pid_backend_mismatch",
+        action: "PID_PROCESS_MISMATCH",
         team: Some(team.to_string()),
         agent_name: Some(agent.to_string()),
         target: Some(format!("pid:{}", validation.pid)),
@@ -2269,7 +2298,7 @@ fn derive_canonical_member_state(
                 meta.source == "pid_backend_validation" && meta.reason == mismatch_reason
             });
             if !already_reported {
-                emit_pid_backend_mismatch(team, agent, &validation, "liveness");
+                emit_pid_process_mismatch(team, agent, &validation, "liveness");
             }
             return CanonicalMemberState {
                 agent: agent.to_string(),
