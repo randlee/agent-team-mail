@@ -32,7 +32,11 @@ impl PidBackendValidation {
     }
 
     pub fn is_alive_mismatch(&self) -> bool {
-        self.alive && self.expected_rule != "-" && !self.matches_expected
+        // If sysinfo cannot resolve process details for a live PID, treat that
+        // as inconclusive rather than a hard backend mismatch.
+        let has_process_observation =
+            self.actual_process_name.is_some() || self.actual_process_args.is_some();
+        self.alive && self.expected_rule != "-" && has_process_observation && !self.matches_expected
     }
 }
 
@@ -206,5 +210,22 @@ mod tests {
         assert!(BackendRule::Gemini.matches(Some("node"), Some("gemini --model 2.5-pro")));
         assert!(!BackendRule::Gemini.matches(Some("node"), Some("index.js")));
         assert!(!BackendRule::Gemini.matches(Some("gemini"), Some("gemini")));
+    }
+
+    #[test]
+    fn pid_validation_is_inconclusive_without_process_observation() {
+        let validation = PidBackendValidation {
+            pid: 1234,
+            alive: true,
+            backend: "codex".to_string(),
+            expected_rule: "comm=codex".to_string(),
+            actual_process_name: None,
+            actual_process_args: None,
+            matches_expected: false,
+        };
+        assert!(
+            !validation.is_alive_mismatch(),
+            "missing sysinfo process details should be treated as inconclusive"
+        );
     }
 }
