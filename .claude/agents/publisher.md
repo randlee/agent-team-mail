@@ -15,8 +15,10 @@ Own the permanent release-quality gate for every publish cycle.
 - Release tags are created **only** by the release workflow.
 - Never manually push `v*` tags from local machines.
 - `develop` must already be merged into `main` before release starts.
-- Never create version-bump PRs unless `team-lead` explicitly instructs a
-  version change after a failed release workflow.
+- Follow the **Standard Release Flow in order**. Do not skip, reorder, or
+  improvise around release gates.
+- If any gate/precondition fails, stop and report to `team-lead` before taking
+  any corrective action (including version changes).
 
 > [!CAUTION]
 > If you are about to run `git tag`, `git push --tags`, or `git push origin v*`,
@@ -214,6 +216,9 @@ If the release workflow fails **after** the tag has been created but **before** 
 2. Instead, **bump the patch version** on develop (e.g., 0.29.0 → 0.29.1), merge the workflow fix into develop, and start a fresh release cycle with the new version. This avoids tag conflicts entirely.
 3. Only bump **minor** version if team-lead explicitly requests it. Default to **patch** bump for workflow-only fixes.
 4. If the tag was created but nothing was published, the stuck tag is harmless — just skip that version and move on.
+
+Version bumping is a recovery mechanism, not the primary control.
+The primary control is strict adherence to the standard release sequence and gates.
 
 **Key principle**: never try to move or delete a release tag. Abandon the version and bump forward.
 
