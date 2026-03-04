@@ -957,6 +957,9 @@ Required behavior:
   command handlers consume daemon snapshot values directly.
 - Reconciliation and diagnostics must be team-scoped:
   daemon state for team `A` must not create findings for team `B`.
+- `atm send` must not write session/process ownership fields (`session_id`,
+  `process_id`) directly in team `config.json`; these are daemon-owned via
+  session registry.
 
 #### Operational State Variable Inventory
 
@@ -968,6 +971,24 @@ Required behavior:
 | `process_id` | Daemon session registry | `.claude/daemon/session-registry.json` | Integer PID (`>1`) or absent | Process identity used for liveness checks. |
 | `status` (`state`) | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `active`, `idle`, `offline`, `unknown` | Canonical liveness/status consumed by doctor/status/members. |
 | `activity` | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `busy`, `idle`, `unknown` | Canonical activity hint exposed separately from liveness. |
+
+### 4.3.3e `register-hint` Command (Daemon SSoT Path)
+
+External runtimes that cannot emit hook lifecycle updates on every send path
+must register session/process hints through a daemon command:
+
+- Socket command: `register-hint`
+- Required payload: `team`, `agent`, `session_id`, `process_id`
+- Optional payload: `runtime`, `runtime_session_id`, `pane_id`, `runtime_home`
+
+Required behavior:
+- Daemon validates team membership before accepting the hint.
+- Daemon applies PID/backend validation rules from §4.3.3d.
+- On success, daemon updates session registry and tracker state for the member.
+
+Compatibility behavior:
+- If daemon is unreachable, caller treats registration as best-effort skip.
+- If daemon responds `UNKNOWN_COMMAND`, caller must fail with daemon-upgrade guidance.
 
 ### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
 
@@ -985,6 +1006,9 @@ Required baseline:
   - **resume**: continue an existing runtime session bound to the ATM agent.
 - User-facing control remains agent-centric (`team`, `agent`) rather than runtime
   session-centric for normal usage.
+- Before launch, `atm teams spawn` must persist roster metadata for target member:
+  - `model` (validated by model registry)
+  - `external_backend_type` (runtime-mapped backend kind)
 
 ### 4.3.4a Codex/Gemini Startup Guidance Prompt Injection
 

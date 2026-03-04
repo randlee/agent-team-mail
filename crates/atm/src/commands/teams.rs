@@ -404,6 +404,13 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         .team
         .clone()
         .unwrap_or_else(|| config.core.default_team.clone());
+    ensure_spawn_member_metadata(
+        &team_name,
+        &args.agent,
+        &args.runtime,
+        args.model.as_deref(),
+        &launch_dir,
+    )?;
 
     let parsed_env = parse_env_vars(&args.env)?;
 
@@ -557,6 +564,82 @@ fn runtime_name(runtime: &RuntimeKind) -> &'static str {
         RuntimeKind::Gemini => "gemini",
         RuntimeKind::Opencode => "opencode",
     }
+}
+
+fn backend_type_for_runtime(runtime: &RuntimeKind) -> BackendType {
+    match runtime {
+        RuntimeKind::Claude => BackendType::ClaudeCode,
+        RuntimeKind::Codex => BackendType::Codex,
+        RuntimeKind::Gemini => BackendType::Gemini,
+        RuntimeKind::Opencode => BackendType::External,
+    }
+}
+
+fn ensure_spawn_member_metadata(
+    team: &str,
+    agent: &str,
+    runtime: &RuntimeKind,
+    model_override: Option<&str>,
+    launch_dir: &Path,
+) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let team_dir = home_dir.join(".claude/teams").join(team);
+    let config_path = team_dir.join("config.json");
+    if !config_path.exists() {
+        anyhow::bail!("Team config not found at {}", config_path.display());
+    }
+
+    let lock_path = config_path.with_extension("lock");
+    let _lock = acquire_lock(&lock_path, 5)
+        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
+
+    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let backend = backend_type_for_runtime(runtime);
+    let model_text = model_override.unwrap_or("unknown");
+    let parsed_model =
+        ModelId::from_str(model_text).map_err(|e| anyhow::anyhow!("Invalid --model: {e}"))?;
+
+    if let Some(member) = team_config.members.iter_mut().find(|m| m.name == agent) {
+        if let Some(model) = model_override {
+            member.model = model.to_string();
+            member.external_model = Some(parsed_model);
+        } else if member.external_model.is_none() {
+            member.external_model =
+                Some(ModelId::from_str(&member.model).unwrap_or(ModelId::Unknown));
+        }
+        member.external_backend_type = Some(backend);
+        if member.cwd.trim().is_empty() {
+            member.cwd = launch_dir.to_string_lossy().to_string();
+        }
+    } else {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        team_config
+            .members
+            .push(agent_team_mail_core::schema::AgentMember {
+                agent_id: format!("{agent}@{team}"),
+                name: agent.to_string(),
+                agent_type: runtime_name(runtime).to_string(),
+                model: model_text.to_string(),
+                prompt: None,
+                color: None,
+                plan_mode_required: None,
+                joined_at: now_ms,
+                tmux_pane_id: None,
+                cwd: launch_dir.to_string_lossy().to_string(),
+                subscriptions: Vec::new(),
+                backend_type: None,
+                is_active: Some(false),
+                last_active: None,
+                session_id: None,
+                external_backend_type: Some(backend),
+                external_model: Some(parsed_model),
+                unknown_fields: std::collections::HashMap::new(),
+            });
+    }
+
+    write_team_config(&config_path, &team_config)?;
+    ensure_member_inbox_atomic(&team_dir, team, agent)?;
+    Ok(())
 }
 
 fn canonicalize_directory(path: &Path, flag: &str) -> Result<PathBuf> {
@@ -3457,5 +3540,93 @@ mod tests {
         let command = format!("cd '{}' && codex --yolo", test_cwd.to_string_lossy());
         let rendered = format_spawn_launch_command(&RuntimeKind::Codex, &spec, &command);
         assert_eq!(rendered, command);
+    }
+
+    #[test]
+    #[serial]
+    fn test_ensure_spawn_member_metadata_creates_missing_member() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let launch_dir = temp_dir.path().join("repo");
+        fs::create_dir_all(&launch_dir).unwrap();
+        ensure_spawn_member_metadata(
+            "atm-dev",
+            "arch-ctm",
+            &RuntimeKind::Codex,
+            Some("gpt5.3-codex"),
+            &launch_dir,
+        )
+        .unwrap();
+
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(team_dir.join("config.json")).unwrap())
+                .unwrap();
+        let member = config
+            .members
+            .iter()
+            .find(|m| m.name == "arch-ctm")
+            .expect("member must be created");
+        assert_eq!(member.model, "gpt5.3-codex");
+        assert_eq!(member.external_backend_type, Some(BackendType::Codex));
+        assert_eq!(
+            member.external_model,
+            Some(ModelId::from_str("gpt5.3-codex").unwrap())
+        );
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_ensure_spawn_member_metadata_updates_existing_member_backend_and_model() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        ensure_spawn_member_metadata(
+            "atm-dev",
+            "publisher",
+            &RuntimeKind::Gemini,
+            Some("gemini-2.5-pro"),
+            temp_dir.path(),
+        )
+        .unwrap();
+
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(team_dir.join("config.json")).unwrap())
+                .unwrap();
+        let member = config
+            .members
+            .iter()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        assert_eq!(member.model, "gemini-2.5-pro");
+        assert_eq!(member.external_backend_type, Some(BackendType::Gemini));
+        assert_eq!(
+            member.external_model,
+            Some(ModelId::from_str("gemini-2.5-pro").unwrap())
+        );
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 }

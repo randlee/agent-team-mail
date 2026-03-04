@@ -1834,6 +1834,7 @@ fn parse_and_dispatch(
         "agent-pane" => handle_agent_pane(&request, state_store),
         "subscribe" => handle_subscribe(&request, pubsub_store),
         "unsubscribe" => handle_unsubscribe(&request, pubsub_store),
+        "register-hint" => handle_register_hint(&request, state_store, session_registry),
         "session-query" => handle_session_query(&request, session_registry),
         "session-query-team" => handle_session_query_team(&request, session_registry),
         "agent-stream-state" => handle_agent_stream_state(&request, stream_state_store),
@@ -2045,6 +2046,178 @@ fn handle_session_query_team(
             "runtime_session_id": record.runtime_session_id,
             "pane_id": record.pane_id,
             "runtime_home": record.runtime_home,
+        }),
+    )
+}
+
+/// Handle the `register-hint` command.
+///
+/// Payload:
+/// `{"team":"<team>","agent":"<name>","session_id":"<sid>","process_id":1234,"runtime":"codex?"...}`
+///
+/// This updates daemon session registry and state tracker through canonical
+/// daemon-owned paths for runtimes that cannot emit lifecycle hooks directly.
+fn handle_register_hint(
+    request: &agent_team_mail_core::daemon_client::SocketRequest,
+    state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    let team = match request.payload.get("team").and_then(|v| v.as_str()) {
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'team'",
+            );
+        }
+    };
+    let agent = match request.payload.get("agent").and_then(|v| v.as_str()) {
+        Some(a) if !a.trim().is_empty() => a.trim().to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'agent'",
+            );
+        }
+    };
+    let session_id = match request.payload.get("session_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'session_id'",
+            );
+        }
+    };
+    let process_id = match request.payload.get("process_id").and_then(|v| v.as_u64()) {
+        Some(pid) if pid > 1 => pid as u32,
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'process_id' (>1)",
+            );
+        }
+    };
+
+    let runtime = request
+        .payload
+        .get("runtime")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let runtime_session_id = request
+        .payload
+        .get("runtime_session_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let pane_id = request
+        .payload
+        .get("pane_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let runtime_home = request
+        .payload
+        .get("runtime_home")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+
+    let home = match agent_team_mail_core::home::get_home_dir() {
+        Ok(h) => h,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INTERNAL_ERROR",
+                &format!("Failed to resolve ATM home: {e}"),
+            );
+        }
+    };
+    let Some(member) = load_team_member(&home, &team, &agent) else {
+        return make_error_response(
+            &request.request_id,
+            "AGENT_NOT_FOUND",
+            &format!("Agent '{agent}' is not in team '{team}'"),
+        );
+    };
+
+    let validation = validate_pid_backend(&member, process_id);
+    if validation.is_alive_mismatch() {
+        emit_pid_process_mismatch(&team, &agent, &validation, "register_hint");
+        return make_error_response(
+            &request.request_id,
+            "PID_PROCESS_MISMATCH",
+            &format!(
+                "backend='{}' expected='{}' actual='{}' pid={}",
+                validation.backend,
+                validation.expected_display(),
+                validation.actual_display(),
+                validation.pid
+            ),
+        );
+    }
+
+    let runtime_session = runtime_session_id.clone().or_else(|| {
+        runtime
+            .as_ref()
+            .map(|_| session_id.clone())
+            .filter(|v| !v.is_empty())
+    });
+    session_registry.lock().unwrap().upsert_runtime_for_team(
+        &team,
+        &agent,
+        &session_id,
+        process_id,
+        runtime.clone(),
+        runtime_session.clone(),
+        pane_id,
+        runtime_home,
+    );
+
+    {
+        let mut tracker = state_store.lock().unwrap();
+        if tracker.get_state(&agent).is_none() {
+            tracker.register_agent(&agent);
+        }
+        tracker.set_state_with_context(
+            &agent,
+            AgentState::Active,
+            "register-hint update",
+            "register_hint",
+        );
+    }
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm-daemon",
+        action: "register_hint",
+        team: Some(team.clone()),
+        agent_name: Some(agent.clone()),
+        session_id: Some(session_id.clone()),
+        target: Some(format!("pid:{process_id}")),
+        result: Some("registered".to_string()),
+        runtime,
+        runtime_session_id: runtime_session,
+        ..Default::default()
+    });
+
+    make_ok_response(
+        &request.request_id,
+        serde_json::json!({
+            "processed": true,
+            "team": team,
+            "agent": agent,
+            "session_id": session_id,
+            "process_id": process_id
         }),
     )
 }
@@ -2902,6 +3075,78 @@ mod tests {
             parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "UNKNOWN_COMMAND");
+    }
+
+    #[test]
+    fn test_parse_and_dispatch_register_hint_missing_team() {
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"agent":"arch-ctm","session_id":"s1","process_id":1234}}"#;
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_register_hint_registers_external_member_session() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let team_dir = temp.path().join(".claude/teams/atm-dev");
+        std::fs::create_dir_all(&team_dir).unwrap();
+        let config = serde_json::json!({
+            "name": "atm-dev",
+            "description": "test",
+            "createdAt": 1739284800000u64,
+            "leadAgentId": "team-lead@atm-dev",
+            "leadSessionId": "lead-sess",
+            "members": [{
+                "agentId": "arch-ctm@atm-dev",
+                "name": "arch-ctm",
+                "agentType": "codex",
+                "model": "gpt5.3-codex",
+                "joinedAt": 1739284800000u64,
+                "cwd": temp.path().to_string_lossy().to_string(),
+                "subscriptions": [],
+                "externalBackendType": "external"
+            }]
+        });
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request(
+            "register-hint",
+            serde_json::json!({
+                "team": "atm-dev",
+                "agent": "arch-ctm",
+                "session_id": "local:arch-ctm:sess:1234",
+                "process_id": std::process::id(),
+                "runtime": "codex",
+                "runtime_session_id": "local:arch-ctm:sess:1234"
+            }),
+        );
+        let resp = handle_register_hint(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let session = sr
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .cloned()
+            .expect("session should be registered");
+        assert_eq!(session.session_id, "local:arch-ctm:sess:1234");
+        assert_eq!(session.process_id, std::process::id());
+        assert_eq!(session.runtime.as_deref(), Some("codex"));
+
+        let tracker_state = store.lock().unwrap().get_state("arch-ctm");
+        assert_eq!(tracker_state, Some(AgentState::Active));
     }
 
     #[test]
