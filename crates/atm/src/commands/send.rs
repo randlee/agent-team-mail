@@ -268,6 +268,12 @@ pub fn execute(args: SendArgs) -> Result<()> {
         WriteOutcome::Queued { .. } => ("queued", None),
     };
     let destination = destination_target(&agent_name, &team_name);
+    let sender_pid = team_config
+        .members
+        .iter()
+        .find(|m| m.name == config.core.identity)
+        .and_then(detect_sender_process_pid);
+    let recipient_pid = member_pid_hint(&team_config, &agent_name);
     emit_event_best_effort(EventFields {
         level: "info",
         source: "atm",
@@ -281,6 +287,12 @@ pub fn execute(args: SendArgs) -> Result<()> {
         message_id: inbox_message.message_id.clone(),
         count: conflict_count,
         message_text: Some(final_message_text.clone()),
+        sender_agent: Some(config.core.identity.clone()),
+        sender_team: Some(sender_team.clone()),
+        sender_pid,
+        recipient_agent: Some(agent_name.clone()),
+        recipient_team: Some(team_name.clone()),
+        recipient_pid,
         ..Default::default()
     });
     info!(
@@ -431,6 +443,13 @@ fn is_self_send(
 
 fn destination_target(agent_name: &str, team_name: &str) -> String {
     format!("{agent_name}@{team_name}")
+}
+
+fn member_pid_hint(cfg: &TeamConfig, name: &str) -> Option<u32> {
+    cfg.members
+        .iter()
+        .find(|m| m.name == name)
+        .and_then(AgentMember::process_id_hint)
 }
 
 fn recipient_has_dead_session(team: &str, agent_name: &str) -> bool {
