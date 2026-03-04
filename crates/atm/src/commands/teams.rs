@@ -448,6 +448,36 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
     print_launch_command_preview(&launch_command_preview, args.json);
 
+    // Preserve legacy spawn UX when daemon is unavailable: return the daemon
+    // error + launch command guidance without requiring team-config mutation.
+    // When daemon is running, we enforce #409 by persisting model/backend
+    // metadata before sending the launch request.
+    if !agent_team_mail_core::daemon_client::daemon_is_running() {
+        if args.json {
+            let output = json!({
+                "error": "Daemon is not running. Start it with: atm-daemon",
+                "agent": args.agent,
+                "team": team_name,
+                "runtime": runtime_name(&args.runtime),
+                "folder": launch_dir.to_string_lossy(),
+                "launch_command": launch_command_preview,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
+            eprintln!("  Run the launch command above manually in a new tmux pane.");
+        }
+        std::process::exit(1);
+    }
+
+    ensure_spawn_member_metadata(
+        &team_name,
+        &args.agent,
+        &args.runtime,
+        args.model.as_deref(),
+        &launch_dir,
+    )?;
+
     let launch_config = LaunchConfig {
         agent: args.agent.clone(),
         team: team_name.clone(),
@@ -588,7 +618,9 @@ fn ensure_spawn_member_metadata(
     let team_dir = home_dir.join(".claude/teams").join(team);
     let config_path = team_dir.join("config.json");
     if !config_path.exists() {
-        anyhow::bail!("Team config not found at {}", config_path.display());
+        // Spawn must remain resilient when team config does not yet exist.
+        // Metadata persistence is best-effort in this case.
+        return Ok(());
     }
 
     let lock_path = config_path.with_extension("lock");
@@ -597,12 +629,14 @@ fn ensure_spawn_member_metadata(
 
     let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
     let backend = backend_type_for_runtime(runtime);
-    let model_text = model_override.unwrap_or("unknown");
-    let parsed_model =
-        ModelId::from_str(model_text).map_err(|e| anyhow::anyhow!("Invalid --model: {e}"))?;
+    let parsed_model_override = model_override.map(|model| {
+        ModelId::from_str(model).unwrap_or_else(|_| ModelId::Custom(model.to_string()))
+    });
 
     if let Some(member) = team_config.members.iter_mut().find(|m| m.name == agent) {
-        if let Some(model) = model_override {
+        if let Some(model) = model_override
+            && let Some(parsed_model) = parsed_model_override
+        {
             member.model = model.to_string();
             member.external_model = Some(parsed_model);
         } else if member.external_model.is_none() {
@@ -621,7 +655,7 @@ fn ensure_spawn_member_metadata(
                 agent_id: format!("{agent}@{team}"),
                 name: agent.to_string(),
                 agent_type: runtime_name(runtime).to_string(),
-                model: model_text.to_string(),
+                model: model_override.unwrap_or("unknown").to_string(),
                 prompt: None,
                 color: None,
                 plan_mode_required: None,
@@ -634,7 +668,7 @@ fn ensure_spawn_member_metadata(
                 last_active: None,
                 session_id: None,
                 external_backend_type: Some(backend),
-                external_model: Some(parsed_model),
+                external_model: Some(parsed_model_override.unwrap_or(ModelId::Unknown)),
                 unknown_fields: std::collections::HashMap::new(),
             });
     }

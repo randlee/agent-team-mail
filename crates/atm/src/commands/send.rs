@@ -500,7 +500,6 @@ fn member_pid_hint(cfg: &TeamConfig, name: &str) -> Option<u32> {
         .find(|m| m.name == name)
         .and_then(AgentMember::process_id_hint)
 }
-}
 
 fn recipient_has_dead_session(team: &str, agent_name: &str) -> bool {
     recipient_has_dead_session_with_query(team, agent_name, |team, agent| {
