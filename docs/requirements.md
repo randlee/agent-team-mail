@@ -753,6 +753,10 @@ atm doctor --full
 - Human-readable output MUST start with a concise team member snapshot table (equivalent
   core fields to `atm members`: name/type/model/status), followed by ordered findings by
   severity, then recommended remediation commands.
+- Human-readable output MUST render the log window using an operator-friendly label:
+  - default/incremental and duration windows: `last <elapsed>`
+  - timestamp windows: `since YYYY-MM-DD HH:mm:ss UTC (<elapsed>)`
+  - full mode: `since session start (<elapsed>)`
 - JSON output (`--json`): stable schema with `summary`, `findings[]`, `recommendations[]`, `log_window`.
 - Both human and JSON output MUST surface active env overrides for `ATM_HOME`,
   `ATM_TEAM`, and `ATM_IDENTITY` when set to non-empty values.
@@ -775,7 +779,7 @@ atm doctor --full
 - `summary`: `team`, `generated_at`, `has_critical`, `counts` (`critical`, `warn`, `info`)
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
-- `log_window`: `mode`, `start`, `end`
+- `log_window`: `mode`, `start`, `end`, `elapsed_secs`
 - `env_overrides`: optional object fields `atm_home`, `atm_team`,
   `atm_identity`; each value shape is `{ source, value }`
 
@@ -792,7 +796,7 @@ Current required `DoctorReport` shape:
 - `summary`: `team`, `generated_at`, `has_critical`, `counts`
 - `findings[]`: `severity`, `check`, `code`, `message`
 - `recommendations[]`: `command`, `reason`
-- `log_window`: `mode`, `start`, `end`
+- `log_window`: `mode`, `start`, `end`, `elapsed_secs`
 - `env_overrides`: optional `atm_home`, `atm_team`, `atm_identity`, each with:
   - `source`: override source tag (`"env"`)
   - `value`: resolved non-empty value
@@ -1246,7 +1250,7 @@ team-lead = "arch-atm"   # role-name → inbox-identity mapping
 | `ATM_DAEMON_AUTOSTART` | Daemon autostart toggle (`1/true/yes` enables, `0/false/no` disables); defaults to enabled when unset |
 | `ATM_DAEMON_BIN` | Optional daemon binary override for test/ops harnesses |
 | `ATM_LOG` | Stderr log level (`trace|debug|info|warn|error`), default `info` |
-| `ATM_LOG_MSG` | Message text logging policy (`none|truncated|full`), default `truncated` |
+| `ATM_LOG_MSG` | Message preview toggle: `1` enables 20-char preview; unset/other values disable preview |
 | `ATM_LOG_FILE` | Canonical unified log file path override for test/ops |
 
 Environment value rules:
@@ -1486,7 +1490,8 @@ No legacy `events.jsonl` sink code remains in any crate.
 #### Runtime Controls
 
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
-- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy (default: `truncated`).
+- `ATM_LOG_MSG=1` enables message preview text; unset (or legacy string values
+  `none|truncated|full`) disables preview text.
 - `ATM_LOG_FILE` may override file path for tests/ops.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
