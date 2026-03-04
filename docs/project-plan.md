@@ -164,6 +164,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
 | X | Team Onboarding + TUI/Doctor Stability | `/team-join`, spawn path normalization, `atm init` one-command setup, and carry-forward bug-debt mapping | PLANNED |
+| Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency | IN PROGRESS |
 
 ---
 
@@ -1405,10 +1406,25 @@ the current tranche focused on onboarding contract closure.
 | **Q** | Q.2 | Integration tests + cross-platform validation | COMPLETE | [#253](https://github.com/randlee/agent-team-mail/pull/253) |
 | **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | COMPLETE | — |
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
+| **Z** | Z.1 | Quick Wins: Doctor + Release Fix | COMPLETE | [#423](https://github.com/randlee/agent-team-mail/pull/423) |
 
 **Completed**: 99+ sprints across 23 phases (CI green)
-**Current version**: v0.27.0
-**Next**: Phase X (planning)
+**Current version**: v0.33.2
+**Current phase**: Phase Z (planning)
+
+---
+
+## 17.11 Phase Z: Daemon SSoT + Observability Hardening
+
+### Z.1 — Quick Wins: Doctor Correctness + Release Fix
+
+**Issues**: [#407](https://github.com/randlee/agent-team-mail/issues/407), [#408](https://github.com/randlee/agent-team-mail/issues/408), [#403](https://github.com/randlee/agent-team-mail/issues/403), [#399](https://github.com/randlee/agent-team-mail/issues/399)
+
+**Sprint entry**:
+
+| Sprint | Name | PR | Branch | Issues |
+|--------|------|----|--------|--------|
+| Z.1 | Quick Wins: Doctor + Release Fix | [#423](https://github.com/randlee/agent-team-mail/pull/423) | `feature/pZ-s1-quick-wins` | #407, #408, #403, #399 |
 
 ---
 
