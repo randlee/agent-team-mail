@@ -85,9 +85,7 @@ fn resolve_session_id(team: &str, identity: &str) -> Result<String> {
         Ok(Some(_)) => "hook file has blank session_id".to_string(),
         Ok(None) => "hook file not found".to_string(),
         Err(e) => {
-            eprintln!(
-                "WARNING: hook file validation failed: {e}; trying session file..."
-            );
+            eprintln!("WARNING: hook file validation failed: {e}; trying session file...");
             format!("hook file validation failed: {e}")
         }
     };

@@ -366,7 +366,9 @@ mod tests {
     fn test_read_session_file_no_dir() {
         let dir = tempfile::TempDir::new().unwrap();
         let old_home = std::env::var("ATM_HOME").ok();
-        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", dir.path());
+        }
 
         let result = read_session_file("test-team", "team-lead");
 
@@ -388,7 +390,10 @@ mod tests {
         let sessions_dir = dir.path().join(".claude/sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
         let data = serde_json::json!({
             "session_id": "test-session-123",
             "team": "test-team",
@@ -399,10 +404,13 @@ mod tests {
         std::fs::write(
             sessions_dir.join("test-session-123.json"),
             serde_json::to_string(&data).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let old_home = std::env::var("ATM_HOME").ok();
-        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", dir.path());
+        }
 
         let result = read_session_file("test-team", "team-lead");
 
@@ -424,7 +432,10 @@ mod tests {
         let sessions_dir = dir.path().join(".claude/sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
         for i in 1..=2 {
             let data = serde_json::json!({
                 "session_id": format!("session-{i}"),
@@ -436,11 +447,14 @@ mod tests {
             std::fs::write(
                 sessions_dir.join(format!("session-{i}.json")),
                 serde_json::to_string(&data).unwrap(),
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let old_home = std::env::var("ATM_HOME").ok();
-        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", dir.path());
+        }
 
         let result = read_session_file("test-team", "team-lead");
 
@@ -453,8 +467,14 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Ambiguous"), "error should mention ambiguity: {err}");
-        assert!(err.contains("CLAUDE_SESSION_ID"), "error should mention env var: {err}");
+        assert!(
+            err.contains("Ambiguous"),
+            "error should mention ambiguity: {err}"
+        );
+        assert!(
+            err.contains("CLAUDE_SESSION_ID"),
+            "error should mention env var: {err}"
+        );
     }
 
     #[test]
@@ -464,7 +484,10 @@ mod tests {
         let sessions_dir = dir.path().join(".claude/sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
         let stale_time = now - 100_000.0; // Well beyond 24h TTL
         let data = serde_json::json!({
             "session_id": "stale-session",
@@ -476,10 +499,13 @@ mod tests {
         std::fs::write(
             sessions_dir.join("stale-session.json"),
             serde_json::to_string(&data).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let old_home = std::env::var("ATM_HOME").ok();
-        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", dir.path());
+        }
 
         let result = read_session_file("test-team", "team-lead");
 
@@ -501,7 +527,10 @@ mod tests {
         let sessions_dir = dir.path().join(".claude/sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
         // created_at is stale but updated_at is fresh
         let data = serde_json::json!({
             "session_id": "refreshed-session",
@@ -514,10 +543,13 @@ mod tests {
         std::fs::write(
             sessions_dir.join("refreshed-session.json"),
             serde_json::to_string(&data).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let old_home = std::env::var("ATM_HOME").ok();
-        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", dir.path());
+        }
 
         let result = read_session_file("test-team", "team-lead");
 
@@ -539,7 +571,10 @@ mod tests {
         let sessions_dir = dir.path().join(".claude/sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
         let data = serde_json::json!({
             "session_id": "custom-home-session",
             "team": "test-team",
@@ -550,10 +585,13 @@ mod tests {
         std::fs::write(
             sessions_dir.join("custom-home-session.json"),
             serde_json::to_string(&data).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let old_home = std::env::var("ATM_HOME").ok();
-        unsafe { std::env::set_var("ATM_HOME", dir.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", dir.path());
+        }
 
         let result = read_session_file("test-team", "team-lead");
 

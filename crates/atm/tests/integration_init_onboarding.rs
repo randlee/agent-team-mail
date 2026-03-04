@@ -14,7 +14,11 @@ fn init_cmd<'a>(home: &'a TempDir, repo: &'a Path) -> assert_cmd::Command {
     cmd
 }
 
-fn count_nested_command_in_hooks(settings_path: &Path, hook_category: &str, command: &str) -> usize {
+fn count_nested_command_in_hooks(
+    settings_path: &Path,
+    hook_category: &str,
+    command: &str,
+) -> usize {
     let parsed: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
 
@@ -28,9 +32,9 @@ fn count_nested_command_in_hooks(settings_path: &Path, hook_category: &str, comm
                         .get("hooks")
                         .and_then(|h| h.as_array())
                         .map(|hooks| {
-                            hooks.iter().any(|h| {
-                                h.get("command").and_then(|c| c.as_str()) == Some(command)
-                            })
+                            hooks
+                                .iter()
+                                .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command))
                         })
                         .unwrap_or(false)
                 })
