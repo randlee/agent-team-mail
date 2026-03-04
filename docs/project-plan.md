@@ -1407,8 +1407,22 @@ the current tranche focused on onboarding contract closure.
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
 
 **Completed**: 99+ sprints across 23 phases (CI green)
-**Current version**: v0.27.0
-**Next**: Phase X (planning)
+**Current version**: v0.33.2
+**Current phase**: Phase Z (planning)
+
+---
+
+## 17.11 Phase Z: Daemon SSoT + Observability Hardening
+
+### Z.1 — Quick Wins: Doctor Correctness + Release Fix
+
+**Issues**: [#407](https://github.com/randlee/agent-team-mail/issues/407), [#408](https://github.com/randlee/agent-team-mail/issues/408), [#403](https://github.com/randlee/agent-team-mail/issues/403), [#399](https://github.com/randlee/agent-team-mail/issues/399)
+
+**Sprint entry**:
+
+| Sprint | Name | PR | Branch | Issues |
+|--------|------|----|--------|--------|
+| Z.1 | Quick Wins: Doctor + Release Fix | [#423](https://github.com/randlee/agent-team-mail/pull/423) | `feature/pZ-s1-quick-wins` | #407, #408, #403, #399 |
 
 ---
 
