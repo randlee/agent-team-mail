@@ -1407,24 +1407,98 @@ the current tranche focused on onboarding contract closure.
 | **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | COMPLETE | — |
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
 | **Z** | Z.1 | Quick Wins: Doctor + Release Fix | COMPLETE | [#423](https://github.com/randlee/agent-team-mail/pull/423) |
+| **Z** | Z.2 | Log Format + Doctor UX | IN REVIEW | [#425](https://github.com/randlee/agent-team-mail/pull/425) |
+| **Z** | Z.3 | SSoT Fast Path (`register-hint`, send-path daemon sync) | IN REVIEW | [#427](https://github.com/randlee/agent-team-mail/pull/427) |
+| **Z** | Z.4 | Canonical Member State Completion | IN REVIEW | [#429](https://github.com/randlee/agent-team-mail/pull/429) |
+| **Z** | Z.5 | Lifecycle Logging + Hook Events | IN REVIEW | [#430](https://github.com/randlee/agent-team-mail/pull/430) |
 
 **Completed**: 99+ sprints across 23 phases (CI green)
 **Current version**: v0.33.2
-**Current phase**: Phase Z (planning)
+**Current phase**: Phase Z (execution)
 
 ---
 
 ## 17.11 Phase Z: Daemon SSoT + Observability Hardening
 
-### Z.1 — Quick Wins: Doctor Correctness + Release Fix
+**Goal**: Close daemon single-source-of-truth gaps for member/session state and make
+doctor/log observability reliable and diagnosable from structured events.
 
-**Issues**: [#407](https://github.com/randlee/agent-team-mail/issues/407), [#408](https://github.com/randlee/agent-team-mail/issues/408), [#403](https://github.com/randlee/agent-team-mail/issues/403), [#399](https://github.com/randlee/agent-team-mail/issues/399)
+**Integration branch**: `integrate/phase-Z`
 
-**Sprint entry**:
+**Dependency graph**:
+- Z.1 and Z.2 start in parallel.
+- Z.3 depends on Z.1 (register-hint + spawn metadata contract).
+- Z.4 depends on Z.3 (canonical union completion on top of fast path).
+- Z.5 is independent and can run in parallel with Z.3/Z.4.
 
-| Sprint | Name | PR | Branch | Issues |
-|--------|------|----|--------|--------|
-| Z.1 | Quick Wins: Doctor + Release Fix | [#423](https://github.com/randlee/agent-team-mail/pull/423) | `feature/pZ-s1-quick-wins` | #407, #408, #403, #399 |
+### Sprint Summary
+| Sprint | Name | PR | Branch | Issues | Status |
+|--------|------|----|--------|--------|--------|
+| Z.1 | Quick Wins: Doctor + Release Fix | [#423](https://github.com/randlee/agent-team-mail/pull/423) | `feature/pZ-s1-quick-wins` | #407, #408, #403, #399 | COMPLETE |
+| Z.2 | Log Format + Doctor UX | [#425](https://github.com/randlee/agent-team-mail/pull/425) | `feature/pZ-s2-log-format` | #410, #411, #412, #419 | IN REVIEW |
+| Z.3 | SSoT Fast Path | [#427](https://github.com/randlee/agent-team-mail/pull/427) | `feature/pZ-s3-ssot-fast-path` | #413, #415, #409 | IN REVIEW |
+| Z.4 | Canonical Member State Completion | [#429](https://github.com/randlee/agent-team-mail/pull/429) | `feature/pZ-s4-canonical-state` | #414, #416, #417, #418, #401, #402 | IN REVIEW |
+| Z.5 | Lifecycle Logging + Hook Events | [#430](https://github.com/randlee/agent-team-mail/pull/430) | `feature/pZ-s5-observability` | #420, #421 | IN REVIEW |
+
+### Z.1 — Quick Wins: Doctor + Release Fix
+**Deliverables**
+1. #407: treat sysinfo process lookup `None` as inconclusive (not mismatch) in PID/backend validation.
+2. #408: short session-id formatting in doctor/member surfaces.
+3. #403: prevent reconcile pass from re-overwriting mismatch-offline states.
+4. #399: migrate release checks from fragile `curl` calls to resilient crates verification path.
+
+**Acceptance Criteria**
+1. Doctor no longer emits false Offline/PID mismatch from missing sysinfo process metadata.
+2. Session identifiers in doctor output are compact and human-parseable.
+3. Mismatch-offline transitions remain sticky until valid re-registration.
+4. Release verification paths avoid Cloudflare/IP-based transient failures.
+
+### Z.2 — Log Format + Doctor UX
+**Deliverables**
+1. #410/#411: normalize send log identity fields and sender->recipient formatting.
+2. #412: `ATM_LOG_MSG` binary contract (`1` enables preview, unset/other disables).
+3. #419: doctor log-window labeling with relative elapsed semantics.
+
+**Acceptance Criteria**
+1. Send log records always include sender/recipient identity + PID fields.
+2. Message preview appears only when `ATM_LOG_MSG=1`.
+3. Doctor log-window text and JSON fields agree on effective time window semantics.
+
+### Z.3 — SSoT Fast Path
+**Deliverables**
+1. #413: add `register-hint` daemon command path for external runtime/session registration.
+2. #415: remove send-path bypasses and route session truth through daemon.
+3. #409: `atm teams spawn` writes model/backend metadata before launch when daemon-backed path is active.
+
+**Acceptance Criteria**
+1. send/spawn command paths do not infer liveness independently of daemon canonical state.
+2. `register-hint` supports backward-compat handling (daemon unavailable skip, unknown command guidance).
+3. Spawn preserves daemon-unavailable UX while keeping metadata writes fail-open and model-safe.
+
+### Z.4 — Canonical Member State Completion
+**Deliverables**
+1. #414/#416: align register/teams/send code paths to daemon-owned canonical state.
+2. #417/#418: team-scoped union roster query (config members + daemon-only sessions) with cold-start PID-hint bootstrap.
+3. #401/#402: strict PID validation parity between send path and daemon validator.
+
+**Acceptance Criteria**
+1. `atm doctor`, `atm status`, and `atm members` read from the same canonical daemon snapshot.
+2. Daemon-only members are surfaced with explicit unregistered/ghost markers.
+3. PID/backend mismatch handling is consistent across lifecycle, send, and diagnostics.
+
+### Z.5 — Lifecycle Logging + Hook Events
+**Deliverables**
+1. #420: lifecycle transition logging (`member_state_change`, `member_activity_change`,
+   `session_id_change`, `process_id_change`) with reason/source fields.
+2. #421: first-class hook lifecycle logs (`hook.session_start`,
+   `hook.pre_compact`, `hook.compact_complete`, `hook.session_end`, `hook.failure`).
+3. Requirements alignment for event coverage and always-on hook observability semantics.
+
+**Acceptance Criteria**
+1. Offline<->Online transitions always emit INFO events exactly once per change.
+2. Busy<->Idle transitions emit DEBUG-only events (no INFO spam).
+3. Hook lifecycle events are always emitted with consistent structured fields and WARN failure records.
+4. Doctor findings are diagnosable directly from structured logs without ad-hoc inference.
 
 ---
 
