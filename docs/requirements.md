@@ -1503,6 +1503,8 @@ No legacy `events.jsonl` sink code remains in any crate.
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
 - `ATM_LOG_MSG=1` enables human send-line message preview; any other value
   (including unset) disables preview text.
+- Migration note: previous values (`none|truncated|full`) are deprecated.
+  Users should migrate to `ATM_LOG_MSG=1` (enabled) or unset/other (disabled).
 - `ATM_LOG_FILE` may override file path for tests/ops.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
@@ -2453,8 +2455,14 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 5. **Large inbox strategy**: For inboxes with 10K+ messages, should `atm-core` support streaming JSON parsing, or is read-all-into-memory acceptable for MVP?
 
+6. **Register-hint daemon protocol (`#413`)**: Should `register-hint` be introduced as a dedicated daemon command (for example `register-hint`) or as an extension of `hook-event` with `source=cli_send`? Backward-compat behavior must be explicit when CLI is newer than daemon.
+
+7. **Canonical model source (`#409`)**: What is the authoritative model-ingest path into daemon state when hook payloads do not always carry model data? Candidate sources are spawn-time metadata, explicit register payload, and config bootstrap; precedence/order must be defined.
+
+8. **Team-scoped roster query contract (`#417`)**: Does daemon require a new query to return full canonical member snapshots (including daemon-only/ghost members), or can current list APIs be extended without breaking existing consumers?
+
 ---
 
 **Document Version**: 0.4
-**Last Updated**: 2026-03-03
+**Last Updated**: 2026-03-04
 **Maintained By**: Claude
