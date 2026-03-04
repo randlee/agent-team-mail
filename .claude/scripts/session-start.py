@@ -57,7 +57,8 @@ def main() -> int:
     if welcome_message:
         print(f"Welcome: {welcome_message}")
 
-    # Send hook event to daemon socket (only when .atm.toml present)
+    # Send hook event to daemon socket (only when .atm.toml present).
+    # Use parent PID (Claude session process), not this short-lived hook PID.
     if session_id:
         payload: dict[str, Any] = {
             "event": "session_start",
@@ -65,7 +66,7 @@ def main() -> int:
             "agent": identity,
             "team": default_team,
             "source": {"kind": "claude_hook"},
-            "process_id": os.getpid(),
+            "process_id": os.getppid(),
         }
         send_hook_event(payload)
 

@@ -90,6 +90,42 @@ Remediation:
    - `atm doctor --json`
 4. If still unavailable, capture diagnostics and escalate.
 
+## PID Logging Semantics
+
+### INFO-level PID fields
+
+INFO log lines for registration and liveness events include `agent_pid=<N>` where `<N>`
+is the **registered agent session PID** — the long-lived process running the agent
+(for example the `claude` or `codex` process). This is the PID stored in the daemon
+session registry and shown in `atm doctor` output.
+
+### Subprocess pid/ppid at DEBUG level
+
+The subprocess PID of each hook invocation and the hook's parent PID (ppid) are logged
+at DEBUG level only. These values change on every hook call and are not meaningful for
+liveness tracking. They appear in WARN and DEBUG entries to assist root-cause analysis
+when diagnosing hook setup or PID correlation problems.
+
+To expose subprocess pid/ppid in output, set:
+
+```bash
+ATM_LOG=debug atm doctor
+```
+
+This enables the full structured fields including `hook_pid`, `hook_ppid`, and
+`agent_pid` for each daemon lifecycle event.
+
+### PID Mismatch Warnings
+
+If `atm doctor` reports a `PID_PROCESS_MISMATCH` finding, the registered PID is alive
+but the process running under that PID is not the expected agent backend (for example
+the PID was reused by an unrelated process after the agent exited). Remediation:
+
+1. Run `atm register <team> <name>` from the affected agent to refresh the PID.
+2. If the agent is no longer running, run `atm cleanup --agent <name>` to remove the
+   stale registration.
+3. Re-run `atm doctor` to confirm the finding is resolved.
+
 ## Fast Triage Commands
 
 ```bash

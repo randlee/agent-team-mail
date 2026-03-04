@@ -724,6 +724,8 @@ atm doctor --full
   (roster removed xor mailbox present).
 - Config/runtime drift: detect path/env mismatches relevant to daemon/team operation.
 - Unified log diagnostics: summarize warning/error events in the configured time window.
+- PID cross-validate: for each member with a registered PID, verify the live process name
+  matches the declared backend (see PID verification requirement in section 4.3.3d).
 
 **Default warning/error log window**:
 - `since = max(team-lead session start, last doctor call time)`.
@@ -827,6 +829,61 @@ Doctor non-failing requirement:
 - Exit `1` is reserved for true execution failures that prevent report creation
   (for example unreadable/malformed required team config or unrecoverable output
   serialization/write failure).
+
+### 4.3.3d PID Verification and Cross-Validate Requirements
+
+#### PID Registration Verification (REQUIRED)
+
+When a PID is registered (via hook event or Codex/Gemini self-registration), the daemon
+MUST verify that the process name for that PID matches the expected token for the declared
+backend:
+
+| Backend | Expected process name (`comm`) |
+|---------|-------------------------------|
+| Claude Code | `claude` |
+| Codex | `codex` (native binary — NOT `node`) |
+| Gemini | `node` AND full args contain `gemini` |
+
+If the process name does not match, the daemon MUST:
+1. Reject the registration (mark PID as invalid in the session registry).
+2. Emit a WARN log including: agent name, backend type, expected process name, actual
+   process name, and PID.
+
+#### Liveness Cross-Validate at Read Time (REQUIRED)
+
+During liveness checks (triggered by `atm doctor`, `atm status`, or `atm members`
+queries), the daemon MUST:
+1. Confirm the process is alive (`kill -0` or platform equivalent).
+2. Re-verify the process name against the backend's expected token.
+3. If the process is alive but the name no longer matches (PID was reused by an
+   unrelated process), emit a `PID_PROCESS_MISMATCH` WARN finding in `atm doctor`
+   output.
+
+The WARN finding MUST include: agent name, backend type, expected process name,
+actual process name, and PID.
+
+#### Self-Registration for External Agents (Codex, Gemini) (REQUIRED)
+
+Codex and Gemini agents do not have a Claude Code hook system. The daemon MUST
+support self-registration for these agents via:
+- Implicit: `atm send` writes the agent's own PID and session ID to their roster entry
+  in `config.json` and creates a daemon state record if one does not exist.
+- Explicit: `atm register <team> <name>` performs the same registration explicitly.
+
+Self-registration uses `os.getpid()` of the calling Codex/Gemini process as the
+registered agent session PID.
+
+When self-registration creates a new daemon state record where an activity hint already
+existed, the daemon MUST emit an `ACTIVE_WITHOUT_SESSION` WARN finding to surface the
+gap, and MUST then create the daemon state record to resolve it.
+
+#### Logging Level Requirements for PID/Process Events (REQUIRED)
+
+- INFO log lines MUST show `agent_pid=<registered session PID>` for registration and
+  liveness events.
+- The subprocess pid and ppid of hook invocations MUST be logged at DEBUG level only.
+- WARN and DEBUG log entries reporting inconsistencies MUST include subprocess pid/ppid
+  as contextual fields to support root-cause analysis without polluting INFO output.
 
 ### 4.3.3a Operational Health Monitor (`atm-monitor`)
 
@@ -1851,7 +1908,11 @@ atm init <team> --skip-team
 - Existing `.atm.toml` is preserved (no silent overwrite); command reports that existing config was found.
 - Existing team is preserved (no duplicate recreation); command reports "team already exists".
 - Global-installed hooks must remain passive in non-ATM repositories; `.atm.toml` guard is the first hook operation.
-- Embedded hook scripts are the runtime source of truth.
+- Embedded hook scripts are the runtime source of truth. Hook script bodies are compiled
+  into the ATM binary via `include_str!()` at build time. **After upgrading `atm`, users
+  MUST re-run `atm init <team>` to materialize updated hook scripts on disk.** The binary
+  holds the authoritative script content; on-disk scripts from prior versions are stale
+  until overwritten by `atm init`.
 
 **Required test scenarios** (each must be independently tested):
 

@@ -205,6 +205,7 @@ class TestSessionStartSocketSend(unittest.TestCase):
         """When socket is called, the sendall payload contains the session_id."""
         toml = '[core]\ndefault_team = "atm-dev"\nidentity = "team-lead"\n'
         send_calls: list[bytes] = []
+        expected_parent_pid = 4242
 
         def capture_send(data: bytes):
             send_calls.append(data)
@@ -232,6 +233,7 @@ class TestSessionStartSocketSend(unittest.TestCase):
                 with patch("sys.stdin", StringIO(stdin_text)), \
                      patch("sys.stdout", captured), \
                      patch.dict(os.environ, {"ATM_HOME": str(atm_home)}), \
+                     patch("os.getppid", return_value=expected_parent_pid), \
                      patch("socket.socket", return_value=mock_sock):
                     mod = _load_module("session_start", _SESSION_START_PATH)
                     rc = mod.main()
@@ -248,7 +250,7 @@ class TestSessionStartSocketSend(unittest.TestCase):
         self.assertEqual(request["payload"]["team"], "atm-dev")
         self.assertEqual(request["payload"]["source"]["kind"], "claude_hook")
         self.assertIn("process_id", request["payload"])
-        self.assertIsInstance(request["payload"]["process_id"], int)
+        self.assertEqual(request["payload"]["process_id"], expected_parent_pid)
 
 
 class TestSessionStartGuards(unittest.TestCase):

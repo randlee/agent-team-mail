@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-team-mail"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-core"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-daemon"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -69,6 +69,7 @@ dependencies = [
  "serial_test",
  "sha2",
  "ssh2",
+ "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -81,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-mcp"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -103,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-tui"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -1347,9 +1348,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.44"
+version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21b2ebcf727b7760c461f091f9f0f539b77b8e87f2fd88131e7f1b433b3cece4"
+checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]

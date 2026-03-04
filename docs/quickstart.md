@@ -94,3 +94,18 @@ backed `atm` invocation.
 
 Note: there is currently no dedicated `atm daemon stop` command; use the
 `pkill` approach above for explicit manual restart during upgrades.
+
+### Update Hook Scripts After Upgrading
+
+ATM hook scripts (session-start, session-end, teammate-idle, etc.) are embedded in
+the `atm` binary at compile time. When you upgrade `atm`, the on-disk hook scripts
+in `~/.claude/scripts/` are stale until refreshed. Always re-run `atm init` after
+upgrading:
+
+```bash
+atm init <team>
+```
+
+This is idempotent — it overwrites only the ATM-managed hook scripts and leaves
+all other settings intact. Failure to re-run `atm init` after an upgrade may result
+in outdated hook behavior (for example incorrect PID reporting or missing lifecycle events).
