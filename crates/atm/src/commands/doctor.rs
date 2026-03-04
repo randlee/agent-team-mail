@@ -974,6 +974,38 @@ fn print_human(report: &DoctorReport) {
     print!("{}", render_human(report));
 }
 
+fn format_session_short(session_id: Option<&str>) -> String {
+    let Some(session) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "-".to_string();
+    };
+
+    if looks_like_uuid(session) {
+        return session.chars().take(8).collect();
+    }
+
+    if let Some(rest) = session.strip_prefix("local:")
+        && let Some(name) = rest.split(':').next()
+        && !name.is_empty()
+    {
+        return format!("local:{name}");
+    }
+
+    session.to_string()
+}
+
+fn looks_like_uuid(value: &str) -> bool {
+    let mut parts = value.split('-');
+    for expected_len in [8usize, 4, 4, 4, 12] {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != expected_len || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
 fn render_human(report: &DoctorReport) -> String {
     let mut out = String::new();
     out.push_str(&format!("ATM Doctor — team {}\n", report.summary.team));
@@ -1020,7 +1052,7 @@ fn render_human(report: &DoctorReport) -> String {
                 .process_id
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "-".to_string());
-            let session = m.session_id.as_deref().unwrap_or("-");
+            let session = format_session_short(m.session_id.as_deref());
             out.push_str(&format!(
                 "  {:<20} {:<20} {:<24} {:<10} {:<10} {:<8} {}\n",
                 m.name, m.agent_type, m.model, m.status, m.activity, pid, session
@@ -1152,6 +1184,21 @@ mod tests {
     fn parse_since_input_accepts_positive_durations() {
         assert!(parse_since_input("5m").is_ok());
         assert!(parse_since_input("1h").is_ok());
+    }
+
+    #[test]
+    fn format_session_short_formats_uuid_and_local_ids() {
+        assert_eq!(
+            format_session_short(Some("123e4567-e89b-12d3-a456-426614174000")),
+            "123e4567"
+        );
+        assert_eq!(
+            format_session_short(Some("local:team-lead:1772608955543:20111")),
+            "local:team-lead"
+        );
+        assert_eq!(format_session_short(Some("sess-1")), "sess-1");
+        assert_eq!(format_session_short(None), "-");
+        assert_eq!(format_session_short(Some("   ")), "-");
     }
 
     #[test]
