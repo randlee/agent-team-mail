@@ -946,17 +946,34 @@ Canonical team member-state snapshot (daemon -> CLI) must include:
 - `activity` (`busy|idle|unknown`)
 - `session_id` (optional)
 - `process_id` (optional)
+- `in_config` (optional bool; default `true`; `false` means daemon session exists for
+  an agent not present in team `config.json`)
 - `reason`
 - `source`
 
 Required behavior:
 - `atm doctor`, `atm status`, and `atm members` must read liveness/status from
   this snapshot.
+- `atm status` and `atm members` must iterate the union of:
+  1) team `config.json` members and 2) daemon-tracked sessions for the same team.
+  Daemon-only rows must be rendered as unregistered/ghost entries.
+- `atm doctor` member snapshot must include daemon-only rows with an explicit
+  unregistered marker.
 - No command-level fallback may map `isActive=false` directly to offline/dead.
 - Per-member status derivation logic must not be duplicated across commands;
   command handlers consume daemon snapshot values directly.
 - Reconciliation and diagnostics must be team-scoped:
   daemon state for team `A` must not create findings for team `B`.
+- `atm send` must not write session/process ownership fields (`session_id`,
+  `process_id`) directly in team `config.json`; these are daemon-owned via
+  session registry.
+- On daemon cold start (or when no live registry record exists for a configured
+  member), daemon may bootstrap a session-registry record from roster hints only
+  when `processId` is present, alive, and backend validation does not report a
+  mismatch.
+- `atm send` PID fallback detection must use the same strict backend rules as the
+  daemon validator (`claude=comm:claude`, `codex=comm:codex`,
+  `gemini=comm:node+args~gemini`) and must not stamp unmatched fallback PIDs.
 
 #### Operational State Variable Inventory
 
@@ -968,6 +985,24 @@ Required behavior:
 | `process_id` | Daemon session registry | `.claude/daemon/session-registry.json` | Integer PID (`>1`) or absent | Process identity used for liveness checks. |
 | `status` (`state`) | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `active`, `idle`, `offline`, `unknown` | Canonical liveness/status consumed by doctor/status/members. |
 | `activity` | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `busy`, `idle`, `unknown` | Canonical activity hint exposed separately from liveness. |
+
+### 4.3.3e `register-hint` Command (Daemon SSoT Path)
+
+External runtimes that cannot emit hook lifecycle updates on every send path
+must register session/process hints through a daemon command:
+
+- Socket command: `register-hint`
+- Required payload: `team`, `agent`, `session_id`, `process_id`
+- Optional payload: `runtime`, `runtime_session_id`, `pane_id`, `runtime_home`
+
+Required behavior:
+- Daemon validates team membership before accepting the hint.
+- Daemon applies PID/backend validation rules from §4.3.3d.
+- On success, daemon updates session registry and tracker state for the member.
+
+Compatibility behavior:
+- If daemon is unreachable, caller treats registration as best-effort skip.
+- If daemon responds `UNKNOWN_COMMAND`, caller must fail with daemon-upgrade guidance.
 
 ### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
 
@@ -985,6 +1020,9 @@ Required baseline:
   - **resume**: continue an existing runtime session bound to the ATM agent.
 - User-facing control remains agent-centric (`team`, `agent`) rather than runtime
   session-centric for normal usage.
+- Before launch, `atm teams spawn` must persist roster metadata for target member:
+  - `model` (validated by model registry)
+  - `external_backend_type` (runtime-mapped backend kind)
 
 ### 4.3.4a Codex/Gemini Startup Guidance Prompt Injection
 
@@ -1222,7 +1260,7 @@ team-lead = "arch-atm"   # role-name → inbox-identity mapping
 | `ATM_DAEMON_AUTOSTART` | Daemon autostart toggle (`1/true/yes` enables, `0/false/no` disables); defaults to enabled when unset |
 | `ATM_DAEMON_BIN` | Optional daemon binary override for test/ops harnesses |
 | `ATM_LOG` | Stderr log level (`trace|debug|info|warn|error`), default `info` |
-| `ATM_LOG_MSG` | Message text logging policy (`none|truncated|full`), default `truncated` |
+| `ATM_LOG_MSG` | Message preview toggle: `1` enables 20-char preview; unset/other values disable preview |
 | `ATM_LOG_FILE` | Canonical unified log file path override for test/ops |
 
 Environment value rules:
@@ -1459,10 +1497,32 @@ No legacy `events.jsonl` sink code remains in any crate.
 - `atm-agent-mcp`: tool-call audit + lifecycle context
 - `atm-tui`: startup/shutdown, stream attach/detach, control-send/ack summaries
 
+#### Lifecycle and Hook Event Requirements (Z.5)
+
+- Daemon must emit lifecycle transition events for canonical member state:
+  - `member_state_change` (INFO) for `Offline ↔ Online` transitions only.
+  - `member_activity_change` (DEBUG) for `Busy ↔ Idle` transitions only.
+  - Events must include `old`, `new`, `reason`, and `source="daemon"` fields.
+  - Emission must be exactly once per state change (no duplicate logs when state is unchanged).
+- Daemon must emit identity transition events when runtime identity changes:
+  - `session_id_change` (INFO) and `process_id_change` (INFO).
+  - Events must include `old`, `new`, `reason`, and `source="daemon"` fields.
+- Hook lifecycle signals must be first-class structured events:
+  - `hook.session_start` (INFO)
+  - `hook.pre_compact` (INFO)
+  - `hook.compact_complete` (INFO)
+  - `hook.session_end` (INFO)
+  - `hook.failure` (WARN)
+- Hook events must include, when available: `team`, `agent`, `session_id`, `pid`,
+  `outcome`, and `source="hook"`.
+- Hook lifecycle event emission is always-on and must not be suppressed by
+  normal stderr verbosity controls (`ATM_LOG`).
+
 #### Runtime Controls
 
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
-- `ATM_LOG_MSG=none|truncated|full` controls message text inclusion policy (default: `truncated`).
+- `ATM_LOG_MSG=1` enables message preview text; unset (or legacy string values
+  `none|truncated|full`) disables preview text.
 - `ATM_LOG_FILE` may override file path for tests/ops.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees

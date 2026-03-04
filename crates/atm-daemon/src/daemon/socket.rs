@@ -904,6 +904,326 @@ fn authorize_hook_event(
     })
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransitionEventSpec {
+    level: &'static str,
+    action: &'static str,
+    old: String,
+    new: String,
+}
+
+#[cfg(unix)]
+fn is_online_state(state: Option<AgentState>) -> bool {
+    matches!(state, Some(AgentState::Active | AgentState::Idle))
+}
+
+#[cfg(unix)]
+fn online_state_label(state: Option<AgentState>) -> &'static str {
+    if is_online_state(state) {
+        "Online"
+    } else {
+        "Offline"
+    }
+}
+
+#[cfg(unix)]
+fn activity_label(state: AgentState) -> Option<&'static str> {
+    match state {
+        AgentState::Active => Some("Busy"),
+        AgentState::Idle => Some("Idle"),
+        AgentState::Offline | AgentState::Unknown => None,
+    }
+}
+
+#[cfg(unix)]
+fn collect_member_transition_events(
+    old_state: Option<AgentState>,
+    new_state: AgentState,
+) -> Vec<TransitionEventSpec> {
+    if old_state == Some(new_state) {
+        return Vec::new();
+    }
+
+    let mut specs = Vec::new();
+    if is_online_state(old_state) != is_online_state(Some(new_state)) {
+        specs.push(TransitionEventSpec {
+            level: "info",
+            action: "member_state_change",
+            old: online_state_label(old_state).to_string(),
+            new: online_state_label(Some(new_state)).to_string(),
+        });
+    }
+
+    let old_activity = old_state.and_then(activity_label);
+    let new_activity = activity_label(new_state);
+    if let (Some(old), Some(new)) = (old_activity, new_activity)
+        && old != new
+    {
+        specs.push(TransitionEventSpec {
+            level: "debug",
+            action: "member_activity_change",
+            old: old.to_string(),
+            new: new.to_string(),
+        });
+    }
+
+    specs
+}
+
+#[cfg(unix)]
+fn emit_member_transition_events(
+    team: &str,
+    agent: &str,
+    old_state: Option<AgentState>,
+    new_state: AgentState,
+    reason: &str,
+    session_id: Option<&str>,
+    process_id: Option<u32>,
+) {
+    for spec in collect_member_transition_events(old_state, new_state) {
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert("old".to_string(), serde_json::Value::String(spec.old));
+        extra_fields.insert("new".to_string(), serde_json::Value::String(spec.new));
+        extra_fields.insert(
+            "source".to_string(),
+            serde_json::Value::String("daemon".to_string()),
+        );
+        extra_fields.insert(
+            "reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+        if let Some(pid) = process_id {
+            extra_fields.insert("pid".to_string(), serde_json::Value::Number(pid.into()));
+        }
+
+        emit_event_best_effort(EventFields {
+            level: spec.level,
+            source: "atm-daemon",
+            action: spec.action,
+            team: Some(team.to_string()),
+            agent_name: Some(agent.to_string()),
+            session_id: session_id
+                .map(str::trim)
+                .filter(|sid| !sid.is_empty())
+                .map(ToString::to_string),
+            result: Some("success".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
+}
+
+#[cfg(unix)]
+fn emit_session_identity_change_events(
+    team: &str,
+    agent: &str,
+    old_record: Option<&crate::daemon::session_registry::SessionRecord>,
+    new_session_id: &str,
+    new_process_id: Option<u32>,
+    reason: &str,
+) {
+    let old_session_id = old_record.map(|record| record.session_id.as_str());
+    let (session_changed, process_changed) =
+        session_identity_change_flags(old_record, new_session_id, new_process_id);
+
+    if session_changed {
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert(
+            "old".to_string(),
+            old_session_id
+                .map(|sid| serde_json::Value::String(sid.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        extra_fields.insert(
+            "new".to_string(),
+            serde_json::Value::String(new_session_id.to_string()),
+        );
+        extra_fields.insert(
+            "source".to_string(),
+            serde_json::Value::String("daemon".to_string()),
+        );
+        extra_fields.insert(
+            "reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+        if let Some(pid) = new_process_id {
+            extra_fields.insert("pid".to_string(), serde_json::Value::Number(pid.into()));
+        }
+
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm-daemon",
+            action: "session_id_change",
+            team: Some(team.to_string()),
+            agent_name: Some(agent.to_string()),
+            session_id: Some(new_session_id.to_string()),
+            result: Some("success".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
+
+    if process_changed && let Some(new_pid) = new_process_id {
+        let old_pid = old_record.map(|record| record.process_id);
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert(
+            "old".to_string(),
+            old_pid
+                .map(|pid| serde_json::Value::Number(pid.into()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        extra_fields.insert("new".to_string(), serde_json::Value::Number(new_pid.into()));
+        extra_fields.insert(
+            "source".to_string(),
+            serde_json::Value::String("daemon".to_string()),
+        );
+        extra_fields.insert(
+            "reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm-daemon",
+            action: "process_id_change",
+            team: Some(team.to_string()),
+            agent_name: Some(agent.to_string()),
+            session_id: Some(new_session_id.to_string()),
+            result: Some("success".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
+}
+
+#[cfg(unix)]
+fn session_identity_change_flags(
+    old_record: Option<&crate::daemon::session_registry::SessionRecord>,
+    new_session_id: &str,
+    new_process_id: Option<u32>,
+) -> (bool, bool) {
+    let session_changed =
+        old_record.map(|record| record.session_id.as_str()) != Some(new_session_id);
+    let process_changed = new_process_id
+        .is_some_and(|new_pid| old_record.map(|record| record.process_id) != Some(new_pid));
+    (session_changed, process_changed)
+}
+
+#[cfg(unix)]
+fn hook_action_name(event_type: &str) -> Option<&'static str> {
+    match event_type {
+        "session_start" => Some("hook.session_start"),
+        "pre_compact" => Some("hook.pre_compact"),
+        "compact_complete" => Some("hook.compact_complete"),
+        "session_end" => Some("hook.session_end"),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct HookLogContext<'a> {
+    team: Option<&'a str>,
+    agent: Option<&'a str>,
+    session_id: Option<&'a str>,
+    process_id: Option<u32>,
+}
+
+#[cfg(unix)]
+fn emit_hook_event(
+    level: &'static str,
+    action: &'static str,
+    ctx: HookLogContext<'_>,
+    outcome: &str,
+    error: Option<String>,
+    event_type: Option<&str>,
+) {
+    let mut extra_fields = serde_json::Map::new();
+    extra_fields.insert(
+        "source".to_string(),
+        serde_json::Value::String("hook".to_string()),
+    );
+    if let Some(pid) = ctx.process_id {
+        extra_fields.insert("pid".to_string(), serde_json::Value::Number(pid.into()));
+    }
+    if let Some(event_type) = event_type {
+        extra_fields.insert(
+            "event".to_string(),
+            serde_json::Value::String(event_type.to_string()),
+        );
+    }
+
+    emit_event_best_effort(EventFields {
+        level,
+        source: "atm-daemon",
+        action,
+        team: ctx
+            .team
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        agent_name: ctx
+            .agent
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        session_id: ctx
+            .session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        result: Some(outcome.to_string()),
+        error,
+        extra_fields,
+        ..Default::default()
+    });
+}
+
+#[cfg(unix)]
+fn emit_hook_success(
+    event_type: &str,
+    team: &str,
+    agent: &str,
+    session_id: Option<&str>,
+    process_id: Option<u32>,
+) {
+    if let Some(action) = hook_action_name(event_type) {
+        let ctx = HookLogContext {
+            team: Some(team),
+            agent: Some(agent),
+            session_id,
+            process_id,
+        };
+        emit_hook_event("info", action, ctx, "success", None, Some(event_type));
+    }
+}
+
+#[cfg(unix)]
+fn emit_hook_failure(
+    event_type: Option<&str>,
+    team: Option<&str>,
+    agent: Option<&str>,
+    session_id: Option<&str>,
+    process_id: Option<u32>,
+    reason: &str,
+) {
+    let ctx = HookLogContext {
+        team,
+        agent,
+        session_id,
+        process_id,
+    };
+    emit_hook_event(
+        "warn",
+        "hook.failure",
+        ctx,
+        "failure",
+        Some(reason.to_string()),
+        event_type,
+    );
+}
+
 /// Handle the `"hook-event"` command, updating daemon state in real-time
 /// from Claude Code lifecycle hooks (session_start, teammate_idle, session_end).
 #[cfg(unix)]
@@ -977,12 +1297,28 @@ async fn handle_hook_event_command(
         .unwrap_or(agent_team_mail_core::daemon_client::LifecycleSourceKind::Unknown);
 
     if agent.is_empty() {
+        emit_hook_failure(
+            Some(event_type.as_str()),
+            Some(team.as_str()),
+            None,
+            Some(session_id.as_str()),
+            process_id,
+            "missing agent",
+        );
         return make_ok_response(
             &request.request_id,
             serde_json::json!({"processed": false, "reason": "missing agent"}),
         );
     }
     if team.is_empty() {
+        emit_hook_failure(
+            Some(event_type.as_str()),
+            None,
+            Some(agent.as_str()),
+            Some(session_id.as_str()),
+            process_id,
+            "missing team",
+        );
         return make_ok_response(
             &request.request_id,
             serde_json::json!({"processed": false, "reason": "missing team"}),
@@ -992,6 +1328,14 @@ async fn handle_hook_event_command(
     let auth = match authorize_hook_event(&team, &agent, source_kind) {
         Ok(auth) => auth,
         Err(reason) => {
+            emit_hook_failure(
+                Some(event_type.as_str()),
+                Some(team.as_str()),
+                Some(agent.as_str()),
+                Some(session_id.as_str()),
+                process_id,
+                &reason,
+            );
             return make_ok_response(
                 &request.request_id,
                 serde_json::json!({"processed": false, "reason": reason}),
@@ -1015,6 +1359,14 @@ async fn handle_hook_event_command(
     match event_type.as_str() {
         "session_start" => {
             if session_id.is_empty() {
+                emit_hook_failure(
+                    Some(event_type.as_str()),
+                    Some(team.as_str()),
+                    Some(agent.as_str()),
+                    None,
+                    process_id,
+                    "missing session_id",
+                );
                 return make_ok_response(
                     &request.request_id,
                     serde_json::json!({"processed": false, "reason": "missing session_id"}),
@@ -1023,23 +1375,41 @@ async fn handle_hook_event_command(
             let home = match agent_team_mail_core::home::get_home_dir() {
                 Ok(h) => h,
                 Err(e) => {
+                    let reason = format!("home resolution failed: {e}");
+                    emit_hook_failure(
+                        Some(event_type.as_str()),
+                        Some(team.as_str()),
+                        Some(agent.as_str()),
+                        Some(session_id.as_str()),
+                        process_id,
+                        &reason,
+                    );
                     return make_ok_response(
                         &request.request_id,
-                        serde_json::json!({"processed": false, "reason": format!("home resolution failed: {e}")}),
+                        serde_json::json!({"processed": false, "reason": reason}),
                     );
                 }
             };
             let Some(member) = load_team_member(&home, &team, &agent) else {
+                emit_hook_failure(
+                    Some(event_type.as_str()),
+                    Some(team.as_str()),
+                    Some(agent.as_str()),
+                    Some(session_id.as_str()),
+                    process_id,
+                    "agent not in team",
+                );
                 return make_ok_response(
                     &request.request_id,
                     serde_json::json!({"processed": false, "reason": "agent not in team"}),
                 );
             };
-            let has_existing_session = session_registry
+            let previous_session_record = session_registry
                 .lock()
                 .unwrap()
                 .query_for_team(&team, &agent)
-                .is_some();
+                .cloned();
+            let has_existing_session = previous_session_record.is_some();
             let has_activity_hint = member.is_active == Some(true)
                 || member.last_active.is_some()
                 || member
@@ -1086,17 +1456,26 @@ async fn handle_hook_event_command(
                             "pid_backend_validation",
                         );
                     }
+                    let reason = format!(
+                        "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
+                        validation.backend,
+                        validation.expected_display(),
+                        validation.actual_display(),
+                        validation.pid
+                    );
+                    emit_hook_failure(
+                        Some(event_type.as_str()),
+                        Some(team.as_str()),
+                        Some(agent.as_str()),
+                        Some(session_id.as_str()),
+                        process_id,
+                        &reason,
+                    );
                     return make_ok_response(
                         &request.request_id,
                         serde_json::json!({
                             "processed": false,
-                            "reason": format!(
-                                "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
-                                validation.backend,
-                                validation.expected_display(),
-                                validation.actual_display(),
-                                validation.pid
-                            )
+                            "reason": reason
                         }),
                     );
                 }
@@ -1105,7 +1484,7 @@ async fn handle_hook_event_command(
                 .lock()
                 .unwrap()
                 .upsert_for_team(&team, &agent, &session_id, agent_pid);
-            {
+            let (old_state, new_state) = {
                 let mut tracker = state_store.lock().unwrap();
                 let current = tracker.get_state(&agent);
                 if current.is_none() {
@@ -1124,13 +1503,56 @@ async fn handle_hook_event_command(
                         "hook_event",
                     );
                 }
-            }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_session_identity_change_events(
+                &team,
+                &agent,
+                previous_session_record.as_ref(),
+                &session_id,
+                process_id,
+                "hook_event.session_start",
+            );
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.session_start",
+                Some(session_id.as_str()),
+                process_id,
+            );
+            emit_hook_success(
+                event_type.as_str(),
+                &team,
+                &agent,
+                Some(session_id.as_str()),
+                process_id,
+            );
             info!(agent = %agent, agent_pid = agent_pid, session_id = %session_id, "hook_event.session_start");
         }
+        "pre_compact" | "compact_complete" => {
+            emit_hook_success(
+                event_type.as_str(),
+                &team,
+                &agent,
+                Some(session_id.as_str()),
+                process_id,
+            );
+            info!(
+                agent = %agent,
+                team = %team,
+                session_id = %session_id,
+                "hook_event {}",
+                event_type
+            );
+        }
         "teammate_idle" => {
-            {
+            let (old_state, new_state) = {
                 let mut tracker = state_store.lock().unwrap();
-                if tracker.get_state(&agent).is_some() {
+                let current = tracker.get_state(&agent);
+                if current.is_some() {
                     tracker.set_state_with_context(
                         &agent,
                         AgentState::Idle,
@@ -1146,11 +1568,30 @@ async fn handle_hook_event_command(
                         "hook_event",
                     );
                 }
-            }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.teammate_idle",
+                Some(session_id.as_str()),
+                process_id,
+            );
             info!(agent = %agent, agent_pid = agent_pid, "hook_event teammate_idle");
         }
         "session_end" => {
             if require_lead_for_session_end && !auth.is_team_lead {
+                emit_hook_failure(
+                    Some(event_type.as_str()),
+                    Some(team.as_str()),
+                    Some(agent.as_str()),
+                    Some(session_id.as_str()),
+                    process_id,
+                    "only team-lead may send session_end",
+                );
                 return make_ok_response(
                     &request.request_id,
                     serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
@@ -1162,8 +1603,9 @@ async fn handle_hook_event_command(
                     .unwrap()
                     .mark_dead_for_team(&team, &agent);
             }
-            {
+            let (old_state, new_state) = {
                 let mut tracker = state_store.lock().unwrap();
+                let current = tracker.get_state(&agent);
                 if tracker.get_state(&agent).is_some() {
                     tracker.set_state_with_context(
                         &agent,
@@ -1172,11 +1614,37 @@ async fn handle_hook_event_command(
                         "hook_event",
                     );
                 }
-            }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.session_end",
+                Some(session_id.as_str()),
+                process_id,
+            );
+            emit_hook_success(
+                event_type.as_str(),
+                &team,
+                &agent,
+                Some(session_id.as_str()),
+                process_id,
+            );
             info!(agent = %agent, agent_pid = agent_pid, "hook_event session_end");
         }
         other => {
             debug!("hook_event unknown event type: {other}");
+            emit_hook_failure(
+                Some(other),
+                Some(team.as_str()),
+                Some(agent.as_str()),
+                Some(session_id.as_str()),
+                process_id,
+                &format!("unknown event type: {other}"),
+            );
             return make_ok_response(
                 &request.request_id,
                 serde_json::json!({"processed": false, "reason": format!("unknown event type: {other}")}),
@@ -3803,6 +4271,92 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_collect_member_transition_events_emits_online_change_once() {
+        let events =
+            collect_member_transition_events(Some(AgentState::Offline), AgentState::Active);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "member_state_change");
+        assert_eq!(events[0].level, "info");
+        assert_eq!(events[0].old, "Offline");
+        assert_eq!(events[0].new, "Online");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_member_transition_events_emits_busy_idle_at_debug_only() {
+        let events = collect_member_transition_events(Some(AgentState::Active), AgentState::Idle);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "member_activity_change");
+        assert_eq!(events[0].level, "debug");
+        assert_eq!(events[0].old, "Busy");
+        assert_eq!(events[0].new, "Idle");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_member_transition_events_no_duplicate_when_state_unchanged() {
+        let events = collect_member_transition_events(Some(AgentState::Idle), AgentState::Idle);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_session_identity_change_flags_detects_changes() {
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-1", 1111);
+        }
+        let record = sr
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .cloned();
+        let (session_changed, pid_changed) =
+            session_identity_change_flags(record.as_ref(), "sess-2", Some(2222));
+        assert!(session_changed);
+        assert!(pid_changed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_session_identity_change_flags_no_change_when_values_match() {
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-1", 1111);
+        }
+        let record = sr
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .cloned();
+        let (session_changed, pid_changed) =
+            session_identity_change_flags(record.as_ref(), "sess-1", Some(1111));
+        assert!(!session_changed);
+        assert!(!pid_changed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_hook_action_name_includes_compact_events() {
+        assert_eq!(
+            hook_action_name("session_start"),
+            Some("hook.session_start")
+        );
+        assert_eq!(hook_action_name("pre_compact"), Some("hook.pre_compact"));
+        assert_eq!(
+            hook_action_name("compact_complete"),
+            Some("hook.compact_complete")
+        );
+        assert_eq!(hook_action_name("session_end"), Some("hook.session_end"));
+        assert_eq!(hook_action_name("teammate_idle"), None);
+    }
+
+    #[test]
     fn test_parse_and_dispatch_hook_event_internal_error() {
         let store = make_store();
         let ps = make_ps();
@@ -3859,6 +4413,36 @@ mod tests {
         // State should remain Idle (not reset to Launching) — session_start only registers if not already tracked
         let tracker = store.lock().unwrap();
         assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_pre_compact_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-pre","command":"hook-event","payload":{"event":"pre_compact","agent":"team-lead","team":"atm-dev","session_id":"sess-pre","process_id":4321}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "pre_compact");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_compact_complete_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-compact-complete","command":"hook-event","payload":{"event":"compact_complete","agent":"team-lead","team":"atm-dev","session_id":"sess-compact","process_id":4321}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "compact_complete");
     }
 
     #[cfg(unix)]
