@@ -1501,6 +1501,27 @@ No legacy `events.jsonl` sink code remains in any crate.
 - `atm-agent-mcp`: tool-call audit + lifecycle context
 - `atm-tui`: startup/shutdown, stream attach/detach, control-send/ack summaries
 
+#### Lifecycle and Hook Event Requirements (Z.5)
+
+- Daemon must emit lifecycle transition events for canonical member state:
+  - `member_state_change` (INFO) for `Offline ↔ Online` transitions only.
+  - `member_activity_change` (DEBUG) for `Busy ↔ Idle` transitions only.
+  - Events must include `old`, `new`, `reason`, and `source="daemon"` fields.
+  - Emission must be exactly once per state change (no duplicate logs when state is unchanged).
+- Daemon must emit identity transition events when runtime identity changes:
+  - `session_id_change` (INFO) and `process_id_change` (INFO).
+  - Events must include `old`, `new`, `reason`, and `source="daemon"` fields.
+- Hook lifecycle signals must be first-class structured events:
+  - `hook.session_start` (INFO)
+  - `hook.pre_compact` (INFO)
+  - `hook.compact_complete` (INFO)
+  - `hook.session_end` (INFO)
+  - `hook.failure` (WARN)
+- Hook events must include, when available: `team`, `agent`, `session_id`, `pid`,
+  `outcome`, and `source="hook"`.
+- Hook lifecycle event emission is always-on and must not be suppressed by
+  normal stderr verbosity controls (`ATM_LOG`).
+
 #### Runtime Controls
 
 - `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.

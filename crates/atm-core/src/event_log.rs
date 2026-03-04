@@ -23,6 +23,7 @@ pub struct EventFields {
     pub runtime_session_id: Option<String>,
     pub teardown_stage: Option<String>,
     pub spawn_mode: Option<String>,
+    pub extra_fields: serde_json::Map<String, serde_json::Value>,
     pub sender_agent: Option<String>,
     pub sender_team: Option<String>,
     pub sender_pid: Option<u32>,
@@ -152,6 +153,9 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
                     "message_preview".to_string(),
                     serde_json::Value::String(preview),
                 );
+            }
+            for (k, v) in &fields.extra_fields {
+                map.entry(k.clone()).or_insert_with(|| v.clone());
             }
             if let Some(ppid) = crate::pid::parent_pid() {
                 map.entry("ppid".to_string())
@@ -386,5 +390,29 @@ mod tests {
             action: "",
             ..Default::default()
         });
+    }
+
+    #[test]
+    fn test_fields_to_log_event_includes_extra_fields() {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "source".to_string(),
+            serde_json::Value::String("daemon".to_string()),
+        );
+        extra.insert("pid".to_string(), serde_json::Value::Number(123_u64.into()));
+
+        let fields = EventFields {
+            level: "info",
+            source: "atm",
+            action: "state_change",
+            extra_fields: extra,
+            ..Default::default()
+        };
+        let event = fields_to_log_event(&fields);
+        assert_eq!(
+            event.fields.get("source").and_then(|v| v.as_str()),
+            Some("daemon")
+        );
+        assert_eq!(event.fields.get("pid").and_then(|v| v.as_u64()), Some(123));
     }
 }
