@@ -562,8 +562,7 @@ fn merge_hooks(
 /// Writes in nested hook schema:
 /// `{ "hooks": [{ "type": "command", "command": "..." }] }`.
 ///
-/// Detects existing entries in both old flat format and new nested format to
-/// avoid duplicates.
+/// Detects existing entries in nested format only.
 fn merge_session_hook(
     settings: &mut serde_json::Value,
     category: &str,
@@ -571,10 +570,6 @@ fn merge_session_hook(
 ) -> Result<HookStatus> {
     let array = get_or_create_hook_array(settings, category)?;
     for entry in array.iter() {
-        // Old flat format.
-        if entry.get("command").and_then(|c| c.as_str()) == Some(command) {
-            return Ok(HookStatus::AlreadyPresent);
-        }
         // New nested format.
         if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
             if hook_command_present(hooks, command) {
