@@ -1307,6 +1307,23 @@ mod tests {
         assert_eq!(content, SESSION_START_PY);
     }
 
+    #[test]
+    fn test_session_start_script_supports_env_fallback_without_atm_toml() {
+        assert!(
+            SESSION_START_PY.contains("ATM_TEAM"),
+            "session-start.py must read ATM_TEAM as fallback context"
+        );
+        assert!(
+            SESSION_START_PY.contains("ATM_IDENTITY"),
+            "session-start.py must read ATM_IDENTITY as fallback context"
+        );
+        assert!(
+            SESSION_START_PY
+                .contains("if atm_config is None and not default_team and not identity"),
+            "session-start.py must fail-open only when both repo and env context are absent"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Atomic write test
     // -----------------------------------------------------------------------

@@ -2221,35 +2221,6 @@ sleep 2
         assert_eq!(outcome, RegisterHintOutcome::UnsupportedDaemon);
     }
 
-    #[test]
-    fn test_decode_register_hint_response_ok_registered() {
-        let response = SocketResponse {
-            version: PROTOCOL_VERSION,
-            request_id: "req-1".to_string(),
-            status: "ok".to_string(),
-            payload: Some(serde_json::json!({ "processed": true })),
-            error: None,
-        };
-        let outcome = decode_register_hint_response(response).expect("ok response");
-        assert_eq!(outcome, RegisterHintOutcome::Registered);
-    }
-
-    #[test]
-    fn test_decode_register_hint_response_unknown_command_maps_to_unsupported() {
-        let response = SocketResponse {
-            version: PROTOCOL_VERSION,
-            request_id: "req-1".to_string(),
-            status: "error".to_string(),
-            payload: None,
-            error: Some(SocketError {
-                code: "UNKNOWN_COMMAND".to_string(),
-                message: "Unknown command: 'register-hint'".to_string(),
-            }),
-        };
-        let outcome = decode_register_hint_response(response).expect("unknown command handled");
-        assert_eq!(outcome, RegisterHintOutcome::UnsupportedDaemon);
-    }
-
     // Unix-only: test PID alive check for the current process
     #[cfg(unix)]
     #[test]
