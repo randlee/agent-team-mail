@@ -107,7 +107,8 @@ fn resolve_session_id(team: &str, identity: &str) -> Result<String> {
             tracing::debug!("session resolved via: CLAUDE_SESSION_ID env var");
             eprintln!(
                 "WARNING: {}, falling back to CLAUDE_SESSION_ID. \
-                 Ensure atm-identity-write.py hook is configured in .claude/settings.json.",
+                 Ensure atm-identity-write.py PreToolUse hook or session-start.py SessionStart \
+                 hook is configured in .claude/settings.json.",
                 fallback_reason
             );
             return Ok(trimmed);
@@ -116,8 +117,8 @@ fn resolve_session_id(team: &str, identity: &str) -> Result<String> {
 
     anyhow::bail!(
         "Cannot determine session_id. \
-         Ensure atm-identity-write.py PreToolUse hook is configured, \
-         or set the CLAUDE_SESSION_ID environment variable."
+         Ensure atm-identity-write.py PreToolUse hook or session-start.py SessionStart hook \
+         is configured, or set the CLAUDE_SESSION_ID environment variable."
     )
 }
 

@@ -77,11 +77,14 @@ def main() -> None:
         sys.stderr.write(f"[atm-hook] Failed to write identity file: {exc}\n")
 
     # Refresh updated_at on the session file (keeps the 24h TTL alive).
+    # Team is resolved from .atm.toml only (not ATM_TEAM env) to ensure the heartbeat
+    # updates the same path that session-start.py created. Invocations without .atm.toml
+    # context do not update the timestamp.
     if session_id and agent_name:
         try:
             toml_inner = toml or {}
             core_inner = toml_inner.get("core", {}) if isinstance(toml_inner.get("core"), dict) else {}
-            default_team: str = (os.environ.get("ATM_TEAM") or "").strip() or core_inner.get("default_team", "")
+            default_team: str = core_inner.get("default_team", "") or ""
             if default_team:
                 sessions_dir = atm_home() / ".claude" / "teams" / default_team / "sessions"
                 session_file = sessions_dir / f"{session_id}.json"

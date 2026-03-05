@@ -46,6 +46,13 @@ def main() -> int:
     if not session_id:
         return 0
 
+    # Guard: skip event and file deletion when team or identity is missing from .atm.toml.
+    # Empty team/identity would produce a malformed event and a wrong-path file deletion.
+    # Env-only sessions (ATM_TEAM/ATM_IDENTITY without .atm.toml) intentionally do NOT
+    # trigger cleanup here — they rely on the 24-hour TTL in read_session_file() instead.
+    if not default_team or not identity:
+        return 0
+
     payload: dict[str, Any] = {
         "event": "session_end",
         "session_id": session_id,

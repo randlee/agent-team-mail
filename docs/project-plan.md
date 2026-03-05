@@ -1558,8 +1558,8 @@ Key commits:
 **Adopted in PR #444** (`feature/session-file-lifecycle`):
 - Session file lifecycle (SessionStart write, SessionEnd cleanup, atm-identity-write.py refresh, `read_session_file` in hook_identity.rs)
 - **Deviations from Erik's implementation**:
-  - Path changed to team-scoped: `~/.claude/teams/<team>/sessions/<session_id>.json` (Erik used `~/.claude/sessions/`)
-  - `pid` field uses `os.getppid()` in `session-start.py` (Erik's version used `os.getpid()` — Phase Z regression)
+  - Path changed to team-scoped: `~/.claude/teams/<team>/sessions/<session_id>.json` (Erik used `~/.claude/sessions/`) — per `docs/requirements.md §4.5 SessionStart — Session File`
+  - `pid` field uses `os.getppid()` in `session-start.py` (Erik's version incorrectly used `os.getpid()`; corrected during integration per `docs/requirements.md §4.5` rule that PID must be the long-lived Claude session process PID, not the short-lived hook subprocess PID)
 
 ---
 

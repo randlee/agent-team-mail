@@ -1395,6 +1395,7 @@ mod tests {
     fn test_merge_report_all_added() {
         let report = MergeReport {
             session_start: HookStatus::Added,
+            session_end: HookStatus::Added,
             pre_tool_use_bash: HookStatus::Added,
             pre_tool_use_task: HookStatus::Added,
             post_tool_use_bash: HookStatus::Added,
@@ -1409,6 +1410,7 @@ mod tests {
     fn test_merge_report_partial_update() {
         let report = MergeReport {
             session_start: HookStatus::Added,
+            session_end: HookStatus::AlreadyPresent,
             pre_tool_use_bash: HookStatus::AlreadyPresent,
             pre_tool_use_task: HookStatus::AlreadyPresent,
             post_tool_use_bash: HookStatus::AlreadyPresent,
