@@ -241,26 +241,34 @@ def main() -> int:
     # Rule 2: Enforce leaders-only spawn policy for spawn-capable Task calls.
     # Spawn-capable means a teammate name or team_name is provided.
     if (team_name and str(team_name).strip()) or (teammate_name and str(teammate_name).strip()):
-        if spawn_policy != SPAWN_POLICY_ANY_MEMBER:
-            env_team = os.environ.get("ATM_TEAM", "").strip()
-            auth_team = required_team or team_name or env_team or None
-            caller_identity = resolve_caller_identity(
-                session_id=session_id,
-                team_name=auth_team,
-                env_identity=os.environ.get("ATM_IDENTITY"),
-            )
-            allowed = {"team-lead", *co_leaders}
-            if caller_identity not in allowed:
-                sys.stderr.write(
-                    f"{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n"
-                    f"\n"
-                    f"Policy team: {auth_team or '<unknown>'}\n"
-                    f"Allowed identities: {', '.join(sorted(allowed))}\n"
-                    f"Resolved caller: {caller_identity or '<unknown>'}\n"
-                    f"\n"
-                    f"Action: run spawn as team-lead or add caller to [team.\"{auth_team}\"].co_leaders in .atm.toml.\n"
+        if spawn_policy != SPAWN_POLICY_ANY_MEMBER and required_team:
+            team_config = load_team_config(required_team)
+            # Fail-open when team config is absent.
+            if not team_config:
+                pass
+            # Fail-open when leadSessionId is absent (no authoritative lead mapping yet).
+            elif not isinstance(team_config.get("leadSessionId"), str) or not team_config.get(
+                "leadSessionId", ""
+            ).strip():
+                pass
+            else:
+                caller_identity = resolve_caller_identity(
+                    session_id=session_id,
+                    team_name=required_team,
+                    env_identity=os.environ.get("ATM_IDENTITY"),
                 )
-                return 2
+                allowed = {"team-lead", *co_leaders}
+                if caller_identity not in allowed:
+                    sys.stderr.write(
+                        f"{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n"
+                        f"\n"
+                        f"Policy team: {required_team}\n"
+                        f"Allowed identities: {', '.join(sorted(allowed))}\n"
+                        f"Resolved caller: {caller_identity or '<unknown>'}\n"
+                        f"\n"
+                        f"Action: run spawn as team-lead or add caller to [team.\"{required_team}\"].co_leaders in .atm.toml.\n"
+                    )
+                    return 2
 
     # Rule 3: Any explicit team_name must match .atm.toml default_team.
     # WHY: Wrong team_name can create/target the wrong team and hide ATM messages.
