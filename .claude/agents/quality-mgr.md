@@ -64,7 +64,7 @@ Key behaviors:
    ```
    Tool: Task
      subagent_type: "rust-qa-agent"
-     run_in_background: false
+     run_in_background: true
      model: "sonnet"
      max_turns: 30
      prompt: <QA prompt — static analysis, clippy, code review against sprint plan; report findings immediately; DO NOT run cargo test yet>
@@ -73,12 +73,12 @@ Key behaviors:
    ```
    Tool: Task
      subagent_type: "atm-qa-agent"
-     run_in_background: false
+     run_in_background: true
      model: "sonnet"
      max_turns: 20
      prompt: <QA prompt with fenced JSON input, scope, phase docs>
    ```
-5. Run both agents sequentially (foreground) so you remain active throughout and report results directly — do NOT go idle while waiting
+5. Both agents run in parallel and report findings **immediately on completion** — do NOT wait for the sibling before reporting to team-lead
 5. **Check CI status** on the PR (if one exists):
    - CI green → rust-qa assessment is sufficient, no need to run `cargo test` locally
    - CI pending/failing → resume rust-qa (or spawn a new cargo-test agent) to run `cargo test` and investigate
