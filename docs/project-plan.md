@@ -1520,6 +1520,11 @@ and harden release/test reliability and operator UX.
 
 **Integration branch**: `integrate/phase-AA` (created from `planning/next-phase`)
 
+**Branching note**:
+- `integrate/phase-AA` was created from `planning/next-phase` for planning review.
+- Before sprint implementation begins, planning changes must be merged to
+  `develop`; sprint branches then follow normal policy (branch from develop).
+
 **Dependency graph**:
 - AA.1 is foundational for session-end correctness.
 - AA.2 is intentionally config-driven and independent of AA.1 (does not depend
@@ -1550,14 +1555,18 @@ and harden release/test reliability and operator UX.
 1. Sending `session_end` for unknown `(team, agent, session_id)` does not create
    records or mutate state; DEBUG event is emitted.
 2. Replaying identical `session_end` for already-dead record is idempotent no-op.
-3. Mismatched-session `session_end` leaves active record unchanged and emits warning.
+3. Mismatched-session `session_end` leaves active record unchanged and emits
+   structured warning fields: `team`, `agent`, `expected_session_id`,
+   `current_session_id`, `received_session_id`.
 4. `Dead + alive PID + mismatch` remains dead until `session_start`/`register-hint`.
 
 ### AA.2 — Spawn Authorization Gate Alignment
 **Deliverables**
 1. CLI path: `atm teams spawn` validates caller identity against
    `.atm.toml` `spawn_policy` (`leaders-only`) + `co_leaders`.
-2. Hook path: `PreToolUse` gate aligns with same policy contract and error code.
+2. Hook path: `PreToolUse` gate in `.claude/settings.json` (matcher `Task`,
+   command invoking `.claude/scripts/gate-agent-spawns.py`) aligns with the same
+   `spawn_policy` contract and `SPAWN_UNAUTHORIZED` behavior.
 3. Tests: leaders-only pass (`team-lead`), leaders-only pass (`co_leader`),
    leaders-only fail (other), and missing `[team.<name>]` fails non-lead with
    `SPAWN_UNAUTHORIZED` (not config parse error).
@@ -1767,6 +1776,6 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 
 ---
 
-**Document Version**: 0.5
-**Last Updated**: 2026-02-25
+**Document Version**: 0.6
+**Last Updated**: 2026-03-05
 **Maintained By**: Claude (ARCH-ATM)
