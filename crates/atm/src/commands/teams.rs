@@ -1557,7 +1557,10 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         // is treated as "unknown liveness" → the external agent is kept.
         let is_external = member.external_backend_type.is_some();
 
-        let is_dead = if is_external {
+        let is_dead = if args.force {
+            // Force mode intentionally bypasses daemon liveness checks.
+            true
+        } else if is_external {
             // External agent: use session_id for the liveness query if available.
             let query_key = match &member.session_id {
                 Some(sid) => sid.clone(),
@@ -1612,17 +1615,12 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 }
                 Ok(None) => {
                     // Daemon is not running: we cannot confirm liveness.
-                    // Skip unless --force.
-                    if args.force {
-                        true
-                    } else {
-                        warn!(
-                            "Warning: daemon unreachable, skipping {} — use --force to override",
-                            member.name
-                        );
-                        skipped_names.push(member.name.clone());
-                        continue;
-                    }
+                    warn!(
+                        "Warning: daemon unreachable, skipping {} — use --force to override",
+                        member.name
+                    );
+                    skipped_names.push(member.name.clone());
+                    continue;
                 }
                 Err(e) => {
                     // Unexpected I/O error after connection was established — cannot
@@ -2150,6 +2148,25 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
+    fn set_autostart_disabled_for_test() -> Option<String> {
+        let original = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        // SAFETY: test-only env mutation, callers use #[serial].
+        unsafe {
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "0");
+        }
+        original
+    }
+
+    fn restore_autostart_env(original: Option<String>) {
+        // SAFETY: test-only env mutation, callers use #[serial].
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
     fn create_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
         let team_dir = temp_dir.path().join(".claude/teams").join(team_name);
         let inboxes_dir = team_dir.join("inboxes");
@@ -2382,6 +2399,7 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -2412,6 +2430,7 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
     }
 
     #[test]
@@ -2427,6 +2446,7 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -2463,6 +2483,7 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
     }
 
     #[test]
@@ -3072,6 +3093,7 @@ mod tests {
         let team_dir = create_test_team_multi_dead(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -3113,6 +3135,7 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
     }
 
     #[test]
@@ -3131,6 +3154,7 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -3154,6 +3178,7 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
     }
 
     #[test]
