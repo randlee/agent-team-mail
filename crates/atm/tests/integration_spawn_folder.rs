@@ -390,6 +390,7 @@ fn test_spawn_env_team_mismatch_requires_override_team() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stdout.contains("# Spawn command:"));
+    assert!(stderr.contains("Warning: team mismatch detected"));
     assert!(stderr.contains("ATM_TEAM ('env-team')"));
     assert!(stderr.contains(".atm.toml default_team ('toml-team')"));
     assert!(stderr.contains("--override-team"));

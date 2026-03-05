@@ -475,7 +475,15 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     print_launch_command_preview(&launch_command_preview, args.json);
 
     if let Some((env_team, repo_team)) = team_mismatch {
+        warn!(
+            "spawn team mismatch detected: ATM_TEAM='{}' vs .atm.toml default_team='{}'",
+            env_team, repo_team
+        );
         if !args.override_team {
+            eprintln!(
+                "Warning: team mismatch detected: ATM_TEAM ('{}') != .atm.toml default_team ('{}').",
+                env_team, repo_team
+            );
             anyhow::bail!(
                 "ATM_TEAM ('{}') does not match .atm.toml default_team ('{}'). \
                  Re-run with --override-team to proceed with the env-var team for this invocation.",

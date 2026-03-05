@@ -71,7 +71,7 @@ pub fn execute(args: RegisterArgs) -> Result<()> {
     let identity = resolve_session_identity()?;
 
     if let Some(ref name) = args.name {
-        register_teammate(&config_path, &args.team, name, &identity)
+        register_teammate(&home_dir, &config_path, &args.team, name, &identity)
     } else {
         register_team_lead(&home_dir, &config_path, &args.team, &identity, args.force)
     }
@@ -253,11 +253,27 @@ fn register_team_lead(
 
 /// Register as a named teammate: update the member's `sessionId` field.
 fn register_teammate(
+    home_dir: &std::path::Path,
     config_path: &std::path::Path,
     team: &str,
     name: &str,
     identity: &SessionIdentity,
 ) -> Result<()> {
+    let caller_identity = resolve_caller_identity(home_dir, team)?;
+    if caller_identity != name {
+        warn!(
+            attempted_writer = %caller_identity,
+            owner = %name,
+            field = "sessionId",
+            "register teammate ownership guard rejected cross-identity session write"
+        );
+        eprintln!(
+            "Warning: refusing to update sessionId for '{}': caller identity is '{}'.",
+            name, caller_identity
+        );
+        return Ok(());
+    }
+
     // Verify member exists in team config.
     let existing: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
 
@@ -310,6 +326,19 @@ fn register_teammate(
         name, team, identity.session_id
     );
     Ok(())
+}
+
+fn resolve_caller_identity(home_dir: &std::path::Path, team: &str) -> Result<String> {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = resolve_config(
+        &ConfigOverrides {
+            team: Some(team.to_string()),
+            ..Default::default()
+        },
+        &current_dir,
+        home_dir,
+    )?;
+    Ok(config.core.identity)
 }
 
 fn sync_session_with_daemon(

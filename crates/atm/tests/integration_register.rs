@@ -532,3 +532,42 @@ fn test_register_warns_and_continues_when_daemon_is_unsupported() {
     let _ = daemon.kill();
     let _ = daemon.wait();
 }
+
+#[test]
+fn test_register_teammate_rejects_cross_identity_write() {
+    let temp_dir = TempDir::new().unwrap();
+    create_test_team(
+        &temp_dir,
+        "my-team",
+        &[("team-lead", true), ("alice", false), ("bob", false)],
+    );
+    write_atm_toml(&temp_dir, "bob");
+
+    let config_path = temp_dir.path().join(".claude/teams/my-team/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["members"][1]["sessionId"] = serde_json::json!("alice-session-existing");
+    config["leadSessionId"] = serde_json::json!("lead-session-existing");
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    configure_cmd(&mut cmd, &temp_dir);
+    cmd.env("CLAUDE_SESSION_ID", "new-cross-identity-session")
+        .env("ATM_TEAM", "my-team")
+        .current_dir(temp_dir.path().join("workdir"))
+        .args(["register", "my-team", "alice"]);
+
+    cmd.assert().success().stderr(predicate::str::contains(
+        "refusing to update sessionId for 'alice': caller identity is 'bob'",
+    ));
+
+    let config_after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    let alice_after = config_after["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "alice")
+        .unwrap();
+    assert_eq!(alice_after["sessionId"], "alice-session-existing");
+}

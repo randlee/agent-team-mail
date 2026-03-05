@@ -2608,6 +2608,28 @@ fn handle_register_hint(
             );
         }
     };
+    let requesting_identity = request
+        .payload
+        .get("identity")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    if let Some(identity) = requesting_identity.as_deref()
+        && identity != agent
+    {
+        warn!(
+            attempted_writer = %identity,
+            owner = %agent,
+            field = "sessionId",
+            "register-hint ownership guard rejected cross-identity session write"
+        );
+        return make_error_response(
+            &request.request_id,
+            "PERMISSION_DENIED",
+            &format!("Identity '{identity}' is not allowed to update sessionId for '{agent}'"),
+        );
+    }
     let session_id = match request.payload.get("session_id").and_then(|v| v.as_str()) {
         Some(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => {
@@ -3893,6 +3915,63 @@ mod tests {
 
         let tracker_state = store.lock().unwrap().get_state("arch-ctm");
         assert_eq!(tracker_state, Some(AgentState::Active));
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_register_hint_rejects_cross_identity_session_write() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let team_dir = temp.path().join(".claude/teams/atm-dev");
+        std::fs::create_dir_all(&team_dir).unwrap();
+        let config = serde_json::json!({
+            "name": "atm-dev",
+            "description": "test",
+            "createdAt": 1739284800000u64,
+            "leadAgentId": "team-lead@atm-dev",
+            "leadSessionId": "lead-sess",
+            "members": [{
+                "agentId": "arch-ctm@atm-dev",
+                "name": "arch-ctm",
+                "agentType": "codex",
+                "model": "gpt5.3-codex",
+                "joinedAt": 1739284800000u64,
+                "cwd": temp.path().to_string_lossy().to_string(),
+                "subscriptions": [],
+                "externalBackendType": "external"
+            }]
+        });
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request(
+            "register-hint",
+            serde_json::json!({
+                "team": "atm-dev",
+                "agent": "arch-ctm",
+                "identity": "team-lead",
+                "session_id": "local:arch-ctm:sess:9999",
+                "process_id": std::process::id(),
+            }),
+        );
+        let resp = handle_register_hint(&req, &store, &sr);
+        assert_eq!(resp.status, "error");
+        let err = resp.error.expect("error payload required");
+        assert_eq!(err.code, "PERMISSION_DENIED");
+        assert!(err.message.contains("not allowed to update sessionId"));
+
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "cross-identity register-hint must not write session record"
+        );
     }
 
     #[test]
