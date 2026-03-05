@@ -346,7 +346,7 @@ fn test_spawn_claude_echoes_full_launch_command_on_failure() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    assert!(stdout.contains("Launch command:"));
+    assert!(stdout.contains("# Spawn command:"));
     assert!(stdout.contains("env ATM_TEAM='atm-dev' ATM_IDENTITY='my-agent'"));
     assert!(stdout.contains("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude"));
     assert!(stdout.contains("--agent-id my-agent@atm-dev"));
@@ -374,7 +374,8 @@ fn test_spawn_env_team_mismatch_requires_override_team() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
-    cmd.env("ATM_TEAM", "env-team")
+    let assert = cmd
+        .env("ATM_TEAM", "env-team")
         .args([
             "teams",
             "spawn",
@@ -385,12 +386,13 @@ fn test_spawn_env_team_mismatch_requires_override_team() {
             folder.to_str().unwrap(),
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("ATM_TEAM ('env-team')"))
-        .stderr(predicate::str::contains(
-            ".atm.toml default_team ('toml-team')",
-        ))
-        .stderr(predicate::str::contains("--override-team"));
+        .failure();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stdout.contains("# Spawn command:"));
+    assert!(stderr.contains("ATM_TEAM ('env-team')"));
+    assert!(stderr.contains(".atm.toml default_team ('toml-team')"));
+    assert!(stderr.contains("--override-team"));
 }
 
 #[test]
@@ -444,25 +446,41 @@ fn test_spawn_rejects_live_session_ownership_conflict() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
-    cmd.args([
-        "teams",
-        "spawn",
-        "agent-live",
-        "--team",
-        "atm-dev",
-        "--runtime",
-        "codex",
-        "--folder",
-        folder.to_str().unwrap(),
-    ])
-    .assert()
-    .failure()
-    .stderr(predicate::str::contains(
-        "live session is already registered",
-    ))
-    .stderr(predicate::str::contains("session_id='live-sess'"))
-    .stderr(predicate::str::contains("Stop the existing process"));
+    let assert = cmd
+        .args([
+            "teams",
+            "spawn",
+            "agent-live",
+            "--team",
+            "atm-dev",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stdout.contains("# Spawn command:"));
+    assert!(stderr.contains("live session is already registered"));
+    assert!(stderr.contains("session_id='live-sess'"));
+    assert!(stderr.contains("Stop the existing process"));
 
     let _ = daemon.kill();
     let _ = daemon.wait();
+}
+
+#[test]
+fn test_spawn_help_includes_env_folder_and_runtime_examples() {
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    cmd.args(["teams", "spawn", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ATM_TEAM"))
+        .stdout(predicate::str::contains("ATM_IDENTITY"))
+        .stdout(predicate::str::contains("--folder"))
+        .stdout(predicate::str::contains("--runtime codex"))
+        .stdout(predicate::str::contains("--runtime gemini"))
+        .stdout(predicate::str::contains("--runtime claude"));
 }

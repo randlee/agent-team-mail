@@ -63,6 +63,9 @@ pub enum TeamsCommand {
 
 /// Spawn a team member (runtime-aware daemon launch)
 #[derive(Args, Debug)]
+#[command(
+    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn team-lead --runtime claude --folder /path/to/repo --team atm-dev\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
+)]
 pub struct SpawnArgs {
     /// Agent name
     agent: String,
@@ -400,43 +403,14 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let launch_dir = resolve_spawn_folder(&args.folder, &current_dir)?;
     let env_team = env_var_nonempty("ATM_TEAM");
     let repo_default_team = read_repo_default_team(&current_dir);
-    if args.team.is_none()
-        && let (Some(env_team), Some(repo_team)) =
-            (env_team.as_deref(), repo_default_team.as_deref())
-        && env_team != repo_team
+    let team_mismatch = if args.team.is_none()
+        && let (Some(env), Some(repo)) = (env_team.as_deref(), repo_default_team.as_deref())
+        && env != repo
     {
-        if !args.override_team {
-            anyhow::bail!(
-                "ATM_TEAM ('{}') does not match .atm.toml default_team ('{}'). \
-                 Re-run with --override-team to proceed with the env-var team for this invocation.",
-                env_team,
-                repo_team
-            );
-        }
-        warn!(
-            "spawn override-team: using ATM_TEAM='{}' instead of .atm.toml default_team='{}'",
-            env_team, repo_team
-        );
-        let mut extra_fields = serde_json::Map::new();
-        extra_fields.insert(
-            "conflicting_toml_team".to_string(),
-            serde_json::Value::String(repo_team.to_string()),
-        );
-        extra_fields.insert(
-            "invoked_at".to_string(),
-            serde_json::Value::String(Utc::now().to_rfc3339()),
-        );
-        emit_event_best_effort(EventFields {
-            level: "warn",
-            source: "atm",
-            action: "spawn_team_override",
-            team: Some(env_team.to_string()),
-            agent_name: Some(args.agent.clone()),
-            result: Some("override_team".to_string()),
-            extra_fields,
-            ..Default::default()
-        });
-    }
+        Some((env.to_string(), repo.to_string()))
+    } else {
+        None
+    };
     let config = resolve_config(
         &ConfigOverrides {
             team: args.team.clone(),
@@ -452,18 +426,6 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let daemon_session = query_session_for_team(&team_name, &args.agent)
         .ok()
         .flatten();
-    if let Some(session) = daemon_session.as_ref()
-        && session.alive
-    {
-        anyhow::bail!(
-            "Cannot spawn '{}@{}': live session is already registered (session_id='{}', pid={}). \
-             Stop the existing process (or wait for it to exit) before respawning.",
-            args.agent,
-            team_name,
-            session.session_id,
-            session.process_id
-        );
-    }
     ensure_spawn_member_metadata(
         &team_name,
         &args.agent,
@@ -471,8 +433,6 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         args.model.as_deref(),
         &launch_dir,
     )?;
-
-    let parsed_env = parse_env_vars(&args.env)?;
 
     let resolved_resume_session_id = if args.resume_session_id.is_some() {
         args.resume_session_id.clone()
@@ -511,12 +471,61 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
 
     let adapter = adapter_for_runtime(&args.runtime);
     let command = adapter.build_command(&spec)?;
+    let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
+    print_launch_command_preview(&launch_command_preview, args.json);
+
+    if let Some((env_team, repo_team)) = team_mismatch {
+        if !args.override_team {
+            anyhow::bail!(
+                "ATM_TEAM ('{}') does not match .atm.toml default_team ('{}'). \
+                 Re-run with --override-team to proceed with the env-var team for this invocation.",
+                env_team,
+                repo_team
+            );
+        }
+        warn!(
+            "spawn override-team: using ATM_TEAM='{}' instead of .atm.toml default_team='{}'",
+            env_team, repo_team
+        );
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert(
+            "conflicting_toml_team".to_string(),
+            serde_json::Value::String(repo_team),
+        );
+        extra_fields.insert(
+            "invoked_at".to_string(),
+            serde_json::Value::String(Utc::now().to_rfc3339()),
+        );
+        emit_event_best_effort(EventFields {
+            level: "warn",
+            source: "atm",
+            action: "spawn_team_override",
+            team: Some(env_team),
+            agent_name: Some(args.agent.clone()),
+            result: Some("override_team".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
+
+    if let Some(session) = daemon_session.as_ref()
+        && session.alive
+    {
+        anyhow::bail!(
+            "Cannot spawn '{}@{}': live session is already registered (session_id='{}', pid={}). \
+             Stop the existing process (or wait for it to exit) before respawning.",
+            args.agent,
+            team_name,
+            session.session_id,
+            session.process_id
+        );
+    }
+
+    let parsed_env = parse_env_vars(&args.env)?;
     let mut env_vars = adapter.build_env(&spec, &home_dir)?;
     for (k, v) in parsed_env {
         env_vars.insert(k, v);
     }
-    let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
-    print_launch_command_preview(&launch_command_preview, args.json);
 
     // Preserve legacy spawn UX when daemon is unavailable: return the daemon
     // error + launch command guidance without requiring team-config mutation.
@@ -647,12 +656,12 @@ fn format_spawn_launch_command(runtime: &RuntimeKind, spec: &SpawnSpec, command:
 
 fn print_launch_command_preview(preview: &str, json_mode: bool) {
     if json_mode {
-        eprintln!("Launch command:");
+        eprintln!("# Spawn command:");
         for line in preview.lines() {
             eprintln!("  {line}");
         }
     } else {
-        println!("Launch command:");
+        println!("# Spawn command:");
         for line in preview.lines() {
             println!("  {line}");
         }
