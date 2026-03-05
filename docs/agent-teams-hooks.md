@@ -144,25 +144,27 @@ Wrong:
 - **With `name`** → full tmux teammate (own pane, can compact, survives context limit)
 - **Without `name`** → sidechain background agent (no pane, dies at context limit)
 
-#### Rule 2: Only Team Lead Can Use `team_name`
+#### Rule 2: Enforce `.atm.toml` Spawn Policy (`leaders-only` / `any-member`)
 
-If `team_name` is provided and the caller's `session_id` does **not** match `leadSessionId` in the team's `config.json`, the call is **blocked**.
+For spawn-capable Task calls (providing `name` and/or `team_name`), the gate enforces
+`.atm.toml` team policy:
+- default: `leaders-only`
+- optional override: `any-member`
+- optional `co_leaders` list under `[team."<default_team>"]`
+
+Under `leaders-only`, unauthorized callers are blocked with stable error code
+`SPAWN_UNAUTHORIZED`.
 
 ```
-BLOCKED: Only the team lead can spawn agents with team_name.
+SPAWN_UNAUTHORIZED: leaders-only spawn policy violation.
 
-You are a teammate. Use background agents:
-  Task(subagent_type="...", run_in_background=true, prompt="...")  # no team_name
-
-NOT allowed from teammates:
-  Task(..., team_name="atm-dev", ...)  # creates named teammate = pane exhaustion
+Policy team: atm-dev
+Allowed identities: arch-atm, team-lead
+Resolved caller: dev-1
 ```
 
-**Why**: Each named teammate with `team_name` creates a new tmux pane. Without this gate, orchestrators can accidentally spawn their own named sub-teammates, creating a pane explosion (for example: 3 scrum-masters × 2 sub-agents each = 9 panes). The correct pattern for orchestrators is to spawn implementation/review helpers as **background agents** (no `name`, no `team_name`).
-
-The gate reads `leadSessionId` from `~/.claude/teams/<team>/config.json` and compares it to `session_id` in the hook payload. Only the session whose ID matches `leadSessionId` can pass a `team_name`.
-
-**Fail-open behavior**: If no team config exists (new team) or `leadSessionId` is absent, the check is skipped and the call is allowed. This prevents the gate from blocking legitimate first-time setup.
+Identity resolution uses `ATM_IDENTITY` when present, else team config/session
+mapping (`leadSessionId` and `members[].sessionId`) for the default team.
 
 #### Rule 3: `team_name` Must Match `.atm.toml`
 
@@ -188,8 +190,8 @@ resume should use explicit `--session-id` and/or `CLAUDE_SESSION_ID`.
 ### What Is NOT Blocked
 
 - Spawning any non-orchestrator agent type (e.g., `rust-developer`, `rust-qa-agent`, `general-purpose`) — with or without `name`
-- Background agents spawned without `team_name` by teammates (the dev/QA pattern used by scrum-masters)
-- Any call where `team_name` matches the configured default and `session_id` matches `leadSessionId`
+- Spawn-capable calls when policy is `any-member`
+- Spawn-capable calls by authorized identities under `leaders-only` (`team-lead` + `co_leaders`)
 
 ---
 

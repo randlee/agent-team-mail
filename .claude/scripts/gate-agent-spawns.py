@@ -38,35 +38,19 @@ import sys
 import tempfile
 from pathlib import Path
 
+from atm_hook_lib import read_atm_toml
+
 SPAWN_POLICY_NAMED_REQUIRED = "named_teammate_required"
+SPAWN_POLICY_LEADERS_ONLY = "leaders-only"
+SPAWN_POLICY_ANY_MEMBER = "any-member"
+SPAWN_UNAUTHORIZED = "SPAWN_UNAUTHORIZED"
 
 DEBUG_LOG = Path(tempfile.gettempdir()) / "gate-agent-spawns-debug.jsonl"
 SESSION_ID_FILE = Path(tempfile.gettempdir()) / "atm-session-id"
 
 
-def get_required_team() -> str | None:
-    """Read default_team from .atm.toml in the project root.
-
-    Returns None if file is missing or unparseable (fail open).
-    """
-    try:
-        import tomllib
-
-        toml_path = Path(".atm.toml")
-        if not toml_path.exists():
-            return None
-        with toml_path.open("rb") as f:
-            config = tomllib.load(f)
-        return config.get("core", {}).get("default_team")
-    except Exception:
-        return None
-
-
-def get_lead_session_id(team_name: str) -> str | None:
-    """Get team lead's session ID to differentiate lead from teammates.
-
-    Returns None if team doesn't exist (allows by default).
-    """
+def load_team_config(team_name: str) -> dict | None:
+    """Load ~/.claude/teams/<team>/config.json when available."""
     if not team_name or not team_name.strip():
         return None
 
@@ -76,9 +60,75 @@ def get_lead_session_id(team_name: str) -> str | None:
 
     try:
         config = json.loads(config_path.read_text())
-        return config.get("leadSessionId")
+        if isinstance(config, dict):
+            return config
+        return None
     except Exception:
         return None
+
+
+def load_spawn_policy_from_toml() -> tuple[str | None, str, list[str]]:
+    """Return (required_team, spawn_policy, co_leaders) from .atm.toml.
+
+    Defaults when keys are absent:
+    - spawn_policy: leaders-only
+    - co_leaders: []
+    """
+    config = read_atm_toml() or {}
+    core = config.get("core", {}) if isinstance(config, dict) else {}
+    required_team = core.get("default_team") if isinstance(core, dict) else None
+
+    spawn_policy = SPAWN_POLICY_LEADERS_ONLY
+    co_leaders: list[str] = []
+    if isinstance(required_team, str) and required_team.strip():
+        team_cfg = config.get("team", {}) if isinstance(config, dict) else {}
+        team_entry = team_cfg.get(required_team, {}) if isinstance(team_cfg, dict) else {}
+        if isinstance(team_entry, dict):
+            raw_policy = str(team_entry.get("spawn_policy", SPAWN_POLICY_LEADERS_ONLY)).strip()
+            if raw_policy in {SPAWN_POLICY_LEADERS_ONLY, SPAWN_POLICY_ANY_MEMBER}:
+                spawn_policy = raw_policy
+            raw_co_leaders = team_entry.get("co_leaders", [])
+            if isinstance(raw_co_leaders, list):
+                co_leaders = [
+                    str(item).strip()
+                    for item in raw_co_leaders
+                    if isinstance(item, str) and str(item).strip()
+                ]
+    return required_team, spawn_policy, co_leaders
+
+
+def resolve_caller_identity(
+    session_id: str, team_name: str | None, env_identity: str | None
+) -> str | None:
+    """Resolve caller identity for spawn policy checks.
+
+    Priority:
+    1. ATM_IDENTITY env override
+    2. Team config lookup by session_id (leadSessionId or member.sessionId)
+    """
+    if isinstance(env_identity, str) and env_identity.strip():
+        return env_identity.strip()
+
+    team = (team_name or "").strip()
+    if not team or not session_id:
+        return None
+    config = load_team_config(team)
+    if not config:
+        return None
+
+    if config.get("leadSessionId") == session_id:
+        return "team-lead"
+
+    members = config.get("members", [])
+    if isinstance(members, list):
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            if member.get("sessionId") == session_id:
+                name = member.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+    return None
 
 
 def _extract_frontmatter(text: str) -> str | None:
@@ -171,7 +221,7 @@ def main() -> int:
         except Exception:
             pass
 
-    required_team = get_required_team()
+    required_team, spawn_policy, co_leaders = load_spawn_policy_from_toml()
 
     # Rule 1: Agents with named-teammate policy must be spawned with teammate_name
     # WHY: They need full lifecycle (compaction, proper shutdown) to coordinate
@@ -202,34 +252,30 @@ def main() -> int:
         )
         return 2
 
-    # Rule 2: Only team LEAD can spawn named teammates (with name or team_name).
-    # WHY: Prevents orchestrators from creating teammates (pane exhaustion).
-    # Closing the bypass: a teammate that omits team_name but sets name still
-    # creates a named teammate in the inherited team context — must be blocked too.
-    # Orchestrators should spawn background agents (no name, no team_name).
+    # Rule 2: Enforce leaders-only spawn policy for spawn-capable Task calls.
+    # Spawn-capable means a teammate name or team_name is provided.
     if (team_name and str(team_name).strip()) or (teammate_name and str(teammate_name).strip()):
-        lead_session_id = get_lead_session_id(team_name)
-
-        # Allow if we can't determine lead (no team config yet)
-        # WHY: Fail open - team might be new, don't block legitimate spawns
-        if not lead_session_id:
+        if spawn_policy == SPAWN_POLICY_ANY_MEMBER:
             return 0
 
-        # Allow if caller IS the team lead
-        # WHY: Lead creates the orchestrators, needs team_name to add them to team
-        if session_id == lead_session_id:
+        auth_team = required_team or team_name
+        caller_identity = resolve_caller_identity(
+            session_id=session_id,
+            team_name=auth_team,
+            env_identity=os.environ.get("ATM_IDENTITY"),
+        )
+        allowed = {"team-lead", *co_leaders}
+        if caller_identity in allowed:
             return 0
 
-        # Block: caller is a teammate trying to use team_name
-        # WHY: Teammates spawning teammates = pane explosion
         sys.stderr.write(
-            f"BLOCKED: Only the team lead can spawn agents with team_name.\n"
+            f"{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n"
             f"\n"
-            f"You are a teammate. Use background agents:\n"
-            f'  Task(subagent_type="...", run_in_background=true, prompt="...")  # no team_name\n'
+            f"Policy team: {auth_team or '<unknown>'}\n"
+            f"Allowed identities: {', '.join(sorted(allowed))}\n"
+            f"Resolved caller: {caller_identity or '<unknown>'}\n"
             f"\n"
-            f"NOT allowed from teammates:\n"
-            f'  Task(..., team_name="{team_name}", ...)  # creates named teammate = pane exhaustion\n'
+            f"Action: run spawn as team-lead or add caller to [team.\"{auth_team}\"].co_leaders in .atm.toml.\n"
         )
         return 2
 
