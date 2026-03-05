@@ -188,7 +188,7 @@ async fn test_ci_failure_delivers_inbox_message() {
     assert_eq!(msg.from, "ci-monitor");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_ci_deduplication() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -264,16 +264,30 @@ async fn test_ci_deduplication() {
         .with_config(test_config);
     plugin.init(&ctx).await.unwrap();
 
-    // Run for more than two poll cycles (21 seconds = 2 full cycles)
+    // Run with simulated time so this test stays fast and deterministic.
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
 
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(21000)).await;
-        cancel_clone.cancel();
-    });
+    // Drive virtual time until we've observed at least two poll cycles.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        let list_calls = provider_clone
+            .get_calls()
+            .iter()
+            .filter(|c| matches!(c, MockCall::ListRuns(_)))
+            .count();
+        if list_calls >= 2 {
+            break;
+        }
+    }
 
-    let _ = plugin.run(cancel).await;
+    cancel.cancel();
+    tokio::task::yield_now().await;
+
+    let _ = run_task.await.unwrap();
 
     // Verify list_runs and get_run were called multiple times
     let calls = provider_clone.get_calls();
