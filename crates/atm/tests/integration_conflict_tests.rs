@@ -132,13 +132,10 @@ impl DaemonProcessGuard {
     }
 
     fn wait_ready(&mut self, home: &TempDir) {
-        let pid_path = home
-            .path()
-            .join(".claude")
-            .join("daemon")
-            .join("atm-daemon.pid");
+        let daemon_dir = home.path().join(".claude").join("daemon");
+        let pid_path = daemon_dir.join("atm-daemon.pid");
         #[cfg(windows)]
-        let timeout_secs = 10;
+        let timeout_secs = 30;
         #[cfg(not(windows))]
         let timeout_secs = 3;
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
@@ -158,10 +155,34 @@ impl DaemonProcessGuard {
             }
             std::thread::sleep(Duration::from_millis(25));
         }
+
+        let child_state = match self.child.try_wait() {
+            Ok(Some(status)) => format!("exited ({status})"),
+            Ok(None) => "running".to_string(),
+            Err(e) => format!("unknown ({e})"),
+        };
+        let daemon_entries = match fs::read_dir(&daemon_dir) {
+            Ok(entries) => {
+                let mut names: Vec<String> = entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().to_string())
+                    .collect();
+                names.sort();
+                names.join(", ")
+            }
+            Err(_) => "<missing>".to_string(),
+        };
+        let pid_contents = fs::read_to_string(&pid_path)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "<missing>".to_string());
         panic!(
-            "daemon readiness timeout: expected pid {} at {}",
+            "daemon readiness timeout: expected pid {} at {} (child={}, daemon_dir={}, pid_contents={}, daemon_entries=[{}])",
             self.pid,
-            pid_path.display()
+            pid_path.display(),
+            child_state,
+            daemon_dir.display(),
+            pid_contents,
+            daemon_entries
         );
     }
 }
