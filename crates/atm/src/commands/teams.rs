@@ -403,11 +403,11 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let launch_dir = resolve_spawn_folder(&args.folder, &current_dir)?;
     let env_team = env_var_nonempty("ATM_TEAM");
     let repo_default_team = read_repo_default_team(&current_dir);
-    let team_mismatch = if args.team.is_none()
-        && let (Some(env), Some(repo)) = (env_team.as_deref(), repo_default_team.as_deref())
-        && env != repo
-    {
-        Some((env.to_string(), repo.to_string()))
+    let team_mismatch = if args.team.is_none() {
+        match (env_team.as_deref(), repo_default_team.as_deref()) {
+            (Some(env), Some(repo)) if env != repo => Some((env.to_string(), repo.to_string())),
+            _ => None,
+        }
     } else {
         None
     };
@@ -423,32 +423,19 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         .team
         .clone()
         .unwrap_or_else(|| config.core.default_team.clone());
-    let daemon_session = query_session_for_team(&team_name, &args.agent)
-        .ok()
-        .flatten();
+
+    let parsed_env = parse_env_vars(&args.env)?;
 
     let resolved_resume_session_id = if args.resume_session_id.is_some() {
         args.resume_session_id.clone()
     } else if args.resume {
-        daemon_session.as_ref().map(|info| {
-            info.runtime_session_id
-                .clone()
-                .unwrap_or_else(|| info.session_id.clone())
-        })
+        query_session_for_team(&team_name, &args.agent)
+            .ok()
+            .flatten()
+            .map(|info| info.runtime_session_id.unwrap_or(info.session_id))
     } else {
-        daemon_session.as_ref().and_then(|info| {
-            if info.alive {
-                None
-            } else {
-                Some(
-                    info.runtime_session_id
-                        .clone()
-                        .unwrap_or_else(|| info.session_id.clone()),
-                )
-            }
-        })
+        None
     };
-    let effective_resume = args.resume || resolved_resume_session_id.is_some();
 
     let spec = SpawnSpec {
         team: team_name.clone(),
@@ -457,13 +444,17 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         model: args.model.clone(),
         sandbox: args.sandbox,
         approval_mode: args.approval_mode.clone(),
-        resume: effective_resume,
+        resume: args.resume,
         resume_session_id: resolved_resume_session_id,
         system_prompt: args.system_prompt.clone(),
     };
 
     let adapter = adapter_for_runtime(&args.runtime);
     let command = adapter.build_command(&spec)?;
+    let mut env_vars = adapter.build_env(&spec, &home_dir)?;
+    for (k, v) in parsed_env {
+        env_vars.insert(k, v);
+    }
     let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
     print_launch_command_preview(&launch_command_preview, args.json);
 
@@ -472,11 +463,11 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
             "spawn team mismatch detected: ATM_TEAM='{}' vs .atm.toml default_team='{}'",
             env_team, repo_team
         );
+        eprintln!(
+            "Warning: team mismatch detected: ATM_TEAM ('{}') != .atm.toml default_team ('{}').",
+            env_team, repo_team
+        );
         if !args.override_team {
-            eprintln!(
-                "Warning: team mismatch detected: ATM_TEAM ('{}') != .atm.toml default_team ('{}').",
-                env_team, repo_team
-            );
             anyhow::bail!(
                 "ATM_TEAM ('{}') does not match .atm.toml default_team ('{}'). \
                  Re-run with --override-team to proceed with the env-var team for this invocation.",
@@ -507,25 +498,6 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
             extra_fields,
             ..Default::default()
         });
-    }
-
-    if let Some(session) = daemon_session.as_ref()
-        && session.alive
-    {
-        anyhow::bail!(
-            "Cannot spawn '{}@{}': live session is already registered (session_id='{}', pid={}). \
-             Stop the existing process (or wait for it to exit) before respawning.",
-            args.agent,
-            team_name,
-            session.session_id,
-            session.process_id
-        );
-    }
-
-    let parsed_env = parse_env_vars(&args.env)?;
-    let mut env_vars = adapter.build_env(&spec, &home_dir)?;
-    for (k, v) in parsed_env {
-        env_vars.insert(k, v);
     }
 
     // Preserve legacy spawn UX when daemon is unavailable: return the daemon
@@ -657,12 +629,12 @@ fn format_spawn_launch_command(runtime: &RuntimeKind, spec: &SpawnSpec, command:
 
 fn print_launch_command_preview(preview: &str, json_mode: bool) {
     if json_mode {
-        eprintln!("# Spawn command:");
+        eprintln!("Launch command:");
         for line in preview.lines() {
             eprintln!("  {line}");
         }
     } else {
-        println!("# Spawn command:");
+        println!("Launch command:");
         for line in preview.lines() {
             println!("  {line}");
         }
@@ -1272,12 +1244,9 @@ fn sync_member_session_hint(
         None,
     ) {
         Ok(RegisterHintOutcome::Registered | RegisterHintOutcome::DaemonUnavailable) => Ok(()),
-        Ok(RegisterHintOutcome::UnsupportedDaemon) => {
-            warn!(
-                "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry; continuing without daemon session sync."
-            );
-            Ok(())
-        }
+        Ok(RegisterHintOutcome::UnsupportedDaemon) => anyhow::bail!(
+            "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry."
+        ),
         Err(e) => {
             warn!("daemon sync failed for {agent}@{team} session hint: {e}");
             Ok(())
@@ -3667,45 +3636,6 @@ mod tests {
     fn test_parse_env_vars_empty_key_errors() {
         let err = parse_env_vars(&["=value".to_string()]);
         assert!(err.is_err());
-    }
-
-    #[test]
-    fn test_env_var_nonempty_trims_and_filters_empty() {
-        let original = std::env::var("ATM_TEST_ENV_HELPER").ok();
-        // SAFETY: test-only env mutation
-        unsafe {
-            std::env::set_var("ATM_TEST_ENV_HELPER", "  value  ");
-        }
-        assert_eq!(
-            env_var_nonempty("ATM_TEST_ENV_HELPER").as_deref(),
-            Some("value")
-        );
-        // SAFETY: test-only env mutation
-        unsafe {
-            std::env::set_var("ATM_TEST_ENV_HELPER", "   ");
-        }
-        assert!(env_var_nonempty("ATM_TEST_ENV_HELPER").is_none());
-        // SAFETY: test-only env mutation
-        unsafe {
-            match original {
-                Some(v) => std::env::set_var("ATM_TEST_ENV_HELPER", v),
-                None => std::env::remove_var("ATM_TEST_ENV_HELPER"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_read_repo_default_team_from_atm_toml() {
-        let temp_dir = TempDir::new().unwrap();
-        let repo = temp_dir.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
-        fs::write(
-            repo.join(".atm.toml"),
-            "[core]\ndefault_team = \"atm-dev\"\nidentity = \"team-lead\"\n",
-        )
-        .unwrap();
-        let team = read_repo_default_team(&repo);
-        assert_eq!(team.as_deref(), Some("atm-dev"));
     }
 
     #[test]

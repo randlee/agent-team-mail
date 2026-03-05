@@ -262,17 +262,22 @@ fn register_teammate(
     let caller_identity = resolve_caller_identity(home_dir, team)?;
     let caller_identity_explicit = !caller_identity.trim().is_empty() && caller_identity != "human";
     if caller_identity_explicit && caller_identity != name {
+        // Fail closed: do not allow cross-identity teammate session writes even
+        // when daemon/session sync is unavailable, so ownership guarantees do
+        // not depend on daemon reachability.
         warn!(
             attempted_writer = %caller_identity,
             owner = %name,
             field = "sessionId",
             "register teammate ownership guard rejected cross-identity session write"
         );
-        eprintln!(
-            "Warning: refusing to update sessionId for '{}': caller identity is '{}'.",
-            name, caller_identity
+        anyhow::bail!(
+            "Ownership guard rejected sessionId update for '{}': caller identity is '{}'. \
+             Set ATM_IDENTITY/.atm.toml identity to '{}' and retry.",
+            name,
+            caller_identity,
+            name
         );
-        return Ok(());
     }
 
     // Verify member exists in team config.
@@ -370,11 +375,9 @@ fn sync_session_with_daemon(
         Ok(agent_team_mail_core::daemon_client::RegisterHintOutcome::Registered)
         | Ok(agent_team_mail_core::daemon_client::RegisterHintOutcome::DaemonUnavailable) => Ok(()),
         Ok(agent_team_mail_core::daemon_client::RegisterHintOutcome::UnsupportedDaemon) => {
-            eprintln!(
-                "Warning: Connected daemon does not support 'register-hint'. \
-                 Upgrade atm-daemon to this ATM version and retry; continuing without daemon session sync."
-            );
-            Ok(())
+            anyhow::bail!(
+                "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry."
+            )
         }
         Err(e) => {
             eprintln!("Warning: daemon session sync failed for {agent}@{team}: {e}");

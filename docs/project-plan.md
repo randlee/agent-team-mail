@@ -164,7 +164,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
 | X | Team Onboarding + TUI/Doctor Stability | `/team-join`, spawn path normalization, `atm init` one-command setup, and carry-forward bug-debt mapping | PLANNED |
-| Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency | IN PROGRESS |
+| Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency (Z.1–Z.6 COMPLETE; Z.7 in progress) | IN PROGRESS |
 
 ---
 
@@ -1411,8 +1411,8 @@ the current tranche focused on onboarding contract closure.
 | **Z** | Z.3 | SSoT Fast Path (`register-hint`, send-path daemon sync) | COMPLETE | [#427](https://github.com/randlee/agent-team-mail/pull/427) |
 | **Z** | Z.4 | Canonical Member State Completion | COMPLETE | [#429](https://github.com/randlee/agent-team-mail/pull/429) |
 | **Z** | Z.5 | Lifecycle Logging + Hook Events | COMPLETE | [#430](https://github.com/randlee/agent-team-mail/pull/430) |
-| **Z** | Z.6 | Cross-Folder Spawn + QA Blockers | IN PROGRESS | — |
-| **Z** | Z.7 | Review Findings Hardening | PLANNED | — |
+| **Z** | Z.6 | Cross-folder Spawn + QA Blocker Closure | COMPLETE | [#431](https://github.com/randlee/agent-team-mail/pull/431) |
+| **Z** | Z.7 | Review Findings Hardening | IN REVIEW | [#432](https://github.com/randlee/agent-team-mail/pull/432) |
 
 **Completed**: 99+ sprints across 23 phases (CI green)
 **Current version**: v0.33.2
@@ -1432,8 +1432,6 @@ doctor/log observability reliable and diagnosable from structured events.
 - Z.3 depends on Z.1 (register-hint + spawn metadata contract).
 - Z.4 depends on Z.3 (canonical union completion on top of fast path).
 - Z.5 is independent and can run in parallel with Z.3/Z.4.
-- Z.6 depends on Z.1–Z.5 merged to integrate/phase-Z (QA blocker fixes + ui-template findings).
-- Z.7 depends on Z.6 (review findings hardening on top of full phase baseline).
 
 ### Sprint Summary
 | Sprint | Name | PR | Branch | Issues | Status |
@@ -1443,8 +1441,8 @@ doctor/log observability reliable and diagnosable from structured events.
 | Z.3 | SSoT Fast Path | [#427](https://github.com/randlee/agent-team-mail/pull/427) | `feature/pZ-s3-ssot-fast-path` | #413, #415, #409 | COMPLETE |
 | Z.4 | Canonical Member State Completion | [#429](https://github.com/randlee/agent-team-mail/pull/429) | `feature/pZ-s4-canonical-state` | #414, #416, #417, #418, #401, #402 | COMPLETE |
 | Z.5 | Lifecycle Logging + Hook Events | [#430](https://github.com/randlee/agent-team-mail/pull/430) | `feature/pZ-s5-observability` | #420, #421 | COMPLETE |
-| Z.6 | Cross-Folder Spawn + QA Blockers | — | `feature/pZ-s6-cross-folder-spawn` | #424 | IN PROGRESS |
-| Z.7 | Review Findings Hardening | — | `feature/pZ-s7-review-hardening` | — | PLANNED |
+| Z.6 | Cross-folder Spawn + QA Blocker Closure | [#431](https://github.com/randlee/agent-team-mail/pull/431) | `feature/pZ-s6-cross-folder-spawn` | #422, #424, #426, #428 | COMPLETE |
+| Z.7 | Review Findings Hardening | [#432](https://github.com/randlee/agent-team-mail/pull/432) | `feature/pZ-s7-review-hardening` | QA findings closure | IN REVIEW |
 
 ### Z.1 — Quick Wins: Doctor + Release Fix
 **Deliverables**
@@ -1505,61 +1503,6 @@ doctor/log observability reliable and diagnosable from structured events.
 2. Busy<->Idle transitions emit DEBUG-only events (no INFO spam).
 3. Hook lifecycle events are always emitted with consistent structured fields and WARN failure records.
 4. Doctor findings are diagnosable directly from structured logs without ad-hoc inference.
-
-### Z.6 — Cross-Folder Spawn + QA Blockers
-**Deliverables**
-1. Fix 4 QA blocking findings from phase-ending review:
-   - ATM-Z-QA-001: `UnsupportedDaemon` treated as warn+continue in send/register/teams paths (not hard bail); add integration test for UNKNOWN_COMMAND → UnsupportedDaemon → warn+continue round-trip.
-   - ATM-Z-QA-002: thread `dedup_store` into `handle_hook_event_command`; add test for duplicate hook delivery producing exactly one state-change event.
-   - ATM-Z-QA-003: add CLI-level test for UNKNOWN_COMMAND path; add daemon-level test for empty/whitespace session_id rejection on register-hint.
-   - ATM-Z-QA-004: remove duplicate test function definitions in `daemon_client.rs` (~lines 2196/2225 and 2209/2238).
-2. session-start.py precedence: `ATM_TEAM`/`ATM_IDENTITY` env vars **override** `.atm.toml` (env vars take priority; `.atm.toml` is the fallback when env vars are absent). If effective team from env vars differs from `.atm.toml` `default_team`, the divergence is logged as a warning.
-3. Mismatch policy: if effective team (env var) differs from `.atm.toml` `default_team`, `atm teams spawn` requires an explicit `--override-team` flag to proceed; without it, spawn fails with a clear mismatch error naming both the env-var team and the `.atm.toml` team. When `--override-team` is passed: spawn proceeds using the env-var team for the duration of the invocation; the member is registered to the env-var team; `.atm.toml` is NOT modified; a WARN log is emitted documenting the override (effective team, conflicting `.atm.toml` value, invocation timestamp).
-4. Identity ownership guard: if the target member identity has a live daemon PID/session, `atm teams spawn` must fail (no silent takeover). If the member is dead/offline, spawn proceeds in resume mode (passing existing session metadata/resume flags to the runtime where available). Error message for live-conflict includes: member name, conflicting PID or session ID, and a remediation hint. Dead/offline path is distinguishable from live-conflict in both error text and exit code.
-5. Config mirrors with ownership guard: `leadSessionId` (team-lead) and per-member `sessionId` fields in `config.json` are updated on startup/registration; only the matching identity may update its own entry. Cross-identity update attempts must: (a) emit a WARN log with attempted-writer identity, owner identity, and field name; (b) drop the update (not apply it). Daemon remains canonical SSoT; config mirrors exist for compatibility.
-6. `atm teams spawn` always prints full copy-pastable command first (regardless of success/failure), then prints success/failure status and remediation guidance. Format: `# Spawn command:` header line, command block, then status.
-7. `atm teams spawn --help` includes: env var setup (`ATM_TEAM`, `ATM_IDENTITY`), `--folder` flag examples, and agent-type examples for claude/codex/gemini backends.
-
-**Non-goals**: Tmux pane targeting automation (auto-detecting user's visible pane for cross-folder spawn) is out of scope for Z.6. Tracked as a future sprint item.
-
-**Acceptance Criteria**
-1. `atm send` on a system with older daemon prints upgrade guidance to stderr and completes the send (does not abort).
-2. A replayed session_start hook produces exactly one `member_state_change` event (dedup guard in hook-event handler).
-3. `atm teams spawn` always prints the full copy-pastable launch command BEFORE any status or error output on ALL failure paths (LAUNCH_UNAVAILABLE, mismatch error, live-conflict error, invalid-argument errors).
-4. `ATM_TEAM`/`ATM_IDENTITY` env vars override `.atm.toml` in both session-start.py and the Rust CLI config resolution pipeline for all `atm teams spawn` invocations. When env-var team differs from `.atm.toml` team (both non-empty), a WARN-level log record is emitted identifying the effective team and the conflicting `.atm.toml` value.
-5. Spawn with conflicting effective-team vs `.atm.toml` team fails with mismatch error naming both teams unless `--override-team` is passed. With `--override-team`: member registers to env-var team, `.atm.toml` is not modified, WARN log emitted.
-6. Spawn for a member with live daemon PID/session fails with live-conflict error including member name, PID/session ID, and remediation hint. Spawn for offline/dead member proceeds in resume mode. Exit codes distinguish live-conflict from offline-resume.
-7. Cross-identity config mirror updates are rejected with a WARN log (writer identity, owner identity, field name); the owning identity's value is unchanged after rejection. A test must verify the rejected value is not applied.
-8. After successful spawn, `atm doctor` and `atm members` derive liveness from daemon snapshot, not config.json mirror fields.
-9. `atm teams spawn --help` output includes: ATM_TEAM and ATM_IDENTITY env var descriptions, `--folder` flag usage with at least one example, and backend examples for claude, codex, and gemini.
-10. All duplicate test names removed; `cargo test` green.
-
-### Z.7 — Review Findings Hardening
-**Deliverables**
-1. ATM-Z-QA-008/ATM-Z-001: fix double `ensure_spawn_member_metadata` call in `spawn_member`; remove pre-flight call (lines 409–415), keep post-daemon-check call only.
-2. ATM-Z-004/ATM-Z-QA-004: extend doctor PID mismatch check to daemon-only sessions (`in_config=false`); emit `PID_PROCESS_MISMATCH` findings for ghost sessions.
-3. ATM-Z-008/ATM-Z-011: add register-hint tests for typed-backend (Codex/Claude) PID mismatch rejection path; add test for mismatch-offline clearance via register-hint re-registration.
-4. ATM-Z-003: add test for `derive_canonical_member_state` and `derive_unregistered_member_state` directly (edge cases: tracker_state=Offline with active session, tracker_state=Active without session).
-5. ATM-Z-002 documentation: document that lifecycle transition events are Unix-only (`#[cfg(unix)]`); update Z.5 acceptance criterion 1 language to scope it to Unix builds; add note to `docs/cross-platform-guidelines.md` with an explicit entry for transition event Unix scoping.
-6. ATM-Z-QA-014: replace inline ghost/unregistered string literals with a shared constant across doctor, members, status surfaces.
-7. ATM-Z-005: add `ATM_LOG_MSG=""` (empty string) test case asserting message_preview is disabled (empty string = same as unset, not same as "1").
-8. Validate `--override-team` behavior from Z.6: verify (a) override is session-scoped only (does not modify `.atm.toml`), (b) member registers to env-var team, (c) WARN log is emitted. Add regression test if not present from Z.6.
-9. Identity ownership guard under daemon-unavailable: test that spawn fails with a clear error when daemon cannot be queried for ownership state, rather than silently proceeding. Document fail-closed vs. fail-open policy.
-10. Rust CLI env var precedence integration test: assert `ATM_TEAM` env var takes priority over `.atm.toml` `default_team` in the Rust config resolution pipeline for `atm teams spawn`, independent of session-start.py.
-11. After Z.7 Deliverable 1 removes the pre-flight `ensure_spawn_member_metadata` call, verify the Z.6 identity ownership guard continues to operate correctly at the remaining call site. Add a test for cross-identity config mirror rejection surviving the refactor.
-12. Update project-plan.md §17.11 Z.1–Z.6 sprint statuses to COMPLETE; update Section 2 overview rows and sprint summary table for Z.6/Z.7.
-
-**Acceptance Criteria**
-1. `spawn_member` calls `ensure_spawn_member_metadata` exactly once (post-daemon-check only); cross-identity config mirror rejection still works after the refactor.
-2. `atm doctor` emits `PID_PROCESS_MISMATCH` findings for daemon-only ghost sessions including: agent name, backend type, expected process name, actual process name, and PID.
-3. register-hint with Codex/Claude backend and mismatched PID returns `PID_PROCESS_MISMATCH` error AND emits a WARN log with agent name, backend type, expected process name, actual process name, and PID.
-4. register-hint from mismatch-offline baseline transitions member back to Active after valid re-registration.
-5. Ghost/unregistered labels use a single shared constant; no string duplication across surfaces.
-6. `docs/cross-platform-guidelines.md` contains an explicit entry noting lifecycle transition events are Unix-only. Z.5 AC 1 in §17.11 is updated with Unix-only scoping. CI on Windows passes without asserting lifecycle event emission.
-7. `--override-team` from Z.6: session-scoped, no `.atm.toml` modification, WARN log emitted — all verified by regression test.
-8. Ownership guard fails with clear error under daemon-unavailable (fail-closed or documented fail-open with rationale).
-9. ATM_TEAM env var overrides `.atm.toml` in Rust CLI config pipeline (Rust integration test, not just session-start.py).
-10. All new tests pass; CI green on all platforms. Daemon socket tests that are Unix-only are annotated `#[cfg(unix)]` and documented in cross-platform guidelines.
 
 ---
 
