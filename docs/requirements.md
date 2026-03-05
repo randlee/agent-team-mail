@@ -344,7 +344,7 @@ Teams subcommands:
   teams join <agent> [--team <team>] [--agent-type <type>] [--model <model>] [--folder <path>]
   teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [...]
   teams resume <team> [message] [--force] [--kill] [--session-id <id>]
-  teams cleanup <team> [agent] [--force]
+  teams cleanup <team> [agent] [--force] [--dry-run]
   teams backup <team> [--json]
   teams restore <team> [--from <path>] [--dry-run] [--skip-tasks] [--json]
 
@@ -630,6 +630,11 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
   it MUST deliver `shutdown_request` first, then enforce timeout/kill fallback.
 - `atm daemon --kill <agent> [--timeout <seconds>]`: executes shutdown protocol above,
   then teardown cleanup invariant.
+- `atm teams cleanup <team> [agent] --dry-run`: non-mutating preview mode that MUST:
+  1. render a table of candidate actions (roster removal, mailbox delete, session prune),
+  2. include a reason per row,
+  3. include total counts by action type, and
+  4. exit `0` with no writes.
 
 ### 4.3.2 `atm teams spawn` (Claude Runtime Baseline)
 
@@ -640,6 +645,11 @@ Required baseline behavior:
 - Resolve agent runtime metadata from `.claude/agents/<agent>.md` frontmatter
   (at minimum `model`, `color`; prompt body used for initial instruction delivery).
 - Resolve team/identity using explicit args first, then `ATM_TEAM` / `ATM_IDENTITY`.
+- Enforce spawn authorization from `.atm.toml` team policy:
+  - `spawn_policy = "leaders-only"` allows only `team-lead` plus
+    `[team.<name>].co_leaders`.
+  - Unauthorized callers fail before mutation/spawn side effects with
+    `SPAWN_UNAUTHORIZED`.
 - Resolve working directory from explicit `--folder <path>` (preferred) or legacy
   `--cwd <path>` compatibility alias, else current project root; launch command MUST
   `cd` into that root before starting Claude.
@@ -653,6 +663,11 @@ Required baseline behavior:
 - Before reporting launch success or failure, `atm teams spawn` must print the
   fully constructed launch command (with resolved team/agent/runtime flags and
   env vars) so operators/agents can retry manually when launch fails.
+- The fully constructed launch command must be printed on both success and
+  failure paths.
+- `atm teams spawn --help` must include a **Generated launch command** reference
+  block with copy-pastable, fully-expanded examples for `claude`, `codex`, and
+  `gemini` showing env setup, runtime args, and `--folder` usage.
 
 Hook/path compatibility requirements:
 - Generated hook commands must use `"$CLAUDE_PROJECT_DIR"` for project scripts and guard
@@ -753,6 +768,8 @@ atm doctor --full
 - Human-readable output MUST start with a concise team member snapshot table (equivalent
   core fields to `atm members`: name/type/model/status), followed by ordered findings by
   severity, then recommended remediation commands.
+- Human-readable member snapshots for `atm doctor`, `atm status`, and `atm members`
+  SHOULD include `last_alive` when daemon evidence is available.
 - Human-readable output MUST render the log window using an operator-friendly label:
   - default/incremental and duration windows: `last <elapsed>`
   - timestamp windows: `since YYYY-MM-DD HH:mm:ss UTC (<elapsed>)`
@@ -862,6 +879,8 @@ queries), the daemon MUST:
 3. If the process is alive but the name no longer matches (PID was reused by an
    unrelated process), emit a `PID_PROCESS_MISMATCH` WARN finding in `atm doctor`
    output.
+4. Refresh `last_alive_at` when process liveness is confirmed and backend validation
+   is not mismatched.
 
 The WARN finding MUST include: agent name, backend type, expected process name,
 actual process name, and PID.
@@ -880,6 +899,22 @@ registered agent session PID.
 When self-registration creates a new daemon state record where an activity hint already
 existed, the daemon MUST emit an `ACTIVE_WITHOUT_SESSION` WARN finding to surface the
 gap, and MUST then create the daemon state record to resolve it.
+
+Any successful PID/session registration path (`session_start` lifecycle upsert,
+`register-hint`, daemon bootstrap from roster hints) MUST set `last_alive_at` to
+current time for that member record.
+
+#### Session-End State Integrity (REQUIRED)
+
+To prevent stale lifecycle events from incorrectly dead-marking live sessions:
+- `session_end` processing MUST be scoped by `(team, agent, session_id)`.
+- If the incoming `session_id` does not match the currently tracked active session for
+  that team+agent, daemon must not mark that record dead.
+- Session-id mismatch handling MUST emit a structured warning event with actionable
+  context (`team`, `agent`, expected/current session id, received session id).
+- If a member is marked dead/offline and PID appears alive but backend/session
+  validation is mismatched, daemon MUST NOT auto-promote to active/idle. Clearing
+  this state requires explicit re-registration (`session_start` or `register-hint`).
 
 #### Logging Level Requirements for PID/Process Events (REQUIRED)
 
@@ -950,6 +985,7 @@ Canonical team member-state snapshot (daemon -> CLI) must include:
 - `activity` (`busy|idle|unknown`)
 - `session_id` (optional)
 - `process_id` (optional)
+- `last_alive_at` (optional RFC3339 UTC timestamp)
 - `in_config` (optional bool; default `true`; `false` means daemon session exists for
   an agent not present in team `config.json`)
 - `reason`
@@ -978,6 +1014,10 @@ Required behavior:
 - `atm send` PID fallback detection must use the same strict backend rules as the
   daemon validator (`claude=comm:claude`, `codex=comm:codex`,
   `gemini=comm:node+args~gemini`) and must not stamp unmatched fallback PIDs.
+- If registry state says `Dead` but PID/backend validation indicates the tracked
+  process is alive and validation is mismatched, daemon must keep dead/offline
+  status and require explicit re-registration to clear mismatch.
+  Auto-reconcile is allowed only when PID/backend/session validation is consistent.
 
 #### Operational State Variable Inventory
 
@@ -987,6 +1027,7 @@ Required behavior:
 | `lastActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`lastActive`) | `u64` epoch-millis or `null` | Last activity timestamp only. Not a liveness source. |
 | `session_id` | Daemon session registry (`session_start`/`session_end`) | `.claude/daemon/session-registry.json` | Non-empty string or absent | Session identity tracked by daemon lifecycle registry. |
 | `process_id` | Daemon session registry | `.claude/daemon/session-registry.json` | Integer PID (`>1`) or absent | Process identity used for liveness checks. |
+| `last_alive_at` | Daemon session registry + liveness reconciler | `.claude/daemon/session-registry.json` and daemon canonical snapshot | RFC3339 UTC timestamp or absent | Most recent point-in-time where daemon confirmed process alive. |
 | `status` (`state`) | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `active`, `idle`, `offline`, `unknown` | Canonical liveness/status consumed by doctor/status/members. |
 | `activity` | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `busy`, `idle`, `unknown` | Canonical activity hint exposed separately from liveness. |
 
@@ -1248,9 +1289,20 @@ arch-atm = "team-lead"   # alias-name → inbox-identity mapping
 team-lead = "arch-atm"   # role-name → inbox-identity mapping
                          # roles take precedence over aliases in resolution order
                          # resolution order: roles → aliases → literal fallback
+
+[team."backend-ci-team"]
+spawn_policy = "leaders-only"       # leaders-only | any-member
+co_leaders = ["arch-atm", "quality-mgr"]
 ```
 
 **Identity resolution**: The `[aliases]` and `[roles]` tables allow symbolic names to route to actual inbox identities. Resolution order: `[roles]` first (for semantic role names), then `[aliases]` (for stable shorthand), then literal fallback. Resolution is non-recursive and case-sensitive.
+
+**Spawn authorization defaults**:
+- `spawn_policy` defaults to `leaders-only` when omitted.
+- Under `leaders-only`, only `team-lead` and identities listed in
+  `[team.<name>].co_leaders` may run terminal spawn operations.
+- Unauthorized spawn attempts must fail with stable error code
+  `SPAWN_UNAUTHORIZED` and actionable guidance.
 
 #### Environment Variables
 
@@ -1287,6 +1339,9 @@ events for daemon state tracking.
 Required policy:
 - Block Task spawns when the target agent prompt (`.claude/agents/<subagent_type>.md`) declares frontmatter `metadata.spawn_policy = named_teammate_required` unless they are named teammates (`name` provided).
 - Block any explicit `team_name` that does not match `.atm.toml` `[core].default_team`.
+- For spawn-capable flows, enforce `.atm.toml` team spawn policy (`leaders-only`
+  + `co_leaders`) and reject unauthorized callers with `SPAWN_UNAUTHORIZED`
+  before launching background agents.
 - Return exit code `2` with actionable feedback when blocked.
 
 Rationale:
@@ -1665,8 +1720,11 @@ identity and liveness.
 - **Ownership**: daemon is sole writer; CLI reads via daemon socket API only.
 - **Update sources**:
   - `hook-event` `session_start`: upsert record (`session_id`, `process_id`, `state=active`, `updated_at`)
-  - `hook-event` `session_end`: mark record dead (`state=dead`, `updated_at`)
+  - `hook-event` `session_end`: mark record dead (`state=dead`, `updated_at`) only when
+    incoming `(team, agent, session_id)` matches the currently tracked session
   - daemon liveness sweeps may mark stale PIDs dead when process no longer exists
+  - successful liveness checks refresh `last_alive_at`
+  - mismatch-marked dead records must not auto-promote from PID aliveness alone
 - **Lookup semantics**:
   - Team-scoped lead check must resolve by `(team, agent=team-lead)`
   - CLI `teams resume` refusal logic must use this team-scoped daemon result, not bare-name process lookup
@@ -1680,6 +1738,7 @@ Minimum record shape:
   "session_id": "uuid",
   "process_id": 12345,
   "state": "active",
+  "last_alive_at": "2026-02-27T00:00:05Z",
   "updated_at": "2026-02-27T00:00:00Z"
 }
 ```
@@ -1976,6 +2035,9 @@ Required constraints:
   and verification command(s).
 - Post-publish verification must run for every required inventory item and record
   pass/fail evidence for each item.
+- Post-publish verification checks against eventually consistent registries
+  (for example `cargo search`) must use bounded retry with backoff before
+  declaring failure.
 - Release completion is permitted only when all required inventory items verify
   successfully, or when explicit waivers are recorded with approver and reason.
 - The publishing process above is the default release procedure for all future
@@ -1989,6 +2051,8 @@ Acceptance checks:
   are duplicated, or ordering is non-deterministic.
 - Post-publish verification failure for any required item fails the release gate
   unless a documented waiver is present.
+- Delayed-index scenarios must show retry/backoff attempts in release logs and
+  fail only after retry budget is exhausted.
 
 ### 4.9 Team Hook Setup (`atm init`)
 
@@ -2431,6 +2495,13 @@ The core has no awareness of whether a team member is local or remote.
   (for example `ATM_HOME`) MUST be serialized to avoid cross-test races.
 - **Parallel stability gate**: CI/local suites must include a parallel run baseline
   (`--test-threads=8` or equivalent) for env-sensitive integration tests.
+- **Long-run test guardrails**: daemon/concurrency integration tests MUST have
+  explicit bounded timeouts and deterministic teardown guards that terminate
+  spawned daemon processes on timeout/failure.
+- **Platform mitigation policy**: when a test has a known platform-specific hang
+  risk (for example macOS `test_concurrent_sends_no_data_loss`), temporary CI
+  mitigation (`#[cfg_attr(target_os = "macos", ignore)]`) is allowed only while
+  root-cause remediation remains tracked in an active sprint/issue.
 
 ### 8.4 Performance
 

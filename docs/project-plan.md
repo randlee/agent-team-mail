@@ -1513,6 +1513,61 @@ The following Z.7 deliverables (d8–d12) were deferred due to scope and are tra
 
 These items should be addressed in the next hardening phase.
 
+### Z.8 Post-Z Liveness Hardening Queue
+
+Post-Z verification produced two liveness follow-up issues:
+
+1. **[#448](https://github.com/randlee/agent-team-mail/issues/448)** —
+   correctness-first:
+   - `session_end` must be `(team, agent, session_id)` scoped
+   - dead/offline mismatch records must require explicit re-registration
+2. **[#449](https://github.com/randlee/agent-team-mail/issues/449)** —
+   freshness hardening:
+   - PID liveness cache TTL
+   - periodic PID re-probe
+   - canonical `last_alive` timestamp in member snapshots
+
+Execution order is mandatory: land #448 before #449.
+
+### Z.9 Next-Phase Draft Sprints (Confirmed Scope)
+
+Confirmed next-phase scope from team-lead currently includes #448, #394, #372,
+post-publish verification retry/backoff, and approved UX items #373/#424.
+
+| Sprint | Scope | Issues | Notes |
+|--------|-------|--------|-------|
+| Z.9a | Daemon session-end correctness + mismatch dead-state rules | [#448](https://github.com/randlee/agent-team-mail/issues/448) | Foundation sprint for liveness correctness |
+| Z.9b | Spawn authorization gate (`leaders-only`, `co_leaders`, `SPAWN_UNAUTHORIZED`, hook gate alignment) | [#394](https://github.com/randlee/agent-team-mail/issues/394) | Access-control and roster-pollution prevention |
+| Z.9c | CI/release reliability hardening: macOS daemon-test hang mitigation + post-publish verify retry/backoff | [#372](https://github.com/randlee/agent-team-mail/issues/372), release retry/backoff task | Timeout+teardown guardrails and propagation-lag resilience |
+| Z.9d | UX/output polish batch: cleanup preview and spawn help launch-command reference | [#373](https://github.com/randlee/agent-team-mail/issues/373), [#424](https://github.com/randlee/agent-team-mail/issues/424) | Small combined sprint; output-only, low risk |
+
+### Z.10 Design Discussion (Not Yet a Sprint): Named Agent Lifecycle + Mailbox Archival
+
+Problem framing:
+- Current behavior intentionally preserves named members after shutdown to avoid
+  immediate message loss, but this can also leave stale dead entries.
+- We need a principled policy that distinguishes short-lived task agents from
+  persistent long-running agents.
+
+Design space to resolve before sprinting:
+1. Classification source:
+   - explicit `agent_type = "task" | "persistent"` in team config / `.atm.toml`
+   - inferred from spawn context (less explicit, harder to audit)
+2. Archive semantics:
+   - hard delete mailbox
+   - move mailbox to archive directory
+   - retain mailbox but mark agent inactive with retention policy
+3. Trigger points:
+   - lifecycle-driven (`session_end`, `shutdown_approved`)
+   - operator-driven (`atm teams cleanup`, `atm teams archive <agent>`)
+4. Cleanup integration:
+   - `teams cleanup` behavior must branch by classification to avoid deleting
+     persistent-agent continuity while still removing completed task-agent drift.
+
+Blocking dependency:
+- Depends on finalized agent classification contract (related to #394 spawn
+  authorization metadata ownership).
+
 ---
 
 ## 20. Phase Integration PRs
@@ -1583,6 +1638,12 @@ Key commits:
 | [#351](https://github.com/randlee/agent-team-mail/issues/351) | Add `/team-join` slash command | X.1 | New onboarding UX contract; paired with `atm teams join` CLI planning |
 | [#361](https://github.com/randlee/agent-team-mail/issues/361) | Spawn path normalization (`--folder` canonical, `--cwd` compatibility) | X.2 | Canonical spawn-directory contract across runtimes |
 | [#357](https://github.com/randlee/agent-team-mail/issues/357) | `atm init` full one-command setup + default global hooks | X.3 | One-command onboarding (`.atm.toml` + team + hooks) plus quickstart updates |
+| [#448](https://github.com/randlee/agent-team-mail/issues/448) | `session_end` must be session-id scoped; reconcile stale dead/alive mismatch state | Z.9a | Correctness-first post-Z follow-up |
+| [#449](https://github.com/randlee/agent-team-mail/issues/449) | PID liveness cache TTL, periodic re-probe, and `last_alive` in member state | Deferred (`0.37/0.38`) | Freshness tranche after #448 |
+| [#394](https://github.com/randlee/agent-team-mail/issues/394) | Gate terminal spawn to team-lead + co-leaders only | Z.9b | Prevent unauthorized terminal/session spawn |
+| [#372](https://github.com/randlee/agent-team-mail/issues/372) | macOS CI hang in `test_concurrent_sends_no_data_loss` | Z.9c | Add timeout + teardown; temporary macOS ignore allowed while fixing |
+| [#373](https://github.com/randlee/agent-team-mail/issues/373) | Add `--dry-run` preview mode to `atm teams cleanup` | Z.9d | Non-mutating table with reasons and totals |
+| [#424](https://github.com/randlee/agent-team-mail/issues/424) | Improve `atm teams spawn --help` with generated launch-command reference | Z.9d | Always-show copy/paste launch reference (claude/codex/gemini) |
 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | `parse_since_input` accepts `0m` and negative durations | X.4 (deferred) | Deferred follow-on from Phase X onboarding tranche |
 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | Missing `#[serial]` on env-mutating daemon tests (`ATM_HOME`) | X.5 (deferred) | Deferred CI-debt cleanup in Phase X follow-on |
 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | `add-member` does not create inbox atomically | X.6 (deferred) | Deferred follow-on after onboarding contract closure |
