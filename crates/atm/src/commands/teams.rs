@@ -115,6 +115,10 @@ pub struct SpawnArgs {
     #[arg(long, alias = "cwd")]
     folder: Vec<PathBuf>,
 
+    /// Allow ATM_TEAM (env) to override conflicting .atm.toml default_team for this invocation
+    #[arg(long)]
+    override_team: bool,
+
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -394,6 +398,45 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
     let launch_dir = resolve_spawn_folder(&args.folder, &current_dir)?;
+    let env_team = env_var_nonempty("ATM_TEAM");
+    let repo_default_team = read_repo_default_team(&current_dir);
+    if args.team.is_none()
+        && let (Some(env_team), Some(repo_team)) =
+            (env_team.as_deref(), repo_default_team.as_deref())
+        && env_team != repo_team
+    {
+        if !args.override_team {
+            anyhow::bail!(
+                "ATM_TEAM ('{}') does not match .atm.toml default_team ('{}'). \
+                 Re-run with --override-team to proceed with the env-var team for this invocation.",
+                env_team,
+                repo_team
+            );
+        }
+        warn!(
+            "spawn override-team: using ATM_TEAM='{}' instead of .atm.toml default_team='{}'",
+            env_team, repo_team
+        );
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert(
+            "conflicting_toml_team".to_string(),
+            serde_json::Value::String(repo_team.to_string()),
+        );
+        extra_fields.insert(
+            "invoked_at".to_string(),
+            serde_json::Value::String(Utc::now().to_rfc3339()),
+        );
+        emit_event_best_effort(EventFields {
+            level: "warn",
+            source: "atm",
+            action: "spawn_team_override",
+            team: Some(env_team.to_string()),
+            agent_name: Some(args.agent.clone()),
+            result: Some("override_team".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
     let config = resolve_config(
         &ConfigOverrides {
             team: args.team.clone(),
@@ -406,6 +449,21 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         .team
         .clone()
         .unwrap_or_else(|| config.core.default_team.clone());
+    let daemon_session = query_session_for_team(&team_name, &args.agent)
+        .ok()
+        .flatten();
+    if let Some(session) = daemon_session.as_ref()
+        && session.alive
+    {
+        anyhow::bail!(
+            "Cannot spawn '{}@{}': live session is already registered (session_id='{}', pid={}). \
+             Stop the existing process (or wait for it to exit) before respawning.",
+            args.agent,
+            team_name,
+            session.session_id,
+            session.process_id
+        );
+    }
     ensure_spawn_member_metadata(
         &team_name,
         &args.agent,
@@ -419,13 +477,25 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let resolved_resume_session_id = if args.resume_session_id.is_some() {
         args.resume_session_id.clone()
     } else if args.resume {
-        query_session_for_team(&team_name, &args.agent)
-            .ok()
-            .flatten()
-            .map(|info| info.runtime_session_id.unwrap_or(info.session_id))
+        daemon_session.as_ref().map(|info| {
+            info.runtime_session_id
+                .clone()
+                .unwrap_or_else(|| info.session_id.clone())
+        })
     } else {
-        None
+        daemon_session.as_ref().and_then(|info| {
+            if info.alive {
+                None
+            } else {
+                Some(
+                    info.runtime_session_id
+                        .clone()
+                        .unwrap_or_else(|| info.session_id.clone()),
+                )
+            }
+        })
     };
+    let effective_resume = args.resume || resolved_resume_session_id.is_some();
 
     let spec = SpawnSpec {
         team: team_name.clone(),
@@ -434,7 +504,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         model: args.model.clone(),
         sandbox: args.sandbox,
         approval_mode: args.approval_mode.clone(),
-        resume: args.resume,
+        resume: effective_resume,
         resume_session_id: resolved_resume_session_id,
         system_prompt: args.system_prompt.clone(),
     };
@@ -729,6 +799,41 @@ fn resolve_spawn_folder(folder_args: &[PathBuf], current_dir: &Path) -> Result<P
         );
     }
     Ok(first)
+}
+
+fn env_var_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn find_repo_local_atm_toml(current_dir: &Path) -> Option<PathBuf> {
+    let mut dir = current_dir;
+    loop {
+        let config_path = dir.join(".atm.toml");
+        if config_path.exists() {
+            return Some(config_path);
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
+
+fn read_repo_default_team(current_dir: &Path) -> Option<String> {
+    let config_path = find_repo_local_atm_toml(current_dir)?;
+    let contents = fs::read_to_string(config_path).ok()?;
+    let value: toml::Value = toml::from_str(&contents).ok()?;
+    value
+        .get("core")
+        .and_then(|core| core.get("default_team"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|team| !team.is_empty())
+        .map(ToString::to_string)
 }
 
 fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
@@ -3552,6 +3657,45 @@ mod tests {
     fn test_parse_env_vars_empty_key_errors() {
         let err = parse_env_vars(&["=value".to_string()]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_env_var_nonempty_trims_and_filters_empty() {
+        let original = std::env::var("ATM_TEST_ENV_HELPER").ok();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_TEST_ENV_HELPER", "  value  ");
+        }
+        assert_eq!(
+            env_var_nonempty("ATM_TEST_ENV_HELPER").as_deref(),
+            Some("value")
+        );
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_TEST_ENV_HELPER", "   ");
+        }
+        assert!(env_var_nonempty("ATM_TEST_ENV_HELPER").is_none());
+        // SAFETY: test-only env mutation
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_TEST_ENV_HELPER", v),
+                None => std::env::remove_var("ATM_TEST_ENV_HELPER"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_repo_default_team_from_atm_toml() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = temp_dir.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(
+            repo.join(".atm.toml"),
+            "[core]\ndefault_team = \"atm-dev\"\nidentity = \"team-lead\"\n",
+        )
+        .unwrap();
+        let team = read_repo_default_team(&repo);
+        assert_eq!(team.as_deref(), Some("atm-dev"));
     }
 
     #[test]

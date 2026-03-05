@@ -1,6 +1,14 @@
 use assert_cmd::cargo;
 use predicates::prelude::*;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{Child, Command};
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
@@ -12,6 +20,119 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
         .current_dir(&workdir);
+}
+
+#[cfg(unix)]
+fn write_fake_live_session_daemon_script(home: &Path) -> PathBuf {
+    let script = home.join("fake-live-session-daemon.py");
+    let body = r#"#!/usr/bin/env python3
+import json
+import os
+import signal
+import socket
+from pathlib import Path
+
+home = Path(os.environ["ATM_HOME"])
+daemon_dir = home / ".claude" / "daemon"
+daemon_dir.mkdir(parents=True, exist_ok=True)
+
+sock_path = daemon_dir / "atm-daemon.sock"
+pid_path = daemon_dir / "atm-daemon.pid"
+if sock_path.exists():
+    sock_path.unlink()
+pid_path.write_text(str(os.getpid()))
+
+running = True
+def _stop(_signum, _frame):
+    global running
+    running = False
+
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(str(sock_path))
+srv.listen(16)
+srv.settimeout(0.2)
+
+while running:
+    try:
+        conn, _ = srv.accept()
+    except TimeoutError:
+        continue
+    except OSError:
+        break
+    with conn:
+        data = b""
+        while b"\n" not in data:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        try:
+            req = json.loads(data.decode().strip() or "{}")
+        except Exception:
+            req = {}
+
+        request_id = req.get("request_id", "req")
+        command = req.get("command", "")
+        if command in ("session-query-team", "session-for-team"):
+            payload = {
+                "session_id": "live-sess",
+                "process_id": 9999,
+                "alive": True,
+                "runtime": "codex",
+                "agent": req.get("payload", {}).get("name", "unknown"),
+                "team": req.get("payload", {}).get("team", "unknown"),
+            }
+            resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": payload}
+        elif command == "list-agents":
+            resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": []}
+        else:
+            resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": {}}
+        conn.sendall((json.dumps(resp) + "\n").encode())
+
+try:
+    srv.close()
+finally:
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        pid_path.unlink()
+    except FileNotFoundError:
+        pass
+"#;
+    fs::write(&script, body).unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn wait_for_daemon_socket(home: &Path) {
+    let socket = home.join(".claude/daemon/atm-daemon.sock");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if socket.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "fake daemon socket was not created in time: {}",
+        socket.display()
+    );
+}
+
+#[cfg(unix)]
+fn start_fake_live_session_daemon(home: &Path) -> Child {
+    let script = write_fake_live_session_daemon_script(home);
+    let child = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    wait_for_daemon_socket(home);
+    child
 }
 
 #[test]
@@ -236,4 +357,112 @@ fn test_spawn_claude_echoes_full_launch_command_on_failure() {
         stderr.contains("Daemon is not running"),
         "expected daemon unavailable failure, got stderr: {stderr}"
     );
+}
+
+#[test]
+fn test_spawn_env_team_mismatch_requires_override_team() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(
+        workdir.join(".atm.toml"),
+        "[core]\ndefault_team = \"toml-team\"\nidentity = \"team-lead\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "env-team")
+        .args([
+            "teams",
+            "spawn",
+            "agent-mismatch",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ATM_TEAM ('env-team')"))
+        .stderr(predicate::str::contains(
+            ".atm.toml default_team ('toml-team')",
+        ))
+        .stderr(predicate::str::contains("--override-team"));
+}
+
+#[test]
+fn test_spawn_env_team_mismatch_override_team_uses_env_team() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    let atm_toml_path = workdir.join(".atm.toml");
+    let toml_content = "[core]\ndefault_team = \"toml-team\"\nidentity = \"team-lead\"\n";
+    fs::write(&atm_toml_path, toml_content).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_TEAM", "env-team")
+        .args([
+            "teams",
+            "spawn",
+            "agent-override",
+            "--runtime",
+            "codex",
+            "--override-team",
+            "--folder",
+            folder.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["team"].as_str(), Some("env-team"));
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("Daemon is not running")
+    );
+    assert_eq!(fs::read_to_string(&atm_toml_path).unwrap(), toml_content);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_spawn_rejects_live_session_ownership_conflict() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let mut daemon = start_fake_live_session_daemon(temp_dir.path());
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.args([
+        "teams",
+        "spawn",
+        "agent-live",
+        "--team",
+        "atm-dev",
+        "--runtime",
+        "codex",
+        "--folder",
+        folder.to_str().unwrap(),
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains(
+        "live session is already registered",
+    ))
+    .stderr(predicate::str::contains("session_id='live-sess'"))
+    .stderr(predicate::str::contains("Stop the existing process"));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }
