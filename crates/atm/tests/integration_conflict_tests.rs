@@ -131,10 +131,25 @@ impl DaemonProcessGuard {
         self.pid
     }
 
-    fn wait_ready(&self, home: &TempDir) {
-        let pid_path = home.path().join(".claude/daemon/atm-daemon.pid");
-        let deadline = Instant::now() + Duration::from_secs(3);
+    fn wait_ready(&mut self, home: &TempDir) {
+        let pid_path = home
+            .path()
+            .join(".claude")
+            .join("daemon")
+            .join("atm-daemon.pid");
+        #[cfg(windows)]
+        let timeout_secs = 10;
+        #[cfg(not(windows))]
+        let timeout_secs = 3;
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         while Instant::now() < deadline {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                panic!(
+                    "daemon exited before readiness (status={status}); expected pid {} at {}",
+                    self.pid,
+                    pid_path.display()
+                );
+            }
             if let Ok(content) = fs::read_to_string(&pid_path)
                 && let Ok(pid) = content.trim().parse::<u32>()
                 && pid == self.pid
@@ -173,7 +188,7 @@ async fn test_concurrent_sends_no_data_loss() {
     // Multi-threaded test: simulate atm CLI and Claude Code writing to same inbox
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
-    let daemon_guard = DaemonProcessGuard::spawn(&temp_dir, "test-team");
+    let mut daemon_guard = DaemonProcessGuard::spawn(&temp_dir, "test-team");
     let daemon_pid = daemon_guard.pid();
     assert!(daemon_pid > 1, "daemon must expose a stable known PID");
     daemon_guard.wait_ready(&temp_dir);
