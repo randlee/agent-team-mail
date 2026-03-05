@@ -484,9 +484,13 @@ fn register_sender_hint(team: &str, sender: &str, cfg: &TeamConfig) -> Result<()
         None,
     ) {
         Ok(RegisterHintOutcome::Registered | RegisterHintOutcome::DaemonUnavailable) => Ok(()),
-        Ok(RegisterHintOutcome::UnsupportedDaemon) => anyhow::bail!(
-            "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry."
-        ),
+        Ok(RegisterHintOutcome::UnsupportedDaemon) => {
+            eprintln!(
+                "Warning: Connected daemon does not support 'register-hint'. \
+                 Upgrade atm-daemon to this ATM version and retry; continuing without daemon session sync."
+            );
+            Ok(())
+        }
         Err(e) => {
             eprintln!("Warning: Failed to register daemon session hint: {e}");
             Ok(())

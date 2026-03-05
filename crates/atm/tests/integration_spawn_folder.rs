@@ -316,7 +316,6 @@ fn test_spawn_env_team_mismatch_override_team_uses_env_team_without_modifying_to
     );
     assert_eq!(fs::read_to_string(&atm_toml_path).unwrap(), toml_content);
 }
-
 #[test]
 fn test_spawn_env_team_matching_toml_does_not_require_override() {
     let temp_dir = TempDir::new().unwrap();
