@@ -2,7 +2,8 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::daemon_client::{
-    LaunchConfig, RegisterHintOutcome, launch_agent, query_session_for_team, register_hint,
+    AgentSummary, LaunchConfig, RegisterHintOutcome, launch_agent, query_list_agents,
+    query_session_for_team, register_hint,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
@@ -500,14 +501,12 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         });
     }
 
-    // Preserve legacy spawn UX when daemon is unavailable: return the daemon
-    // error + launch command guidance without requiring team-config mutation.
-    // When daemon is running, we enforce #409 by persisting model/backend
-    // metadata before sending the launch request.
-    if !agent_team_mail_core::daemon_client::daemon_is_running() {
+    // Probe daemon before metadata writes. This path triggers daemon auto-start
+    // where enabled (same behavior as other daemon-backed commands).
+    if let Err(e) = ensure_daemon_ready_for_spawn(query_list_agents) {
         if args.json {
             let output = json!({
-                "error": "Daemon is not running. Start it with: atm-daemon",
+                "error": e.to_string(),
                 "agent": args.agent,
                 "team": team_name,
                 "runtime": runtime_name(&args.runtime),
@@ -516,7 +515,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
-            eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
+            eprintln!("Error: {e}");
             eprintln!("  Run the launch command above manually in a new tmux pane.");
         }
         std::process::exit(1);
@@ -656,6 +655,17 @@ fn backend_type_for_runtime(runtime: &RuntimeKind) -> BackendType {
         RuntimeKind::Codex => BackendType::Codex,
         RuntimeKind::Gemini => BackendType::Gemini,
         RuntimeKind::Opencode => BackendType::External,
+    }
+}
+
+fn ensure_daemon_ready_for_spawn<F>(query: F) -> Result<()>
+where
+    F: Fn() -> Result<Option<Vec<AgentSummary>>>,
+{
+    match query() {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => anyhow::bail!("Daemon is not running. Start it with: atm-daemon"),
+        Err(e) => Err(e).context("Failed to reach daemon for spawn"),
     }
 }
 
@@ -3744,6 +3754,35 @@ mod tests {
         let command = format!("cd '{}' && codex --yolo", test_cwd.to_string_lossy());
         let rendered = format_spawn_launch_command(&RuntimeKind::Codex, &spec, &command);
         assert_eq!(rendered, command);
+    }
+
+    #[test]
+    fn test_ensure_daemon_ready_for_spawn_accepts_available_daemon() {
+        let result = ensure_daemon_ready_for_spawn(|| Ok(Some(Vec::new())));
+        assert!(result.is_ok(), "daemon availability should pass readiness");
+    }
+
+    #[test]
+    fn test_ensure_daemon_ready_for_spawn_reports_unavailable_daemon() {
+        let err = ensure_daemon_ready_for_spawn(|| Ok(None)).expect_err("daemon unavailable");
+        assert!(
+            err.to_string()
+                .contains("Daemon is not running. Start it with: atm-daemon"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_ensure_daemon_ready_for_spawn_wraps_query_errors() {
+        let err = ensure_daemon_ready_for_spawn(|| {
+            Err(anyhow::anyhow!(
+                "daemon auto-start attempted but socket unavailable"
+            ))
+        })
+        .expect_err("query error should be surfaced");
+        let text = format!("{err:#}");
+        assert!(text.contains("Failed to reach daemon for spawn"));
+        assert!(text.contains("socket unavailable"));
     }
 
     #[test]
