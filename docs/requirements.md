@@ -635,6 +635,8 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
   2. include a reason per row,
   3. include total counts by action type, and
   4. exit `0` with no writes.
+  If there are no candidates, output `Nothing to clean up for team <name>.`,
+  do not print an empty table header, and still exit `0`.
 
 ### 4.3.2 `atm teams spawn` (Claude Runtime Baseline)
 
@@ -668,6 +670,9 @@ Required baseline behavior:
 - `atm teams spawn --help` must include a **Generated launch command** reference
   block with copy-pastable, fully-expanded examples for `claude`, `codex`, and
   `gemini` showing env setup, runtime args, and `--folder` usage.
+- `atm teams spawn --help` must succeed even when `.atm.toml` is absent.
+  In that case, help output uses token placeholders (for example:
+  `<team_name>`, `<agent_name>`, `<folder_path>`) for substitution.
 
 Hook/path compatibility requirements:
 - Generated hook commands must use `"$CLAUDE_PROJECT_DIR"` for project scripts and guard
@@ -908,10 +913,15 @@ current time for that member record.
 
 To prevent stale lifecycle events from incorrectly dead-marking live sessions:
 - `session_end` processing MUST be scoped by `(team, agent, session_id)`.
+- If `session_end` arrives for `(team, agent, session_id)` and no matching
+  session registry record exists, daemon must perform no state mutation, emit a
+  DEBUG log record, and must not create tombstone/session rows.
 - If the incoming `session_id` does not match the currently tracked active session for
   that team+agent, daemon must not mark that record dead.
 - Session-id mismatch handling MUST emit a structured warning event with actionable
   context (`team`, `agent`, expected/current session id, received session id).
+- If `session_end` is replayed for a record already marked `state=dead`, daemon
+  must treat it as a no-op and MUST NOT re-trigger teardown/cleanup/reconcile.
 - If a member is marked dead/offline and PID appears alive but backend/session
   validation is mismatched, daemon MUST NOT auto-promote to active/idle. Clearing
   this state requires explicit re-registration (`session_start` or `register-hint`).
@@ -1301,8 +1311,10 @@ co_leaders = ["arch-atm", "quality-mgr"]
 - `spawn_policy` defaults to `leaders-only` when omitted.
 - Under `leaders-only`, only `team-lead` and identities listed in
   `[team.<name>].co_leaders` may run terminal spawn operations.
+- If `[team.<name>]` is entirely absent, effective policy is
+  `leaders-only` with `co_leaders=[]` (team-lead only).
 - Unauthorized spawn attempts must fail with stable error code
-  `SPAWN_UNAUTHORIZED` and actionable guidance.
+  `SPAWN_UNAUTHORIZED` and actionable guidance, not config-parse failure.
 
 #### Environment Variables
 
@@ -2036,8 +2048,9 @@ Required constraints:
 - Post-publish verification must run for every required inventory item and record
   pass/fail evidence for each item.
 - Post-publish verification checks against eventually consistent registries
-  (for example `cargo search`) must use bounded retry with backoff before
-  declaring failure.
+  (for example `cargo search`) are CI-workflow requirements in
+  `.github/workflows/release.yml`, not new ATM CLI commands.
+  They must retry up to 5 attempts with 60-second intervals before failing.
 - Release completion is permitted only when all required inventory items verify
   successfully, or when explicit waivers are recorded with approver and reason.
 - The publishing process above is the default release procedure for all future
@@ -2053,6 +2066,8 @@ Acceptance checks:
   unless a documented waiver is present.
 - Delayed-index scenarios must show retry/backoff attempts in release logs and
   fail only after retry budget is exhausted.
+- Each retry attempt must emit structured attempt logs, and terminal failure
+  output must include all crate names that failed verification.
 
 ### 4.9 Team Hook Setup (`atm init`)
 
