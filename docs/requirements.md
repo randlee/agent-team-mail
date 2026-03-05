@@ -1338,6 +1338,63 @@ Recommended policy:
 Rationale:
 - Stops tasks from being marked complete before required quality gates pass.
 
+#### `SessionStart` — Session File
+
+The `SessionStart` hook writes a session file at `{ATM_HOME}/.claude/teams/<team>/sessions/<session_id>.json`
+when full routing context is available (`session_id` + `team` + `identity`).
+
+**File contents**:
+```json
+{
+  "session_id": "<uuid>",
+  "team": "<default_team>",
+  "identity": "<identity>",
+  "pid": <os.getppid()>,
+  "created_at": <unix timestamp>,
+  "updated_at": <unix timestamp>
+}
+```
+
+**Rules**:
+- `pid` MUST be `os.getppid()` — the long-lived Claude session process PID, not the
+  short-lived hook subprocess PID.
+- `created_at` and `updated_at` are set to the current time on creation.
+- `updated_at` is refreshed by `atm-identity-write.py` on `atm` CLI invocations where
+  both `session_id` and agent identity are resolvable (from `.atm.toml` and the hook
+  payload). Invocations without `.atm.toml` context do not update the timestamp.
+  This acts as a TTL heartbeat so active sessions are not orphan-reaped prematurely.
+- The file persists across context compaction and `--continue`/`--resume` invocations
+  (same session ID — `SessionEnd` does not fire on compaction, so the file survives).
+- Orphaned files (from crash or SIGKILL) are expired by a 24-hour TTL in
+  `read_session_file()` — callers must treat files older than 24 hours as stale.
+
+**Purpose**: Enables automatic CLI identity resolution without requiring `CLAUDE_SESSION_ID`
+to be exported into bash subshells. The CLI reads the file as a fallback when
+`CLAUDE_SESSION_ID` is unavailable in the calling environment.
+
+**Ambiguity handling**: If more than one active (non-stale) session file matches the
+caller's resolved `team` + `identity`, the CLI must error with an actionable message
+instructing the user to set `CLAUDE_SESSION_ID` explicitly to disambiguate.
+
+#### `SessionEnd` — Session File Cleanup
+
+The `SessionEnd` hook deletes the session file for the terminating session:
+
+```
+{ATM_HOME}/.claude/teams/<team>/sessions/<session_id>.json
+```
+
+**Rules**:
+- Only fires for `.atm.toml`-configured sessions. Sessions started via env-only
+  context (`ATM_TEAM`/`ATM_IDENTITY` without `.atm.toml`) do not trigger cleanup;
+  their session files expire via the 24-hour TTL instead.
+- Only the file for THIS session's `session_id` is deleted — no other session files
+  are touched.
+- `missing_ok=True` semantics: if the file does not exist (crash-restart recovery
+  scenario), the deletion is silently skipped.
+- Fail-open: deletion errors are logged to stderr but must not cause the hook to
+  return a non-zero exit code.
+
 ---
 
 ### 4.6 Unified Event Logging

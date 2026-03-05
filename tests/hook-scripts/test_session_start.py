@@ -452,5 +452,108 @@ class TestSessionStartGuards(unittest.TestCase):
         self.assertEqual(socket_calls, [], "Socket must not be called when tomllib is unavailable")
 
 
+class TestSessionStartSessionFile(unittest.TestCase):
+    """Tests for the session file write block added to session-start.py."""
+
+    _TOML = '[core]\ndefault_team = "atm-dev"\nidentity = "team-lead"\n'
+
+    def _run(self, tmpdir: str, stdin_text: str) -> int:
+        """Run session-start.py from tmpdir with the given stdin, returning exit code."""
+        captured = StringIO()
+        orig_dir = os.getcwd()
+        try:
+            os.chdir(tmpdir)
+            Path(tmpdir, ".atm.toml").write_text(self._TOML)
+            with patch("sys.stdin", StringIO(stdin_text)), \
+                 patch("sys.stdout", captured), \
+                 patch.dict(os.environ, {"ATM_HOME": tmpdir, "ATM_TEAM": "", "ATM_IDENTITY": ""}), \
+                 patch("socket.socket"):
+                mod = _load_module("session_start", _SESSION_START_PATH)
+                return mod.main()
+        finally:
+            os.chdir(orig_dir)
+
+    def test_session_file_written_with_correct_fields(self):
+        """Session file is written with session_id, team, identity, pid, created_at, updated_at."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stdin_text = json.dumps({"session_id": "abc-123", "source": "init"})
+            rc = self._run(tmpdir, stdin_text)
+            self.assertEqual(rc, 0)
+
+            expected_path = Path(tmpdir) / ".claude" / "teams" / "atm-dev" / "sessions" / "abc-123.json"
+            self.assertTrue(expected_path.exists(), f"Session file not found at {expected_path}")
+            data = json.loads(expected_path.read_text())
+            self.assertEqual(data["session_id"], "abc-123")
+            self.assertEqual(data["team"], "atm-dev")
+            self.assertEqual(data["identity"], "team-lead")
+            self.assertIn("pid", data)
+            self.assertIn("created_at", data)
+            self.assertIn("updated_at", data)
+
+    def test_session_file_not_written_without_session_id(self):
+        """No session file is written when session_id is absent."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stdin_text = json.dumps({"source": "init"})
+            rc = self._run(tmpdir, stdin_text)
+            self.assertEqual(rc, 0)
+
+            sessions_dir = Path(tmpdir) / ".claude" / "teams" / "atm-dev" / "sessions"
+            if sessions_dir.exists():
+                files = list(sessions_dir.glob("*.json"))
+                self.assertEqual(files, [], "No session file should be written without session_id")
+
+    def test_session_file_preserves_created_at_on_refire(self):
+        """On compact/resume re-fire, created_at is preserved; only updated_at changes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sessions_dir = Path(tmpdir) / ".claude" / "teams" / "atm-dev" / "sessions"
+            sessions_dir.mkdir(parents=True)
+            import time
+            original_created = time.time() - 3600  # 1 hour ago
+            existing = {
+                "session_id": "abc-resume",
+                "team": "atm-dev",
+                "identity": "team-lead",
+                "pid": 9999,
+                "created_at": original_created,
+                "updated_at": original_created,
+            }
+            (sessions_dir / "abc-resume.json").write_text(json.dumps(existing))
+
+            stdin_text = json.dumps({"session_id": "abc-resume", "source": "compact"})
+            rc = self._run(tmpdir, stdin_text)
+            self.assertEqual(rc, 0)
+
+            data = json.loads((sessions_dir / "abc-resume.json").read_text())
+            self.assertAlmostEqual(
+                data["created_at"], original_created, delta=1.0,
+                msg="created_at must be preserved on re-fire"
+            )
+            self.assertGreater(
+                data["updated_at"], original_created,
+                msg="updated_at must be refreshed on re-fire"
+            )
+
+    def test_session_file_write_failure_exits_zero(self):
+        """A write failure is silently swallowed — script exits 0 (fail-open)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_dir = os.getcwd()
+            captured = StringIO()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(self._TOML)
+                stdin_text = json.dumps({"session_id": "err-test", "source": "init"})
+                with patch("sys.stdin", StringIO(stdin_text)), \
+                     patch("sys.stdout", captured), \
+                     patch.dict(os.environ, {"ATM_HOME": tmpdir, "ATM_TEAM": "", "ATM_IDENTITY": ""}), \
+                     patch("socket.socket"), \
+                     patch("pathlib.Path.write_text", side_effect=OSError("simulated disk full")):
+                    mod = _load_module("session_start", _SESSION_START_PATH)
+                    rc = mod.main()
+            finally:
+                os.chdir(orig_dir)
+
+            self.assertEqual(rc, 0, "Script must exit 0 even when write fails (fail-open)")
+
+
 if __name__ == "__main__":
     unittest.main()

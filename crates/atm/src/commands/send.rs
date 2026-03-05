@@ -22,7 +22,7 @@ use agent_team_mail_core::text::{
 
 use crate::util::addressing::parse_address;
 use crate::util::file_policy::check_file_reference;
-use crate::util::hook_identity::{read_hook_file, read_hook_file_identity};
+use crate::util::hook_identity::{read_hook_file, read_hook_file_identity, read_session_file};
 use crate::util::settings::get_home_dir;
 
 /// Send a message to a specific agent
@@ -457,13 +457,14 @@ fn register_sender_hint(team: &str, sender: &str, cfg: &TeamConfig) -> Result<()
         return Ok(());
     }
 
-    let session_id = detect_sender_session_id().unwrap_or_else(|| {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        format!("local:{sender}:{now_ms}:{process_id}")
-    });
+    let session_id = detect_sender_session_id_with_context(Some(team), Some(sender))
+        .unwrap_or_else(|| {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            format!("local:{sender}:{now_ms}:{process_id}")
+        });
 
     let runtime = member.effective_backend_type().and_then(|bt| match bt {
         BackendType::ClaudeCode => Some("claude"),
@@ -588,13 +589,24 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     Ok(())
 }
 
-fn detect_sender_session_id() -> Option<String> {
+fn detect_sender_session_id_with_context(
+    team: Option<&str>,
+    identity: Option<&str>,
+) -> Option<String> {
+    // 1. PID-based hook file (fastest, most precise — set by PreToolUse Bash hook).
     if let Ok(Some(hook)) = read_hook_file() {
         let trimmed = hook.session_id.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
         }
     }
+    // 2. Session file written by SessionStart hook (survives bash subshell env loss).
+    if let (Some(t), Some(id)) = (team, identity) {
+        if let Ok(Some(session_id)) = read_session_file(t, id) {
+            return Some(session_id);
+        }
+    }
+    // 3. CLAUDE_SESSION_ID env var (explicit override or tmux/codex sessions).
     std::env::var("CLAUDE_SESSION_ID")
         .ok()
         .map(|s| s.trim().to_string())
@@ -688,7 +700,9 @@ fn detect_sender_process_pid(member: &AgentMember) -> Option<u32> {
 mod tests {
     use super::*;
     use anyhow::anyhow;
+    use serial_test::serial;
     use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
 
     #[test]
@@ -961,5 +975,127 @@ mod tests {
         assert_eq!(member.process_id_hint(), Some(7777));
         assert_eq!(member.is_active, Some(true));
         assert!(member.last_active.is_some());
+    }
+
+    fn current_ppid_hook_path() -> std::path::PathBuf {
+        let ppid = crate::util::hook_identity::get_parent_pid();
+        std::env::temp_dir().join(format!("atm-hook-{ppid}.json"))
+    }
+
+    fn write_fresh_hook_file(session_id: &str) {
+        let ppid = crate::util::hook_identity::get_parent_pid();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let data = serde_json::json!({
+            "pid": ppid,
+            "session_id": session_id,
+            "agent_name": "team-lead",
+            "created_at": now,
+        });
+        std::fs::write(
+            current_ppid_hook_path(),
+            serde_json::to_string(&data).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_session_file(home: &std::path::Path, team: &str, identity: &str, session_id: &str) {
+        let sessions_dir = home
+            .join(".claude")
+            .join("teams")
+            .join(team)
+            .join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let data = serde_json::json!({
+            "session_id": session_id,
+            "team": team,
+            "identity": identity,
+            "pid": 12345,
+            "created_at": now,
+            "updated_at": now,
+        });
+        std::fs::write(
+            sessions_dir.join(format!("{session_id}.json")),
+            serde_json::to_string(&data).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn test_detect_sender_session_id_prefers_hook_file_over_session_and_env() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        write_fresh_hook_file("sid-from-hook");
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+        }
+
+        let actual = detect_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"));
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+        let _ = std::fs::remove_file(&hook_path);
+
+        assert_eq!(actual.as_deref(), Some("sid-from-hook"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_detect_sender_session_id_uses_session_file_when_hook_missing() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+        }
+
+        let actual = detect_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"));
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(actual.as_deref(), Some("sid-from-session"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_detect_sender_session_id_uses_env_when_hook_and_session_missing() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+        }
+
+        let actual = detect_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"));
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(actual.as_deref(), Some("sid-from-env"));
     }
 }

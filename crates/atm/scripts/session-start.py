@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from atm_hook_lib import first_str, send_hook_event, read_atm_toml  # noqa: E402
+from atm_hook_lib import first_str, send_hook_event, read_atm_toml, atm_home  # noqa: E402
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -88,6 +88,43 @@ def main() -> int:
             "process_id": os.getppid(),
         }
         send_hook_event(payload)
+
+    # Write session file for CLI identity resolution fallback.
+    # Only written when we have full routing context (session_id + team + identity).
+    # Uses os.getppid() — the long-lived Claude session process PID, not this
+    # short-lived hook subprocess.
+    #
+    # Intentionally non-atomic: session files are transient/rewritable and the
+    # 24-hour TTL in read_session_file() handles stale or partially-written files.
+    # The hook is short-lived and crash probability is negligible.
+    if session_id and default_team and identity:
+        try:
+            import time
+            sessions_dir = atm_home() / ".claude" / "teams" / default_team / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            session_file = sessions_dir / f"{session_id}.json"
+            # Preserve created_at on re-fires (compact/resume) for the same session_id.
+            # Only created_at is preserved; updated_at is always refreshed.
+            existing_created_at: float | None = None
+            if session_file.exists():
+                try:
+                    existing = json.loads(session_file.read_text())
+                    if existing.get("session_id") == session_id:
+                        existing_created_at = existing.get("created_at")
+                except Exception:
+                    pass
+            now = time.time()
+            session_data = {
+                "session_id": session_id,
+                "team": default_team,
+                "identity": identity,
+                "pid": os.getppid(),
+                "created_at": existing_created_at if existing_created_at else now,
+                "updated_at": now,
+            }
+            session_file.write_text(json.dumps(session_data))
+        except Exception as exc:
+            sys.stderr.write(f"[atm-hook] Failed to write session file: {exc}\n")
 
     return 0
 

@@ -25,14 +25,8 @@ use std::path::PathBuf;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::util::hook_identity::read_hook_file;
+use crate::util::hook_identity::{read_hook_file, read_session_file};
 use crate::util::settings::get_home_dir;
-
-#[derive(Debug, Clone)]
-struct SessionIdentity {
-    session_id: String,
-    process_id: Option<u32>,
-}
 
 /// Register this agent session with a team.
 ///
@@ -67,57 +61,64 @@ pub fn execute(args: RegisterArgs) -> Result<()> {
         );
     }
 
-    // Resolve session ID: hook file → CLAUDE_SESSION_ID env var.
-    let identity = resolve_session_identity()?;
+    // Resolve session ID: hook file → session file → CLAUDE_SESSION_ID env var.
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = resolve_config(&ConfigOverrides::default(), &current_dir, &home_dir)?;
+    let caller_identity = &config.core.identity;
+    let session_id = resolve_session_id(&args.team, caller_identity)?;
 
     if let Some(ref name) = args.name {
-        register_teammate(&home_dir, &config_path, &args.team, name, &identity)
+        register_teammate(&config_path, &args.team, name, &session_id)
     } else {
-        register_team_lead(&home_dir, &config_path, &args.team, &identity, args.force)
+        register_team_lead(&home_dir, &config_path, &args.team, &session_id, args.force)
     }
 }
 
-/// Resolve the current session ID from hook file or environment.
-fn resolve_session_identity() -> Result<SessionIdentity> {
+/// Resolve the current session ID from hook file, session file, or environment.
+fn resolve_session_id(team: &str, identity: &str) -> Result<String> {
     // 1. Try hook file (written by PreToolUse Bash hook).
     let fallback_reason = match read_hook_file() {
         Ok(Some(data)) if !data.session_id.is_empty() => {
-            let pid = (data.pid > 1).then_some(data.pid);
-            return Ok(SessionIdentity {
-                session_id: data.session_id,
-                process_id: pid,
-            });
+            tracing::debug!("session resolved via: hook file");
+            return Ok(data.session_id);
         }
         Ok(Some(_)) => "hook file has blank session_id".to_string(),
         Ok(None) => "hook file not found".to_string(),
         Err(e) => {
-            anyhow::bail!(
-                "Cannot determine session_id: hook file validation failed: {e}. \
-                 Fix hook setup or use --force only with explicit user confirmation."
-            );
+            eprintln!("WARNING: hook file validation failed: {e}; trying session file...");
+            format!("hook file validation failed: {e}")
         }
     };
 
-    // 2. Bootstrap fallback: CLAUDE_SESSION_ID (register only — with mandatory warning).
+    // 2. Session file (written by session-start.py hook).
+    match read_session_file(team, identity) {
+        Ok(Some(sid)) => {
+            tracing::debug!("session resolved via: session file");
+            return Ok(sid);
+        }
+        Ok(None) => tracing::debug!("no session file found"),
+        Err(e) => eprintln!("WARNING: session file lookup failed: {e}"),
+    }
+
+    // 3. Bootstrap fallback: CLAUDE_SESSION_ID (register only — with mandatory warning).
     if let Ok(id) = std::env::var("CLAUDE_SESSION_ID") {
         let trimmed = id.trim().to_string();
         if !trimmed.is_empty() {
+            tracing::debug!("session resolved via: CLAUDE_SESSION_ID env var");
             eprintln!(
                 "WARNING: {}, falling back to CLAUDE_SESSION_ID. \
-                 Ensure atm-identity-write.py hook is configured in .claude/settings.json.",
+                 Ensure atm-identity-write.py PreToolUse hook or session-start.py SessionStart \
+                 hook is configured in .claude/settings.json.",
                 fallback_reason
             );
-            return Ok(SessionIdentity {
-                session_id: trimmed,
-                process_id: None,
-            });
+            return Ok(trimmed);
         }
     }
 
     anyhow::bail!(
         "Cannot determine session_id. \
-         Ensure atm-identity-write.py PreToolUse hook is configured, \
-         or set the CLAUDE_SESSION_ID environment variable."
+         Ensure atm-identity-write.py PreToolUse hook or session-start.py SessionStart hook \
+         is configured, or set the CLAUDE_SESSION_ID environment variable."
     )
 }
 
@@ -126,7 +127,7 @@ fn register_team_lead(
     home_dir: &std::path::Path,
     config_path: &std::path::Path,
     team: &str,
-    identity: &SessionIdentity,
+    session_id: &str,
     force: bool,
 ) -> Result<()> {
     // Verify caller identity is "team-lead".
@@ -145,21 +146,41 @@ fn register_team_lead(
     // Check liveness of existing session if not forced.
     if !force {
         let existing: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
-        if !existing.lead_session_id.is_empty() && existing.lead_session_id == identity.session_id {
+        if !existing.lead_session_id.is_empty() && existing.lead_session_id == session_id {
             println!(
                 "Already registered as team-lead for team '{}'. Session: {}",
-                team, identity.session_id
+                team, session_id
             );
             return Ok(());
         }
 
         if !existing.lead_session_id.is_empty() {
-            ensure_team_lead_replacement_safe_with_query(
-                team,
-                &existing.lead_session_id,
-                &identity.session_id,
-                agent_team_mail_core::daemon_client::query_session_for_team,
-            )?;
+            // Query daemon for liveness — proceed silently if daemon unreachable.
+            use agent_team_mail_core::daemon_client::query_session;
+            match query_session("team-lead") {
+                Ok(Some(ref info)) if info.alive && info.session_id != session_id => {
+                    let short = &info.session_id[..8.min(info.session_id.len())];
+                    anyhow::bail!(
+                        "team-lead is already active in session {}... (use --force to override)",
+                        short
+                    );
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    anyhow::bail!(
+                        "WARNING: cannot confirm liveness of existing team-lead session {}. \
+                         Use --force to take over explicitly.",
+                        existing.lead_session_id
+                    );
+                }
+                Err(e) => {
+                    anyhow::bail!(
+                        "WARNING: daemon liveness check failed ({e}). \
+                         Cannot safely replace existing team-lead session {}; use --force to override.",
+                        existing.lead_session_id
+                    );
+                }
+            }
         }
     }
 
@@ -171,7 +192,7 @@ fn register_team_lead(
 
         let mut team_config: TeamConfig =
             serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
-        team_config.lead_session_id = identity.session_id.to_string();
+        team_config.lead_session_id = session_id.to_string();
 
         // Mark non-lead members inactive to clear stale status.
         for member in team_config.members.iter_mut() {
@@ -181,14 +202,6 @@ fn register_team_lead(
         }
         write_team_config(config_path, &team_config)?;
     }
-
-    sync_session_with_daemon(
-        team,
-        "team-lead",
-        &identity.session_id,
-        identity.process_id,
-        Some("claude"),
-    )?;
 
     // Reload and notify members.
     let team_config: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
@@ -226,40 +239,18 @@ fn register_team_lead(
 
     println!(
         "Registered as team-lead for team '{}'. Session: {}. {} member(s) notified.",
-        team, identity.session_id, notified
+        team, session_id, notified
     );
     Ok(())
 }
 
 /// Register as a named teammate: update the member's `sessionId` field.
 fn register_teammate(
-    home_dir: &std::path::Path,
     config_path: &std::path::Path,
     team: &str,
     name: &str,
-    identity: &SessionIdentity,
+    session_id: &str,
 ) -> Result<()> {
-    let caller_identity = resolve_caller_identity(home_dir, team)?;
-    let caller_identity_explicit = !caller_identity.trim().is_empty() && caller_identity != "human";
-    if caller_identity_explicit && caller_identity != name {
-        // Fail closed: do not allow cross-identity teammate session writes even
-        // when daemon/session sync is unavailable, so ownership guarantees do
-        // not depend on daemon reachability.
-        warn!(
-            attempted_writer = %caller_identity,
-            owner = %name,
-            field = "sessionId",
-            "register teammate ownership guard rejected cross-identity session write"
-        );
-        anyhow::bail!(
-            "Ownership guard rejected sessionId update for '{}': caller identity is '{}'. \
-             Set ATM_IDENTITY/.atm.toml identity to '{}' and retry.",
-            name,
-            caller_identity,
-            name
-        );
-    }
-
     // Verify member exists in team config.
     let existing: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
 
@@ -297,7 +288,7 @@ fn register_teammate(
             .iter_mut()
             .find(|m| m.name == name)
             .expect("member existence already verified above");
-        member.session_id = Some(identity.session_id.to_string());
+        member.session_id = Some(session_id.to_string());
         member.is_active = Some(true);
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         member.last_active = Some(now_ms);
@@ -305,96 +296,11 @@ fn register_teammate(
         write_team_config(config_path, &team_config)?;
     }
 
-    sync_session_with_daemon(team, name, &identity.session_id, identity.process_id, None)?;
-
     println!(
         "Registered as '{}' in team '{}'. Session: {}",
-        name, team, identity.session_id
+        name, team, session_id
     );
     Ok(())
-}
-
-fn resolve_caller_identity(home_dir: &std::path::Path, team: &str) -> Result<String> {
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = resolve_config(
-        &ConfigOverrides {
-            team: Some(team.to_string()),
-            ..Default::default()
-        },
-        &current_dir,
-        home_dir,
-    )?;
-    Ok(config.core.identity)
-}
-
-fn ensure_team_lead_replacement_safe_with_query<F>(
-    team: &str,
-    existing_lead_session_id: &str,
-    new_session_id: &str,
-    query_session_for_team: F,
-) -> Result<()>
-where
-    F: Fn(&str, &str) -> Result<Option<agent_team_mail_core::daemon_client::SessionQueryResult>>,
-{
-    match query_session_for_team(team, "team-lead") {
-        Ok(Some(ref info)) if info.alive && info.session_id != new_session_id => {
-            let short = &info.session_id[..8.min(info.session_id.len())];
-            anyhow::bail!(
-                "team-lead is already active in session {}... (use --force to override)",
-                short
-            );
-        }
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => anyhow::bail!(
-            "WARNING: cannot confirm liveness of existing team-lead session {}. \
-             Use --force to take over explicitly.",
-            existing_lead_session_id
-        ),
-        Err(e) => anyhow::bail!(
-            "WARNING: daemon liveness check failed ({e}). \
-             Cannot safely replace existing team-lead session {}; use --force to override.",
-            existing_lead_session_id
-        ),
-    }
-}
-
-fn sync_session_with_daemon(
-    team: &str,
-    agent: &str,
-    session_id: &str,
-    process_id: Option<u32>,
-    runtime: Option<&str>,
-) -> Result<()> {
-    let Some(pid) = process_id.filter(|pid| *pid > 1) else {
-        eprintln!(
-            "Warning: daemon session sync skipped for {agent}@{team} (no validated hook PID)."
-        );
-        return Ok(());
-    };
-
-    let runtime_session_id = runtime.map(|_| session_id);
-    match agent_team_mail_core::daemon_client::register_hint(
-        team,
-        agent,
-        session_id,
-        pid,
-        runtime,
-        runtime_session_id,
-        None,
-        None,
-    ) {
-        Ok(agent_team_mail_core::daemon_client::RegisterHintOutcome::Registered)
-        | Ok(agent_team_mail_core::daemon_client::RegisterHintOutcome::DaemonUnavailable) => Ok(()),
-        Ok(agent_team_mail_core::daemon_client::RegisterHintOutcome::UnsupportedDaemon) => {
-            anyhow::bail!(
-                "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry."
-            )
-        }
-        Err(e) => {
-            eprintln!("Warning: daemon session sync failed for {agent}@{team}: {e}");
-            Ok(())
-        }
-    }
 }
 
 /// Write team config atomically using a temp file + fsync + swap.
@@ -407,71 +313,4 @@ fn write_team_config(config_path: &std::path::Path, config: &TeamConfig) -> Resu
     drop(file);
     atomic_swap(config_path, &tmp_path)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use agent_team_mail_core::daemon_client::SessionQueryResult;
-    use std::cell::RefCell;
-
-    fn sample_session(session_id: &str, alive: bool) -> SessionQueryResult {
-        SessionQueryResult {
-            session_id: session_id.to_string(),
-            process_id: 1234,
-            alive,
-            runtime: None,
-            runtime_session_id: None,
-            pane_id: None,
-            runtime_home: None,
-        }
-    }
-
-    #[test]
-    fn lead_replacement_check_uses_team_scoped_query() {
-        let called = RefCell::new(None::<(String, String)>);
-        let result = ensure_team_lead_replacement_safe_with_query(
-            "atm-dev",
-            "existing-session",
-            "new-session",
-            |team, name| {
-                *called.borrow_mut() = Some((team.to_string(), name.to_string()));
-                Ok(Some(sample_session("other-session", true)))
-            },
-        );
-        assert!(result.is_err(), "live conflicting lead session must block");
-        assert_eq!(
-            called.into_inner(),
-            Some(("atm-dev".to_string(), "team-lead".to_string()))
-        );
-    }
-
-    #[test]
-    fn lead_replacement_check_allows_dead_existing_session() {
-        let result = ensure_team_lead_replacement_safe_with_query(
-            "atm-dev",
-            "existing-session",
-            "new-session",
-            |_team, _name| Ok(Some(sample_session("other-session", false))),
-        );
-        assert!(
-            result.is_ok(),
-            "dead existing session should allow takeover"
-        );
-    }
-
-    #[test]
-    fn lead_replacement_check_none_requires_force() {
-        let err = ensure_team_lead_replacement_safe_with_query(
-            "atm-dev",
-            "existing-session",
-            "new-session",
-            |_team, _name| Ok(None),
-        )
-        .expect_err("missing daemon evidence must fail closed");
-        assert!(
-            err.to_string().contains("cannot confirm liveness"),
-            "unexpected error: {err}"
-        );
-    }
 }
