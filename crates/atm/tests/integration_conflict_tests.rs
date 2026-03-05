@@ -8,7 +8,7 @@ use assert_cmd::cargo;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// Helper to set home directory for cross-platform test compatibility.
@@ -88,13 +88,6 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
     team_dir
 }
 
-fn workspace_bin_path(bin_name: &str) -> PathBuf {
-    #[allow(deprecated)]
-    {
-        cargo::cargo_bin(bin_name)
-    }
-}
-
 /// Explicit daemon process lifecycle guard for integration tests.
 ///
 /// Spawns `atm-daemon` with a known PID and guarantees teardown via kill+wait.
@@ -105,7 +98,7 @@ struct DaemonProcessGuard {
 
 impl DaemonProcessGuard {
     fn spawn(home: &TempDir, team: &str) -> Self {
-        let daemon_bin = workspace_bin_path("atm-daemon");
+        let daemon_bin = cargo::cargo_bin("atm-daemon");
         let mut cmd = Command::new(daemon_bin);
         cmd.env("ATM_HOME", home.path())
             .env("ATM_DAEMON_AUTOSTART", "0")
@@ -125,6 +118,25 @@ impl DaemonProcessGuard {
     fn pid(&self) -> u32 {
         self.pid
     }
+
+    fn wait_ready(&self, home: &TempDir) {
+        let pid_path = home.path().join(".claude/daemon/atm-daemon.pid");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Ok(content) = fs::read_to_string(&pid_path)
+                && let Ok(pid) = content.trim().parse::<u32>()
+                && pid == self.pid
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!(
+            "daemon readiness timeout: expected pid {} at {}",
+            self.pid,
+            pid_path.display()
+        );
+    }
 }
 
 impl Drop for DaemonProcessGuard {
@@ -143,12 +155,16 @@ impl Drop for DaemonProcessGuard {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn test_concurrent_sends_no_data_loss() {
+    // Root-cause note for #372: CI hangs were traced to harness lifecycle
+    // nondeterminism (startup/teardown timing), not a confirmed production
+    // data-loss defect in send/inbox persistence.
     // Multi-threaded test: simulate atm CLI and Claude Code writing to same inbox
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
     let daemon_guard = DaemonProcessGuard::spawn(&temp_dir, "test-team");
     let daemon_pid = daemon_guard.pid();
     assert!(daemon_pid > 1, "daemon must expose a stable known PID");
+    daemon_guard.wait_ready(&temp_dir);
 
     let num_senders = 5;
     let messages_per_sender = 4;
@@ -156,7 +172,7 @@ async fn test_concurrent_sends_no_data_loss() {
 
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).unwrap();
-    let atm_bin = workspace_bin_path("atm");
+    let atm_bin = cargo::cargo_bin("atm");
 
     // Send messages in parallel using async tasks and bound the full send phase.
     let mut senders = tokio::task::JoinSet::new();
@@ -219,15 +235,12 @@ async fn test_concurrent_sends_no_data_loss() {
         }
     }
 
-    // Deterministic drain convergence: bounded by pass count, not wall-clock.
+    // Deterministic drain convergence with bounded wall-clock timeout.
     let teams_dir = temp_dir.path().join(".claude/teams");
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
-    let max_drain_passes = expected * 20;
-    for _ in 0..max_drain_passes {
-        if status.pending == 0 {
-            break;
-        }
-        std::thread::yield_now();
+    while status.pending > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
         status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
     }
     assert_eq!(
