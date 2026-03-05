@@ -98,7 +98,19 @@ struct DaemonProcessGuard {
 
 impl DaemonProcessGuard {
     fn spawn(home: &TempDir, team: &str) -> Self {
-        let daemon_bin = cargo::cargo_bin("atm-daemon");
+        let daemon_bin = {
+            let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
+            #[cfg(windows)]
+            candidate.set_file_name("atm-daemon.exe");
+            #[cfg(not(windows))]
+            candidate.set_file_name("atm-daemon");
+            candidate
+        };
+        assert!(
+            daemon_bin.exists(),
+            "atm-daemon binary not found at {}",
+            daemon_bin.display()
+        );
         let mut cmd = Command::new(daemon_bin);
         cmd.env("ATM_HOME", home.path())
             .env("ATM_DAEMON_AUTOSTART", "0")
@@ -172,7 +184,7 @@ async fn test_concurrent_sends_no_data_loss() {
 
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).unwrap();
-    let atm_bin = cargo::cargo_bin("atm");
+    let atm_bin = cargo::cargo_bin!("atm");
 
     // Send messages in parallel using async tasks and bound the full send phase.
     let mut senders = tokio::task::JoinSet::new();
@@ -180,7 +192,7 @@ async fn test_concurrent_sends_no_data_loss() {
     for sender_id in 0..num_senders {
         let temp_path = temp_dir.path().to_path_buf();
         let workdir_path = workdir.clone();
-        let atm_bin_path = atm_bin.clone();
+        let atm_bin_path = atm_bin.to_path_buf();
         senders.spawn(async move {
             for msg_id in 0..messages_per_sender {
                 let mut cmd = tokio::process::Command::new(&atm_bin_path);
