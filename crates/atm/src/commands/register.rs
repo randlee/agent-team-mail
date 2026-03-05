@@ -71,7 +71,7 @@ pub fn execute(args: RegisterArgs) -> Result<()> {
     let identity = resolve_session_identity()?;
 
     if let Some(ref name) = args.name {
-        register_teammate(&config_path, &args.team, name, &identity)
+        register_teammate(&home_dir, &config_path, &args.team, name, &identity)
     } else {
         register_team_lead(&home_dir, &config_path, &args.team, &identity, args.force)
     }
@@ -253,11 +253,33 @@ fn register_team_lead(
 
 /// Register as a named teammate: update the member's `sessionId` field.
 fn register_teammate(
+    home_dir: &std::path::Path,
     config_path: &std::path::Path,
     team: &str,
     name: &str,
     identity: &SessionIdentity,
 ) -> Result<()> {
+    let caller_identity = resolve_caller_identity(home_dir, team)?;
+    let caller_identity_explicit = !caller_identity.trim().is_empty() && caller_identity != "human";
+    if caller_identity_explicit && caller_identity != name {
+        // Fail closed: do not allow cross-identity teammate session writes even
+        // when daemon/session sync is unavailable, so ownership guarantees do
+        // not depend on daemon reachability.
+        warn!(
+            attempted_writer = %caller_identity,
+            owner = %name,
+            field = "sessionId",
+            "register teammate ownership guard rejected cross-identity session write"
+        );
+        anyhow::bail!(
+            "Ownership guard rejected sessionId update for '{}': caller identity is '{}'. \
+             Set ATM_IDENTITY/.atm.toml identity to '{}' and retry.",
+            name,
+            caller_identity,
+            name
+        );
+    }
+
     // Verify member exists in team config.
     let existing: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
 
@@ -310,6 +332,19 @@ fn register_teammate(
         name, team, identity.session_id
     );
     Ok(())
+}
+
+fn resolve_caller_identity(home_dir: &std::path::Path, team: &str) -> Result<String> {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = resolve_config(
+        &ConfigOverrides {
+            team: Some(team.to_string()),
+            ..Default::default()
+        },
+        &current_dir,
+        home_dir,
+    )?;
+    Ok(config.core.identity)
 }
 
 fn sync_session_with_daemon(
