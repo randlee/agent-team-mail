@@ -1543,6 +1543,26 @@ These items should be addressed in the next hardening phase.
 
 ---
 
+## 22. External Contributions
+
+### 22.1 Erik's Session File Lifecycle Work (PR #428)
+
+**Branch**: `origin/erik/atm-project-template-phase-1`
+**Worktree**: `/Users/randlee/Documents/github/agent-team-mail-worktrees/erik/atm-project-template-phase-1`
+**Status**: DRAFT — under review by atm-qa
+
+Key commits:
+- `01998f7` — session-end hook + session-start write (initial implementation)
+- `1d2bc83` — SessionEnd hook hardening
+
+**Adopted in PR #444** (`feature/session-file-lifecycle`):
+- Session file lifecycle (SessionStart write, SessionEnd cleanup, atm-identity-write.py refresh, `read_session_file` in hook_identity.rs)
+- **Deviations from Erik's implementation**:
+  - Path changed to team-scoped: `~/.claude/teams/<team>/sessions/<session_id>.json` (Erik used `~/.claude/sessions/`)
+  - `pid` field uses `os.getppid()` in `session-start.py` (Erik's version used `os.getpid()` — Phase Z regression)
+
+---
+
 ## 21. Open Issues Tracker
 
 **WARNING**: All issues below are OPEN on GitHub. Do not mark as resolved without verifying the fix exists AND closing the GitHub issue.

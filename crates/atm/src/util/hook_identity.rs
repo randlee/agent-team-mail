@@ -16,6 +16,8 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::util::settings::get_home_dir;
+
 /// Maximum age in seconds before a hook file is considered stale.
 const HOOK_FILE_TTL_SECS: f64 = 5.0;
 
@@ -118,6 +120,97 @@ pub fn read_hook_file() -> Result<Option<HookFileData>> {
     }
 
     Ok(Some(data))
+}
+
+/// Data stored in a session file written by `session-start.py`.
+#[derive(Debug, Deserialize)]
+pub struct SessionFileData {
+    pub session_id: String,
+    pub team: String,
+    pub identity: String,
+    #[allow(dead_code)]
+    pub pid: Option<u32>,
+    pub created_at: f64,
+    pub updated_at: Option<f64>,
+}
+
+/// Maximum age in seconds before a session file is considered stale (24 hours).
+const SESSION_FILE_TTL_SECS: f64 = 86400.0;
+
+/// Scan session files for a matching `team` + `identity`.
+///
+/// Session files are stored at `{ATM_HOME}/.claude/teams/<team>/sessions/<session_id>.json`.
+///
+/// Returns:
+/// - `Ok(None)` — directory absent or no matching non-stale files found.
+/// - `Ok(Some(session_id))` — exactly one active match found.
+/// - `Err(e)` — ambiguous (>1 active match); error message instructs the user to
+///   set `CLAUDE_SESSION_ID` explicitly.
+pub fn read_session_file(team: &str, identity: &str) -> Result<Option<String>> {
+    let home = get_home_dir()?;
+    let sessions_dir = home.join(".claude").join("teams").join(team).join("sessions");
+    if !sessions_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
+    let mut matches: Vec<SessionFileData> = Vec::new();
+    let entries = match std::fs::read_dir(&sessions_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(None),
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+
+        // Ownership check (Unix only).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(meta) = std::fs::metadata(&path) {
+                // SAFETY: getuid() has no preconditions and always succeeds on Unix.
+                let current_uid = unsafe { libc::getuid() };
+                if meta.uid() != current_uid {
+                    continue;
+                }
+            }
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let data: SessionFileData = match serde_json::from_str(&content) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        // TTL check: use updated_at if present, else fall back to created_at.
+        let timestamp = data.updated_at.unwrap_or(data.created_at);
+        if timestamp <= 0.0 || (now - timestamp) > SESSION_FILE_TTL_SECS {
+            continue;
+        }
+
+        if data.team == team && data.identity == identity {
+            matches.push(data);
+        }
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.into_iter().next().unwrap().session_id)),
+        n => anyhow::bail!(
+            "Ambiguous: {n} active sessions for {identity}@{team}. \
+             Export CLAUDE_SESSION_ID=<your-session-id> to disambiguate."
+        ),
+    }
 }
 
 /// Read the agent identity from the PID-based hook file.

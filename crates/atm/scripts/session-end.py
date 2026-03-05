@@ -59,7 +59,7 @@ def main() -> int:
     send_hook_event(payload)
 
     # Clean up THIS session's file only (fail-open — missing file is fine).
-    sessions_dir = atm_home() / ".claude" / "sessions"
+    sessions_dir = atm_home() / ".claude" / "teams" / default_team / "sessions"
     session_file = sessions_dir / f"{session_id}.json"
     try:
         session_file.unlink(missing_ok=True)

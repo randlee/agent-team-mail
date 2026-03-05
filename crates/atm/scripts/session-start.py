@@ -96,7 +96,7 @@ def main() -> int:
     if session_id and default_team and identity:
         try:
             import time
-            sessions_dir = atm_home() / ".claude" / "sessions"
+            sessions_dir = atm_home() / ".claude" / "teams" / default_team / "sessions"
             sessions_dir.mkdir(parents=True, exist_ok=True)
             session_file = sessions_dir / f"{session_id}.json"
             session_data = {

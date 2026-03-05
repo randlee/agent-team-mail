@@ -22,7 +22,7 @@ use agent_team_mail_core::text::{
 
 use crate::util::addressing::parse_address;
 use crate::util::file_policy::check_file_reference;
-use crate::util::hook_identity::{read_hook_file, read_hook_file_identity};
+use crate::util::hook_identity::{read_hook_file, read_hook_file_identity, read_session_file};
 use crate::util::settings::get_home_dir;
 
 /// Send a message to a specific agent
@@ -457,7 +457,7 @@ fn register_sender_hint(team: &str, sender: &str, cfg: &TeamConfig) -> Result<()
         return Ok(());
     }
 
-    let session_id = detect_sender_session_id().unwrap_or_else(|| {
+    let session_id = detect_sender_session_id_with_context(Some(team), Some(sender)).unwrap_or_else(|| {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -588,13 +588,21 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     Ok(())
 }
 
-fn detect_sender_session_id() -> Option<String> {
+fn detect_sender_session_id_with_context(team: Option<&str>, identity: Option<&str>) -> Option<String> {
+    // 1. PID-based hook file (fastest, most precise — set by PreToolUse Bash hook).
     if let Ok(Some(hook)) = read_hook_file() {
         let trimmed = hook.session_id.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
         }
     }
+    // 2. Session file written by SessionStart hook (survives bash subshell env loss).
+    if let (Some(t), Some(id)) = (team, identity) {
+        if let Ok(Some(session_id)) = read_session_file(t, id) {
+            return Some(session_id);
+        }
+    }
+    // 3. CLAUDE_SESSION_ID env var (explicit override or tmux/codex sessions).
     std::env::var("CLAUDE_SESSION_ID")
         .ok()
         .map(|s| s.trim().to_string())

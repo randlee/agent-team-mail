@@ -1340,7 +1340,7 @@ Rationale:
 
 #### `SessionStart` — Session File
 
-The `SessionStart` hook writes a session file at `{ATM_HOME}/.claude/sessions/<session_id>.json`
+The `SessionStart` hook writes a session file at `{ATM_HOME}/.claude/teams/<team>/sessions/<session_id>.json`
 when full routing context is available (`session_id` + `team` + `identity`).
 
 **File contents**:
@@ -1379,7 +1379,7 @@ instructing the user to set `CLAUDE_SESSION_ID` explicitly to disambiguate.
 The `SessionEnd` hook deletes the session file for the terminating session:
 
 ```
-{ATM_HOME}/.claude/sessions/<session_id>.json
+{ATM_HOME}/.claude/teams/<team>/sessions/<session_id>.json
 ```
 
 **Rules**:
