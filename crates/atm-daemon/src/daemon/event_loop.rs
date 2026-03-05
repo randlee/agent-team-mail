@@ -1721,6 +1721,74 @@ mod tests {
         assert_eq!(member.is_active, Some(false));
     }
 
+    #[test]
+    #[serial]
+    fn test_reconcile_does_not_auto_promote_dead_session_with_live_pid() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let cwd = home.display().to_string();
+        let live_pid = std::process::id();
+
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd.clone(),
+                    "subscriptions": [],
+                    "isActive": true
+                },
+                {
+                    "agentId": "arch-ctm@atm-dev",
+                    "name": "arch-ctm",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd,
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "dead-live-pid", live_pid);
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+
+        let state_store = new_state_store();
+        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+
+        let tracker = state_store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Offline));
+        drop(tracker);
+
+        let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
+            &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
+        )
+        .unwrap();
+        let member = cfg
+            .members
+            .iter()
+            .find(|m| m.name == "arch-ctm")
+            .expect("member present");
+        assert_eq!(member.is_active, Some(false));
+
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Dead
+        );
+    }
+
     fn assert_terminal_non_lead_cleanup(home: &std::path::Path, inbox_dir: &std::path::Path) {
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
             &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
