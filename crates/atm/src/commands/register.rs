@@ -340,9 +340,11 @@ fn sync_session_with_daemon(
         Ok(agent_team_mail_core::daemon_client::RegisterHintOutcome::Registered)
         | Ok(agent_team_mail_core::daemon_client::RegisterHintOutcome::DaemonUnavailable) => Ok(()),
         Ok(agent_team_mail_core::daemon_client::RegisterHintOutcome::UnsupportedDaemon) => {
-            anyhow::bail!(
-                "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry."
-            )
+            eprintln!(
+                "Warning: Connected daemon does not support 'register-hint'. \
+                 Upgrade atm-daemon to this ATM version and retry; continuing without daemon session sync."
+            );
+            Ok(())
         }
         Err(e) => {
             eprintln!("Warning: daemon session sync failed for {agent}@{team}: {e}");

@@ -461,7 +461,13 @@ async fn handle_connection(
         )
         .await
     } else if is_hook_event_command(request_str) {
-        handle_hook_event_command(request_str, &state_store, &session_registry).await
+        handle_hook_event_command_with_dedup(
+            request_str,
+            &state_store,
+            &session_registry,
+            &dedup_store,
+        )
+        .await
     } else if is_stream_event_command(request_str) {
         handle_stream_event_command(request_str, &stream_state_store, &stream_event_sender).await
     } else if is_log_event_command(request_str) {
@@ -995,10 +1001,7 @@ fn emit_member_transition_events(
             "source".to_string(),
             serde_json::Value::String("daemon".to_string()),
         );
-        extra_fields.insert(
-            "reason".to_string(),
-            serde_json::Value::String(spec.reason),
-        );
+        extra_fields.insert("reason".to_string(), serde_json::Value::String(spec.reason));
         if let Some(pid) = process_id {
             extra_fields.insert("pid".to_string(), serde_json::Value::Number(pid.into()));
         }
@@ -1233,10 +1236,11 @@ fn emit_hook_failure(
 /// Handle the `"hook-event"` command, updating daemon state in real-time
 /// from Claude Code lifecycle hooks (session_start, teammate_idle, session_end).
 #[cfg(unix)]
-async fn handle_hook_event_command(
+async fn handle_hook_event_command_with_dedup(
     request_str: &str,
     state_store: &SharedStateStore,
     session_registry: &SharedSessionRegistry,
+    dedup_store: &SharedDedupeStore,
 ) -> SocketResponse {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
 
@@ -1360,6 +1364,37 @@ async fn handle_hook_event_command(
         auth.source,
         LifecycleSourceKind::ClaudeHook | LifecycleSourceKind::Unknown
     );
+
+    // Deduplicate lifecycle hook deliveries before any mutable state changes.
+    // Some adapters may retry on transport failures using the same request_id.
+    let request_id = request.request_id.trim();
+    if !request_id.is_empty() {
+        let session_key = if session_id.trim().is_empty() {
+            "_"
+        } else {
+            session_id.trim()
+        };
+        let key = DedupeKey::new(&team, session_key, &agent, request_id);
+        if dedup_store.lock().unwrap().check_and_insert(key) {
+            info!(
+                event = %event_type,
+                team = %team,
+                agent = %agent,
+                request_id = %request_id,
+                "hook_event duplicate delivery ignored"
+            );
+            return make_ok_response(
+                &request.request_id,
+                serde_json::json!({
+                    "processed": true,
+                    "duplicate": true,
+                    "event": event_type,
+                    "agent": agent
+                }),
+            );
+        }
+    }
+
     let agent_pid = process_id.unwrap_or(0);
 
     match event_type.as_str() {
@@ -1662,6 +1697,23 @@ async fn handle_hook_event_command(
         &request.request_id,
         serde_json::json!({"processed": true, "event": event_type, "agent": agent}),
     )
+}
+
+#[cfg(all(test, unix))]
+async fn handle_hook_event_command(
+    request_str: &str,
+    state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    let dedup_path = std::env::temp_dir().join(format!(
+        "atm-hook-event-test-dedup-{}.jsonl",
+        uuid::Uuid::new_v4()
+    ));
+    let store = DurableDedupeStore::new(dedup_path, std::time::Duration::from_secs(600), 1000)
+        .expect("failed to create test dedupe store");
+    let dedup_store = std::sync::Arc::new(std::sync::Mutex::new(store));
+    handle_hook_event_command_with_dedup(request_str, state_store, session_registry, &dedup_store)
+        .await
 }
 
 /// Handle the `"launch"` command asynchronously by forwarding it through the
@@ -3766,6 +3818,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_and_dispatch_register_hint_rejects_whitespace_session_id() {
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"team":"atm-dev","agent":"arch-ctm","session_id":"   ","process_id":1234}}"#;
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "MISSING_PARAMETER");
+        assert!(
+            err.message.contains("session_id"),
+            "error must mention missing session_id, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
     #[serial]
     fn test_handle_register_hint_registers_external_member_session() {
         let temp = TempDir::new().unwrap();
@@ -4876,6 +4946,41 @@ mod tests {
         // State should remain Idle (not reset to Launching) — session_start only registers if not already tracked
         let tracker = store.lock().unwrap();
         assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_duplicate_request_id_is_deduped_before_state_mutation() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let (dd, _dd_dir) = make_dd();
+        let req_json = r#"{"version":1,"request_id":"r-dedup-1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-dedup","process_id":0}}"#;
+
+        let first = handle_hook_event_command_with_dedup(req_json, &store, &sr, &dd).await;
+        assert_eq!(first.status, "ok");
+        let payload1 = first.payload.unwrap();
+        assert!(payload1["processed"].as_bool().unwrap());
+        assert!(payload1.get("duplicate").is_none());
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let second = handle_hook_event_command_with_dedup(req_json, &store, &sr, &dd).await;
+        assert_eq!(second.status, "ok");
+        let payload2 = second.payload.unwrap();
+        assert!(payload2["processed"].as_bool().unwrap());
+        assert_eq!(payload2["duplicate"].as_bool(), Some(true));
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Active));
+        let elapsed = tracker
+            .time_since_transition("team-lead")
+            .expect("team-lead transition timestamp should exist");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(20),
+            "duplicate hook request should not reset last transition timestamp"
+        );
     }
 
     #[cfg(unix)]

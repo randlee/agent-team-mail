@@ -1157,9 +1157,12 @@ fn sync_member_session_hint(
         None,
     ) {
         Ok(RegisterHintOutcome::Registered | RegisterHintOutcome::DaemonUnavailable) => Ok(()),
-        Ok(RegisterHintOutcome::UnsupportedDaemon) => anyhow::bail!(
-            "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry."
-        ),
+        Ok(RegisterHintOutcome::UnsupportedDaemon) => {
+            warn!(
+                "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry; continuing without daemon session sync."
+            );
+            Ok(())
+        }
         Err(e) => {
             warn!("daemon sync failed for {agent}@{team} session hint: {e}");
             Ok(())
