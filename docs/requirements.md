@@ -1076,6 +1076,16 @@ Required baseline:
 - User-facing control remains agent-centric (`team`, `agent`) rather than runtime
   session-centric for normal usage.
 - Before launch, `atm teams spawn` must persist roster metadata for target member:
+  - `agent_type` ownership:
+    - `agent_type` is a human/runtime role label owned by ATM roster writers
+      (`teams add-member`, `teams join`, `teams spawn`), not by daemon liveness
+      reconciliation.
+    - Valid values are free-form strings, but recommended values are:
+      `general-purpose`, `Explore`, `Plan`, `claude`, `codex`, `gemini`,
+      `opencode`, and `human:<username>` where applicable.
+    - Liveness and backend routing semantics must use backend/session fields
+      (`external_backend_type`, `session_id`, `process_id`) and must not infer
+      liveness from `agent_type`.
   - `model` (validated by model registry)
   - `external_backend_type` (runtime-mapped backend kind)
 
