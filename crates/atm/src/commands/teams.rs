@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Args;
 use serde_json::json;
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -1515,8 +1516,8 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
 
     let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
 
-    let inboxes_dir = team_dir.join("inboxes");
     let mut removed_names: Vec<String> = Vec::new();
+    let mut removed_orphan_mailboxes: Vec<String> = Vec::new();
 
     let members_to_check: Vec<_> = if let Some(ref agent_name) = args.agent {
         team_config
@@ -1636,13 +1637,9 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         };
 
         if is_dead {
-            // Remove inbox file(s) for this member
-            let inbox_path = inboxes_dir.join(format!("{}.json", member.name));
-            if inbox_path.exists() {
-                if let Err(e) = fs::remove_file(&inbox_path) {
-                    warn!("Failed to remove inbox for {}: {e}", member.name);
-                }
-            }
+            // Coupled teardown: when a roster member is removed, remove all
+            // associated mailbox artifacts (inbox json/lock + mailbox dir).
+            remove_member_mailbox_artifacts(&team_dir, &member.name);
             removed_names.push(member.name.clone());
         } else {
             // Only print a warning when cleaning up a specific named agent.
@@ -1661,13 +1658,25 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         write_team_config(&config_path, &team_config)?;
     }
 
-    if removed_names.is_empty() && skipped_names.is_empty() {
+    // Full-team cleanup mode: purge orphan mailbox artifacts that no longer
+    // match any roster member.
+    if args.agent.is_none() {
+        let roster: HashSet<String> = team_config.members.iter().map(|m| m.name.clone()).collect();
+        removed_orphan_mailboxes = purge_orphan_mailboxes(&team_dir, &roster);
+    }
+
+    if removed_names.is_empty() && removed_orphan_mailboxes.is_empty() && skipped_names.is_empty() {
         println!("No stale members found.");
     } else {
         if !removed_names.is_empty() {
             let names = removed_names.join(", ");
             let count = removed_names.len();
             println!("Removed {count} stale member(s): {names}");
+        }
+        if !removed_orphan_mailboxes.is_empty() {
+            let names = removed_orphan_mailboxes.join(", ");
+            let count = removed_orphan_mailboxes.len();
+            println!("Removed {count} orphan mailbox(es): {names}");
         }
         if !skipped_names.is_empty() {
             let names = skipped_names.join(", ");
@@ -1688,7 +1697,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             agent_id: std::env::var("ATM_IDENTITY").ok(),
             agent_name: std::env::var("ATM_IDENTITY").ok(),
             result: Some("incomplete".to_string()),
-            count: Some(removed_names.len() as u64),
+            count: Some((removed_names.len() + removed_orphan_mailboxes.len()) as u64),
             error: Some(format!(
                 "skipped={} daemon_unreachable",
                 skipped_names.len()
@@ -1711,11 +1720,81 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         agent_id: std::env::var("ATM_IDENTITY").ok(),
         agent_name: std::env::var("ATM_IDENTITY").ok(),
         result: Some("ok".to_string()),
-        count: Some(removed_names.len() as u64),
+        count: Some((removed_names.len() + removed_orphan_mailboxes.len()) as u64),
         ..Default::default()
     });
 
     Ok(())
+}
+
+fn remove_member_mailbox_artifacts(team_dir: &Path, member_name: &str) {
+    let inboxes_dir = team_dir.join("inboxes");
+    for ext in ["json", "lock"] {
+        let path = inboxes_dir.join(format!("{member_name}.{ext}"));
+        if path.exists()
+            && let Err(e) = fs::remove_file(&path)
+        {
+            warn!("Failed to remove inbox artifact for {member_name}: {e}");
+        }
+    }
+
+    let mailbox_dir = team_dir.join("mailboxes").join(member_name);
+    if mailbox_dir.exists()
+        && let Err(e) = fs::remove_dir_all(&mailbox_dir)
+    {
+        warn!("Failed to remove mailbox dir for {member_name}: {e}");
+    }
+}
+
+fn purge_orphan_mailboxes(team_dir: &Path, roster: &HashSet<String>) -> Vec<String> {
+    let mut removed: HashSet<String> = HashSet::new();
+
+    let inboxes_dir = team_dir.join("inboxes");
+    if let Ok(entries) = fs::read_dir(&inboxes_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|s| s.to_str());
+            if !matches!(ext, Some("json") | Some("lock")) {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if roster.contains(stem) {
+                continue;
+            }
+            if let Err(e) = fs::remove_file(&path) {
+                warn!("Failed to remove orphan inbox artifact '{}': {e}", stem);
+                continue;
+            }
+            removed.insert(stem.to_string());
+        }
+    }
+
+    let mailboxes_root = team_dir.join("mailboxes");
+    if let Ok(entries) = fs::read_dir(&mailboxes_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if roster.contains(name) {
+                continue;
+            }
+            if let Err(e) = fs::remove_dir_all(&path) {
+                warn!("Failed to remove orphan mailbox dir '{}': {e}", name);
+                continue;
+            }
+            removed.insert(name.to_string());
+        }
+    }
+
+    let mut removed_list: Vec<String> = removed.into_iter().collect();
+    removed_list.sort();
+    removed_list
 }
 
 /// Entry point for `atm cleanup --agent` compatibility.
@@ -2435,6 +2514,48 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_cleanup_single_agent_removes_member_mailbox_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+        let mailbox_dir = team_dir.join("mailboxes/publisher");
+        fs::create_dir_all(&mailbox_dir).unwrap();
+        fs::write(mailbox_dir.join("meta.json"), "{}").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            force: true,
+        };
+
+        let result = cleanup(args);
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+        assert!(!inbox.exists(), "publisher inbox should be removed");
+        assert!(
+            !mailbox_dir.exists(),
+            "publisher mailbox dir should be removed during coupled teardown"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_cleanup_skips_and_errors_when_daemon_unreachable_no_force() {
         // Without --force, cleanup must not remove members when daemon liveness
         // cannot be determined; it should return an incomplete-cleanup error.
@@ -3136,6 +3257,73 @@ mod tests {
             }
         }
         restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cleanup_full_team_purges_orphan_mailbox_artifacts() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team_multi_dead(&temp_dir, "atm-dev");
+
+        // Create orphan inbox artifacts and mailbox dirs.
+        fs::write(team_dir.join("inboxes/orphan-agent.json"), "[]").unwrap();
+        fs::write(team_dir.join("inboxes/orphan-agent.lock"), "").unwrap();
+        let orphan_mailbox = team_dir.join("mailboxes/orphan-agent");
+        fs::create_dir_all(&orphan_mailbox).unwrap();
+        fs::write(orphan_mailbox.join("state.json"), "{}").unwrap();
+
+        // Create mailbox dirs for a live roster member and for removable members.
+        let lead_mailbox = team_dir.join("mailboxes/team-lead");
+        fs::create_dir_all(&lead_mailbox).unwrap();
+        fs::write(lead_mailbox.join("state.json"), "{}").unwrap();
+        let removable_mailbox = team_dir.join("mailboxes/agent-a");
+        fs::create_dir_all(&removable_mailbox).unwrap();
+        fs::write(removable_mailbox.join("state.json"), "{}").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: None,
+            force: true,
+        };
+
+        let result = cleanup(args);
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+
+        assert!(
+            !team_dir.join("inboxes/orphan-agent.json").exists(),
+            "orphan inbox json should be purged"
+        );
+        assert!(
+            !team_dir.join("inboxes/orphan-agent.lock").exists(),
+            "orphan inbox lock should be purged"
+        );
+        assert!(
+            !orphan_mailbox.exists(),
+            "orphan mailbox dir should be purged"
+        );
+        assert!(
+            !removable_mailbox.exists(),
+            "removed member mailbox dir should be removed"
+        );
+        assert!(
+            lead_mailbox.exists(),
+            "mailbox for remaining roster member should be preserved"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 
     #[test]
