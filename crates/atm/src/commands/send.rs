@@ -457,13 +457,14 @@ fn register_sender_hint(team: &str, sender: &str, cfg: &TeamConfig) -> Result<()
         return Ok(());
     }
 
-    let session_id = detect_sender_session_id_with_context(Some(team), Some(sender)).unwrap_or_else(|| {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        format!("local:{sender}:{now_ms}:{process_id}")
-    });
+    let session_id = detect_sender_session_id_with_context(Some(team), Some(sender))
+        .unwrap_or_else(|| {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            format!("local:{sender}:{now_ms}:{process_id}")
+        });
 
     let runtime = member.effective_backend_type().and_then(|bt| match bt {
         BackendType::ClaudeCode => Some("claude"),
@@ -588,7 +589,10 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     Ok(())
 }
 
-fn detect_sender_session_id_with_context(team: Option<&str>, identity: Option<&str>) -> Option<String> {
+fn detect_sender_session_id_with_context(
+    team: Option<&str>,
+    identity: Option<&str>,
+) -> Option<String> {
     // 1. PID-based hook file (fastest, most precise — set by PreToolUse Bash hook).
     if let Ok(Some(hook)) = read_hook_file() {
         let trimmed = hook.session_id.trim();

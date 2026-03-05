@@ -148,7 +148,11 @@ const SESSION_FILE_TTL_SECS: f64 = 86400.0;
 ///   set `CLAUDE_SESSION_ID` explicitly.
 pub fn read_session_file(team: &str, identity: &str) -> Result<Option<String>> {
     let home = get_home_dir()?;
-    let sessions_dir = home.join(".claude").join("teams").join(team).join("sessions");
+    let sessions_dir = home
+        .join(".claude")
+        .join("teams")
+        .join(team)
+        .join("sessions");
     if !sessions_dir.is_dir() {
         return Ok(None);
     }
