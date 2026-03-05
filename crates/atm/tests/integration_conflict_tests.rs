@@ -91,6 +91,7 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 // ============================================================================
 
 #[test]
+#[serial_test::serial]
 fn test_concurrent_sends_no_data_loss() {
     // Multi-threaded test: simulate atm CLI and Claude Code writing to same inbox
     let temp_dir = TempDir::new().unwrap();
@@ -99,17 +100,26 @@ fn test_concurrent_sends_no_data_loss() {
     let num_senders = 5;
     let messages_per_sender = 4;
 
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+
     // Send messages in parallel using threads
     let mut handles = Vec::new();
 
     for sender_id in 0..num_senders {
         let temp_path = temp_dir.path().to_path_buf();
+        let workdir_path = workdir.clone();
         let handle = std::thread::spawn(move || {
             for msg_id in 0..messages_per_sender {
                 let mut cmd = cargo::cargo_bin_cmd!("atm");
-                cmd.env("ATM_HOME", &temp_path);
-                cmd.env("ATM_TEAM", "test-team");
-                cmd.env("ATM_IDENTITY", format!("sender-{sender_id}"));
+                cmd.env("ATM_HOME", &temp_path)
+                    .env("ATM_DAEMON_AUTOSTART", "0")
+                    .env_remove("ATM_CONFIG")
+                    .env_remove("CLAUDE_SESSION_ID")
+                    .env("ATM_TEAM", "test-team")
+                    .env("ATM_IDENTITY", format!("sender-{sender_id}"))
+                    .current_dir(&workdir_path)
+                    .timeout(std::time::Duration::from_secs(10));
                 cmd.arg("send")
                     .arg("agent-a")
                     .arg(format!("Message {msg_id} from sender {sender_id}"));
@@ -131,33 +141,42 @@ fn test_concurrent_sends_no_data_loss() {
         handle.join().expect("Thread panicked");
     }
 
+    // Drain any queued spool messages to make the final inbox count deterministic.
+    let teams_dir = temp_dir.path().join(".claude/teams");
+    let status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
+    assert_eq!(
+        status.failed, 0,
+        "Expected no spool drain failures, got: {:?}",
+        status
+    );
+
     // Verify: all messages should be in the inbox (possibly some in spool)
     let inbox_path = temp_dir
         .path()
         .join(".claude/teams/test-team/inboxes/agent-a.json");
 
-    if inbox_path.exists() {
-        let content = fs::read_to_string(&inbox_path).unwrap();
-        let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+    assert!(inbox_path.exists(), "Inbox file should exist after sends");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
 
-        // We should have at least some messages (concurrent writes may queue some)
-        assert!(
-            !messages.is_empty(),
-            "Inbox should contain at least some messages"
-        );
+    let expected = (num_senders * messages_per_sender) as usize;
+    assert_eq!(
+        messages.len(),
+        expected,
+        "Expected all messages to be delivered"
+    );
 
-        // Verify no duplicate message IDs
-        let msg_ids: Vec<&str> = messages
-            .iter()
-            .filter_map(|m| m["message_id"].as_str())
-            .collect();
-        let unique_ids: std::collections::HashSet<&str> = msg_ids.iter().copied().collect();
-        assert_eq!(
-            msg_ids.len(),
-            unique_ids.len(),
-            "No duplicate message_ids should exist"
-        );
-    }
+    // Verify no duplicate message IDs
+    let msg_ids: Vec<&str> = messages
+        .iter()
+        .filter_map(|m| m["message_id"].as_str())
+        .collect();
+    let unique_ids: std::collections::HashSet<&str> = msg_ids.iter().copied().collect();
+    assert_eq!(
+        msg_ids.len(),
+        unique_ids.len(),
+        "No duplicate message_ids should exist"
+    );
 }
 
 #[test]
