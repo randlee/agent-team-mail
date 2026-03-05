@@ -479,7 +479,7 @@ jobs:
         run: |
           set -euo pipefail
           version='${{ needs.gate-and-tag.outputs.release_version }}'
-          publish_list_path="${RUNNER_TEMP}/publish_list.txt"
+          publish_list_path="${RUNNER_TEMP:?RUNNER_TEMP is required}/publish_list.txt"
 
           crate_exists() {
             local crate="$1"
@@ -831,7 +831,7 @@ jobs:
           set -euo pipefail
           tag='${{ needs.gate-and-tag.outputs.release_tag }}'
           version='${{ needs.gate-and-tag.outputs.release_version }}'
-          tarball_path="${RUNNER_TEMP}/release.tar.gz"
+          tarball_path="${RUNNER_TEMP:?RUNNER_TEMP is required}/release.tar.gz"
           # Use the macOS arm64 tarball as the canonical release artifact
           tarball_url="https://github.com/randlee/agent-team-mail/releases/download/${tag}/atm_${version}_aarch64-apple-darwin.tar.gz"
           echo "tarball_url=${tarball_url}" >> "$GITHUB_OUTPUT"
