@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
-**Version**: 0.5
-**Date**: 2026-02-25
-**Status**: Phase X planning in progress (post-v0.30.0 release).
+**Version**: 0.6
+**Date**: 2026-03-05
+**Status**: Phase Z complete (post-v0.34.0 release).
 
 ---
 
@@ -1412,11 +1412,11 @@ the current tranche focused on onboarding contract closure.
 | **Z** | Z.4 | Canonical Member State Completion | COMPLETE | [#429](https://github.com/randlee/agent-team-mail/pull/429) |
 | **Z** | Z.5 | Lifecycle Logging + Hook Events | COMPLETE | [#430](https://github.com/randlee/agent-team-mail/pull/430) |
 | **Z** | Z.6 | Cross-folder Spawn + QA Blocker Closure | COMPLETE | [#431](https://github.com/randlee/agent-team-mail/pull/431) |
-| **Z** | Z.7 | Review Findings Hardening | COMPLETE | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433) |
+| **Z** | Z.7 | Review Findings Hardening | COMPLETE (d1–7 shipped; d8–12 deferred) | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433), [#435](https://github.com/randlee/agent-team-mail/pull/435) |
 
-**Completed**: 99+ sprints across 23 phases (CI green)
+**Completed**: 106+ sprints across 24 phases (CI green)
 **Current version**: v0.34.0
-**Current phase**: Phase Z (execution)
+**Current phase**: Phase Z (complete)
 
 ---
 
@@ -1504,6 +1504,15 @@ doctor/log observability reliable and diagnosable from structured events.
 3. Hook lifecycle events are always emitted with consistent structured fields and WARN failure records.
 4. Doctor findings are diagnosable directly from structured logs without ad-hoc inference.
 
+### Z.7 Deferred Technical Debt Carry-Forward
+
+The following Z.7 deliverables (d8–d12) were deferred due to scope and are tracked as next-phase debt:
+
+- **d8**: `ATM_TEAM` env precedence test (non-mismatch path) — ATM-ZQA-001 test added to cover the fix; full precedence matrix coverage deferred
+- **d9–d12**: Advanced mismatch-override audit trails, cross-folder spawn edge cases, additional liveness-check hardening, and team-scoped register-lead conflict resolution
+
+These items should be addressed in the next hardening phase.
+
 ---
 
 ## 20. Phase Integration PRs
@@ -1528,6 +1537,9 @@ doctor/log observability reliable and diagnosable from structured events.
 | Phase N | [#221](https://github.com/randlee/agent-team-mail/pull/221) | Merged |
 | Phase O-R | [#238](https://github.com/randlee/agent-team-mail/pull/238) | Merged |
 | Phase P | Sprint PRs targeted develop directly (no integration branch) | Merged |
+| Phase Q | `integrate/phase-Q` → [#262](https://github.com/randlee/agent-team-mail/pull/262) | Merged |
+| Phase Y | `integrate/phase-Y` → [#396](https://github.com/randlee/agent-team-mail/pull/396) | Merged |
+| Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Open |
 
 ---
 
