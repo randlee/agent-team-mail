@@ -2,8 +2,10 @@
 """Global SessionStart hook for Claude Code.
 
 Reads the hook payload from stdin JSON, announces the session ID to stdout
-(always), and sends hook_event/session_start when an effective team+identity
-can be resolved (env vars take precedence over .atm.toml values).
+(always), and optionally sends a hook_event/session_start message to the
+ATM daemon socket when routing context is available from either:
+- `.atm.toml` in the current working directory, or
+- `ATM_TEAM` / `ATM_IDENTITY` environment variables.
 
 Exit codes:
 - 0: always (success or soft failure — fail-open)
@@ -16,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from atm_hook_lib import send_hook_event, read_atm_toml  # noqa: E402
+from atm_hook_lib import first_str, send_hook_event, read_atm_toml  # noqa: E402
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -41,28 +43,40 @@ def main() -> int:
         else:
             print(f"SESSION_ID={session_id} (starting fresh)")
 
-    # Resolve project/env context. Env vars take precedence; .atm.toml is fallback.
+    # Resolve routing context from .atm.toml (repo) or env (spawned teammates).
+    # This keeps hooks fail-open for non-ATM sessions while still supporting
+    # cross-folder spawned teammates that rely on env-only context.
     atm_config = read_atm_toml()
-    core = atm_config.get("core", {}) if isinstance(atm_config, dict) and isinstance(atm_config.get("core"), dict) else {}
-    toml_team: str = core.get("default_team", "") or ""
-    toml_identity: str = core.get("identity", "") or ""
-    env_team: str = os.environ.get("ATM_TEAM", "").strip()
-    env_identity: str = os.environ.get("ATM_IDENTITY", "").strip()
-    default_team: str = env_team or toml_team
-    identity: str = env_identity or toml_identity
+    core: dict[str, Any] = {}
+    if isinstance(atm_config, dict):
+        maybe_core = atm_config.get("core")
+        if isinstance(maybe_core, dict):
+            core = maybe_core
+    default_team: str = first_str(os.environ.get("ATM_TEAM"), core.get("default_team")) or ""
+    identity: str = first_str(os.environ.get("ATM_IDENTITY"), core.get("identity")) or ""
     welcome_message: str = core.get("welcome-message", "") or ""
 
-    if env_team and toml_team and env_team != toml_team:
-        sys.stderr.write(
-            f"[atm-hook] WARNING: ATM_TEAM='{env_team}' overrides .atm.toml default_team='{toml_team}'\n"
+    if atm_config is None and not default_team and not identity:
+        return 0  # Not an ATM project session and no env fallback — do nothing further
+
+    if isinstance(atm_config, dict):
+        toml_team: str = (
+            core.get("default_team", "")
+            if isinstance(core.get("default_team", ""), str)
+            else ""
         )
+        env_team = (os.environ.get("ATM_TEAM") or "").strip()
+        if env_team and toml_team and env_team != toml_team:
+            sys.stderr.write(
+                f"[atm-hook] WARNING: ATM_TEAM='{env_team}' overrides .atm.toml default_team='{toml_team}'\n"
+            )
 
     if default_team:
         print(f"ATM team: {default_team}")
     if welcome_message:
         print(f"Welcome: {welcome_message}")
 
-    # Send hook event to daemon socket when effective routing identity is known.
+    # Send hook event to daemon socket when we have complete routing context.
     # Use parent PID (Claude session process), not this short-lived hook PID.
     if session_id and default_team and identity:
         payload: dict[str, Any] = {

@@ -1501,7 +1501,7 @@ doctor/log observability reliable and diagnosable from structured events.
 3. Requirements alignment for event coverage and always-on hook observability semantics.
 
 **Acceptance Criteria**
-1. Offline<->Online transitions always emit INFO events exactly once per change.
+1. Offline<->Online transitions always emit INFO events exactly once per change on Unix builds (`#[cfg(unix)]` scope).
 2. Busy<->Idle transitions emit DEBUG-only events (no INFO spam).
 3. Hook lifecycle events are always emitted with consistent structured fields and WARN failure records.
 4. Doctor findings are diagnosable directly from structured logs without ad-hoc inference.

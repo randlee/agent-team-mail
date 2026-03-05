@@ -334,6 +334,27 @@ mod tests {
         unsafe { std::env::remove_var("ATM_LOG_MSG") };
     }
 
+    #[test]
+    #[serial]
+    fn test_fields_to_log_event_send_preview_disabled_for_empty_atm_log_msg() {
+        // SAFETY: test-scoped environment update.
+        unsafe { std::env::set_var("ATM_LOG_MSG", "") };
+        let fields = EventFields {
+            level: "info",
+            source: "atm",
+            action: "send",
+            message_text: Some("preview should remain disabled".to_string()),
+            ..Default::default()
+        };
+        let event = fields_to_log_event(&fields);
+        assert!(
+            event.fields.get("message_preview").is_none(),
+            "empty ATM_LOG_MSG must disable message preview"
+        );
+        // SAFETY: test-scoped environment cleanup.
+        unsafe { std::env::remove_var("ATM_LOG_MSG") };
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_fields_to_log_event_includes_parent_pid_field_on_unix() {

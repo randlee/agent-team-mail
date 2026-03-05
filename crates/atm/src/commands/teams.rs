@@ -426,13 +426,6 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let daemon_session = query_session_for_team(&team_name, &args.agent)
         .ok()
         .flatten();
-    ensure_spawn_member_metadata(
-        &team_name,
-        &args.agent,
-        &args.runtime,
-        args.model.as_deref(),
-        &launch_dir,
-    )?;
 
     let resolved_resume_session_id = if args.resume_session_id.is_some() {
         args.resume_session_id.clone()

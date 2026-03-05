@@ -11,6 +11,7 @@ use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
+use crate::util::member_labels::{GHOST_SUFFIX, UNREGISTERED_MARKER};
 use crate::util::settings::get_home_dir;
 
 /// List agents in a team
@@ -104,7 +105,7 @@ pub fn execute(args: MembersArgs) -> Result<()> {
                 let name = if member.in_config {
                     member.name.clone()
                 } else {
-                    format!("{} [ghost]", member.name)
+                    format!("{}{}", member.name, GHOST_SUFFIX)
                 };
                 let agent_type = &member.agent_type;
                 let model = &member.model;
@@ -147,8 +148,8 @@ fn build_member_rows(
             } else {
                 MemberRow {
                     name: name.clone(),
-                    agent_type: "[unregistered]".to_string(),
-                    model: "[unregistered]".to_string(),
+                    agent_type: UNREGISTERED_MARKER.to_string(),
+                    model: UNREGISTERED_MARKER.to_string(),
                     liveness: canonical_liveness_bool(daemon_states.get(name.as_str())),
                     in_config: false,
                 }
