@@ -49,9 +49,8 @@ const ATM_HOOK_LIB_PY: &str = include_str!("../../scripts/atm_hook_lib.py");
 // - PreToolUse(Task): gate agent spawning pattern enforcement
 // - PostToolUse(Bash): clean up PID identity file after `atm` commands
 //
-// Note: `atm init` installs the core hook commands. SessionEnd and
-// teammate-idle relay scripts are also materialized for lifecycle parity, even
-// when not explicitly wired as hook commands by this command.
+// Note: `atm init` installs the core hook commands, including SessionEnd.
+// Teammate-idle relay scripts are also materialized for lifecycle parity.
 
 /// Return the SessionStart hook command string for local or global install.
 fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
@@ -800,6 +799,7 @@ fn print_report(
             settings_path.display()
         );
         println!("  \u{2713} SessionStart hook present");
+        println!("  \u{2713} SessionEnd hook present");
         println!("  \u{2713} PreToolUse(Bash) hook present");
         println!("  \u{2713} PreToolUse(Task) hook present");
         println!("  \u{2713} PostToolUse(Bash) hook present");
@@ -810,6 +810,7 @@ fn print_report(
             settings_path.display()
         );
         print_hook_line("SessionStart hook", &report.session_start);
+        print_hook_line("SessionEnd hook", &report.session_end);
         print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash);
         print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
         print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
@@ -820,6 +821,7 @@ fn print_report(
             settings_path.display()
         );
         print_hook_line("SessionStart hook", &report.session_start);
+        print_hook_line("SessionEnd hook", &report.session_end);
         print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash);
         print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
         print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
