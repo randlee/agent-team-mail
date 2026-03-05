@@ -59,6 +59,18 @@ def main() -> int:
     if atm_config is None and not default_team and not identity:
         return 0  # Not an ATM project session and no env fallback — do nothing further
 
+    if isinstance(atm_config, dict):
+        toml_team: str = (
+            core.get("default_team", "")
+            if isinstance(core.get("default_team", ""), str)
+            else ""
+        )
+        env_team = (os.environ.get("ATM_TEAM") or "").strip()
+        if env_team and toml_team and env_team != toml_team:
+            sys.stderr.write(
+                f"[atm-hook] WARNING: ATM_TEAM='{env_team}' overrides .atm.toml default_team='{toml_team}'\n"
+            )
+
     if default_team:
         print(f"ATM team: {default_team}")
     if welcome_message:

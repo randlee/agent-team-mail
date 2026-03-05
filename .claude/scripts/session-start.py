@@ -2,8 +2,8 @@
 """Global SessionStart hook for Claude Code.
 
 Reads the hook payload from stdin JSON, announces the session ID to stdout
-(always), and optionally sends a hook_event/session_start message to the
-ATM daemon socket when .atm.toml exists in the current working directory.
+(always), and sends hook_event/session_start when an effective team+identity
+can be resolved (env vars take precedence over .atm.toml values).
 
 Exit codes:
 - 0: always (success or soft failure — fail-open)
@@ -41,25 +41,30 @@ def main() -> int:
         else:
             print(f"SESSION_ID={session_id} (starting fresh)")
 
-    # From here: guard ALL side effects with .atm.toml presence.
-    # File I/O and socket sends only happen when this is an ATM project session.
+    # Resolve project/env context. Env vars take precedence; .atm.toml is fallback.
     atm_config = read_atm_toml()
-    if atm_config is None:
-        return 0  # Not an ATM project session — do nothing further
-
-    core = atm_config.get("core", {}) if isinstance(atm_config.get("core"), dict) else {}
-    default_team: str = core.get("default_team", "") or ""
-    identity: str = core.get("identity", "") or ""
+    core = atm_config.get("core", {}) if isinstance(atm_config, dict) and isinstance(atm_config.get("core"), dict) else {}
+    toml_team: str = core.get("default_team", "") or ""
+    toml_identity: str = core.get("identity", "") or ""
+    env_team: str = os.environ.get("ATM_TEAM", "").strip()
+    env_identity: str = os.environ.get("ATM_IDENTITY", "").strip()
+    default_team: str = env_team or toml_team
+    identity: str = env_identity or toml_identity
     welcome_message: str = core.get("welcome-message", "") or ""
+
+    if env_team and toml_team and env_team != toml_team:
+        sys.stderr.write(
+            f"[atm-hook] WARNING: ATM_TEAM='{env_team}' overrides .atm.toml default_team='{toml_team}'\n"
+        )
 
     if default_team:
         print(f"ATM team: {default_team}")
     if welcome_message:
         print(f"Welcome: {welcome_message}")
 
-    # Send hook event to daemon socket (only when .atm.toml present).
+    # Send hook event to daemon socket when effective routing identity is known.
     # Use parent PID (Claude session process), not this short-lived hook PID.
-    if session_id:
+    if session_id and default_team and identity:
         payload: dict[str, Any] = {
             "event": "session_start",
             "session_id": session_id,

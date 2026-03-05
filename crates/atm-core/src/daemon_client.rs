@@ -952,6 +952,10 @@ pub fn register_hint(
             "runtime_session_id": runtime_session_id,
             "pane_id": pane_id,
             "runtime_home": runtime_home,
+            "identity": std::env::var("ATM_IDENTITY")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
         }),
     };
 
