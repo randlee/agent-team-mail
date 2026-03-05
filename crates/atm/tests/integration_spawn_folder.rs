@@ -237,3 +237,82 @@ fn test_spawn_claude_echoes_full_launch_command_on_failure() {
         "expected daemon unavailable failure, got stderr: {stderr}"
     );
 }
+
+#[test]
+fn test_spawn_env_team_mismatch_requires_override_team() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    let atm_toml_path = workdir.join(".atm.toml");
+    let toml_content = "[core]\ndefault_team = \"toml-team\"\nidentity = \"team-lead\"\n";
+    fs::write(&atm_toml_path, toml_content).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_TEAM", "env-team")
+        .args([
+            "teams",
+            "spawn",
+            "agent-mismatch",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stdout.contains("Launch command:"));
+    assert!(stderr.contains("Warning: team mismatch detected"));
+    assert!(stderr.contains("ATM_TEAM ('env-team')"));
+    assert!(stderr.contains(".atm.toml default_team ('toml-team')"));
+    assert!(stderr.contains("--override-team"));
+    assert_eq!(fs::read_to_string(&atm_toml_path).unwrap(), toml_content);
+}
+
+#[test]
+fn test_spawn_env_team_mismatch_override_team_uses_env_team_without_modifying_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    let atm_toml_path = workdir.join(".atm.toml");
+    let toml_content = "[core]\ndefault_team = \"toml-team\"\nidentity = \"team-lead\"\n";
+    fs::write(&atm_toml_path, toml_content).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_TEAM", "env-team")
+        .args([
+            "teams",
+            "spawn",
+            "agent-override",
+            "--runtime",
+            "codex",
+            "--override-team",
+            "--folder",
+            folder.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("Warning: team mismatch detected"));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["team"].as_str(), Some("env-team"));
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("Daemon is not running")
+    );
+    assert_eq!(fs::read_to_string(&atm_toml_path).unwrap(), toml_content);
+}

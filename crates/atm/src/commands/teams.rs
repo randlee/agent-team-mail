@@ -63,6 +63,9 @@ pub enum TeamsCommand {
 
 /// Spawn a team member (runtime-aware daemon launch)
 #[derive(Args, Debug)]
+#[command(
+    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn team-lead --runtime claude --folder /path/to/repo --team atm-dev\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
+)]
 pub struct SpawnArgs {
     /// Agent name
     agent: String,
@@ -114,6 +117,10 @@ pub struct SpawnArgs {
     /// Canonical spawn directory (`--cwd` is accepted as an alias)
     #[arg(long, alias = "cwd")]
     folder: Vec<PathBuf>,
+
+    /// Allow ATM_TEAM (env) to override conflicting .atm.toml default_team for this invocation
+    #[arg(long)]
+    override_team: bool,
 
     /// Output as JSON
     #[arg(long)]
@@ -394,6 +401,16 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
     let launch_dir = resolve_spawn_folder(&args.folder, &current_dir)?;
+    let env_team = env_var_nonempty("ATM_TEAM");
+    let repo_default_team = read_repo_default_team(&current_dir);
+    let team_mismatch = if args.team.is_none() {
+        match (env_team.as_deref(), repo_default_team.as_deref()) {
+            (Some(env), Some(repo)) if env != repo => Some((env.to_string(), repo.to_string())),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let config = resolve_config(
         &ConfigOverrides {
             team: args.team.clone(),
@@ -440,6 +457,48 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     }
     let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
     print_launch_command_preview(&launch_command_preview, args.json);
+
+    if let Some((env_team, repo_team)) = team_mismatch {
+        warn!(
+            "spawn team mismatch detected: ATM_TEAM='{}' vs .atm.toml default_team='{}'",
+            env_team, repo_team
+        );
+        eprintln!(
+            "Warning: team mismatch detected: ATM_TEAM ('{}') != .atm.toml default_team ('{}').",
+            env_team, repo_team
+        );
+        if !args.override_team {
+            anyhow::bail!(
+                "ATM_TEAM ('{}') does not match .atm.toml default_team ('{}'). \
+                 Re-run with --override-team to proceed with the env-var team for this invocation.",
+                env_team,
+                repo_team
+            );
+        }
+        warn!(
+            "spawn override-team: using ATM_TEAM='{}' instead of .atm.toml default_team='{}'",
+            env_team, repo_team
+        );
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert(
+            "conflicting_toml_team".to_string(),
+            serde_json::Value::String(repo_team),
+        );
+        extra_fields.insert(
+            "invoked_at".to_string(),
+            serde_json::Value::String(Utc::now().to_rfc3339()),
+        );
+        emit_event_best_effort(EventFields {
+            level: "warn",
+            source: "atm",
+            action: "spawn_team_override",
+            team: Some(env_team),
+            agent_name: Some(args.agent.clone()),
+            result: Some("override_team".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
 
     // Preserve legacy spawn UX when daemon is unavailable: return the daemon
     // error + launch command guidance without requiring team-config mutation.
@@ -722,6 +781,41 @@ fn resolve_spawn_folder(folder_args: &[PathBuf], current_dir: &Path) -> Result<P
         );
     }
     Ok(first)
+}
+
+fn env_var_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn find_repo_local_atm_toml(current_dir: &Path) -> Option<PathBuf> {
+    let mut dir = current_dir;
+    loop {
+        let config_path = dir.join(".atm.toml");
+        if config_path.exists() {
+            return Some(config_path);
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
+
+fn read_repo_default_team(current_dir: &Path) -> Option<String> {
+    let config_path = find_repo_local_atm_toml(current_dir)?;
+    let contents = fs::read_to_string(config_path).ok()?;
+    let value: toml::Value = toml::from_str(&contents).ok()?;
+    value
+        .get("core")
+        .and_then(|core| core.get("default_team"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|team| !team.is_empty())
+        .map(ToString::to_string)
 }
 
 fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
