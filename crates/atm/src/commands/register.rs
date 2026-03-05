@@ -260,7 +260,8 @@ fn register_teammate(
     identity: &SessionIdentity,
 ) -> Result<()> {
     let caller_identity = resolve_caller_identity(home_dir, team)?;
-    if caller_identity != name {
+    let caller_identity_explicit = !caller_identity.trim().is_empty() && caller_identity != "human";
+    if caller_identity_explicit && caller_identity != name {
         warn!(
             attempted_writer = %caller_identity,
             owner = %name,
