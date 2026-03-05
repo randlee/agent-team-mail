@@ -252,6 +252,47 @@ class TestSessionStartSocketSend(unittest.TestCase):
         self.assertIn("process_id", request["payload"])
         self.assertEqual(request["payload"]["process_id"], expected_parent_pid)
 
+    def test_session_file_stores_parent_pid(self):
+        """Session file's pid field must be os.getppid(), not os.getpid()."""
+        toml = '[core]\ndefault_team = "atm-dev"\nidentity = "team-lead"\n'
+        expected_ppid = 9999
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                Path(tmpdir, ".atm.toml").write_text(toml)
+                atm_home = Path(tmpdir)
+                sock_dir = atm_home / ".claude" / "daemon"
+                sock_dir.mkdir(parents=True, exist_ok=True)
+                (sock_dir / "atm-daemon.sock").touch()
+
+                mock_sock = MagicMock()
+                mock_sock.__enter__ = MagicMock(return_value=mock_sock)
+                mock_sock.__exit__ = MagicMock(return_value=False)
+                mock_sock.recv.return_value = b'{"status":"ok"}'
+
+                stdin_text = json.dumps({"session_id": "pid-test-sess", "source": "init"})
+                captured = StringIO()
+                with patch("sys.stdin", StringIO(stdin_text)), \
+                     patch("sys.stdout", captured), \
+                     patch.dict(os.environ, {"ATM_HOME": str(atm_home)}), \
+                     patch("os.getppid", return_value=expected_ppid), \
+                     patch("socket.socket", return_value=mock_sock):
+                    mod = _load_module("session_start", _SESSION_START_PATH)
+                    mod.main()
+
+                # Verify session file was written with parent PID
+                sessions_dir = atm_home / ".claude" / "sessions"
+                session_file = sessions_dir / "pid-test-sess.json"
+                self.assertTrue(session_file.exists(), "Session file should be created")
+                sf_data = json.loads(session_file.read_text())
+                self.assertEqual(sf_data["pid"], expected_ppid,
+                    "Session file pid must be os.getppid() (parent Claude process), "
+                    "not os.getpid() (short-lived hook process)")
+            finally:
+                os.chdir(orig_dir)
+
 
 class TestSessionStartGuards(unittest.TestCase):
     """Tests for C-1 and I-1: .atm.toml guard and tomllib fallback."""

@@ -11,7 +11,9 @@ Exit codes:
 
 import json
 import os
+import platform
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +68,7 @@ def main() -> int:
             "agent": identity,
             "team": default_team,
             "source": {"kind": "claude_hook"},
-            "process_id": os.getpid(),
+            "process_id": os.getppid(),
         }
         send_hook_event(payload)
 
@@ -76,16 +78,14 @@ def main() -> int:
             sessions_dir = atm_home() / ".claude" / "sessions"
             sessions_dir.mkdir(parents=True, exist_ok=True)
             session_file = sessions_dir / f"{session_id}.json"
-            import time
             session_data = {
                 "session_id": session_id,
                 "team": default_team,
                 "identity": identity,
-                "pid": os.getpid(),
+                "pid": os.getppid(),
                 "created_at": time.time(),
             }
             session_file.write_text(json.dumps(session_data))
-            import platform
             if platform.system() != "Windows":
                 session_file.chmod(0o600)
         except Exception as exc:

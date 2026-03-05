@@ -269,7 +269,7 @@ fn test_register_requires_session_id() {
 /// (The previous behavior was `bail!` on hook file errors; the new behavior
 /// warns and continues so that Claude Code's subprocess model is supported.)
 #[test]
-fn test_register_invalid_hook_file_does_not_fallback_to_env() {
+fn test_register_invalid_hook_file_falls_back_to_env() {
     let temp_dir = TempDir::new().unwrap();
     create_test_team(
         &temp_dir,

@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Import shared utilities
 sys.path.insert(0, str(Path(__file__).parent))
-from atm_hook_lib import load_payload, read_atm_toml
+from atm_hook_lib import load_payload, read_atm_toml, atm_home
 
 
 def _is_atm_invocation(command: str) -> bool:
@@ -79,13 +79,11 @@ def main() -> None:
     # Refresh session file timestamp (session-start.py owns creation)
     if session_id:
         try:
-            from atm_hook_lib import atm_home
             sessions_dir = atm_home() / ".claude" / "sessions"
             session_file = sessions_dir / f"{session_id}.json"
             if session_file.exists():
-                import time as _time
                 sf_data = json.loads(session_file.read_text())
-                sf_data["updated_at"] = _time.time()
+                sf_data["updated_at"] = time.time()
                 session_file.write_text(json.dumps(sf_data))
         except Exception:
             pass  # Fail-open: session file refresh is best-effort
