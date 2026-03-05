@@ -8,7 +8,7 @@
 //!
 //! - `agent-turn-complete` → [`AgentStateTracker`] (agent transitions to Idle)
 //! - `session-start` → [`SessionRegistry`] (`upsert` with session ID and PID)
-//! - `session-end` → [`SessionRegistry`] (`mark_dead` for the agent)
+//! - `session-end` → [`SessionRegistry`] (session-scoped dead-mark)
 //!
 //! ## Event Format
 //!
@@ -32,7 +32,7 @@
 //! the offset resets to 0 and the file is read from the beginning.
 
 use super::agent_state::{AgentState, AgentStateTracker};
-use crate::daemon::session_registry::SharedSessionRegistry;
+use crate::daemon::session_registry::{MarkDeadForSessionOutcome, SharedSessionRegistry};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::schema::TeamConfig;
@@ -554,11 +554,39 @@ fn apply_hook_event(
                     return;
                 }
             };
+            let session_id = match event
+                .session_id
+                .as_deref()
+                .filter(|sid| !sid.trim().is_empty())
+            {
+                Some(sid) => sid,
+                None => {
+                    debug!("SessionEnd hook missing sessionId for {agent_id}; skipping");
+                    return;
+                }
+            };
             debug!("SessionEnd hook received for {agent_id}");
             if let Some(registry) = session_registry {
                 let mut reg = registry.lock().unwrap();
                 if let Some(team) = event.team.as_deref() {
-                    reg.mark_dead_for_team(team, &agent_id);
+                    match reg.mark_dead_for_team_session(team, &agent_id, session_id) {
+                        MarkDeadForSessionOutcome::MarkedDead => {}
+                        MarkDeadForSessionOutcome::AlreadyDead => {
+                            debug!(
+                                "SessionEnd duplicate ignored for {agent_id}@{team} session={session_id}"
+                            );
+                        }
+                        MarkDeadForSessionOutcome::UnknownSession => {
+                            debug!(
+                                "SessionEnd ignored for unknown session {agent_id}@{team} session={session_id}"
+                            );
+                        }
+                        MarkDeadForSessionOutcome::SessionMismatch { current_session_id } => {
+                            warn!(
+                                "SessionEnd mismatch for {agent_id}@{team}: current_session_id={current_session_id} received_session_id={session_id}"
+                            );
+                        }
+                    }
                 } else {
                     reg.mark_dead(&agent_id);
                 }
