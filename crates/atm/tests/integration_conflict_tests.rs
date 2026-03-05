@@ -134,6 +134,7 @@ impl DaemonProcessGuard {
     fn wait_ready(&mut self, home: &TempDir) {
         let daemon_dir = home.path().join(".claude").join("daemon");
         let pid_path = daemon_dir.join("atm-daemon.pid");
+        let status_path = daemon_dir.join("status.json");
         #[cfg(windows)]
         let timeout_secs = 30;
         #[cfg(not(windows))]
@@ -144,8 +145,16 @@ impl DaemonProcessGuard {
                 panic!(
                     "daemon exited before readiness (status={status}); expected pid {} at {}",
                     self.pid,
-                    pid_path.display()
+                    status_path.display()
                 );
+            }
+            let status_pid = fs::read_to_string(&status_path)
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+                .map(|pid| pid as u32);
+            if status_pid == Some(self.pid) {
+                return;
             }
             if let Ok(content) = fs::read_to_string(&pid_path)
                 && let Ok(pid) = content.trim().parse::<u32>()
@@ -175,13 +184,23 @@ impl DaemonProcessGuard {
         let pid_contents = fs::read_to_string(&pid_path)
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "<missing>".to_string());
+        let status_contents = fs::read_to_string(&status_path)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "<missing>".to_string());
+        let status_pid = serde_json::from_str::<serde_json::Value>(&status_contents)
+            .ok()
+            .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "<missing>".to_string());
         panic!(
-            "daemon readiness timeout: expected pid {} at {} (child={}, daemon_dir={}, pid_contents={}, daemon_entries=[{}])",
+            "daemon readiness timeout: expected pid {} at {} (child={}, daemon_dir={}, pid_contents={}, status_pid={}, status_contents={}, daemon_entries=[{}])",
             self.pid,
-            pid_path.display(),
+            status_path.display(),
             child_state,
             daemon_dir.display(),
             pid_contents,
+            status_pid,
+            status_contents,
             daemon_entries
         );
     }
