@@ -32,6 +32,7 @@ fn workdir(temp: &TempDir) -> PathBuf {
 
 fn configure_cmd(cmd: &mut assert_cmd::Command, temp: &TempDir, path: &Path, wd: &Path) {
     cmd.env("ATM_HOME", temp.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
         .env_remove("ATM_CONFIG")

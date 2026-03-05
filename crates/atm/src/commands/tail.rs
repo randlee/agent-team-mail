@@ -281,6 +281,7 @@ fn run_tmux_capture_fallback(agent: &str, n: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -375,9 +376,22 @@ mod tests {
     // ── resolve_log_path (no daemon) ─────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_resolve_log_path_no_daemon_returns_none() {
         // Without a running daemon this should return None, not an error.
+        let original = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "0");
+        }
         let result = resolve_log_path("arch-ctm");
+        // SAFETY: test-only cleanup.
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
         assert!(result.is_ok());
         // If the daemon is not running the result will be None.
         // We just verify it does not panic.

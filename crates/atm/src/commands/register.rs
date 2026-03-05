@@ -154,32 +154,12 @@ fn register_team_lead(
         }
 
         if !existing.lead_session_id.is_empty() {
-            // Query daemon for liveness — proceed silently if daemon unreachable.
-            use agent_team_mail_core::daemon_client::query_session;
-            match query_session("team-lead") {
-                Ok(Some(ref info)) if info.alive && info.session_id != identity.session_id => {
-                    let short = &info.session_id[..8.min(info.session_id.len())];
-                    anyhow::bail!(
-                        "team-lead is already active in session {}... (use --force to override)",
-                        short
-                    );
-                }
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    anyhow::bail!(
-                        "WARNING: cannot confirm liveness of existing team-lead session {}. \
-                         Use --force to take over explicitly.",
-                        existing.lead_session_id
-                    );
-                }
-                Err(e) => {
-                    anyhow::bail!(
-                        "WARNING: daemon liveness check failed ({e}). \
-                         Cannot safely replace existing team-lead session {}; use --force to override.",
-                        existing.lead_session_id
-                    );
-                }
-            }
+            ensure_team_lead_replacement_safe_with_query(
+                team,
+                &existing.lead_session_id,
+                &identity.session_id,
+                agent_team_mail_core::daemon_client::query_session_for_team,
+            )?;
         }
     }
 
@@ -347,6 +327,37 @@ fn resolve_caller_identity(home_dir: &std::path::Path, team: &str) -> Result<Str
     Ok(config.core.identity)
 }
 
+fn ensure_team_lead_replacement_safe_with_query<F>(
+    team: &str,
+    existing_lead_session_id: &str,
+    new_session_id: &str,
+    query_session_for_team: F,
+) -> Result<()>
+where
+    F: Fn(&str, &str) -> Result<Option<agent_team_mail_core::daemon_client::SessionQueryResult>>,
+{
+    match query_session_for_team(team, "team-lead") {
+        Ok(Some(ref info)) if info.alive && info.session_id != new_session_id => {
+            let short = &info.session_id[..8.min(info.session_id.len())];
+            anyhow::bail!(
+                "team-lead is already active in session {}... (use --force to override)",
+                short
+            );
+        }
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => anyhow::bail!(
+            "WARNING: cannot confirm liveness of existing team-lead session {}. \
+             Use --force to take over explicitly.",
+            existing_lead_session_id
+        ),
+        Err(e) => anyhow::bail!(
+            "WARNING: daemon liveness check failed ({e}). \
+             Cannot safely replace existing team-lead session {}; use --force to override.",
+            existing_lead_session_id
+        ),
+    }
+}
+
 fn sync_session_with_daemon(
     team: &str,
     agent: &str,
@@ -396,4 +407,71 @@ fn write_team_config(config_path: &std::path::Path, config: &TeamConfig) -> Resu
     drop(file);
     atomic_swap(config_path, &tmp_path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_team_mail_core::daemon_client::SessionQueryResult;
+    use std::cell::RefCell;
+
+    fn sample_session(session_id: &str, alive: bool) -> SessionQueryResult {
+        SessionQueryResult {
+            session_id: session_id.to_string(),
+            process_id: 1234,
+            alive,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        }
+    }
+
+    #[test]
+    fn lead_replacement_check_uses_team_scoped_query() {
+        let called = RefCell::new(None::<(String, String)>);
+        let result = ensure_team_lead_replacement_safe_with_query(
+            "atm-dev",
+            "existing-session",
+            "new-session",
+            |team, name| {
+                *called.borrow_mut() = Some((team.to_string(), name.to_string()));
+                Ok(Some(sample_session("other-session", true)))
+            },
+        );
+        assert!(result.is_err(), "live conflicting lead session must block");
+        assert_eq!(
+            called.into_inner(),
+            Some(("atm-dev".to_string(), "team-lead".to_string()))
+        );
+    }
+
+    #[test]
+    fn lead_replacement_check_allows_dead_existing_session() {
+        let result = ensure_team_lead_replacement_safe_with_query(
+            "atm-dev",
+            "existing-session",
+            "new-session",
+            |_team, _name| Ok(Some(sample_session("other-session", false))),
+        );
+        assert!(
+            result.is_ok(),
+            "dead existing session should allow takeover"
+        );
+    }
+
+    #[test]
+    fn lead_replacement_check_none_requires_force() {
+        let err = ensure_team_lead_replacement_safe_with_query(
+            "atm-dev",
+            "existing-session",
+            "new-session",
+            |_team, _name| Ok(None),
+        )
+        .expect_err("missing daemon evidence must fail closed");
+        assert!(
+            err.to_string().contains("cannot confirm liveness"),
+            "unexpected error: {err}"
+        );
+    }
 }

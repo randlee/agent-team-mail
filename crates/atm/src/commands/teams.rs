@@ -2,7 +2,8 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::daemon_client::{
-    LaunchConfig, RegisterHintOutcome, launch_agent, query_session_for_team, register_hint,
+    AgentSummary, LaunchConfig, RegisterHintOutcome, launch_agent, query_list_agents,
+    query_session_for_team, register_hint,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
@@ -500,14 +501,12 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         });
     }
 
-    // Preserve legacy spawn UX when daemon is unavailable: return the daemon
-    // error + launch command guidance without requiring team-config mutation.
-    // When daemon is running, we enforce #409 by persisting model/backend
-    // metadata before sending the launch request.
-    if !agent_team_mail_core::daemon_client::daemon_is_running() {
+    // Probe daemon before metadata writes. This path triggers daemon auto-start
+    // where enabled (same behavior as other daemon-backed commands).
+    if let Err(e) = ensure_daemon_ready_for_spawn(query_list_agents) {
         if args.json {
             let output = json!({
-                "error": "Daemon is not running. Start it with: atm-daemon",
+                "error": e.to_string(),
                 "agent": args.agent,
                 "team": team_name,
                 "runtime": runtime_name(&args.runtime),
@@ -516,7 +515,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
-            eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
+            eprintln!("Error: {e}");
             eprintln!("  Run the launch command above manually in a new tmux pane.");
         }
         std::process::exit(1);
@@ -656,6 +655,17 @@ fn backend_type_for_runtime(runtime: &RuntimeKind) -> BackendType {
         RuntimeKind::Codex => BackendType::Codex,
         RuntimeKind::Gemini => BackendType::Gemini,
         RuntimeKind::Opencode => BackendType::External,
+    }
+}
+
+fn ensure_daemon_ready_for_spawn<F>(query: F) -> Result<()>
+where
+    F: Fn() -> Result<Option<Vec<AgentSummary>>>,
+{
+    match query() {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => anyhow::bail!("Daemon is not running. Start it with: atm-daemon"),
+        Err(e) => Err(e).context("Failed to reach daemon for spawn"),
     }
 }
 
@@ -1547,7 +1557,10 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         // is treated as "unknown liveness" → the external agent is kept.
         let is_external = member.external_backend_type.is_some();
 
-        let is_dead = if is_external {
+        let is_dead = if args.force {
+            // Force mode intentionally bypasses daemon liveness checks.
+            true
+        } else if is_external {
             // External agent: use session_id for the liveness query if available.
             let query_key = match &member.session_id {
                 Some(sid) => sid.clone(),
@@ -1602,17 +1615,12 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 }
                 Ok(None) => {
                     // Daemon is not running: we cannot confirm liveness.
-                    // Skip unless --force.
-                    if args.force {
-                        true
-                    } else {
-                        warn!(
-                            "Warning: daemon unreachable, skipping {} — use --force to override",
-                            member.name
-                        );
-                        skipped_names.push(member.name.clone());
-                        continue;
-                    }
+                    warn!(
+                        "Warning: daemon unreachable, skipping {} — use --force to override",
+                        member.name
+                    );
+                    skipped_names.push(member.name.clone());
+                    continue;
                 }
                 Err(e) => {
                     // Unexpected I/O error after connection was established — cannot
@@ -2140,6 +2148,25 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
+    fn set_autostart_disabled_for_test() -> Option<String> {
+        let original = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        // SAFETY: test-only env mutation, callers use #[serial].
+        unsafe {
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "0");
+        }
+        original
+    }
+
+    fn restore_autostart_env(original: Option<String>) {
+        // SAFETY: test-only env mutation, callers use #[serial].
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
     fn create_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
         let team_dir = temp_dir.path().join(".claude/teams").join(team_name);
         let inboxes_dir = team_dir.join("inboxes");
@@ -2372,6 +2399,7 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -2402,6 +2430,7 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
     }
 
     #[test]
@@ -2417,6 +2446,7 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -2453,6 +2483,7 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
     }
 
     #[test]
@@ -3062,6 +3093,7 @@ mod tests {
         let team_dir = create_test_team_multi_dead(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -3103,6 +3135,7 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
     }
 
     #[test]
@@ -3121,6 +3154,7 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -3144,6 +3178,7 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
     }
 
     #[test]
@@ -3744,6 +3779,35 @@ mod tests {
         let command = format!("cd '{}' && codex --yolo", test_cwd.to_string_lossy());
         let rendered = format_spawn_launch_command(&RuntimeKind::Codex, &spec, &command);
         assert_eq!(rendered, command);
+    }
+
+    #[test]
+    fn test_ensure_daemon_ready_for_spawn_accepts_available_daemon() {
+        let result = ensure_daemon_ready_for_spawn(|| Ok(Some(Vec::new())));
+        assert!(result.is_ok(), "daemon availability should pass readiness");
+    }
+
+    #[test]
+    fn test_ensure_daemon_ready_for_spawn_reports_unavailable_daemon() {
+        let err = ensure_daemon_ready_for_spawn(|| Ok(None)).expect_err("daemon unavailable");
+        assert!(
+            err.to_string()
+                .contains("Daemon is not running. Start it with: atm-daemon"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_ensure_daemon_ready_for_spawn_wraps_query_errors() {
+        let err = ensure_daemon_ready_for_spawn(|| {
+            Err(anyhow::anyhow!(
+                "daemon auto-start attempted but socket unavailable"
+            ))
+        })
+        .expect_err("query error should be surfaced");
+        let text = format!("{err:#}");
+        assert!(text.contains("Failed to reach daemon for spawn"));
+        assert!(text.contains("socket unavailable"));
     }
 
     #[test]

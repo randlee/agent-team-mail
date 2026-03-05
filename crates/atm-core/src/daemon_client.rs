@@ -1073,9 +1073,13 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
 
 #[cfg(unix)]
 fn daemon_autostart_enabled() -> bool {
-    matches!(
-        std::env::var("ATM_DAEMON_AUTOSTART").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    let Ok(raw) = std::env::var("ATM_DAEMON_AUTOSTART") else {
+        // Opt-out model: autostart is enabled by default when unset.
+        return true;
+    };
+    !matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no"
     )
 }
 
@@ -1492,6 +1496,11 @@ mod tests {
     fn test_daemon_autostart_flag_parsing() {
         let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
 
+        // Unset => enabled (opt-out model).
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::remove_var("ATM_DAEMON_AUTOSTART") };
+        assert!(daemon_autostart_enabled());
+
         // SAFETY: serialized env mutation in test.
         unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "1") };
         assert!(daemon_autostart_enabled());
@@ -1499,8 +1508,21 @@ mod tests {
         unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "true") };
         assert!(daemon_autostart_enabled());
         // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "yes") };
+        assert!(daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
         unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "0") };
         assert!(!daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "false") };
+        assert!(!daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "no") };
+        assert!(!daemon_autostart_enabled());
+        // Invalid values remain enabled unless explicitly falsey.
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "maybe") };
+        assert!(daemon_autostart_enabled());
 
         // SAFETY: serialized env mutation in test.
         unsafe {
