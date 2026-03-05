@@ -1416,7 +1416,7 @@ the current tranche focused on onboarding contract closure.
 
 **Completed**: 106+ sprints across 24 phases (CI green)
 **Current version**: v0.34.0
-**Current phase**: Phase Z (complete)
+**Current phase**: Phase AA (planning)
 
 ---
 
@@ -1513,6 +1513,130 @@ The following Z.7 deliverables (d8–d12) were deferred due to scope and are tra
 
 These items should be addressed in the next hardening phase.
 
+## 17.12 Phase AA: Session Correctness + Spawn Authorization + Reliability UX
+
+**Goal**: close session-end correctness gaps, enforce leaders-only spawn policy,
+and harden release/test reliability and operator UX.
+
+**Integration branch**: `integrate/phase-AA` (created from `planning/next-phase`)
+
+**Branching note**:
+- `integrate/phase-AA` was created from `planning/next-phase` for planning review.
+- Before sprint implementation begins, planning changes must be merged to
+  `develop`; sprint branches then follow normal policy (branch from develop).
+
+**Dependency graph**:
+- AA.1 is foundational for session-end correctness.
+- AA.2 is intentionally config-driven and independent of AA.1 (does not depend
+  on daemon session state for authorization decisions).
+- AA.3 is independent.
+- AA.4 is independent and can run in parallel with AA.1–AA.3.
+- AA follow-on for #449 depends on AA.1 completion and post-AA.1 assessment.
+
+### Sprint Summary
+| Sprint | Name | PR | Branch | Issues | Status |
+|--------|------|----|--------|--------|--------|
+| AA.1 | Session-End Correctness Hardening | TBD | `feature/pAA-s1-session-end-correctness` | [#448](https://github.com/randlee/agent-team-mail/issues/448) | PLANNED |
+| AA.2 | Spawn Authorization Gate Alignment | TBD | `feature/pAA-s2-spawn-authorization` | [#394](https://github.com/randlee/agent-team-mail/issues/394) | PLANNED |
+| AA.3 | CI/Release Reliability Closure | TBD | `feature/pAA-s3-reliability-closure` | [#372](https://github.com/randlee/agent-team-mail/issues/372) | PLANNED |
+| AA.4 | Cleanup + Spawn Help UX Polish | TBD | `feature/pAA-s4-ux-polish` | [#373](https://github.com/randlee/agent-team-mail/issues/373), [#424](https://github.com/randlee/agent-team-mail/issues/424) | PLANNED |
+
+### AA.1 — Session-End Correctness Hardening
+**Deliverables**
+1. Define/implement no-record `session_end` handling: no mutation, DEBUG log,
+   no tombstone/session-row creation.
+2. Define/implement duplicate dead `session_end` replay as strict no-op with no
+   teardown/cleanup/reconcile retrigger.
+3. Keep mismatch protection: mismatched session_id must not dead-mark current
+   record; warning must include expected vs received session id.
+4. Keep dead+alive mismatch rule: no auto-promote without explicit re-registration.
+
+**Acceptance Criteria**
+1. Sending `session_end` for unknown `(team, agent, session_id)` does not create
+   records or mutate state; DEBUG event is emitted.
+2. Replaying identical `session_end` for already-dead record is idempotent no-op.
+3. Mismatched-session `session_end` leaves active record unchanged and emits
+   structured warning fields: `team`, `agent`, `expected_session_id`,
+   `current_session_id`, `received_session_id`.
+4. `Dead + alive PID + mismatch` remains dead until `session_start`/`register-hint`.
+
+### AA.2 — Spawn Authorization Gate Alignment
+**Deliverables**
+1. CLI path: `atm teams spawn` validates caller identity against
+   `.atm.toml` `spawn_policy` (`leaders-only`) + `co_leaders`.
+2. Hook path: `PreToolUse` gate in `.claude/settings.json` (matcher `Task`,
+   command invoking `.claude/scripts/gate-agent-spawns.py`) aligns with the same
+   `spawn_policy` contract and `SPAWN_UNAUTHORIZED` behavior.
+3. Tests: leaders-only pass (`team-lead`), leaders-only pass (`co_leader`),
+   leaders-only fail (other), and missing `[team.<name>]` fails non-lead with
+   `SPAWN_UNAUTHORIZED` (not config parse error).
+4. Documentation: `SPAWN_UNAUTHORIZED` semantics and guidance are explicit.
+
+**Acceptance Criteria**
+1. Authorized leader/co-leader can spawn without policy error.
+2. Unauthorized caller receives `SPAWN_UNAUTHORIZED` before side effects.
+3. Missing `[team.<name>]` defaults to team-lead-only and fails non-lead callers.
+4. CLI and hook gate outcomes match for equivalent caller/team inputs.
+
+### AA.3 — CI/Release Reliability Closure
+**Deliverables**
+0. Root-cause gate on [#372](https://github.com/randlee/agent-team-mail/issues/372):
+   comment root-cause determination before mitigation path is selected.
+1. Redesign flaky concurrency coverage into deterministic tests with explicit
+   timeout + teardown guardrails for spawned daemons.
+2. If root cause is production data-loss, ship production fix and keep coverage
+   active (no ignore path).
+3. If root cause is timing/harness-only, redesign test harness/process control
+   to remain deterministic on macOS/Linux/Windows without suppression.
+4. Add post-publish verify retry/backoff in `release.yml` (`cargo search`):
+   5 attempts, 60s intervals, structured retry logs, terminal failure with full
+   crate list.
+
+**Acceptance Criteria**
+1. #372 root-cause comment exists before AA.3 merge decision.
+2. Concurrency/reliability tests are bounded (no unbounded hang) on CI.
+3. `test_concurrent_sends_no_data_loss` (or replacement coverage) passes on
+   macOS, Linux, and Windows without platform-specific skip/ignore.
+4. Release verification fails only after 5 retries and reports all failed crates.
+
+### AA.4 — Cleanup + Spawn Help UX Polish
+**Deliverables**
+1. `atm teams cleanup --dry-run` outputs non-mutating candidate-action preview
+   table with per-row reason and action totals.
+2. Empty dry-run output is explicit and concise.
+3. `atm teams spawn --help` adds generated launch-command block for
+   claude/codex/gemini with token-substituted placeholders when config absent.
+4. Help output remains static/safe and never fails on missing `.atm.toml`.
+
+**Acceptance Criteria**
+1. Non-empty dry-run shows preview table + totals and exits 0 with no writes.
+2. Empty dry-run prints `Nothing to clean up for team <name>.` and no table header.
+3. `spawn --help` succeeds without `.atm.toml` and uses meaningful placeholders.
+
+### AA.D1 Design Discussion (Not Yet a Sprint): Named Agent Lifecycle + Mailbox Archival
+
+Recommended direction:
+1. Use explicit `agent_type = "task" | "persistent"` metadata (preferred over
+   inferred classification for auditability and deterministic cleanup).
+2. Default archive semantics: retain mailbox + mark inactive + TTL cleanup.
+3. Hard-delete mailbox is permissible only when mailbox is empty, all messages
+   are read, or explicit operator acknowledgment is provided.
+4. Trigger model should converge lifecycle (`session_end`, shutdown_approved)
+   and operator actions (`teams cleanup`, future `teams archive`).
+5. Shutdown convergence should be daemon-driven for both CLI shutdown paths
+   (`atm shutdown`/kill flows) and Claude hook lifecycle (`session_end`), with
+   policy controls designed as config/flag knobs (for example
+   `auto_cleanup_on_shutdown`, optional cleanup delay).
+
+Unblock requirement:
+- AA.2 should establish spawn metadata schema ownership for `agent_type` so
+  lifecycle policy can be enforced in a later sprint.
+
+Follow-on note for #449:
+- Pick up after AA.1 merges and PID/session behavior is re-verified.
+- If AA.1 exposes additional PID freshness risk, promote #449 to AA.5;
+  otherwise keep as deferred `0.37/0.38` follow-on.
+
 ---
 
 ## 20. Phase Integration PRs
@@ -1539,7 +1663,8 @@ These items should be addressed in the next hardening phase.
 | Phase P | Sprint PRs targeted develop directly (no integration branch) | Merged |
 | Phase Q | `integrate/phase-Q` → [#262](https://github.com/randlee/agent-team-mail/pull/262) | Merged |
 | Phase Y | `integrate/phase-Y` → [#396](https://github.com/randlee/agent-team-mail/pull/396) | Merged |
-| Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Open |
+| Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Merged |
+| Phase AA | `integrate/phase-AA` | Planning |
 
 ---
 
@@ -1583,6 +1708,12 @@ Key commits:
 | [#351](https://github.com/randlee/agent-team-mail/issues/351) | Add `/team-join` slash command | X.1 | New onboarding UX contract; paired with `atm teams join` CLI planning |
 | [#361](https://github.com/randlee/agent-team-mail/issues/361) | Spawn path normalization (`--folder` canonical, `--cwd` compatibility) | X.2 | Canonical spawn-directory contract across runtimes |
 | [#357](https://github.com/randlee/agent-team-mail/issues/357) | `atm init` full one-command setup + default global hooks | X.3 | One-command onboarding (`.atm.toml` + team + hooks) plus quickstart updates |
+| [#448](https://github.com/randlee/agent-team-mail/issues/448) | `session_end` must be session-id scoped; reconcile stale dead/alive mismatch state | AA.1 | Correctness-first Phase AA sprint |
+| [#449](https://github.com/randlee/agent-team-mail/issues/449) | PID liveness cache TTL, periodic re-probe, and `last_alive` in member state | AA follow-on (`0.37/0.38`) | Reassess after AA.1; promote to AA.5 if urgency increases |
+| [#394](https://github.com/randlee/agent-team-mail/issues/394) | Gate terminal spawn to team-lead + co-leaders only | AA.2 | Config-driven authorization (no daemon-state dependency) |
+| [#372](https://github.com/randlee/agent-team-mail/issues/372) | macOS CI hang in `test_concurrent_sends_no_data_loss` | AA.3 | Root-cause gate required before mitigation path |
+| [#373](https://github.com/randlee/agent-team-mail/issues/373) | Add `--dry-run` preview mode to `atm teams cleanup` | AA.4 | Non-mutating table with reasons/totals + empty-state messaging |
+| [#424](https://github.com/randlee/agent-team-mail/issues/424) | Improve `atm teams spawn --help` with generated launch-command reference | AA.4 | Always-show copy/paste launch reference with placeholders when config absent |
 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | `parse_since_input` accepts `0m` and negative durations | X.4 (deferred) | Deferred follow-on from Phase X onboarding tranche |
 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | Missing `#[serial]` on env-mutating daemon tests (`ATM_HOME`) | X.5 (deferred) | Deferred CI-debt cleanup in Phase X follow-on |
 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | `add-member` does not create inbox atomically | X.6 (deferred) | Deferred follow-on after onboarding contract closure |
@@ -1645,6 +1776,6 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 
 ---
 
-**Document Version**: 0.5
-**Last Updated**: 2026-02-25
+**Document Version**: 0.6
+**Last Updated**: 2026-03-05
 **Maintained By**: Claude (ARCH-ATM)
