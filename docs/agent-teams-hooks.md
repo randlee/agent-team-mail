@@ -373,7 +373,7 @@ Committed to the repository. Applies to all interactive Claude Code sessions ope
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\""
+            "command": "bash -c 'if test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\"; then python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\"; else exit 0; fi'"
           }
         ]
       }
@@ -383,7 +383,7 @@ Committed to the repository. Applies to all interactive Claude Code sessions ope
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/teammate-idle-relay.py\""
+            "command": "bash -c 'test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/teammate-idle-relay.py\" && python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/teammate-idle-relay.py\" || true'"
           }
         ]
       }

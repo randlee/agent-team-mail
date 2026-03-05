@@ -16,7 +16,7 @@ orchestrators can accidentally spawn agents incorrectly, leading to:
 This gate enforces three rules:
 - Rule 1: Agents declaring `metadata.spawn_policy: named_teammate_required`
   MUST be named teammates
-- Rule 2: Only the team LEAD can create named teammates (not orchestrators themselves)
+- Rule 2: Only team-lead and co_leaders can create named teammates
 - Rule 3: team_name must match .atm.toml [core].default_team when provided
 
 ## Mode Compatibility
