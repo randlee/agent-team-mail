@@ -59,14 +59,14 @@ Key behaviors:
 ### For each sprint assigned to you:
 
 1. **Read sprint context**: Understand what was delivered (check the worktree diff, sprint plan)
-2. **Run rust-qa-agent** (technical QA):
+2. **Run rust-qa-agent** (assessment mode — static analysis + clippy + code review, NO `cargo test` yet):
    ```
    Tool: Task
      subagent_type: "rust-qa-agent"
      run_in_background: true
      model: "sonnet"
      max_turns: 30
-     prompt: <QA prompt with sprint deliverables, worktree path, required checks>
+     prompt: <QA prompt — static analysis, clippy, code review against sprint plan; report findings immediately; DO NOT run cargo test yet>
    ```
 3. **Run atm-qa-agent** (compliance QA):
    ```
@@ -77,22 +77,24 @@ Key behaviors:
      max_turns: 20
      prompt: <QA prompt with fenced JSON input, scope, phase docs>
    ```
-4. Both agents can run in parallel (they are read-only)
-5. Collect results via `TaskOutput`
-6. Report to team-lead via SendMessage
+4. Both agents run in parallel and report findings **immediately on completion** — do NOT wait for the sibling before reporting to team-lead
+5. **Check CI status** on the PR (if one exists):
+   - CI green → rust-qa assessment is sufficient, no need to run `cargo test` locally
+   - CI pending/failing → resume rust-qa (or spawn a new cargo-test agent) to run `cargo test` and investigate
+6. Report to team-lead via SendMessage as each agent completes — early findings enable faster fix cycles
 
 ### QA Prompt Requirements
 
-#### rust-qa-agent prompt:
+#### rust-qa-agent prompt (assessment mode):
 1. **Sprint deliverables**: What was supposed to be implemented
 2. **Worktree path**: The absolute path to validate
 3. **Required checks** (all non-negotiable):
    - Code review against sprint plan and architecture
    - Sufficient unit test coverage, especially corner cases
-   - `cargo test` — 100% pass required
    - `cargo clippy -- -D warnings` — clean required
    - Cross-platform compliance (ATM_HOME, no raw HOME/USERPROFILE in tests)
    - Round-trip preservation of unknown JSON fields where applicable
+   - **`cargo test` only if CI is not available or CI is red**
 4. **Output format**: Must report PASS or FAIL with specific findings
 
 #### atm-qa-agent prompt:
