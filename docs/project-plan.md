@@ -1577,8 +1577,8 @@ and harden release/test reliability and operator UX.
    timeout + teardown guardrails for spawned daemons.
 2. If root cause is production data-loss, ship production fix and keep coverage
    active (no ignore path).
-3. If root cause is timing/harness-only, temporary macOS-ignore path may be
-   used with documented rationale and replacement coverage.
+3. If root cause is timing/harness-only, redesign test harness/process control
+   to remain deterministic on macOS/Linux/Windows without suppression.
 4. Add post-publish verify retry/backoff in `release.yml` (`cargo search`):
    5 attempts, 60s intervals, structured retry logs, terminal failure with full
    crate list.
@@ -1586,7 +1586,8 @@ and harden release/test reliability and operator UX.
 **Acceptance Criteria**
 1. #372 root-cause comment exists before AA.3 merge decision.
 2. Concurrency/reliability tests are bounded (no unbounded hang) on CI.
-3. Any ignore usage has active replacement coverage and rationale.
+3. `test_concurrent_sends_no_data_loss` (or replacement coverage) passes on
+   macOS, Linux, and Windows without platform-specific skip/ignore.
 4. Release verification fails only after 5 retries and reports all failed crates.
 
 ### AA.4 — Cleanup + Spawn Help UX Polish
@@ -1653,7 +1654,7 @@ Follow-on note for #449:
 | Phase P | Sprint PRs targeted develop directly (no integration branch) | Merged |
 | Phase Q | `integrate/phase-Q` → [#262](https://github.com/randlee/agent-team-mail/pull/262) | Merged |
 | Phase Y | `integrate/phase-Y` → [#396](https://github.com/randlee/agent-team-mail/pull/396) | Merged |
-| Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Open |
+| Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Merged |
 | Phase AA | `integrate/phase-AA` | Planning |
 
 ---
