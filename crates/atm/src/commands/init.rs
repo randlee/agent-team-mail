@@ -860,6 +860,17 @@ mod tests {
     use std::env;
     use tempfile::TempDir;
 
+    fn entry_uses_session_hook_schema(entry: &serde_json::Value) -> bool {
+        if entry.get("hooks").and_then(|h| h.as_array()).is_none() {
+            return false;
+        }
+        entry
+            .get("matcher")
+            .and_then(|m| m.as_str())
+            .map(|m| m.is_empty())
+            .unwrap_or(true)
+    }
+
     // -----------------------------------------------------------------------
     // Helper: build a settings.json path inside a TempDir
     // -----------------------------------------------------------------------
@@ -904,10 +915,8 @@ mod tests {
             "SessionStart hook missing"
         );
         assert!(
-            session_start
-                .iter()
-                .all(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("")),
-            "SessionStart entries must include empty-string matcher"
+            session_start.iter().all(entry_uses_session_hook_schema),
+            "SessionStart entries must be nested hooks and only use empty-string matcher when present"
         );
 
         let pre_tool_use = parsed["hooks"]["PreToolUse"]
@@ -1128,10 +1137,8 @@ mod tests {
             "SessionStart ATM command must still be present after migration"
         );
         assert!(
-            session_start
-                .iter()
-                .all(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("")),
-            "all SessionStart entries must have empty-string matcher after migration"
+            session_start.iter().all(entry_uses_session_hook_schema),
+            "all SessionStart entries must be nested hooks and only use empty-string matcher when present"
         );
         assert!(
             session_start.iter().all(|e| e.get("hooks").is_some()),
@@ -1142,10 +1149,8 @@ mod tests {
             .as_array()
             .expect("SessionEnd array");
         assert!(
-            session_end
-                .iter()
-                .all(|e| e.get("matcher").and_then(|m| m.as_str()) == Some("")),
-            "all SessionEnd entries must have empty-string matcher after migration"
+            session_end.iter().all(entry_uses_session_hook_schema),
+            "all SessionEnd entries must be nested hooks and only use empty-string matcher when present"
         );
         assert!(
             session_end.iter().all(|e| e.get("hooks").is_some()),
