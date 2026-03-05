@@ -15,28 +15,48 @@ fn init_cmd<'a>(home: &'a TempDir, repo: &'a Path) -> assert_cmd::Command {
     cmd
 }
 
-fn count_command_in_hooks(settings_path: &Path, hook_category: &str, command: &str) -> usize {
+fn count_nested_command_in_hooks(
+    settings_path: &Path,
+    hook_category: &str,
+    command: &str,
+) -> usize {
     let parsed: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
 
-    match hook_category {
-        "SessionStart" => parsed["hooks"]["SessionStart"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .filter(|h| {
-                h["hooks"]
-                    .as_array()
-                    .map(|hooks| {
-                        hooks.iter().any(|entry| {
-                            entry.get("command").and_then(|c| c.as_str()) == Some(command)
+    parsed["hooks"][hook_category]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|hooks| {
+                            hooks
+                                .iter()
+                                .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command))
                         })
-                    })
-                    .unwrap_or(false)
-            })
-            .count(),
-        _ => 0,
-    }
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn count_flat_command_entries(settings_path: &Path, hook_category: &str, command: &str) -> usize {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+
+    parsed["hooks"][hook_category]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.get("command").and_then(|c| c.as_str()) == Some(command))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 #[test]
@@ -90,10 +110,32 @@ fn test_init_is_idempotent_on_rerun() {
     let session_start_cmd = format!(
         "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{session_start_py}\" || true'"
     );
+    let session_end_py = scripts_dir
+        .join("session-end.py")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let session_end_cmd = format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{session_end_py}\" || true'"
+    );
     assert_eq!(
-        count_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
+        count_nested_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
         1,
         "SessionStart hook should not be duplicated"
+    );
+    assert_eq!(
+        count_nested_command_in_hooks(&settings_path, "SessionEnd", &session_end_cmd),
+        1,
+        "SessionEnd hook should not be duplicated"
+    );
+    assert_eq!(
+        count_flat_command_entries(&settings_path, "SessionStart", &session_start_cmd),
+        0,
+        "SessionStart must not use flat legacy command entries"
+    );
+    assert_eq!(
+        count_flat_command_entries(&settings_path, "SessionEnd", &session_end_cmd),
+        0,
+        "SessionEnd must not use flat legacy command entries"
     );
 }
 
@@ -207,11 +249,66 @@ fn test_init_with_existing_hooks_creates_atm_toml_without_duplicating_hooks() {
     let session_start_cmd = format!(
         "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{session_start_py}\" || true'"
     );
+    let session_end_py = scripts_dir
+        .join("session-end.py")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let session_end_cmd = format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{session_end_py}\" || true'"
+    );
     assert_eq!(
-        count_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
+        count_nested_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
         1,
         "SessionStart hook must not be duplicated when hooks pre-exist"
     );
+    assert_eq!(
+        count_nested_command_in_hooks(&settings_path, "SessionEnd", &session_end_cmd),
+        1,
+        "SessionEnd hook must not be duplicated when hooks pre-exist"
+    );
+    assert_eq!(
+        count_flat_command_entries(&settings_path, "SessionStart", &session_start_cmd),
+        0,
+        "SessionStart must not use flat legacy command entries"
+    );
+    assert_eq!(
+        count_flat_command_entries(&settings_path, "SessionEnd", &session_end_cmd),
+        0,
+        "SessionEnd must not use flat legacy command entries"
+    );
+}
+
+#[test]
+fn test_init_session_hooks_use_nested_schema_only() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success();
+
+    let settings_path = home.path().join(".claude/settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+
+    for category in ["SessionStart", "SessionEnd"] {
+        let entries = parsed["hooks"][category]
+            .as_array()
+            .expect("session hook category should be an array");
+        assert!(!entries.is_empty(), "{category} should not be empty");
+        for entry in entries {
+            assert!(
+                entry.get("hooks").and_then(|h| h.as_array()).is_some(),
+                "{category} entries must use nested hooks schema"
+            );
+            assert!(
+                entry.get("command").is_none(),
+                "{category} entries must not use flat legacy command schema"
+            );
+        }
+    }
 }
 
 #[test]

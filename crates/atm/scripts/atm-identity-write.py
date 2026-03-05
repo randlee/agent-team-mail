@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Import shared utilities
 sys.path.insert(0, str(Path(__file__).parent))
-from atm_hook_lib import load_payload, read_atm_toml
+from atm_hook_lib import load_payload, read_atm_toml, atm_home
 
 
 def _is_atm_invocation(command: str) -> bool:
@@ -75,6 +75,25 @@ def main() -> None:
             sys.stderr.write("[atm-hook] Windows: skipping chmod (fail-open)\n")
     except Exception as exc:
         sys.stderr.write(f"[atm-hook] Failed to write identity file: {exc}\n")
+
+    # Refresh updated_at on the session file (keeps the 24h TTL alive).
+    # Team is resolved from .atm.toml only (not ATM_TEAM env) to ensure the heartbeat
+    # updates the same path that session-start.py created. Invocations without .atm.toml
+    # context do not update the timestamp.
+    if session_id and agent_name:
+        try:
+            toml_inner = toml or {}
+            core_inner = toml_inner.get("core", {}) if isinstance(toml_inner.get("core"), dict) else {}
+            default_team: str = core_inner.get("default_team", "") or ""
+            if default_team:
+                sessions_dir = atm_home() / ".claude" / "teams" / default_team / "sessions"
+                session_file = sessions_dir / f"{session_id}.json"
+                if session_file.exists():
+                    sf_data = json.loads(session_file.read_text())
+                    sf_data["updated_at"] = time.time()
+                    session_file.write_text(json.dumps(sf_data))
+        except Exception:
+            pass  # Fail-open: session file refresh is best-effort
 
     sys.exit(0)
 
