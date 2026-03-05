@@ -61,6 +61,14 @@ fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
     )
 }
 
+/// Return the SessionEnd hook command string for local or global install.
+fn session_end_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "session-end.py");
+    format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+    )
+}
+
 /// Return the PreToolUse(Bash) hook command string for local or global install.
 fn pre_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "atm-identity-write.py");
@@ -469,6 +477,7 @@ enum HookStatus {
 /// Summary of what changed (or was already present) during a merge.
 struct MergeReport {
     session_start: HookStatus,
+    session_end: HookStatus,
     pre_tool_use_bash: HookStatus,
     pre_tool_use_task: HookStatus,
     post_tool_use_bash: HookStatus,
@@ -477,6 +486,7 @@ struct MergeReport {
 impl MergeReport {
     fn all_present(&self) -> bool {
         self.session_start == HookStatus::AlreadyPresent
+            && self.session_end == HookStatus::AlreadyPresent
             && self.pre_tool_use_bash == HookStatus::AlreadyPresent
             && self.pre_tool_use_task == HookStatus::AlreadyPresent
             && self.post_tool_use_bash == HookStatus::AlreadyPresent
@@ -484,6 +494,7 @@ impl MergeReport {
 
     fn any_added(&self) -> bool {
         self.session_start == HookStatus::Added
+            || self.session_end == HookStatus::Added
             || self.pre_tool_use_bash == HookStatus::Added
             || self.pre_tool_use_task == HookStatus::Added
             || self.post_tool_use_bash == HookStatus::Added
@@ -491,6 +502,7 @@ impl MergeReport {
 
     fn all_added(&self) -> bool {
         self.session_start == HookStatus::Added
+            && self.session_end == HookStatus::Added
             && self.pre_tool_use_bash == HookStatus::Added
             && self.pre_tool_use_task == HookStatus::Added
             && self.post_tool_use_bash == HookStatus::Added
@@ -529,39 +541,57 @@ fn merge_hooks(
     normalize_catch_all_hook_category_if_present(settings, "SessionEnd")?;
 
     let ss_cmd = session_start_cmd(global_scripts_dir);
+    let se_cmd = session_end_cmd(global_scripts_dir);
     let ptu_bash = pre_tool_use_bash_cmd(global_scripts_dir);
     let ptu_task = pre_tool_use_task_cmd(global_scripts_dir);
     let post_bash = post_tool_use_bash_cmd(global_scripts_dir);
 
-    let session_start = merge_session_start_hook(settings, &ss_cmd)?;
+    let session_start = merge_session_hook(settings, "SessionStart", &ss_cmd)?;
+    let session_end = merge_session_hook(settings, "SessionEnd", &se_cmd)?;
     let pre_tool_use_bash = merge_matcher_hook(settings, "PreToolUse", "Bash", &ptu_bash)?;
     let pre_tool_use_task = merge_matcher_hook(settings, "PreToolUse", "Task", &ptu_task)?;
     let post_tool_use_bash = merge_matcher_hook(settings, "PostToolUse", "Bash", &post_bash)?;
 
     Ok(MergeReport {
         session_start,
+        session_end,
         pre_tool_use_bash,
         pre_tool_use_task,
         post_tool_use_bash,
     })
 }
 
-/// Merge a single hook entry into the `hooks.SessionStart` array.
+/// Merge a single hook entry into a `hooks.SessionStart` or `hooks.SessionEnd` array.
 ///
-/// Canonical format for SessionStart/SessionEnd entries is:
-/// `{ "matcher": "", "hooks": [{ "type": "command", "command": "..." }] }`.
+/// Writes new entries in the nested hook schema (no `matcher` field):
+/// `{ "hooks": [{ "type": "command", "command": "..." }] }`.
 ///
-/// This function also migrates legacy entries in-place:
-/// - bare `{ "type": "command", "command": "..." }`
-/// - wrapper entries missing `matcher`
-fn merge_session_start_hook(settings: &mut serde_json::Value, command: &str) -> Result<HookStatus> {
-    let array = get_or_create_hook_array(settings, "SessionStart")?;
+/// Detects existing entries in both legacy catch-all format (with `matcher: ""`)
+/// and the new nested format (without `matcher`), so re-running `atm init` after
+/// a migration is idempotent.
+fn merge_session_hook(
+    settings: &mut serde_json::Value,
+    category: &str,
+    command: &str,
+) -> Result<HookStatus> {
+    let array = get_or_create_hook_array(settings, category)?;
 
-    if catch_all_hook_command_present(array, command) {
-        return Ok(HookStatus::AlreadyPresent);
+    // Check for presence in either format (legacy catch-all or new nested).
+    for entry in array.iter() {
+        if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+            if hook_command_present(hooks, command) {
+                return Ok(HookStatus::AlreadyPresent);
+            }
+        }
     }
 
-    array.push(catch_all_hook_entry(command));
+    let new_entry = serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": command
+        }]
+    });
+    array.push(new_entry);
     Ok(HookStatus::Added)
 }
 
@@ -724,6 +754,7 @@ fn normalize_catch_all_hook_category_if_present(
     normalize_catch_all_hook_entries(array)
 }
 
+#[allow(dead_code)] // used in tests; production path uses merge_session_hook
 fn catch_all_hook_command_present(array: &[serde_json::Value], cmd: &str) -> bool {
     array.iter().any(|entry| {
         entry
