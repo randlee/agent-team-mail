@@ -1543,7 +1543,7 @@ These items should be addressed in the next hardening phase.
 
 ---
 
-## 22. External Contributions
+## 23. External Contributions
 
 ### 22.1 Erik's Session File Lifecycle Work (PR #428)
 
