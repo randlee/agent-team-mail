@@ -164,7 +164,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
 | X | Team Onboarding + TUI/Doctor Stability | `/team-join`, spawn path normalization, `atm init` one-command setup, and carry-forward bug-debt mapping | PLANNED |
-| Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency (Z.1–Z.6 COMPLETE; Z.7 in progress) | IN PROGRESS |
+| Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency (Z.1–Z.7 COMPLETE) | COMPLETE |
 
 ---
 
@@ -1412,10 +1412,10 @@ the current tranche focused on onboarding contract closure.
 | **Z** | Z.4 | Canonical Member State Completion | COMPLETE | [#429](https://github.com/randlee/agent-team-mail/pull/429) |
 | **Z** | Z.5 | Lifecycle Logging + Hook Events | COMPLETE | [#430](https://github.com/randlee/agent-team-mail/pull/430) |
 | **Z** | Z.6 | Cross-folder Spawn + QA Blocker Closure | COMPLETE | [#431](https://github.com/randlee/agent-team-mail/pull/431) |
-| **Z** | Z.7 | Review Findings Hardening | IN REVIEW | [#432](https://github.com/randlee/agent-team-mail/pull/432) |
+| **Z** | Z.7 | Review Findings Hardening | COMPLETE | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433) |
 
 **Completed**: 99+ sprints across 23 phases (CI green)
-**Current version**: v0.33.2
+**Current version**: v0.34.0
 **Current phase**: Phase Z (execution)
 
 ---
@@ -1442,7 +1442,7 @@ doctor/log observability reliable and diagnosable from structured events.
 | Z.4 | Canonical Member State Completion | [#429](https://github.com/randlee/agent-team-mail/pull/429) | `feature/pZ-s4-canonical-state` | #414, #416, #417, #418, #401, #402 | COMPLETE |
 | Z.5 | Lifecycle Logging + Hook Events | [#430](https://github.com/randlee/agent-team-mail/pull/430) | `feature/pZ-s5-observability` | #420, #421 | COMPLETE |
 | Z.6 | Cross-folder Spawn + QA Blocker Closure | [#431](https://github.com/randlee/agent-team-mail/pull/431) | `feature/pZ-s6-cross-folder-spawn` | #422, #424, #426, #428 | COMPLETE |
-| Z.7 | Review Findings Hardening | [#432](https://github.com/randlee/agent-team-mail/pull/432) | `feature/pZ-s7-review-hardening` | QA findings closure | IN REVIEW |
+| Z.7 | Review Findings Hardening | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433) | `feature/pZ-s7-review-hardening` | QA findings closure | COMPLETE |
 
 ### Z.1 — Quick Wins: Doctor + Release Fix
 **Deliverables**
