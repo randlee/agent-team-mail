@@ -30,6 +30,13 @@ use crate::util::settings::get_home_dir;
 /// each backup or auto-backup-on-resume. Increase if longer rollback windows
 /// are needed.
 const BACKUP_RETENTION_COUNT: usize = 5;
+const SPAWN_UNAUTHORIZED: &str = "SPAWN_UNAUTHORIZED";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnPolicy {
+    LeadersOnly,
+    AnyMember,
+}
 
 /// List all teams on this machine
 #[derive(Args, Debug)]
@@ -425,6 +432,46 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         .team
         .clone()
         .unwrap_or_else(|| config.core.default_team.clone());
+
+    if let Some((required_team, spawn_policy, co_leaders)) =
+        load_spawn_policy_from_toml(&current_dir)
+        && matches!(spawn_policy, SpawnPolicy::LeadersOnly)
+    {
+        let policy_team = required_team.unwrap_or_else(|| team_name.clone());
+        let caller_identity = resolve_spawn_caller_identity(
+            &home_dir,
+            &policy_team,
+            &resolve_identity(&config.core.identity, &config.roles, &config.aliases),
+        );
+        let mut allowed = vec!["team-lead".to_string()];
+        for identity in co_leaders {
+            if !identity.trim().is_empty() {
+                allowed.push(identity);
+            }
+        }
+        allowed.sort();
+        allowed.dedup();
+
+        let authorized = caller_identity
+            .as_deref()
+            .map(|id| allowed.iter().any(|allowed_id| allowed_id == id))
+            .unwrap_or(false);
+        if !authorized {
+            anyhow::bail!(
+                "{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n\
+                 \n\
+                 Policy team: {}\n\
+                 Allowed identities: {}\n\
+                 Resolved caller: {}\n\
+                 \n\
+                 Action: run spawn as team-lead or add caller to [team.\"{}\"].co_leaders in .atm.toml.",
+                policy_team,
+                allowed.join(", "),
+                caller_identity.unwrap_or_else(|| "<unknown>".to_string()),
+                policy_team
+            );
+        }
+    }
 
     let parsed_env = parse_env_vars(&args.env)?;
 
@@ -827,6 +874,90 @@ fn read_repo_default_team(current_dir: &Path) -> Option<String> {
         .map(str::trim)
         .filter(|team| !team.is_empty())
         .map(ToString::to_string)
+}
+
+fn load_spawn_policy_from_toml(
+    current_dir: &Path,
+) -> Option<(Option<String>, SpawnPolicy, Vec<String>)> {
+    let config_path = find_repo_local_atm_toml(current_dir)?;
+    let contents = fs::read_to_string(config_path).ok()?;
+    let value: toml::Value = toml::from_str(&contents).ok()?;
+
+    let required_team = value
+        .get("core")
+        .and_then(|core| core.get("default_team"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|team| !team.is_empty())
+        .map(ToString::to_string);
+
+    let mut spawn_policy = SpawnPolicy::LeadersOnly;
+    let mut co_leaders: Vec<String> = Vec::new();
+
+    if let Some(team) = required_team.as_deref()
+        && let Some(team_entry) = value
+            .get("team")
+            .and_then(toml::Value::as_table)
+            .and_then(|teams| teams.get(team))
+            .and_then(toml::Value::as_table)
+    {
+        if let Some(raw_policy) = team_entry.get("spawn_policy").and_then(toml::Value::as_str) {
+            spawn_policy = if raw_policy.trim() == "any-member" {
+                SpawnPolicy::AnyMember
+            } else {
+                SpawnPolicy::LeadersOnly
+            };
+        }
+
+        if let Some(values) = team_entry.get("co_leaders").and_then(toml::Value::as_array) {
+            co_leaders = values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|identity| !identity.is_empty())
+                .map(ToString::to_string)
+                .collect();
+            co_leaders.sort();
+            co_leaders.dedup();
+        }
+    }
+
+    Some((required_team, spawn_policy, co_leaders))
+}
+
+fn resolve_spawn_caller_identity(
+    home_dir: &Path,
+    team_name: &str,
+    resolved_identity: &str,
+) -> Option<String> {
+    if let Some(identity) = env_var_nonempty("ATM_IDENTITY") {
+        return Some(identity);
+    }
+
+    let trimmed_identity = resolved_identity.trim();
+    if !trimmed_identity.is_empty() && trimmed_identity != "human" {
+        return Some(trimmed_identity.to_string());
+    }
+
+    let session_id = env_var_nonempty("CLAUDE_SESSION_ID")?;
+    let config_path = home_dir
+        .join(".claude/teams")
+        .join(team_name)
+        .join("config.json");
+    if !config_path.exists() {
+        return None;
+    }
+
+    let team_config = read_team_config(&config_path).ok()?;
+    if team_config.lead_session_id == session_id {
+        return Some("team-lead".to_string());
+    }
+
+    team_config
+        .members
+        .iter()
+        .find(|member| member.session_id.as_deref() == Some(session_id.as_str()))
+        .map(|member| member.name.clone())
 }
 
 fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {

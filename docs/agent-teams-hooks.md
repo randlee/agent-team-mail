@@ -165,6 +165,8 @@ Resolved caller: dev-1
 
 Identity resolution uses `ATM_IDENTITY` when present, else team config/session
 mapping (`leadSessionId` and `members[].sessionId`) for the default team.
+Team config lookup must resolve from `${ATM_HOME}/.claude/teams/<team>/config.json`
+(`ATM_HOME` first, home-directory fallback).
 
 #### Rule 3: `team_name` Must Match `.atm.toml`
 
