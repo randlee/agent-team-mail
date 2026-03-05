@@ -12,11 +12,51 @@ Exit codes:
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from atm_hook_lib import send_hook_event, read_atm_toml  # noqa: E402
+from atm_hook_lib import atm_home, read_atm_toml, send_hook_event  # noqa: E402
+
+
+def write_session_file(session_id: str, team: str, identity: str) -> None:
+    """Best-effort write/update of session file for team+identity lifecycle tracking.
+
+    Fail-open: errors are intentionally swallowed so the hook never blocks Claude.
+    """
+    if not session_id or not team or not identity:
+        return
+
+    try:
+        sessions_dir = atm_home() / ".claude" / "teams" / team / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        session_path = sessions_dir / f"{session_id}.json"
+
+        now = time.time()
+        created_at = now
+
+        if session_path.exists():
+            try:
+                existing = json.loads(session_path.read_text(encoding="utf-8"))
+                existing_created = existing.get("created_at")
+                if isinstance(existing_created, (int, float)) and existing_created > 0:
+                    created_at = float(existing_created)
+            except Exception:
+                pass
+
+        payload = {
+            "session_id": session_id,
+            "team": team,
+            "identity": identity,
+            "pid": os.getppid(),
+            "created_at": created_at,
+            "updated_at": now,
+        }
+        session_path.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception:
+        # Hook scripts are fail-open by design.
+        pass
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -61,6 +101,9 @@ def main() -> int:
         print(f"ATM team: {default_team}")
     if welcome_message:
         print(f"Welcome: {welcome_message}")
+
+    # Maintain session file for fallback session-id discovery in CLI sends.
+    write_session_file(session_id, default_team, identity)
 
     # Send hook event to daemon socket when effective routing identity is known.
     # Use parent PID (Claude session process), not this short-lived hook PID.

@@ -700,7 +700,9 @@ fn detect_sender_process_pid(member: &AgentMember) -> Option<u32> {
 mod tests {
     use super::*;
     use anyhow::anyhow;
+    use serial_test::serial;
     use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
 
     #[test]
@@ -973,5 +975,127 @@ mod tests {
         assert_eq!(member.process_id_hint(), Some(7777));
         assert_eq!(member.is_active, Some(true));
         assert!(member.last_active.is_some());
+    }
+
+    fn current_ppid_hook_path() -> std::path::PathBuf {
+        let ppid = crate::util::hook_identity::get_parent_pid();
+        std::env::temp_dir().join(format!("atm-hook-{ppid}.json"))
+    }
+
+    fn write_fresh_hook_file(session_id: &str) {
+        let ppid = crate::util::hook_identity::get_parent_pid();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let data = serde_json::json!({
+            "pid": ppid,
+            "session_id": session_id,
+            "agent_name": "team-lead",
+            "created_at": now,
+        });
+        std::fs::write(
+            current_ppid_hook_path(),
+            serde_json::to_string(&data).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_session_file(home: &std::path::Path, team: &str, identity: &str, session_id: &str) {
+        let sessions_dir = home
+            .join(".claude")
+            .join("teams")
+            .join(team)
+            .join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let data = serde_json::json!({
+            "session_id": session_id,
+            "team": team,
+            "identity": identity,
+            "pid": 12345,
+            "created_at": now,
+            "updated_at": now,
+        });
+        std::fs::write(
+            sessions_dir.join(format!("{session_id}.json")),
+            serde_json::to_string(&data).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn test_detect_sender_session_id_prefers_hook_file_over_session_and_env() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        write_fresh_hook_file("sid-from-hook");
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+        }
+
+        let actual = detect_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"));
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+        let _ = std::fs::remove_file(&hook_path);
+
+        assert_eq!(actual.as_deref(), Some("sid-from-hook"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_detect_sender_session_id_uses_session_file_when_hook_missing() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+        }
+
+        let actual = detect_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"));
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(actual.as_deref(), Some("sid-from-session"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_detect_sender_session_id_uses_env_when_hook_and_session_missing() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+        }
+
+        let actual = detect_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"));
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(actual.as_deref(), Some("sid-from-env"));
     }
 }

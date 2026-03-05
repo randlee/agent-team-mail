@@ -406,12 +406,19 @@ mod tests {
     #[serial]
     fn test_read_session_file_missing_directory_returns_none() {
         let home = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", home.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", home.path());
+        }
 
         let result = read_session_file("no-team", "agent");
-        unsafe { std::env::remove_var("ATM_HOME"); }
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+        }
 
-        assert!(result.is_ok(), "expected Ok when directory absent: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok when directory absent: {result:?}"
+        );
         assert!(result.unwrap().is_none());
     }
 
@@ -419,20 +426,29 @@ mod tests {
     #[serial]
     fn test_read_session_file_single_match_returns_session_id() {
         let home = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", home.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", home.path());
+        }
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        write_session_file(home.path(), "atm-dev", "sid-001", "team-lead", now, Some(now));
+        write_session_file(
+            home.path(),
+            "atm-dev",
+            "sid-001",
+            "team-lead",
+            now,
+            Some(now),
+        );
 
         let result = read_session_file("atm-dev", "team-lead");
-        unsafe { std::env::remove_var("ATM_HOME"); }
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+        }
 
-        let sid = result
-            .expect("expected Ok")
-            .expect("expected Some");
+        let sid = result.expect("expected Ok").expect("expected Some");
         assert_eq!(sid, "sid-001");
     }
 
@@ -440,7 +456,9 @@ mod tests {
     #[serial]
     fn test_read_session_file_stale_file_returns_none() {
         let home = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", home.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", home.path());
+        }
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -458,7 +476,9 @@ mod tests {
         );
 
         let result = read_session_file("atm-dev", "team-lead");
-        unsafe { std::env::remove_var("ATM_HOME"); }
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+        }
 
         assert!(result.is_ok(), "expected Ok: {result:?}");
         assert!(result.unwrap().is_none(), "stale file should be skipped");
@@ -468,7 +488,9 @@ mod tests {
     #[serial]
     fn test_read_session_file_updated_at_refreshes_ttl() {
         let home = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", home.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", home.path());
+        }
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -486,7 +508,9 @@ mod tests {
         );
 
         let result = read_session_file("atm-dev", "team-lead");
-        unsafe { std::env::remove_var("ATM_HOME"); }
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+        }
 
         let sid = result.expect("expected Ok").expect("expected Some");
         assert_eq!(sid, "sid-fresh", "fresh updated_at should keep file alive");
@@ -496,17 +520,35 @@ mod tests {
     #[serial]
     fn test_read_session_file_ambiguous_returns_err() {
         let home = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", home.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", home.path());
+        }
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        write_session_file(home.path(), "atm-dev", "sid-aaa111", "team-lead", now, Some(now));
-        write_session_file(home.path(), "atm-dev", "sid-bbb222", "team-lead", now, Some(now));
+        write_session_file(
+            home.path(),
+            "atm-dev",
+            "sid-aaa111",
+            "team-lead",
+            now,
+            Some(now),
+        );
+        write_session_file(
+            home.path(),
+            "atm-dev",
+            "sid-bbb222",
+            "team-lead",
+            now,
+            Some(now),
+        );
 
         let result = read_session_file("atm-dev", "team-lead");
-        unsafe { std::env::remove_var("ATM_HOME"); }
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+        }
 
         assert!(result.is_err(), "expected Err for ambiguous sessions");
         let msg = result.unwrap_err().to_string();
@@ -524,16 +566,27 @@ mod tests {
     #[serial]
     fn test_read_session_file_wrong_identity_returns_none() {
         let home = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", home.path()); }
+        unsafe {
+            std::env::set_var("ATM_HOME", home.path());
+        }
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        write_session_file(home.path(), "atm-dev", "sid-xyz", "other-agent", now, Some(now));
+        write_session_file(
+            home.path(),
+            "atm-dev",
+            "sid-xyz",
+            "other-agent",
+            now,
+            Some(now),
+        );
 
         let result = read_session_file("atm-dev", "team-lead");
-        unsafe { std::env::remove_var("ATM_HOME"); }
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+        }
 
         assert!(result.is_ok(), "expected Ok: {result:?}");
         assert!(
