@@ -536,7 +536,7 @@ fn merge_hooks(
     }
 
     // Migrate existing SessionStart/SessionEnd entries to Claude's current
-    // catch-all matcher schema when present.
+    // nested hook schema when present.
     normalize_catch_all_hook_category_if_present(settings, "SessionStart")?;
     normalize_catch_all_hook_category_if_present(settings, "SessionEnd")?;
 
@@ -716,17 +716,6 @@ fn normalize_catch_all_hook_entries(array: &mut [serde_json::Value]) -> Result<(
             hooks
                 .as_array_mut()
                 .context("catch-all hook `hooks` field is not an array")?;
-            let should_normalize_matcher = match obj.get("matcher") {
-                None => true,
-                Some(serde_json::Value::Null) => true,
-                Some(serde_json::Value::String(m)) => m.is_empty(),
-                Some(serde_json::Value::Object(m)) => m.is_empty(),
-                _ => false,
-            };
-
-            if should_normalize_matcher {
-                obj.insert("matcher".to_string(), serde_json::json!(""));
-            }
         }
     }
 
