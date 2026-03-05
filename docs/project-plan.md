@@ -1545,7 +1545,7 @@ These items should be addressed in the next hardening phase.
 
 ## 23. External Contributions
 
-### 22.1 Erik's Session File Lifecycle Work (PR #428)
+### 23.1 Erik's Session File Lifecycle Work (PR #428)
 
 **Branch**: `origin/erik/atm-project-template-phase-1`
 **Worktree**: `/Users/randlee/Documents/github/agent-team-mail-worktrees/erik/atm-project-template-phase-1`

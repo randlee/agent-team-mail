@@ -1359,8 +1359,10 @@ when full routing context is available (`session_id` + `team` + `identity`).
 - `pid` MUST be `os.getppid()` — the long-lived Claude session process PID, not the
   short-lived hook subprocess PID.
 - `created_at` and `updated_at` are set to the current time on creation.
-- `updated_at` is refreshed by `atm-identity-write.py` on every `atm` CLI invocation
-  (acts as a TTL heartbeat so active sessions are not orphan-reaped prematurely).
+- `updated_at` is refreshed by `atm-identity-write.py` on `atm` CLI invocations where
+  both `session_id` and agent identity are resolvable (from `.atm.toml` and the hook
+  payload). Invocations without `.atm.toml` context do not update the timestamp.
+  This acts as a TTL heartbeat so active sessions are not orphan-reaped prematurely.
 - The file persists across context compaction and `--continue`/`--resume` invocations
   (same session ID — `SessionEnd` does not fire on compaction, so the file survives).
 - Orphaned files (from crash or SIGKILL) are expired by a 24-hour TTL in
@@ -1383,6 +1385,9 @@ The `SessionEnd` hook deletes the session file for the terminating session:
 ```
 
 **Rules**:
+- Only fires for `.atm.toml`-configured sessions. Sessions started via env-only
+  context (`ATM_TEAM`/`ATM_IDENTITY` without `.atm.toml`) do not trigger cleanup;
+  their session files expire via the 24-hour TTL instead.
 - Only the file for THIS session's `session_id` is deleted — no other session files
   are touched.
 - `missing_ok=True` semantics: if the file does not exist (crash-restart recovery
