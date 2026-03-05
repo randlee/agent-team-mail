@@ -59,25 +59,26 @@ Key behaviors:
 ### For each sprint assigned to you:
 
 1. **Read sprint context**: Understand what was delivered (check the worktree diff, sprint plan)
-2. **Run rust-qa-agent** (assessment mode — static analysis + clippy + code review, NO `cargo test` yet):
+2. **ACK immediately** — send a reply to team-lead confirming receipt before doing any work.
+3. **Run rust-qa-agent** (assessment mode — static analysis + clippy + code review, NO `cargo test` yet):
    ```
    Tool: Task
      subagent_type: "rust-qa-agent"
-     run_in_background: true
+     run_in_background: false
      model: "sonnet"
      max_turns: 30
      prompt: <QA prompt — static analysis, clippy, code review against sprint plan; report findings immediately; DO NOT run cargo test yet>
    ```
-3. **Run atm-qa-agent** (compliance QA):
+4. **Run atm-qa-agent** (compliance QA):
    ```
    Tool: Task
      subagent_type: "atm-qa-agent"
-     run_in_background: true
+     run_in_background: false
      model: "sonnet"
      max_turns: 20
      prompt: <QA prompt with fenced JSON input, scope, phase docs>
    ```
-4. Both agents run in parallel and report findings **immediately on completion** — do NOT wait for the sibling before reporting to team-lead
+5. Run both agents sequentially (foreground) so you remain active throughout and report results directly — do NOT go idle while waiting
 5. **Check CI status** on the PR (if one exists):
    - CI green → rust-qa assessment is sufficient, no need to run `cargo test` locally
    - CI pending/failing → resume rust-qa (or spawn a new cargo-test agent) to run `cargo test` and investigate
