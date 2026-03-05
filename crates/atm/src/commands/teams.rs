@@ -1,7 +1,9 @@
 //! Teams command implementation
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
-use agent_team_mail_core::daemon_client::{LaunchConfig, launch_agent, query_session_for_team};
+use agent_team_mail_core::daemon_client::{
+    LaunchConfig, RegisterHintOutcome, launch_agent, query_session_for_team, register_hint,
+};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::inbox_update;
@@ -61,6 +63,9 @@ pub enum TeamsCommand {
 
 /// Spawn a team member (runtime-aware daemon launch)
 #[derive(Args, Debug)]
+#[command(
+    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn team-lead --runtime claude --folder /path/to/repo --team atm-dev\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
+)]
 pub struct SpawnArgs {
     /// Agent name
     agent: String,
@@ -112,6 +117,10 @@ pub struct SpawnArgs {
     /// Canonical spawn directory (`--cwd` is accepted as an alias)
     #[arg(long, alias = "cwd")]
     folder: Vec<PathBuf>,
+
+    /// Allow ATM_TEAM (env) to override conflicting .atm.toml default_team for this invocation
+    #[arg(long)]
+    override_team: bool,
 
     /// Output as JSON
     #[arg(long)]
@@ -392,6 +401,16 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
     let launch_dir = resolve_spawn_folder(&args.folder, &current_dir)?;
+    let env_team = env_var_nonempty("ATM_TEAM");
+    let repo_default_team = read_repo_default_team(&current_dir);
+    let team_mismatch = if args.team.is_none() {
+        match (env_team.as_deref(), repo_default_team.as_deref()) {
+            (Some(env), Some(repo)) if env != repo => Some((env.to_string(), repo.to_string())),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let config = resolve_config(
         &ConfigOverrides {
             team: args.team.clone(),
@@ -438,6 +457,78 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     }
     let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
     print_launch_command_preview(&launch_command_preview, args.json);
+
+    if let Some((env_team, repo_team)) = team_mismatch {
+        warn!(
+            "spawn team mismatch detected: ATM_TEAM='{}' vs .atm.toml default_team='{}'",
+            env_team, repo_team
+        );
+        eprintln!(
+            "Warning: team mismatch detected: ATM_TEAM ('{}') != .atm.toml default_team ('{}').",
+            env_team, repo_team
+        );
+        if !args.override_team {
+            anyhow::bail!(
+                "ATM_TEAM ('{}') does not match .atm.toml default_team ('{}'). \
+                 Re-run with --override-team to proceed with the env-var team for this invocation.",
+                env_team,
+                repo_team
+            );
+        }
+        warn!(
+            "spawn override-team: using ATM_TEAM='{}' instead of .atm.toml default_team='{}'",
+            env_team, repo_team
+        );
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert(
+            "conflicting_toml_team".to_string(),
+            serde_json::Value::String(repo_team),
+        );
+        extra_fields.insert(
+            "invoked_at".to_string(),
+            serde_json::Value::String(Utc::now().to_rfc3339()),
+        );
+        emit_event_best_effort(EventFields {
+            level: "warn",
+            source: "atm",
+            action: "spawn_team_override",
+            team: Some(env_team),
+            agent_name: Some(args.agent.clone()),
+            result: Some("override_team".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
+
+    // Preserve legacy spawn UX when daemon is unavailable: return the daemon
+    // error + launch command guidance without requiring team-config mutation.
+    // When daemon is running, we enforce #409 by persisting model/backend
+    // metadata before sending the launch request.
+    if !agent_team_mail_core::daemon_client::daemon_is_running() {
+        if args.json {
+            let output = json!({
+                "error": "Daemon is not running. Start it with: atm-daemon",
+                "agent": args.agent,
+                "team": team_name,
+                "runtime": runtime_name(&args.runtime),
+                "folder": launch_dir.to_string_lossy(),
+                "launch_command": launch_command_preview,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
+            eprintln!("  Run the launch command above manually in a new tmux pane.");
+        }
+        std::process::exit(1);
+    }
+
+    ensure_spawn_member_metadata(
+        &team_name,
+        &args.agent,
+        &args.runtime,
+        args.model.as_deref(),
+        &launch_dir,
+    )?;
 
     let launch_config = LaunchConfig {
         agent: args.agent.clone(),
@@ -559,6 +650,86 @@ fn runtime_name(runtime: &RuntimeKind) -> &'static str {
     }
 }
 
+fn backend_type_for_runtime(runtime: &RuntimeKind) -> BackendType {
+    match runtime {
+        RuntimeKind::Claude => BackendType::ClaudeCode,
+        RuntimeKind::Codex => BackendType::Codex,
+        RuntimeKind::Gemini => BackendType::Gemini,
+        RuntimeKind::Opencode => BackendType::External,
+    }
+}
+
+fn ensure_spawn_member_metadata(
+    team: &str,
+    agent: &str,
+    runtime: &RuntimeKind,
+    model_override: Option<&str>,
+    launch_dir: &Path,
+) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let team_dir = home_dir.join(".claude/teams").join(team);
+    let config_path = team_dir.join("config.json");
+    if !config_path.exists() {
+        // Spawn must remain resilient when team config does not yet exist.
+        // Metadata persistence is best-effort in this case.
+        return Ok(());
+    }
+
+    let lock_path = config_path.with_extension("lock");
+    let _lock = acquire_lock(&lock_path, 5)
+        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
+
+    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let backend = backend_type_for_runtime(runtime);
+    let parsed_model_override = model_override.map(|model| {
+        ModelId::from_str(model).unwrap_or_else(|_| ModelId::Custom(model.to_string()))
+    });
+
+    if let Some(member) = team_config.members.iter_mut().find(|m| m.name == agent) {
+        if let Some(model) = model_override
+            && let Some(parsed_model) = parsed_model_override
+        {
+            member.model = model.to_string();
+            member.external_model = Some(parsed_model);
+        } else if member.external_model.is_none() {
+            member.external_model =
+                Some(ModelId::from_str(&member.model).unwrap_or(ModelId::Unknown));
+        }
+        member.external_backend_type = Some(backend);
+        if member.cwd.trim().is_empty() {
+            member.cwd = launch_dir.to_string_lossy().to_string();
+        }
+    } else {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        team_config
+            .members
+            .push(agent_team_mail_core::schema::AgentMember {
+                agent_id: format!("{agent}@{team}"),
+                name: agent.to_string(),
+                agent_type: runtime_name(runtime).to_string(),
+                model: model_override.unwrap_or("unknown").to_string(),
+                prompt: None,
+                color: None,
+                plan_mode_required: None,
+                joined_at: now_ms,
+                tmux_pane_id: None,
+                cwd: launch_dir.to_string_lossy().to_string(),
+                subscriptions: Vec::new(),
+                backend_type: None,
+                is_active: Some(false),
+                last_active: None,
+                session_id: None,
+                external_backend_type: Some(backend),
+                external_model: Some(parsed_model_override.unwrap_or(ModelId::Unknown)),
+                unknown_fields: std::collections::HashMap::new(),
+            });
+    }
+
+    write_team_config(&config_path, &team_config)?;
+    ensure_member_inbox_atomic(&team_dir, team, agent)?;
+    Ok(())
+}
+
 fn canonicalize_directory(path: &Path, flag: &str) -> Result<PathBuf> {
     if !path.exists() {
         anyhow::bail!(
@@ -610,6 +781,41 @@ fn resolve_spawn_folder(folder_args: &[PathBuf], current_dir: &Path) -> Result<P
         );
     }
     Ok(first)
+}
+
+fn env_var_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn find_repo_local_atm_toml(current_dir: &Path) -> Option<PathBuf> {
+    let mut dir = current_dir;
+    loop {
+        let config_path = dir.join(".atm.toml");
+        if config_path.exists() {
+            return Some(config_path);
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
+
+fn read_repo_default_team(current_dir: &Path) -> Option<String> {
+    let config_path = find_repo_local_atm_toml(current_dir)?;
+    let contents = fs::read_to_string(config_path).ok()?;
+    let value: toml::Value = toml::from_str(&contents).ok()?;
+    value
+        .get("core")
+        .and_then(|core| core.get("default_team"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|team| !team.is_empty())
+        .map(ToString::to_string)
 }
 
 fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
@@ -911,6 +1117,14 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
         }
         write_team_config(&config_path, &team_config)?;
         ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+        if let Some(ref session_id) = args.session_id {
+            sync_member_session_hint_from_config(
+                &config_path,
+                &args.team,
+                &args.agent,
+                session_id,
+            )?;
+        }
         return Ok(AddMemberOutcome::UpdatedInactive);
     }
 
@@ -937,7 +1151,7 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
         backend_type: None,
         is_active: Some(!args.inactive),
         last_active: if !args.inactive { Some(now_ms) } else { None },
-        session_id: args.session_id,
+        session_id: args.session_id.clone(),
         external_backend_type: parsed_backend_type,
         external_model: Some(parsed_model),
         unknown_fields: std::collections::HashMap::new(),
@@ -946,6 +1160,9 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     team_config.members.push(member);
     write_team_config(&config_path, &team_config)?;
     ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+    if let Some(ref session_id) = args.session_id {
+        sync_member_session_hint_from_config(&config_path, &args.team, &args.agent, session_id)?;
+    }
     Ok(AddMemberOutcome::Added)
 }
 
@@ -970,6 +1187,71 @@ fn ensure_member_inbox_atomic(team_dir: &Path, team_name: &str, agent_name: &str
     })?;
 
     Ok(())
+}
+
+fn runtime_for_member(member: &agent_team_mail_core::schema::AgentMember) -> Option<&'static str> {
+    member.effective_backend_type().and_then(|bt| match bt {
+        BackendType::ClaudeCode => Some("claude"),
+        BackendType::Codex => Some("codex"),
+        BackendType::Gemini => Some("gemini"),
+        BackendType::External | BackendType::Human(_) => None,
+    })
+}
+
+fn sync_member_session_hint_from_config(
+    config_path: &Path,
+    team: &str,
+    agent: &str,
+    session_id: &str,
+) -> Result<()> {
+    let cfg: TeamConfig = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+    let member = cfg.members.iter().find(|m| m.name == agent);
+    sync_member_session_hint(team, agent, session_id, member)
+}
+
+fn sync_member_session_hint(
+    team: &str,
+    agent: &str,
+    session_id: &str,
+    member: Option<&agent_team_mail_core::schema::AgentMember>,
+) -> Result<()> {
+    let mut runtime = member.and_then(runtime_for_member).map(str::to_string);
+    let process_hint = member
+        .and_then(|m| m.process_id_hint())
+        .filter(|pid| *pid > 1);
+
+    let daemon_session = query_session_for_team(team, agent).ok().flatten();
+    let process_id = process_hint.or_else(|| daemon_session.as_ref().map(|s| s.process_id));
+    if runtime.is_none() {
+        runtime = daemon_session.and_then(|s| s.runtime);
+    }
+
+    let Some(process_id) = process_id.filter(|pid| *pid > 1) else {
+        warn!("session-id for {agent}@{team} not synced to daemon: no process_id hint available");
+        return Ok(());
+    };
+    let runtime_ref = runtime.as_deref();
+    let runtime_session_id = runtime_ref.map(|_| session_id);
+
+    match register_hint(
+        team,
+        agent,
+        session_id,
+        process_id,
+        runtime_ref,
+        runtime_session_id,
+        None,
+        None,
+    ) {
+        Ok(RegisterHintOutcome::Registered | RegisterHintOutcome::DaemonUnavailable) => Ok(()),
+        Ok(RegisterHintOutcome::UnsupportedDaemon) => anyhow::bail!(
+            "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry."
+        ),
+        Err(e) => {
+            warn!("daemon sync failed for {agent}@{team} session hint: {e}");
+            Ok(())
+        }
+    }
 }
 
 /// Implement `atm teams update-member <team> <agent> [flags]`
@@ -1021,9 +1303,11 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
         })?;
 
     let mut updated_fields: Vec<&str> = Vec::new();
+    let mut session_id_to_sync: Option<String> = None;
 
     if let Some(session_id) = args.session_id {
-        member.session_id = Some(session_id);
+        member.session_id = Some(session_id.clone());
+        session_id_to_sync = Some(session_id);
         updated_fields.push("session_id");
     }
 
@@ -1060,6 +1344,9 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
     }
 
     write_team_config(&config_path, &team_config)?;
+    if let Some(ref session_id) = session_id_to_sync {
+        sync_member_session_hint_from_config(&config_path, &args.team, &args.agent, session_id)?;
+    }
 
     println!(
         "Updated member '{}' in team '{}': {}",
@@ -3457,5 +3744,93 @@ mod tests {
         let command = format!("cd '{}' && codex --yolo", test_cwd.to_string_lossy());
         let rendered = format_spawn_launch_command(&RuntimeKind::Codex, &spec, &command);
         assert_eq!(rendered, command);
+    }
+
+    #[test]
+    #[serial]
+    fn test_ensure_spawn_member_metadata_creates_missing_member() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let launch_dir = temp_dir.path().join("repo");
+        fs::create_dir_all(&launch_dir).unwrap();
+        ensure_spawn_member_metadata(
+            "atm-dev",
+            "arch-ctm",
+            &RuntimeKind::Codex,
+            Some("gpt5.3-codex"),
+            &launch_dir,
+        )
+        .unwrap();
+
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(team_dir.join("config.json")).unwrap())
+                .unwrap();
+        let member = config
+            .members
+            .iter()
+            .find(|m| m.name == "arch-ctm")
+            .expect("member must be created");
+        assert_eq!(member.model, "gpt5.3-codex");
+        assert_eq!(member.external_backend_type, Some(BackendType::Codex));
+        assert_eq!(
+            member.external_model,
+            Some(ModelId::from_str("gpt5.3-codex").unwrap())
+        );
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_ensure_spawn_member_metadata_updates_existing_member_backend_and_model() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        ensure_spawn_member_metadata(
+            "atm-dev",
+            "publisher",
+            &RuntimeKind::Gemini,
+            Some("gemini-2.5-pro"),
+            temp_dir.path(),
+        )
+        .unwrap();
+
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(team_dir.join("config.json")).unwrap())
+                .unwrap();
+        let member = config
+            .members
+            .iter()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        assert_eq!(member.model, "gemini-2.5-pro");
+        assert_eq!(member.external_backend_type, Some(BackendType::Gemini));
+        assert_eq!(
+            member.external_model,
+            Some(ModelId::from_str("gemini-2.5-pro").unwrap())
+        );
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 }

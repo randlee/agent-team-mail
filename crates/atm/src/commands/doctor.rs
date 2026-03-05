@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +19,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::util::hook_identity::read_hook_file;
+use crate::util::member_labels::UNREGISTERED_MARKER;
 use crate::util::settings::get_home_dir;
 
 #[derive(Args, Debug)]
@@ -86,6 +87,7 @@ struct LogWindow {
     mode: String,
     start: String,
     end: String,
+    elapsed_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -288,34 +290,76 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
             mode,
             start: window_start.to_rfc3339(),
             end: window_end.to_rfc3339(),
+            elapsed_secs: window_end
+                .signed_duration_since(window_start)
+                .num_seconds()
+                .max(0) as u64,
         },
         env_overrides: active_env_overrides(),
-        member_snapshot: team_config
-            .as_ref()
-            .map(|cfg| {
-                cfg.members
-                    .iter()
-                    .map(|m| MemberSnapshot {
-                        name: m.name.clone(),
-                        agent_type: m.agent_type.clone(),
-                        model: m.model.clone(),
-                        status: snapshot_status_from_canonical_state(
-                            daemon_states_by_agent.get(&m.name),
-                        ),
-                        activity: snapshot_activity_from_canonical_state(
-                            daemon_states_by_agent.get(&m.name),
-                        ),
-                        session_id: daemon_states_by_agent
-                            .get(&m.name)
-                            .and_then(|s| s.session_id.clone()),
-                        process_id: daemon_states_by_agent
-                            .get(&m.name)
-                            .and_then(|s| s.process_id),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        member_snapshot: build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent),
     })
+}
+
+fn build_member_snapshot(
+    team_config: Option<&TeamConfig>,
+    daemon_states_by_agent: &HashMap<String, CanonicalMemberState>,
+) -> Vec<MemberSnapshot> {
+    let mut names = BTreeSet::new();
+    let mut config_members: HashMap<&str, &agent_team_mail_core::schema::AgentMember> =
+        HashMap::new();
+
+    if let Some(cfg) = team_config {
+        for member in &cfg.members {
+            names.insert(member.name.clone());
+            config_members.insert(member.name.as_str(), member);
+        }
+    }
+    for state in daemon_states_by_agent.values() {
+        names.insert(state.agent.clone());
+    }
+
+    names
+        .into_iter()
+        .map(|name| {
+            if let Some(member) = config_members.get(name.as_str()) {
+                MemberSnapshot {
+                    name: name.clone(),
+                    agent_type: member.agent_type.clone(),
+                    model: member.model.clone(),
+                    status: snapshot_status_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    activity: snapshot_activity_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    session_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.session_id.clone()),
+                    process_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.process_id),
+                }
+            } else {
+                MemberSnapshot {
+                    name: format!("{name} {UNREGISTERED_MARKER}"),
+                    agent_type: UNREGISTERED_MARKER.to_string(),
+                    model: UNREGISTERED_MARKER.to_string(),
+                    status: snapshot_status_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    activity: snapshot_activity_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    session_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.session_id.clone()),
+                    process_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.process_id),
+                }
+            }
+        })
+        .collect()
 }
 
 fn snapshot_status_from_canonical_state(state: Option<&CanonicalMemberState>) -> String {
@@ -486,22 +530,50 @@ where
         ));
     }
 
-    for member in &cfg.members {
-        let daemon_state = daemon_states.get(&member.name);
-        if let Some(state) = daemon_state
-            && state.source == "pid_backend_validation"
-        {
+    for state in daemon_states.values() {
+        if state.source != "pid_backend_validation" {
+            continue;
+        }
+        if let Some(details) = parse_pid_backend_mismatch_reason(&state.reason) {
             findings.push(finding(
                 Severity::Warn,
                 "pid_session_reconciliation",
                 "PID_PROCESS_MISMATCH",
                 format!(
-                    "Member '{}' failed daemon PID/backend validation: {}",
-                    member.name, state.reason
+                    "Member '{}' failed daemon PID/backend validation: backend='{}' expected='{}' actual='{}' pid={}{}",
+                    state.agent,
+                    details.backend,
+                    details.expected,
+                    details.actual,
+                    details.pid,
+                    if state.in_config {
+                        String::new()
+                    } else {
+                        " (daemon-only session)".to_string()
+                    }
                 ),
             ));
-            continue;
+        } else {
+            findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "PID_PROCESS_MISMATCH",
+                format!(
+                    "Member '{}' failed daemon PID/backend validation: {}{}",
+                    state.agent,
+                    state.reason,
+                    if state.in_config {
+                        String::new()
+                    } else {
+                        " (daemon-only session)".to_string()
+                    }
+                ),
+            ));
         }
+    }
+
+    for member in &cfg.members {
+        let daemon_state = daemon_states.get(&member.name);
         match daemon_state.map(|s| s.state.as_str()) {
             Some("offline") | Some("dead") if member.is_active == Some(true) => {
                 findings.push(finding(
@@ -555,6 +627,28 @@ where
     }
 
     (findings, daemon_states)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PidMismatchDetails {
+    backend: String,
+    expected: String,
+    actual: String,
+    pid: u32,
+}
+
+fn parse_pid_backend_mismatch_reason(reason: &str) -> Option<PidMismatchDetails> {
+    let rest = reason.strip_prefix("pid/backend mismatch: backend='")?;
+    let (backend, rest) = rest.split_once("' expected='")?;
+    let (expected, rest) = rest.split_once("' actual='")?;
+    let (actual, pid_part) = rest.rsplit_once("' pid=")?;
+    let pid = pid_part.parse::<u32>().ok()?;
+    Some(PidMismatchDetails {
+        backend: backend.to_string(),
+        expected: expected.to_string(),
+        actual: actual.to_string(),
+        pid,
+    })
 }
 
 fn check_roster_session_integrity(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
@@ -858,12 +952,17 @@ fn compute_log_window_start(
     args: &DoctorArgs,
 ) -> Result<(DateTime<Utc>, String)> {
     if let Some(since) = &args.since {
+        let since_mode = if DateTime::parse_from_rfc3339(since.trim()).is_ok() {
+            "since_timestamp"
+        } else {
+            "since_duration"
+        };
         let dt = parse_since_input(since).with_context(|| {
             format!(
                 "Invalid --since value: '{since}'. Use ISO-8601 or positive duration like 30m/2h/1d"
             )
         })?;
-        return Ok((dt, "since_override".to_string()));
+        return Ok((dt, since_mode.to_string()));
     }
 
     let fallback = Utc::now() - Duration::hours(1);
@@ -974,6 +1073,38 @@ fn print_human(report: &DoctorReport) {
     print!("{}", render_human(report));
 }
 
+fn format_session_short(session_id: Option<&str>) -> String {
+    let Some(session) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "-".to_string();
+    };
+
+    if looks_like_uuid(session) {
+        return session.chars().take(8).collect();
+    }
+
+    if let Some(rest) = session.strip_prefix("local:")
+        && let Some(name) = rest.split(':').next()
+        && !name.is_empty()
+    {
+        return format!("local:{name}");
+    }
+
+    session.to_string()
+}
+
+fn looks_like_uuid(value: &str) -> bool {
+    let mut parts = value.split('-');
+    for expected_len in [8usize, 4, 4, 4, 12] {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != expected_len || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
 fn render_human(report: &DoctorReport) -> String {
     let mut out = String::new();
     out.push_str(&format!("ATM Doctor — team {}\n", report.summary.team));
@@ -984,8 +1115,8 @@ fn render_human(report: &DoctorReport) -> String {
         report.summary.counts.critical, report.summary.counts.warn, report.summary.counts.info
     ));
     out.push_str(&format!(
-        "Log window: {} -> {} ({})\n\n",
-        report.log_window.start, report.log_window.end, report.log_window.mode
+        "Log window: {}\n\n",
+        render_log_window_human(&report.log_window)
     ));
 
     if report.env_overrides.atm_home.is_some()
@@ -1020,7 +1151,7 @@ fn render_human(report: &DoctorReport) -> String {
                 .process_id
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "-".to_string());
-            let session = m.session_id.as_deref().unwrap_or("-");
+            let session = format_session_short(m.session_id.as_deref());
             out.push_str(&format!(
                 "  {:<20} {:<20} {:<24} {:<10} {:<10} {:<8} {}\n",
                 m.name, m.agent_type, m.model, m.status, m.activity, pid, session
@@ -1055,6 +1186,41 @@ fn render_human(report: &DoctorReport) -> String {
     }
 
     out
+}
+
+fn render_log_window_human(window: &LogWindow) -> String {
+    let elapsed = human_duration(window.elapsed_secs);
+    match window.mode.as_str() {
+        "default_incremental" | "since_duration" => format!("last {elapsed}"),
+        "since_timestamp" => parse_utc_timestamp(&window.start)
+            .map(|dt| format!("since {} ({elapsed})", dt.format("%Y-%m-%d %H:%M:%S UTC")))
+            .unwrap_or_else(|| fallback_log_window_human(window)),
+        "full" => format!("since session start ({elapsed})"),
+        _ => fallback_log_window_human(window),
+    }
+}
+
+fn fallback_log_window_human(window: &LogWindow) -> String {
+    format!("{} -> {} ({})", window.start, window.end, window.mode)
+}
+
+fn parse_utc_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn human_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3_600 {
+        return format!("{}m", seconds / 60);
+    }
+    if seconds < 86_400 {
+        return format!("{}h", seconds / 3_600);
+    }
+    format!("{}d", seconds / 86_400)
 }
 
 #[cfg(test)]
@@ -1155,6 +1321,21 @@ mod tests {
     }
 
     #[test]
+    fn format_session_short_formats_uuid_and_local_ids() {
+        assert_eq!(
+            format_session_short(Some("123e4567-e89b-12d3-a456-426614174000")),
+            "123e4567"
+        );
+        assert_eq!(
+            format_session_short(Some("local:team-lead:1772608955543:20111")),
+            "local:team-lead"
+        );
+        assert_eq!(format_session_short(Some("sess-1")), "sess-1");
+        assert_eq!(format_session_short(None), "-");
+        assert_eq!(format_session_short(Some("   ")), "-");
+    }
+
+    #[test]
     fn snapshot_status_from_canonical_state_maps_active_offline_unknown() {
         let active = CanonicalMemberState {
             agent: "a".to_string(),
@@ -1164,6 +1345,7 @@ mod tests {
             process_id: Some(1234),
             reason: "x".to_string(),
             source: "session_registry".to_string(),
+            in_config: true,
         };
         let dead = CanonicalMemberState {
             state: "offline".to_string(),
@@ -1186,6 +1368,45 @@ mod tests {
             "Unknown".to_string()
         );
         assert_eq!(snapshot_status_from_canonical_state(None), "Unknown");
+    }
+
+    #[test]
+    fn build_member_snapshot_includes_daemon_only_members_as_unregistered() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "sess-0".to_string(),
+            members: vec![member("team-lead", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+        let mut daemon_states = HashMap::new();
+        daemon_states.insert(
+            "arch-ctm".to_string(),
+            CanonicalMemberState {
+                agent: "arch-ctm".to_string(),
+                state: "active".to_string(),
+                activity: "busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4242),
+                reason: "session active".to_string(),
+                source: "session_registry".to_string(),
+                in_config: false,
+            },
+        );
+
+        let snapshot = build_member_snapshot(Some(&cfg), &daemon_states);
+        let ghost = snapshot
+            .iter()
+            .find(|m| m.name.contains("arch-ctm"))
+            .expect("daemon-only member missing from snapshot");
+        assert!(
+            ghost.name.contains(UNREGISTERED_MARKER),
+            "daemon-only member name should include marker"
+        );
+        assert_eq!(ghost.agent_type, UNREGISTERED_MARKER);
+        assert_eq!(ghost.model, UNREGISTERED_MARKER);
     }
 
     #[test]
@@ -1288,6 +1509,35 @@ mod tests {
         let (start, mode) = compute_log_window_start(tmp.path(), team, Some(&cfg), &args).unwrap();
         assert_eq!(mode, "default_incremental");
         assert_eq!(start.to_rfc3339(), "2026-02-27T21:00:00+00:00");
+    }
+
+    #[test]
+    fn compute_log_window_since_duration_sets_duration_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = DoctorArgs {
+            team: Some("atm-dev".to_string()),
+            json: false,
+            since: Some("30m".to_string()),
+            errors_only: false,
+            full: false,
+        };
+        let (_start, mode) = compute_log_window_start(tmp.path(), "atm-dev", None, &args).unwrap();
+        assert_eq!(mode, "since_duration");
+    }
+
+    #[test]
+    fn compute_log_window_since_timestamp_sets_timestamp_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = DoctorArgs {
+            team: Some("atm-dev".to_string()),
+            json: false,
+            since: Some("2026-03-03T10:00:00Z".to_string()),
+            errors_only: false,
+            full: false,
+        };
+        let (start, mode) = compute_log_window_start(tmp.path(), "atm-dev", None, &args).unwrap();
+        assert_eq!(mode, "since_timestamp");
+        assert_eq!(start.to_rfc3339(), "2026-03-03T10:00:00+00:00");
     }
 
     #[test]
@@ -1606,6 +1856,7 @@ mod tests {
                 process_id: Some(9),
                 reason: "foreign team state".to_string(),
                 source: "session_registry".to_string(),
+                in_config: false,
             }]))
         });
         assert!(
@@ -1635,9 +1886,59 @@ mod tests {
                 process_id: Some(4321),
                 reason: "session active".to_string(),
                 source: "session_registry".to_string(),
+                in_config: true,
             }]))
         });
         assert!(findings.iter().any(|f| f.code == "GHOST_SESSION"));
+    }
+
+    #[test]
+    fn parse_pid_backend_mismatch_reason_extracts_expected_fields() {
+        let parsed = parse_pid_backend_mismatch_reason(
+            "pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=4242",
+        )
+        .expect("valid mismatch reason");
+        assert_eq!(parsed.backend, "codex");
+        assert_eq!(parsed.expected, "comm=codex");
+        assert_eq!(parsed.actual, "zsh");
+        assert_eq!(parsed.pid, 4242);
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_reports_pid_mismatch_for_daemon_only_state() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(Some(vec![CanonicalMemberState {
+                agent: "arch-ctm".to_string(),
+                state: "offline".to_string(),
+                activity: "unknown".to_string(),
+                session_id: Some("sess-ghost".to_string()),
+                process_id: Some(9999),
+                reason: "pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=9999"
+                    .to_string(),
+                source: "pid_backend_validation".to_string(),
+                in_config: false,
+            }]))
+        });
+
+        let mismatch = findings
+            .iter()
+            .find(|f| f.code == "PID_PROCESS_MISMATCH")
+            .expect("expected pid mismatch finding");
+        assert!(mismatch.message.contains("backend='codex'"));
+        assert!(mismatch.message.contains("expected='comm=codex'"));
+        assert!(mismatch.message.contains("actual='zsh'"));
+        assert!(mismatch.message.contains("pid=9999"));
+        assert!(mismatch.message.contains("daemon-only session"));
     }
 
     #[test]
@@ -1700,6 +2001,7 @@ mod tests {
                 mode: "default_incremental".to_string(),
                 start: "2026-03-02T00:00:00Z".to_string(),
                 end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
             member_snapshot: vec![MemberSnapshot {
@@ -1717,6 +2019,36 @@ mod tests {
         let members_idx = rendered.find("Members:").unwrap();
         let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
         assert!(members_idx < findings_idx);
+    }
+
+    #[test]
+    fn render_log_window_human_uses_elapsed_labels() {
+        let incremental = LogWindow {
+            mode: "default_incremental".to_string(),
+            start: "2026-03-02T00:00:00Z".to_string(),
+            end: "2026-03-02T00:01:00Z".to_string(),
+            elapsed_secs: 60,
+        };
+        assert_eq!(render_log_window_human(&incremental), "last 1m");
+
+        let full = LogWindow {
+            mode: "full".to_string(),
+            start: "2026-03-02T00:00:00Z".to_string(),
+            end: "2026-03-02T02:00:00Z".to_string(),
+            elapsed_secs: 7_200,
+        };
+        assert_eq!(render_log_window_human(&full), "since session start (2h)");
+
+        let since_timestamp = LogWindow {
+            mode: "since_timestamp".to_string(),
+            start: "2026-03-02T00:00:00Z".to_string(),
+            end: "2026-03-02T00:05:00Z".to_string(),
+            elapsed_secs: 300,
+        };
+        assert_eq!(
+            render_log_window_human(&since_timestamp),
+            "since 2026-03-02 00:00:00 UTC (5m)"
+        );
     }
 
     #[test]
@@ -1742,6 +2074,7 @@ mod tests {
                 mode: "default_incremental".to_string(),
                 start: "2026-03-02T00:00:00Z".to_string(),
                 end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
             },
             env_overrides: EnvOverrides {
                 atm_home: Some(EnvOverrideValue {
@@ -1776,6 +2109,10 @@ mod tests {
         assert_eq!(
             value["env_overrides"]["atm_identity"]["value"],
             serde_json::Value::String("arch-ctm".to_string())
+        );
+        assert_eq!(
+            value["log_window"]["elapsed_secs"],
+            serde_json::Value::Number(60u64.into())
         );
     }
 
@@ -1825,6 +2162,7 @@ mod tests {
                 mode: "default_incremental".to_string(),
                 start: "2026-03-02T00:00:00Z".to_string(),
                 end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
             },
             env_overrides: EnvOverrides {
                 atm_home: Some(EnvOverrideValue {

@@ -5,12 +5,16 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Child, Command};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 /// Helper to set home directory for cross-platform test compatibility.
@@ -150,6 +154,133 @@ fn start_fake_dead_session_daemon(home: &Path) -> Child {
     let child = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
     wait_for_daemon_socket(home);
     child
+}
+
+#[cfg(unix)]
+fn write_fake_unknown_register_hint_daemon_script(home: &Path) -> PathBuf {
+    let script = home.join("fake-register-unknown-daemon.py");
+    let body = r#"#!/usr/bin/env python3
+import json
+import os
+import signal
+import socket
+from pathlib import Path
+
+home = Path(os.environ["ATM_HOME"])
+daemon_dir = home / ".claude" / "daemon"
+daemon_dir.mkdir(parents=True, exist_ok=True)
+
+sock_path = daemon_dir / "atm-daemon.sock"
+pid_path = daemon_dir / "atm-daemon.pid"
+if sock_path.exists():
+    sock_path.unlink()
+pid_path.write_text(str(os.getpid()))
+
+running = True
+def _stop(_signum, _frame):
+    global running
+    running = False
+
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(str(sock_path))
+srv.listen(16)
+srv.settimeout(0.2)
+
+while running:
+    try:
+        conn, _ = srv.accept()
+    except TimeoutError:
+        continue
+    except OSError:
+        break
+    with conn:
+        data = b""
+        while b"\n" not in data:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        try:
+            req = json.loads(data.decode().strip() or "{}")
+        except Exception:
+            req = {}
+
+        request_id = req.get("request_id", "req")
+        command = req.get("command", "")
+        payload = req.get("payload", {}) or {}
+        if command == "register-hint":
+            resp = {
+                "version": 1,
+                "request_id": request_id,
+                "status": "error",
+                "error": {
+                    "code": "UNKNOWN_COMMAND",
+                    "message": "Unknown command: 'register-hint'",
+                },
+            }
+        elif command in ("session-query-team", "session-for-team"):
+            resp = {
+                "version": 1,
+                "request_id": request_id,
+                "status": "ok",
+                "payload": {
+                    "session_id": "recipient-live-session",
+                    "process_id": os.getpid(),
+                    "alive": True,
+                    "runtime": "claude",
+                    "agent": payload.get("name", "unknown"),
+                    "team": payload.get("team", "unknown"),
+                },
+            }
+        elif command == "list-agents":
+            resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": []}
+        else:
+            resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": {}}
+        conn.sendall((json.dumps(resp) + "\n").encode())
+
+try:
+    srv.close()
+finally:
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        pid_path.unlink()
+    except FileNotFoundError:
+        pass
+"#;
+    fs::write(&script, body).unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn start_fake_unknown_register_hint_daemon(home: &Path) -> Child {
+    let script = write_fake_unknown_register_hint_daemon_script(home);
+    let child = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    wait_for_daemon_socket(home);
+    child
+}
+
+#[cfg(unix)]
+fn start_fake_claude_process(home: &Path) -> Child {
+    let sleep_bin = Path::new("/bin/sleep");
+    assert!(
+        sleep_bin.exists(),
+        "expected /bin/sleep for fake claude process"
+    );
+
+    let claude_link = home.join("claude");
+    if !claude_link.exists() {
+        symlink(sleep_bin, &claude_link).unwrap();
+    }
+    Command::new(&claude_link).arg("60").spawn().unwrap()
 }
 
 /// Create a test team structure
@@ -864,4 +995,63 @@ fn test_unknown_session_state_never_prefixes_even_with_offline_action_override()
         "Unknown daemon session state must not trigger offline prefix, got: {text}"
     );
     assert_eq!(text, "Check status");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_send_warns_and_continues_when_register_hint_is_unsupported() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let mut fake_claude = start_fake_claude_process(temp_dir.path());
+    let mut daemon = start_fake_unknown_register_hint_daemon(temp_dir.path());
+
+    let ppid = std::process::id();
+    let hook_path = temp_dir.path().join(format!("atm-hook-{ppid}.json"));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let hook = serde_json::json!({
+        "pid": fake_claude.id(),
+        "session_id": "test-session-send-unknown-daemon",
+        "agent_name": "team-lead",
+        "created_at": now,
+    });
+    fs::write(&hook_path, serde_json::to_string(&hook).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("TMPDIR", temp_dir.path())
+        .env("TMP", temp_dir.path())
+        .env("TEMP", temp_dir.path())
+        .env("ATM_TEAM", "test-team")
+        .args([
+            "send",
+            "test-agent",
+            "message survives unknown register-hint",
+        ])
+        .assert()
+        .success();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("Connected daemon does not support 'register-hint'"));
+    assert!(stderr.contains("continuing without daemon session sync"));
+
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/test-agent.json");
+    let messages: Vec<serde_json::Value> =
+        serde_json::from_str(&fs::read_to_string(&inbox_path).unwrap()).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0]["text"],
+        "message survives unknown register-hint"
+    );
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    let _ = fake_claude.kill();
+    let _ = fake_claude.wait();
 }

@@ -319,18 +319,77 @@ pub fn format_event_human(event: &LogEventV1) -> String {
         format!(" -> {}", event.target)
     };
 
+    let action_text = if event.action == "send" {
+        format_send_action(event)
+    } else {
+        format!("{}{}{}", event.action, msg_suffix, target_suffix)
+    };
+
     format!(
-        "{}  {}  [{}{} pid={}{}] {}{}{}",
+        "{}  {}  [{}{} pid={}{}] {}",
         event.ts,
         colored_level,
         event.source_binary,
         agent_suffix,
         event.pid,
         ppid_suffix,
-        event.action,
-        msg_suffix,
-        target_suffix,
+        action_text,
     )
+}
+
+fn format_send_action(event: &LogEventV1) -> String {
+    let sender_agent = field_string(event, "sender_agent")
+        .or_else(|| event.agent.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let sender_team = field_string(event, "sender_team")
+        .or_else(|| event.team.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let sender_pid = field_u64(event, "sender_pid")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    let (fallback_recipient_agent, fallback_recipient_team) = event
+        .target
+        .split_once('@')
+        .map(|(a, t)| (Some(a.to_string()), Some(t.to_string())))
+        .unwrap_or((None, None));
+    let recipient_agent = field_string(event, "recipient_agent")
+        .or(fallback_recipient_agent)
+        .unwrap_or_else(|| "-".to_string());
+    let recipient_team = field_string(event, "recipient_team")
+        .or(fallback_recipient_team)
+        .unwrap_or_else(|| "-".to_string());
+    let recipient_pid = field_u64(event, "recipient_pid")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    let mut line = format!(
+        "send {}@{} [{}] -> {}@{} [{}]",
+        sender_agent, sender_team, sender_pid, recipient_agent, recipient_team, recipient_pid
+    );
+
+    if let Some(preview) = field_string(event, "message_preview")
+        && !preview.is_empty()
+    {
+        line.push(' ');
+        line.push('"');
+        line.push_str(&preview);
+        line.push('"');
+    }
+
+    line
+}
+
+fn field_string(event: &LogEventV1, key: &str) -> Option<String> {
+    event
+        .fields
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn field_u64(event: &LogEventV1, key: &str) -> Option<u64> {
+    event.fields.get(key).and_then(|v| v.as_u64())
 }
 
 /// Parse a human-readable duration string into a [`Duration`].
@@ -632,6 +691,66 @@ mod tests {
             formatted.contains("ppid=123"),
             "formatted event should include ppid when available"
         );
+    }
+
+    #[test]
+    fn test_format_human_send_uses_normalized_sender_recipient_layout() {
+        let mut ev = new_log_event("atm", "send", "atm::send", "info");
+        ev.fields.insert(
+            "sender_agent".to_string(),
+            serde_json::Value::String("team-lead".to_string()),
+        );
+        ev.fields.insert(
+            "sender_team".to_string(),
+            serde_json::Value::String("atm-dev".to_string()),
+        );
+        ev.fields.insert(
+            "sender_pid".to_string(),
+            serde_json::Value::Number(44201u64.into()),
+        );
+        ev.fields.insert(
+            "recipient_agent".to_string(),
+            serde_json::Value::String("arch-ctm".to_string()),
+        );
+        ev.fields.insert(
+            "recipient_team".to_string(),
+            serde_json::Value::String("atm-dev".to_string()),
+        );
+        ev.fields.insert(
+            "recipient_pid".to_string(),
+            serde_json::Value::Number(8009u64.into()),
+        );
+        ev.fields.insert(
+            "message_preview".to_string(),
+            serde_json::Value::String("test message...".to_string()),
+        );
+        let rendered = format_event_human(&ev);
+        assert!(rendered.contains(
+            "send team-lead@atm-dev [44201] -> arch-ctm@atm-dev [8009] \"test message...\""
+        ));
+    }
+
+    #[test]
+    fn test_format_human_send_uses_dash_for_missing_pids() {
+        let mut ev = new_log_event("atm", "send", "atm::send", "info");
+        ev.fields.insert(
+            "sender_agent".to_string(),
+            serde_json::Value::String("team-lead".to_string()),
+        );
+        ev.fields.insert(
+            "sender_team".to_string(),
+            serde_json::Value::String("atm-dev".to_string()),
+        );
+        ev.fields.insert(
+            "recipient_agent".to_string(),
+            serde_json::Value::String("arch-ctm".to_string()),
+        );
+        ev.fields.insert(
+            "recipient_team".to_string(),
+            serde_json::Value::String("atm-dev".to_string()),
+        );
+        let rendered = format_event_human(&ev);
+        assert!(rendered.contains("send team-lead@atm-dev [-] -> arch-ctm@atm-dev [-]"));
     }
 
     // ── test_nonexistent_file_returns_empty ───────────────────────────────────

@@ -19,6 +19,7 @@ fn configure_cmd(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
         .env_remove("ATM_CONFIG")
@@ -359,4 +360,46 @@ fn test_register_conflicting_lead_session_allows_force_when_daemon_unreachable()
         .success()
         .stdout(predicate::str::contains("Registered as team-lead"))
         .stdout(predicate::str::contains("forced-new-session-id"));
+}
+
+#[test]
+fn test_register_teammate_ownership_guard_fails_closed_when_daemon_unavailable() {
+    let temp_dir = TempDir::new().unwrap();
+    create_test_team(
+        &temp_dir,
+        "my-team",
+        &[("team-lead", true), ("alice", false), ("bob", false)],
+    );
+    write_atm_toml(&temp_dir, "bob");
+
+    let config_path = temp_dir.path().join(".claude/teams/my-team/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["members"][1]["sessionId"] = serde_json::json!("alice-session-existing");
+    config["leadSessionId"] = serde_json::json!("lead-session-existing");
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    configure_cmd(&mut cmd, &temp_dir);
+    cmd.env("CLAUDE_SESSION_ID", "new-cross-identity-session")
+        .env("ATM_TEAM", "my-team")
+        .current_dir(temp_dir.path().join("workdir"))
+        .args(["register", "my-team", "alice"]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Ownership guard rejected sessionId update for 'alice'",
+        ))
+        .stderr(predicate::str::contains("caller identity is 'bob'"));
+
+    let config_after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    let alice_after = config_after["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "alice")
+        .unwrap();
+    assert_eq!(alice_after["sessionId"], "alice-session-existing");
 }

@@ -35,7 +35,9 @@ use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 
 use crate::daemon::log_writer::LogEventQueue;
-use crate::daemon::pid_backend_validation::{PidBackendValidation, validate_pid_backend};
+use crate::daemon::pid_backend_validation::{
+    PidBackendValidation, roster_process_id, validate_pid_backend, validate_pid_runtime,
+};
 
 use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
 use crate::daemon::session_registry::SharedSessionRegistry;
@@ -459,7 +461,13 @@ async fn handle_connection(
         )
         .await
     } else if is_hook_event_command(request_str) {
-        handle_hook_event_command(request_str, &state_store, &session_registry).await
+        handle_hook_event_command_with_dedup(
+            request_str,
+            &state_store,
+            &session_registry,
+            &dedup_store,
+        )
+        .await
     } else if is_stream_event_command(request_str) {
         handle_stream_event_command(request_str, &stream_state_store, &stream_event_sender).await
     } else if is_log_event_command(request_str) {
@@ -904,13 +912,335 @@ fn authorize_hook_event(
     })
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransitionEventSpec {
+    level: &'static str,
+    action: &'static str,
+    old: String,
+    new: String,
+    reason: String,
+}
+
+#[cfg(unix)]
+fn is_online_state(state: Option<AgentState>) -> bool {
+    matches!(state, Some(AgentState::Active | AgentState::Idle))
+}
+
+#[cfg(unix)]
+fn online_state_label(state: Option<AgentState>) -> &'static str {
+    if is_online_state(state) {
+        "Online"
+    } else {
+        "Offline"
+    }
+}
+
+#[cfg(unix)]
+fn activity_label(state: AgentState) -> Option<&'static str> {
+    match state {
+        AgentState::Active => Some("Busy"),
+        AgentState::Idle => Some("Idle"),
+        AgentState::Offline | AgentState::Unknown => None,
+    }
+}
+
+#[cfg(unix)]
+fn collect_member_transition_events(
+    old_state: Option<AgentState>,
+    new_state: AgentState,
+    reason: &str,
+) -> Vec<TransitionEventSpec> {
+    if old_state == Some(new_state) {
+        return Vec::new();
+    }
+
+    let mut specs = Vec::new();
+    if is_online_state(old_state) != is_online_state(Some(new_state)) {
+        specs.push(TransitionEventSpec {
+            level: "info",
+            action: "member_state_change",
+            old: online_state_label(old_state).to_string(),
+            new: online_state_label(Some(new_state)).to_string(),
+            reason: reason.to_string(),
+        });
+    }
+
+    let old_activity = old_state.and_then(activity_label);
+    let new_activity = activity_label(new_state);
+    if let (Some(old), Some(new)) = (old_activity, new_activity)
+        && old != new
+    {
+        specs.push(TransitionEventSpec {
+            level: "debug",
+            action: "member_activity_change",
+            old: old.to_string(),
+            new: new.to_string(),
+            reason: reason.to_string(),
+        });
+    }
+
+    specs
+}
+
+#[cfg(unix)]
+fn emit_member_transition_events(
+    team: &str,
+    agent: &str,
+    old_state: Option<AgentState>,
+    new_state: AgentState,
+    reason: &str,
+    session_id: Option<&str>,
+    process_id: Option<u32>,
+) {
+    for spec in collect_member_transition_events(old_state, new_state, reason) {
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert("old".to_string(), serde_json::Value::String(spec.old));
+        extra_fields.insert("new".to_string(), serde_json::Value::String(spec.new));
+        extra_fields.insert(
+            "source".to_string(),
+            serde_json::Value::String("daemon".to_string()),
+        );
+        extra_fields.insert("reason".to_string(), serde_json::Value::String(spec.reason));
+        if let Some(pid) = process_id {
+            extra_fields.insert("pid".to_string(), serde_json::Value::Number(pid.into()));
+        }
+
+        emit_event_best_effort(EventFields {
+            level: spec.level,
+            source: "atm-daemon",
+            action: spec.action,
+            team: Some(team.to_string()),
+            agent_name: Some(agent.to_string()),
+            session_id: session_id
+                .map(str::trim)
+                .filter(|sid| !sid.is_empty())
+                .map(ToString::to_string),
+            result: Some("success".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
+}
+
+#[cfg(unix)]
+fn emit_session_identity_change_events(
+    team: &str,
+    agent: &str,
+    old_record: Option<&crate::daemon::session_registry::SessionRecord>,
+    new_session_id: &str,
+    new_process_id: Option<u32>,
+    reason: &str,
+) {
+    let old_session_id = old_record.map(|record| record.session_id.as_str());
+    let (session_changed, process_changed) =
+        session_identity_change_flags(old_record, new_session_id, new_process_id);
+
+    if session_changed {
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert(
+            "old".to_string(),
+            old_session_id
+                .map(|sid| serde_json::Value::String(sid.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        extra_fields.insert(
+            "new".to_string(),
+            serde_json::Value::String(new_session_id.to_string()),
+        );
+        extra_fields.insert(
+            "source".to_string(),
+            serde_json::Value::String("daemon".to_string()),
+        );
+        extra_fields.insert(
+            "reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+        if let Some(pid) = new_process_id {
+            extra_fields.insert("pid".to_string(), serde_json::Value::Number(pid.into()));
+        }
+
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm-daemon",
+            action: "session_id_change",
+            team: Some(team.to_string()),
+            agent_name: Some(agent.to_string()),
+            session_id: Some(new_session_id.to_string()),
+            result: Some("success".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
+
+    if process_changed && let Some(new_pid) = new_process_id {
+        let old_pid = old_record.map(|record| record.process_id);
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert(
+            "old".to_string(),
+            old_pid
+                .map(|pid| serde_json::Value::Number(pid.into()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        extra_fields.insert("new".to_string(), serde_json::Value::Number(new_pid.into()));
+        extra_fields.insert(
+            "source".to_string(),
+            serde_json::Value::String("daemon".to_string()),
+        );
+        extra_fields.insert(
+            "reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+
+        emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm-daemon",
+            action: "process_id_change",
+            team: Some(team.to_string()),
+            agent_name: Some(agent.to_string()),
+            session_id: Some(new_session_id.to_string()),
+            result: Some("success".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
+}
+
+#[cfg(unix)]
+fn session_identity_change_flags(
+    old_record: Option<&crate::daemon::session_registry::SessionRecord>,
+    new_session_id: &str,
+    new_process_id: Option<u32>,
+) -> (bool, bool) {
+    let session_changed =
+        old_record.map(|record| record.session_id.as_str()) != Some(new_session_id);
+    let process_changed = new_process_id
+        .is_some_and(|new_pid| old_record.map(|record| record.process_id) != Some(new_pid));
+    (session_changed, process_changed)
+}
+
+#[cfg(unix)]
+fn hook_action_name(event_type: &str) -> Option<&'static str> {
+    match event_type {
+        "session_start" => Some("hook.session_start"),
+        "pre_compact" => Some("hook.pre_compact"),
+        "compact_complete" => Some("hook.compact_complete"),
+        "session_end" => Some("hook.session_end"),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct HookLogContext<'a> {
+    team: Option<&'a str>,
+    agent: Option<&'a str>,
+    session_id: Option<&'a str>,
+    process_id: Option<u32>,
+}
+
+#[cfg(unix)]
+fn emit_hook_event(
+    level: &'static str,
+    action: &'static str,
+    ctx: HookLogContext<'_>,
+    outcome: &str,
+    error: Option<String>,
+    event_type: Option<&str>,
+) {
+    let mut extra_fields = serde_json::Map::new();
+    extra_fields.insert(
+        "source".to_string(),
+        serde_json::Value::String("hook".to_string()),
+    );
+    if let Some(pid) = ctx.process_id {
+        extra_fields.insert("pid".to_string(), serde_json::Value::Number(pid.into()));
+    }
+    if let Some(event_type) = event_type {
+        extra_fields.insert(
+            "event".to_string(),
+            serde_json::Value::String(event_type.to_string()),
+        );
+    }
+
+    emit_event_best_effort(EventFields {
+        level,
+        source: "atm-daemon",
+        action,
+        team: ctx
+            .team
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        agent_name: ctx
+            .agent
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        session_id: ctx
+            .session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        result: Some(outcome.to_string()),
+        error,
+        extra_fields,
+        ..Default::default()
+    });
+}
+
+#[cfg(unix)]
+fn emit_hook_success(
+    event_type: &str,
+    team: &str,
+    agent: &str,
+    session_id: Option<&str>,
+    process_id: Option<u32>,
+) {
+    if let Some(action) = hook_action_name(event_type) {
+        let ctx = HookLogContext {
+            team: Some(team),
+            agent: Some(agent),
+            session_id,
+            process_id,
+        };
+        emit_hook_event("info", action, ctx, "success", None, Some(event_type));
+    }
+}
+
+#[cfg(unix)]
+fn emit_hook_failure(
+    event_type: Option<&str>,
+    team: Option<&str>,
+    agent: Option<&str>,
+    session_id: Option<&str>,
+    process_id: Option<u32>,
+    reason: &str,
+) {
+    let ctx = HookLogContext {
+        team,
+        agent,
+        session_id,
+        process_id,
+    };
+    emit_hook_event(
+        "warn",
+        "hook.failure",
+        ctx,
+        "failure",
+        Some(reason.to_string()),
+        event_type,
+    );
+}
+
 /// Handle the `"hook-event"` command, updating daemon state in real-time
 /// from Claude Code lifecycle hooks (session_start, teammate_idle, session_end).
 #[cfg(unix)]
-async fn handle_hook_event_command(
+async fn handle_hook_event_command_with_dedup(
     request_str: &str,
     state_store: &SharedStateStore,
     session_registry: &SharedSessionRegistry,
+    dedup_store: &SharedDedupeStore,
 ) -> SocketResponse {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
 
@@ -977,12 +1307,28 @@ async fn handle_hook_event_command(
         .unwrap_or(agent_team_mail_core::daemon_client::LifecycleSourceKind::Unknown);
 
     if agent.is_empty() {
+        emit_hook_failure(
+            Some(event_type.as_str()),
+            Some(team.as_str()),
+            None,
+            Some(session_id.as_str()),
+            process_id,
+            "missing agent",
+        );
         return make_ok_response(
             &request.request_id,
             serde_json::json!({"processed": false, "reason": "missing agent"}),
         );
     }
     if team.is_empty() {
+        emit_hook_failure(
+            Some(event_type.as_str()),
+            None,
+            Some(agent.as_str()),
+            Some(session_id.as_str()),
+            process_id,
+            "missing team",
+        );
         return make_ok_response(
             &request.request_id,
             serde_json::json!({"processed": false, "reason": "missing team"}),
@@ -992,6 +1338,14 @@ async fn handle_hook_event_command(
     let auth = match authorize_hook_event(&team, &agent, source_kind) {
         Ok(auth) => auth,
         Err(reason) => {
+            emit_hook_failure(
+                Some(event_type.as_str()),
+                Some(team.as_str()),
+                Some(agent.as_str()),
+                Some(session_id.as_str()),
+                process_id,
+                &reason,
+            );
             return make_ok_response(
                 &request.request_id,
                 serde_json::json!({"processed": false, "reason": reason}),
@@ -1010,11 +1364,50 @@ async fn handle_hook_event_command(
         auth.source,
         LifecycleSourceKind::ClaudeHook | LifecycleSourceKind::Unknown
     );
+
+    // Deduplicate lifecycle hook deliveries before any mutable state changes.
+    // Some adapters may retry on transport failures using the same request_id.
+    let request_id = request.request_id.trim();
+    if !request_id.is_empty() {
+        let session_key = if session_id.trim().is_empty() {
+            "_"
+        } else {
+            session_id.trim()
+        };
+        let key = DedupeKey::new(&team, session_key, &agent, request_id);
+        if dedup_store.lock().unwrap().check_and_insert(key) {
+            info!(
+                event = %event_type,
+                team = %team,
+                agent = %agent,
+                request_id = %request_id,
+                "hook_event duplicate delivery ignored"
+            );
+            return make_ok_response(
+                &request.request_id,
+                serde_json::json!({
+                    "processed": true,
+                    "duplicate": true,
+                    "event": event_type,
+                    "agent": agent
+                }),
+            );
+        }
+    }
+
     let agent_pid = process_id.unwrap_or(0);
 
     match event_type.as_str() {
         "session_start" => {
             if session_id.is_empty() {
+                emit_hook_failure(
+                    Some(event_type.as_str()),
+                    Some(team.as_str()),
+                    Some(agent.as_str()),
+                    None,
+                    process_id,
+                    "missing session_id",
+                );
                 return make_ok_response(
                     &request.request_id,
                     serde_json::json!({"processed": false, "reason": "missing session_id"}),
@@ -1023,23 +1416,41 @@ async fn handle_hook_event_command(
             let home = match agent_team_mail_core::home::get_home_dir() {
                 Ok(h) => h,
                 Err(e) => {
+                    let reason = format!("home resolution failed: {e}");
+                    emit_hook_failure(
+                        Some(event_type.as_str()),
+                        Some(team.as_str()),
+                        Some(agent.as_str()),
+                        Some(session_id.as_str()),
+                        process_id,
+                        &reason,
+                    );
                     return make_ok_response(
                         &request.request_id,
-                        serde_json::json!({"processed": false, "reason": format!("home resolution failed: {e}")}),
+                        serde_json::json!({"processed": false, "reason": reason}),
                     );
                 }
             };
             let Some(member) = load_team_member(&home, &team, &agent) else {
+                emit_hook_failure(
+                    Some(event_type.as_str()),
+                    Some(team.as_str()),
+                    Some(agent.as_str()),
+                    Some(session_id.as_str()),
+                    process_id,
+                    "agent not in team",
+                );
                 return make_ok_response(
                     &request.request_id,
                     serde_json::json!({"processed": false, "reason": "agent not in team"}),
                 );
             };
-            let has_existing_session = session_registry
+            let previous_session_record = session_registry
                 .lock()
                 .unwrap()
                 .query_for_team(&team, &agent)
-                .is_some();
+                .cloned();
+            let has_existing_session = previous_session_record.is_some();
             let has_activity_hint = member.is_active == Some(true)
                 || member.last_active.is_some()
                 || member
@@ -1086,17 +1497,26 @@ async fn handle_hook_event_command(
                             "pid_backend_validation",
                         );
                     }
+                    let reason = format!(
+                        "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
+                        validation.backend,
+                        validation.expected_display(),
+                        validation.actual_display(),
+                        validation.pid
+                    );
+                    emit_hook_failure(
+                        Some(event_type.as_str()),
+                        Some(team.as_str()),
+                        Some(agent.as_str()),
+                        Some(session_id.as_str()),
+                        process_id,
+                        &reason,
+                    );
                     return make_ok_response(
                         &request.request_id,
                         serde_json::json!({
                             "processed": false,
-                            "reason": format!(
-                                "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
-                                validation.backend,
-                                validation.expected_display(),
-                                validation.actual_display(),
-                                validation.pid
-                            )
+                            "reason": reason
                         }),
                     );
                 }
@@ -1105,7 +1525,7 @@ async fn handle_hook_event_command(
                 .lock()
                 .unwrap()
                 .upsert_for_team(&team, &agent, &session_id, agent_pid);
-            {
+            let (old_state, new_state) = {
                 let mut tracker = state_store.lock().unwrap();
                 let current = tracker.get_state(&agent);
                 if current.is_none() {
@@ -1124,13 +1544,56 @@ async fn handle_hook_event_command(
                         "hook_event",
                     );
                 }
-            }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_session_identity_change_events(
+                &team,
+                &agent,
+                previous_session_record.as_ref(),
+                &session_id,
+                process_id,
+                "hook_event.session_start",
+            );
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.session_start",
+                Some(session_id.as_str()),
+                process_id,
+            );
+            emit_hook_success(
+                event_type.as_str(),
+                &team,
+                &agent,
+                Some(session_id.as_str()),
+                process_id,
+            );
             info!(agent = %agent, agent_pid = agent_pid, session_id = %session_id, "hook_event.session_start");
         }
+        "pre_compact" | "compact_complete" => {
+            emit_hook_success(
+                event_type.as_str(),
+                &team,
+                &agent,
+                Some(session_id.as_str()),
+                process_id,
+            );
+            info!(
+                agent = %agent,
+                team = %team,
+                session_id = %session_id,
+                "hook_event {}",
+                event_type
+            );
+        }
         "teammate_idle" => {
-            {
+            let (old_state, new_state) = {
                 let mut tracker = state_store.lock().unwrap();
-                if tracker.get_state(&agent).is_some() {
+                let current = tracker.get_state(&agent);
+                if current.is_some() {
                     tracker.set_state_with_context(
                         &agent,
                         AgentState::Idle,
@@ -1146,11 +1609,30 @@ async fn handle_hook_event_command(
                         "hook_event",
                     );
                 }
-            }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.teammate_idle",
+                Some(session_id.as_str()),
+                process_id,
+            );
             info!(agent = %agent, agent_pid = agent_pid, "hook_event teammate_idle");
         }
         "session_end" => {
             if require_lead_for_session_end && !auth.is_team_lead {
+                emit_hook_failure(
+                    Some(event_type.as_str()),
+                    Some(team.as_str()),
+                    Some(agent.as_str()),
+                    Some(session_id.as_str()),
+                    process_id,
+                    "only team-lead may send session_end",
+                );
                 return make_ok_response(
                     &request.request_id,
                     serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
@@ -1162,8 +1644,9 @@ async fn handle_hook_event_command(
                     .unwrap()
                     .mark_dead_for_team(&team, &agent);
             }
-            {
+            let (old_state, new_state) = {
                 let mut tracker = state_store.lock().unwrap();
+                let current = tracker.get_state(&agent);
                 if tracker.get_state(&agent).is_some() {
                     tracker.set_state_with_context(
                         &agent,
@@ -1172,11 +1655,37 @@ async fn handle_hook_event_command(
                         "hook_event",
                     );
                 }
-            }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.session_end",
+                Some(session_id.as_str()),
+                process_id,
+            );
+            emit_hook_success(
+                event_type.as_str(),
+                &team,
+                &agent,
+                Some(session_id.as_str()),
+                process_id,
+            );
             info!(agent = %agent, agent_pid = agent_pid, "hook_event session_end");
         }
         other => {
             debug!("hook_event unknown event type: {other}");
+            emit_hook_failure(
+                Some(other),
+                Some(team.as_str()),
+                Some(agent.as_str()),
+                Some(session_id.as_str()),
+                process_id,
+                &format!("unknown event type: {other}"),
+            );
             return make_ok_response(
                 &request.request_id,
                 serde_json::json!({"processed": false, "reason": format!("unknown event type: {other}")}),
@@ -1188,6 +1697,23 @@ async fn handle_hook_event_command(
         &request.request_id,
         serde_json::json!({"processed": true, "event": event_type, "agent": agent}),
     )
+}
+
+#[cfg(all(test, unix))]
+async fn handle_hook_event_command(
+    request_str: &str,
+    state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    let dedup_path = std::env::temp_dir().join(format!(
+        "atm-hook-event-test-dedup-{}.jsonl",
+        uuid::Uuid::new_v4()
+    ));
+    let store = DurableDedupeStore::new(dedup_path, std::time::Duration::from_secs(600), 1000)
+        .expect("failed to create test dedupe store");
+    let dedup_store = std::sync::Arc::new(std::sync::Mutex::new(store));
+    handle_hook_event_command_with_dedup(request_str, state_store, session_registry, &dedup_store)
+        .await
 }
 
 /// Handle the `"launch"` command asynchronously by forwarding it through the
@@ -1834,6 +2360,7 @@ fn parse_and_dispatch(
         "agent-pane" => handle_agent_pane(&request, state_store),
         "subscribe" => handle_subscribe(&request, pubsub_store),
         "unsubscribe" => handle_unsubscribe(&request, pubsub_store),
+        "register-hint" => handle_register_hint(&request, state_store, session_registry),
         "session-query" => handle_session_query(&request, session_registry),
         "session-query-team" => handle_session_query_team(&request, session_registry),
         "agent-stream-state" => handle_agent_stream_state(&request, stream_state_store),
@@ -2049,6 +2576,200 @@ fn handle_session_query_team(
     )
 }
 
+/// Handle the `register-hint` command.
+///
+/// Payload:
+/// `{"team":"<team>","agent":"<name>","session_id":"<sid>","process_id":1234,"runtime":"codex?"...}`
+///
+/// This updates daemon session registry and state tracker through canonical
+/// daemon-owned paths for runtimes that cannot emit lifecycle hooks directly.
+fn handle_register_hint(
+    request: &agent_team_mail_core::daemon_client::SocketRequest,
+    state_store: &SharedStateStore,
+    session_registry: &SharedSessionRegistry,
+) -> SocketResponse {
+    let team = match request.payload.get("team").and_then(|v| v.as_str()) {
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'team'",
+            );
+        }
+    };
+    let agent = match request.payload.get("agent").and_then(|v| v.as_str()) {
+        Some(a) if !a.trim().is_empty() => a.trim().to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'agent'",
+            );
+        }
+    };
+    let requesting_identity = request
+        .payload
+        .get("identity")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    if let Some(identity) = requesting_identity.as_deref()
+        && identity != agent
+    {
+        warn!(
+            attempted_writer = %identity,
+            owner = %agent,
+            field = "sessionId",
+            "register-hint ownership guard rejected cross-identity session write"
+        );
+        return make_error_response(
+            &request.request_id,
+            "PERMISSION_DENIED",
+            &format!("Identity '{identity}' is not allowed to update sessionId for '{agent}'"),
+        );
+    }
+    let session_id = match request.payload.get("session_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'session_id'",
+            );
+        }
+    };
+    let process_id = match request.payload.get("process_id").and_then(|v| v.as_u64()) {
+        Some(pid) if pid > 1 => pid as u32,
+        _ => {
+            return make_error_response(
+                &request.request_id,
+                "MISSING_PARAMETER",
+                "Missing required payload field: 'process_id' (>1)",
+            );
+        }
+    };
+
+    let runtime = request
+        .payload
+        .get("runtime")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let runtime_session_id = request
+        .payload
+        .get("runtime_session_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let pane_id = request
+        .payload
+        .get("pane_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let runtime_home = request
+        .payload
+        .get("runtime_home")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+
+    let home = match agent_team_mail_core::home::get_home_dir() {
+        Ok(h) => h,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INTERNAL_ERROR",
+                &format!("Failed to resolve ATM home: {e}"),
+            );
+        }
+    };
+    let Some(member) = load_team_member(&home, &team, &agent) else {
+        return make_error_response(
+            &request.request_id,
+            "AGENT_NOT_FOUND",
+            &format!("Agent '{agent}' is not in team '{team}'"),
+        );
+    };
+
+    let validation = validate_pid_backend(&member, process_id);
+    if validation.is_alive_mismatch() {
+        emit_pid_process_mismatch(&team, &agent, &validation, "register_hint");
+        return make_error_response(
+            &request.request_id,
+            "PID_PROCESS_MISMATCH",
+            &format!(
+                "backend='{}' expected='{}' actual='{}' pid={}",
+                validation.backend,
+                validation.expected_display(),
+                validation.actual_display(),
+                validation.pid
+            ),
+        );
+    }
+
+    let runtime_session = runtime_session_id.clone().or_else(|| {
+        runtime
+            .as_ref()
+            .map(|_| session_id.clone())
+            .filter(|v| !v.is_empty())
+    });
+    session_registry.lock().unwrap().upsert_runtime_for_team(
+        &team,
+        &agent,
+        &session_id,
+        process_id,
+        runtime.clone(),
+        runtime_session.clone(),
+        pane_id,
+        runtime_home,
+    );
+
+    {
+        let mut tracker = state_store.lock().unwrap();
+        if tracker.get_state(&agent).is_none() {
+            tracker.register_agent(&agent);
+        }
+        tracker.set_state_with_context(
+            &agent,
+            AgentState::Active,
+            "register-hint update",
+            "register_hint",
+        );
+    }
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm-daemon",
+        action: "register_hint",
+        team: Some(team.clone()),
+        agent_name: Some(agent.clone()),
+        session_id: Some(session_id.clone()),
+        target: Some(format!("pid:{process_id}")),
+        result: Some("registered".to_string()),
+        runtime,
+        runtime_session_id: runtime_session,
+        ..Default::default()
+    });
+
+    make_ok_response(
+        &request.request_id,
+        serde_json::json!({
+            "processed": true,
+            "team": team,
+            "agent": agent,
+            "session_id": session_id,
+            "process_id": process_id
+        }),
+    )
+}
+
 /// Handle the `agent-state` command.
 ///
 /// Payload: `{"agent": "<name>", "team": "<team>"}`  (team is currently informational)
@@ -2172,22 +2893,36 @@ fn handle_list_agents(
         };
         let members = load_team_members(&home, team_name).unwrap_or_default();
         let tracker = state_store.lock().unwrap();
-        let session_guard = session_registry.lock().unwrap();
-        let agents: Vec<serde_json::Value> = members
-            .into_iter()
-            .map(|m| {
-                let tracker_state = tracker.get_state(&m.name);
-                let tracker_meta = tracker.transition_meta(&m.name);
-                let session = session_guard.query_for_team(team_name, &m.name);
-                let state = derive_canonical_member_state(
-                    team_name,
-                    &m,
-                    tracker_state,
-                    session,
-                    tracker_meta,
-                );
+        let mut session_guard = session_registry.lock().unwrap();
+        let mut merged_states: std::collections::BTreeMap<String, CanonicalMemberState> =
+            std::collections::BTreeMap::new();
+
+        for m in members {
+            bootstrap_session_from_member_hint(team_name, &m, &mut session_guard);
+            let tracker_state = tracker.get_state(&m.name);
+            let tracker_meta = tracker.transition_meta(&m.name);
+            let session = session_guard.query_for_team(team_name, &m.name);
+            let state =
+                derive_canonical_member_state(team_name, &m, tracker_state, session, tracker_meta);
+            merged_states.insert(m.name.clone(), state);
+        }
+
+        for session in session_guard.sessions_for_team(team_name) {
+            if merged_states.contains_key(&session.agent_name) {
+                continue;
+            }
+            let tracker_state = tracker.get_state(&session.agent_name);
+            let tracker_meta = tracker.transition_meta(&session.agent_name);
+            let state =
+                derive_unregistered_member_state(team_name, &session, tracker_state, tracker_meta);
+            merged_states.insert(session.agent_name.clone(), state);
+        }
+
+        let agents: Vec<serde_json::Value> = merged_states
+            .into_values()
+            .map(|state| {
                 serde_json::to_value(state)
-                    .unwrap_or_else(|_| serde_json::json!({"agent": m.name, "state": "unknown"}))
+                    .unwrap_or_else(|_| serde_json::json!({"agent": "unknown", "state": "unknown"}))
             })
             .collect();
         return make_ok_response(&request.request_id, serde_json::json!(agents));
@@ -2263,6 +2998,62 @@ fn emit_pid_process_mismatch(
     });
 }
 
+fn runtime_for_member(member: &AgentMember) -> Option<String> {
+    member.effective_backend_type().and_then(|bt| match bt {
+        agent_team_mail_core::schema::BackendType::ClaudeCode => Some("claude".to_string()),
+        agent_team_mail_core::schema::BackendType::Codex => Some("codex".to_string()),
+        agent_team_mail_core::schema::BackendType::Gemini => Some("gemini".to_string()),
+        agent_team_mail_core::schema::BackendType::External
+        | agent_team_mail_core::schema::BackendType::Human(_) => None,
+    })
+}
+
+fn bootstrap_session_from_member_hint(
+    team: &str,
+    member: &AgentMember,
+    session_registry: &mut crate::daemon::session_registry::SessionRegistry,
+) {
+    if session_registry
+        .query_for_team(team, &member.name)
+        .is_some()
+    {
+        return;
+    }
+
+    let Some(pid) = roster_process_id(member).filter(|pid| *pid > 1) else {
+        return;
+    };
+    if !agent_team_mail_core::pid::is_pid_alive(pid) {
+        return;
+    }
+
+    let validation = validate_pid_backend(member, pid);
+    if validation.is_alive_mismatch() {
+        emit_pid_process_mismatch(team, &member.name, &validation, "bootstrap");
+        return;
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let session_id = member
+        .session_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("local:{}:{now_ms}:{pid}", member.name));
+    let runtime = runtime_for_member(member);
+    let runtime_session_id = runtime.as_ref().map(|_| session_id.clone());
+
+    session_registry.upsert_runtime_for_team(
+        team,
+        &member.name,
+        &session_id,
+        pid,
+        runtime,
+        runtime_session_id,
+        member.tmux_pane_id.clone(),
+        None,
+    );
+}
+
 fn derive_canonical_member_state(
     team: &str,
     member: &AgentMember,
@@ -2283,6 +3074,7 @@ fn derive_canonical_member_state(
                 process_id: Some(session.process_id),
                 reason: "session inactive or pid dead".to_string(),
                 source: "session_registry".to_string(),
+                in_config: true,
             };
         }
         let validation = validate_pid_backend(member, session.process_id);
@@ -2308,6 +3100,7 @@ fn derive_canonical_member_state(
                 process_id: Some(session.process_id),
                 reason: mismatch_reason,
                 source: "pid_backend_validation".to_string(),
+                in_config: true,
             };
         }
         if matches!(tracker_state, Some(AgentState::Idle)) {
@@ -2325,6 +3118,7 @@ fn derive_canonical_member_state(
                 process_id: Some(session.process_id),
                 reason,
                 source,
+                in_config: true,
             };
         }
         return CanonicalMemberState {
@@ -2335,6 +3129,7 @@ fn derive_canonical_member_state(
             process_id: Some(session.process_id),
             reason: "session active with live pid".to_string(),
             source: "session_registry".to_string(),
+            in_config: true,
         };
     }
 
@@ -2351,6 +3146,7 @@ fn derive_canonical_member_state(
             source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
+            in_config: true,
         },
         Some(AgentState::Active) => CanonicalMemberState {
             agent: agent.to_string(),
@@ -2364,6 +3160,7 @@ fn derive_canonical_member_state(
             source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
+            in_config: true,
         },
         Some(AgentState::Offline) => CanonicalMemberState {
             agent: agent.to_string(),
@@ -2377,6 +3174,7 @@ fn derive_canonical_member_state(
             source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
+            in_config: true,
         },
         Some(AgentState::Unknown) | None => CanonicalMemberState {
             agent: agent.to_string(),
@@ -2390,7 +3188,85 @@ fn derive_canonical_member_state(
             source: tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "state_tracker".to_string()),
+            in_config: true,
         },
+    }
+}
+
+fn derive_unregistered_member_state(
+    team: &str,
+    session: &crate::daemon::session_registry::SessionRecord,
+    tracker_state: Option<AgentState>,
+    tracker_meta: Option<&crate::plugins::worker_adapter::TransitionMeta>,
+) -> CanonicalMemberState {
+    if session.state != crate::daemon::session_registry::SessionState::Active
+        || !session.is_process_alive()
+    {
+        return CanonicalMemberState {
+            agent: session.agent_name.clone(),
+            state: "offline".to_string(),
+            activity: "unknown".to_string(),
+            session_id: Some(session.session_id.clone()),
+            process_id: Some(session.process_id),
+            reason: "session tracked but member missing from config".to_string(),
+            source: "session_registry".to_string(),
+            in_config: false,
+        };
+    }
+
+    if matches!(tracker_state, Some(AgentState::Idle)) {
+        return CanonicalMemberState {
+            agent: session.agent_name.clone(),
+            state: "idle".to_string(),
+            activity: "idle".to_string(),
+            session_id: Some(session.session_id.clone()),
+            process_id: Some(session.process_id),
+            reason: tracker_meta
+                .map(|m| m.reason.clone())
+                .unwrap_or_else(|| "idle lifecycle signal".to_string()),
+            source: tracker_meta
+                .map(|m| m.source.clone())
+                .unwrap_or_else(|| "hook_event".to_string()),
+            in_config: false,
+        };
+    }
+
+    let validation = validate_pid_runtime(session.runtime.as_deref(), session.process_id);
+    if validation.is_alive_mismatch() {
+        let mismatch_reason = format!(
+            "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
+            validation.backend,
+            validation.expected_display(),
+            validation.actual_display(),
+            validation.pid
+        );
+        let already_reported = tracker_meta.is_some_and(|meta| {
+            meta.source == "pid_backend_validation" && meta.reason == mismatch_reason
+        });
+        if !already_reported {
+            emit_pid_process_mismatch(team, &session.agent_name, &validation, "liveness");
+        }
+        return CanonicalMemberState {
+            agent: session.agent_name.clone(),
+            state: "offline".to_string(),
+            activity: "unknown".to_string(),
+            session_id: Some(session.session_id.clone()),
+            process_id: Some(session.process_id),
+            reason: mismatch_reason,
+            source: "pid_backend_validation".to_string(),
+            in_config: false,
+        };
+    }
+
+    CanonicalMemberState {
+        agent: session.agent_name.clone(),
+        state: "active".to_string(),
+        activity: "busy".to_string(),
+        session_id: Some(session.session_id.clone()),
+        process_id: Some(session.process_id),
+        reason: "session tracked but member missing from config".to_string(),
+        source: "session_registry".to_string(),
+        in_config: false,
     }
 }
 
@@ -2654,6 +3530,36 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct SharedLogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl SharedLogCapture {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap_or_default()
+        }
+    }
+
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for SharedLogCapture {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter(self.0.clone())
+        }
+    }
+
     struct HookAuthFixture {
         _temp: TempDir,
         _atm_home_guard: EnvGuard,
@@ -2692,6 +3598,62 @@ mod tests {
             serde_json::to_string_pretty(&config).unwrap(),
         )
         .unwrap();
+    }
+
+    fn set_member_backend(
+        home_dir: &std::path::Path,
+        team: &str,
+        member_name: &str,
+        backend: &str,
+    ) {
+        let cfg_path = home_dir
+            .join(".claude/teams")
+            .join(team)
+            .join("config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        let members = cfg["members"]
+            .as_array_mut()
+            .expect("members array in team config");
+        let member = members
+            .iter_mut()
+            .find(|m| m["name"].as_str() == Some(member_name))
+            .expect("member exists in team config");
+        member["externalBackendType"] = serde_json::json!(backend);
+        std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+    }
+
+    fn test_member(name: &str, backend: &str) -> agent_team_mail_core::schema::AgentMember {
+        serde_json::from_value(serde_json::json!({
+            "agentId": format!("{name}@atm-dev"),
+            "name": name,
+            "agentType": "general-purpose",
+            "model": "unknown",
+            "joinedAt": 1739284800000u64,
+            "cwd": ".",
+            "subscriptions": [],
+            "externalBackendType": backend
+        }))
+        .expect("valid member json")
+    }
+
+    fn test_active_session(
+        team: &str,
+        agent: &str,
+        runtime: Option<&str>,
+    ) -> crate::daemon::session_registry::SessionRecord {
+        crate::daemon::session_registry::SessionRecord {
+            team: team.to_string(),
+            agent_name: agent.to_string(),
+            session_id: format!("{agent}-sess"),
+            process_id: std::process::id(),
+            state: crate::daemon::session_registry::SessionState::Active,
+            updated_at: "2026-03-05T00:00:00Z".to_string(),
+            runtime: runtime.map(str::to_string),
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        }
     }
 
     fn setup_hook_auth_fixture(team: &str, lead: &str, members: &[&str]) -> HookAuthFixture {
@@ -2809,6 +3771,133 @@ mod tests {
         assert_eq!(arch["state"].as_str(), Some("idle"));
         assert!(arch["reason"].as_str().is_some());
         assert!(arch["source"].as_str().is_some());
+        assert!(
+            arch.get("in_config").is_none() || arch["in_config"].as_bool() == Some(true),
+            "configured members should serialize in_config as omitted (default true) or explicit true"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_team_scope_includes_daemon_only_sessions_as_unregistered() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_runtime_for_team(
+                "atm-dev",
+                "arch-ctm",
+                "sess-ghost-1",
+                std::process::id(),
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+        let arr = resp.payload.unwrap().as_array().unwrap().clone();
+
+        let ghost = arr
+            .iter()
+            .find(|a| a["agent"].as_str() == Some("arch-ctm"))
+            .expect("daemon-only member missing");
+        assert_eq!(ghost["in_config"].as_bool(), Some(false));
+        assert_eq!(ghost["state"].as_str(), Some("active"));
+    }
+
+    #[test]
+    fn test_derive_canonical_member_state_prefers_live_session_over_offline_tracker_state() {
+        let member = test_member("arch-ctm", "external");
+        let session = test_active_session("atm-dev", "arch-ctm", Some("codex"));
+
+        let state = derive_canonical_member_state(
+            "atm-dev",
+            &member,
+            Some(AgentState::Offline),
+            Some(&session),
+            None,
+        );
+
+        assert_eq!(state.state, "active");
+        assert_eq!(state.activity, "busy");
+        assert_eq!(state.source, "session_registry");
+    }
+
+    #[test]
+    fn test_derive_canonical_member_state_active_tracker_without_session_stays_active() {
+        let member = test_member("arch-ctm", "external");
+        let state =
+            derive_canonical_member_state("atm-dev", &member, Some(AgentState::Active), None, None);
+        assert_eq!(state.state, "active");
+        assert_eq!(state.activity, "busy");
+        assert_eq!(state.source, "state_tracker");
+    }
+
+    #[test]
+    fn test_derive_unregistered_member_state_offline_tracker_with_live_session_prefers_session() {
+        let session = test_active_session("atm-dev", "ghost-agent", None);
+        let state =
+            derive_unregistered_member_state("atm-dev", &session, Some(AgentState::Offline), None);
+        assert_eq!(state.state, "active");
+        assert_eq!(state.activity, "busy");
+        assert_eq!(state.source, "session_registry");
+        assert!(!state.in_config);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_derive_unregistered_member_state_runtime_pid_mismatch_marks_offline() {
+        let session = test_active_session("atm-dev", "ghost-codex", Some("codex"));
+        let state =
+            derive_unregistered_member_state("atm-dev", &session, Some(AgentState::Active), None);
+        assert_eq!(state.state, "offline");
+        assert_eq!(state.source, "pid_backend_validation");
+        assert!(state.reason.contains("backend='codex'"));
+        assert!(!state.in_config);
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_bootstraps_session_from_config_process_hint() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let members = cfg["members"].as_array_mut().unwrap();
+        let target = members
+            .iter_mut()
+            .find(|m| m["name"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm in config");
+        target["processId"] = serde_json::json!(std::process::id());
+        target["sessionId"] = serde_json::json!("hint-session-1");
+        target["externalBackendType"] = serde_json::json!("external");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+        let arr = resp.payload.unwrap().as_array().unwrap().clone();
+        let member = arr
+            .iter()
+            .find(|a| a["agent"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm entry missing");
+        assert_eq!(member["state"].as_str(), Some("active"));
+        assert_eq!(member["session_id"].as_str(), Some("hint-session-1"));
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("session registry upserted");
+        assert_eq!(session.session_id, "hint-session-1");
+        assert_eq!(session.process_id, std::process::id());
     }
 
     #[test]
@@ -2902,6 +3991,278 @@ mod tests {
             parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "UNKNOWN_COMMAND");
+    }
+
+    #[test]
+    fn test_parse_and_dispatch_register_hint_missing_team() {
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"agent":"arch-ctm","session_id":"s1","process_id":1234}}"#;
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        assert_eq!(resp.status, "error");
+        assert_eq!(resp.error.unwrap().code, "MISSING_PARAMETER");
+    }
+
+    #[test]
+    fn test_parse_and_dispatch_register_hint_rejects_whitespace_session_id() {
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"team":"atm-dev","agent":"arch-ctm","session_id":"   ","process_id":1234}}"#;
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "MISSING_PARAMETER");
+        assert!(
+            err.message.contains("session_id"),
+            "error must mention missing session_id, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_register_hint_registers_external_member_session() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let team_dir = temp.path().join(".claude/teams/atm-dev");
+        std::fs::create_dir_all(&team_dir).unwrap();
+        let config = serde_json::json!({
+            "name": "atm-dev",
+            "description": "test",
+            "createdAt": 1739284800000u64,
+            "leadAgentId": "team-lead@atm-dev",
+            "leadSessionId": "lead-sess",
+            "members": [{
+                "agentId": "arch-ctm@atm-dev",
+                "name": "arch-ctm",
+                "agentType": "codex",
+                "model": "gpt5.3-codex",
+                "joinedAt": 1739284800000u64,
+                "cwd": temp.path().to_string_lossy().to_string(),
+                "subscriptions": [],
+                "externalBackendType": "external"
+            }]
+        });
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request(
+            "register-hint",
+            serde_json::json!({
+                "team": "atm-dev",
+                "agent": "arch-ctm",
+                "session_id": "local:arch-ctm:sess:1234",
+                "process_id": std::process::id(),
+                "runtime": "codex",
+                "runtime_session_id": "local:arch-ctm:sess:1234"
+            }),
+        );
+        let resp = handle_register_hint(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let session = sr
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .cloned()
+            .expect("session should be registered");
+        assert_eq!(session.session_id, "local:arch-ctm:sess:1234");
+        assert_eq!(session.process_id, std::process::id());
+        assert_eq!(session.runtime.as_deref(), Some("codex"));
+
+        let tracker_state = store.lock().unwrap().get_state("arch-ctm");
+        assert_eq!(tracker_state, Some(AgentState::Active));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_handle_register_hint_rejects_codex_backend_pid_mismatch_with_warn_log() {
+        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        set_member_backend(fixture._temp.path(), "atm-dev", "arch-ctm", "codex");
+        let store = make_store();
+        let sr = make_sr();
+
+        let capture = SharedLogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_writer(capture.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let req = make_request(
+            "register-hint",
+            serde_json::json!({
+                "team": "atm-dev",
+                "agent": "arch-ctm",
+                "session_id": "codex:sess-mismatch",
+                "process_id": std::process::id(),
+                "runtime": "codex",
+            }),
+        );
+        let resp = handle_register_hint(&req, &store, &sr);
+        assert_eq!(resp.status, "error");
+        let err = resp.error.expect("error payload");
+        assert_eq!(err.code, "PID_PROCESS_MISMATCH");
+        assert!(err.message.contains("backend='codex'"));
+
+        let logs = capture.contents();
+        assert!(logs.contains("pid/backend mismatch at register_hint"));
+        assert!(logs.contains("backend='codex'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_handle_register_hint_rejects_claude_backend_pid_mismatch_with_warn_log() {
+        let fixture =
+            setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "team-lead-2"]);
+        set_member_backend(
+            fixture._temp.path(),
+            "atm-dev",
+            "team-lead-2",
+            "claude-code",
+        );
+        let store = make_store();
+        let sr = make_sr();
+
+        let capture = SharedLogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_writer(capture.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let req = make_request(
+            "register-hint",
+            serde_json::json!({
+                "team": "atm-dev",
+                "agent": "team-lead-2",
+                "session_id": "claude:sess-mismatch",
+                "process_id": std::process::id(),
+                "runtime": "claude",
+            }),
+        );
+        let resp = handle_register_hint(&req, &store, &sr);
+        assert_eq!(resp.status, "error");
+        let err = resp.error.expect("error payload");
+        assert_eq!(err.code, "PID_PROCESS_MISMATCH");
+        assert!(err.message.contains("backend='claude-code'"));
+
+        let logs = capture.contents();
+        assert!(logs.contains("pid/backend mismatch at register_hint"));
+        assert!(logs.contains("backend='claude-code'"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_register_hint_recovers_mismatch_offline_baseline_to_active() {
+        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        set_member_backend(fixture._temp.path(), "atm-dev", "arch-ctm", "external");
+        let store = make_store();
+        let sr = make_sr();
+
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state_with_context(
+                "arch-ctm",
+                AgentState::Offline,
+                "pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=9999",
+                "pid_backend_validation",
+            );
+        }
+
+        let req = make_request(
+            "register-hint",
+            serde_json::json!({
+                "team": "atm-dev",
+                "agent": "arch-ctm",
+                "session_id": "local:arch-ctm:recover:1",
+                "process_id": std::process::id(),
+                "runtime": "codex",
+                "runtime_session_id": "local:arch-ctm:recover:1"
+            }),
+        );
+        let resp = handle_register_hint(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let tracker_state = store.lock().unwrap().get_state("arch-ctm");
+        assert_eq!(
+            tracker_state,
+            Some(AgentState::Active),
+            "register-hint should transition mismatch-offline baseline to active"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_register_hint_rejects_cross_identity_session_write() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let team_dir = temp.path().join(".claude/teams/atm-dev");
+        std::fs::create_dir_all(&team_dir).unwrap();
+        let config = serde_json::json!({
+            "name": "atm-dev",
+            "description": "test",
+            "createdAt": 1739284800000u64,
+            "leadAgentId": "team-lead@atm-dev",
+            "leadSessionId": "lead-sess",
+            "members": [{
+                "agentId": "arch-ctm@atm-dev",
+                "name": "arch-ctm",
+                "agentType": "codex",
+                "model": "gpt5.3-codex",
+                "joinedAt": 1739284800000u64,
+                "cwd": temp.path().to_string_lossy().to_string(),
+                "subscriptions": [],
+                "externalBackendType": "external"
+            }]
+        });
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request(
+            "register-hint",
+            serde_json::json!({
+                "team": "atm-dev",
+                "agent": "arch-ctm",
+                "identity": "team-lead",
+                "session_id": "local:arch-ctm:sess:9999",
+                "process_id": std::process::id(),
+            }),
+        );
+        let resp = handle_register_hint(&req, &store, &sr);
+        assert_eq!(resp.status, "error");
+        let err = resp.error.expect("error payload required");
+        assert_eq!(err.code, "PERMISSION_DENIED");
+        assert!(err.message.contains("not allowed to update sessionId"));
+
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "cross-identity register-hint must not write session record"
+        );
     }
 
     #[test]
@@ -3803,6 +5164,102 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_collect_member_transition_events_emits_online_change_once() {
+        let events = collect_member_transition_events(
+            Some(AgentState::Offline),
+            AgentState::Active,
+            "session_start",
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "member_state_change");
+        assert_eq!(events[0].level, "info");
+        assert_eq!(events[0].old, "Offline");
+        assert_eq!(events[0].new, "Online");
+        assert_eq!(events[0].reason, "session_start");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_member_transition_events_emits_busy_idle_at_debug_only() {
+        let events = collect_member_transition_events(
+            Some(AgentState::Active),
+            AgentState::Idle,
+            "heartbeat",
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "member_activity_change");
+        assert_eq!(events[0].level, "debug");
+        assert_eq!(events[0].old, "Busy");
+        assert_eq!(events[0].new, "Idle");
+        assert_eq!(events[0].reason, "heartbeat");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_member_transition_events_no_duplicate_when_state_unchanged() {
+        let events =
+            collect_member_transition_events(Some(AgentState::Idle), AgentState::Idle, "noop");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_session_identity_change_flags_detects_changes() {
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-1", 1111);
+        }
+        let record = sr
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .cloned();
+        let (session_changed, pid_changed) =
+            session_identity_change_flags(record.as_ref(), "sess-2", Some(2222));
+        assert!(session_changed);
+        assert!(pid_changed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_session_identity_change_flags_no_change_when_values_match() {
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-1", 1111);
+        }
+        let record = sr
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .cloned();
+        let (session_changed, pid_changed) =
+            session_identity_change_flags(record.as_ref(), "sess-1", Some(1111));
+        assert!(!session_changed);
+        assert!(!pid_changed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_hook_action_name_includes_compact_events() {
+        assert_eq!(
+            hook_action_name("session_start"),
+            Some("hook.session_start")
+        );
+        assert_eq!(hook_action_name("pre_compact"), Some("hook.pre_compact"));
+        assert_eq!(
+            hook_action_name("compact_complete"),
+            Some("hook.compact_complete")
+        );
+        assert_eq!(hook_action_name("session_end"), Some("hook.session_end"));
+        assert_eq!(hook_action_name("teammate_idle"), None);
+    }
+
+    #[test]
     fn test_parse_and_dispatch_hook_event_internal_error() {
         let store = make_store();
         let ps = make_ps();
@@ -3859,6 +5316,71 @@ mod tests {
         // State should remain Idle (not reset to Launching) — session_start only registers if not already tracked
         let tracker = store.lock().unwrap();
         assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_duplicate_request_id_is_deduped_before_state_mutation() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let (dd, _dd_dir) = make_dd();
+        let req_json = r#"{"version":1,"request_id":"r-dedup-1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-dedup","process_id":0}}"#;
+
+        let first = handle_hook_event_command_with_dedup(req_json, &store, &sr, &dd).await;
+        assert_eq!(first.status, "ok");
+        let payload1 = first.payload.unwrap();
+        assert!(payload1["processed"].as_bool().unwrap());
+        assert!(payload1.get("duplicate").is_none());
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let second = handle_hook_event_command_with_dedup(req_json, &store, &sr, &dd).await;
+        assert_eq!(second.status, "ok");
+        let payload2 = second.payload.unwrap();
+        assert!(payload2["processed"].as_bool().unwrap());
+        assert_eq!(payload2["duplicate"].as_bool(), Some(true));
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Active));
+        let elapsed = tracker
+            .time_since_transition("team-lead")
+            .expect("team-lead transition timestamp should exist");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(20),
+            "duplicate hook request should not reset last transition timestamp"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_pre_compact_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-pre","command":"hook-event","payload":{"event":"pre_compact","agent":"team-lead","team":"atm-dev","session_id":"sess-pre","process_id":4321}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "pre_compact");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_compact_complete_processed() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-compact-complete","command":"hook-event","payload":{"event":"compact_complete","agent":"team-lead","team":"atm-dev","session_id":"sess-compact","process_id":4321}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "compact_complete");
     }
 
     #[cfg(unix)]
