@@ -74,9 +74,12 @@ fn test_teams_cleanup_dry_run_preview_table_and_no_mutation() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("Cleanup preview for team atm-dev:"));
+    assert!(stdout.contains("Reason"));
     assert!(stdout.contains("roster-remove"));
     assert!(stdout.contains("mailbox-delete"));
     assert!(stdout.contains("session-prune"));
+    assert!(stdout.contains("forced cleanup (--force)"));
+    assert!(stdout.contains("stale session metadata"));
     assert!(stdout.contains("Totals:"));
 
     let config_after =
@@ -125,4 +128,40 @@ fn test_teams_cleanup_noop_uses_exact_message() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("Nothing to clean up for team atm-dev."));
+}
+
+#[test]
+fn test_teams_cleanup_dry_run_suppresses_session_prune_without_session_id() {
+    let temp_dir = TempDir::new().unwrap();
+    write_team_config(&temp_dir, "atm-dev", true);
+
+    // Remove sessionId from publisher to verify session-prune preview suppression.
+    let config_path = temp_dir.path().join(".claude/teams/atm-dev/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    if let Some(members) = config
+        .get_mut("members")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        if let Some(publisher) = members
+            .iter_mut()
+            .find(|m| m.get("name").and_then(serde_json::Value::as_str) == Some("publisher"))
+            && let Some(obj) = publisher.as_object_mut()
+        {
+            obj.remove("sessionId");
+        }
+    }
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .args(["teams", "cleanup", "atm-dev", "--dry-run", "--force"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("roster-remove"));
+    assert!(stdout.contains("mailbox-delete"));
+    assert!(!stdout.contains("session-prune  stale session metadata"));
 }

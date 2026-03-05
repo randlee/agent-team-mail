@@ -66,7 +66,7 @@ pub enum TeamsCommand {
 /// Spawn a team member (runtime-aware daemon launch)
 #[derive(Args, Debug)]
 #[command(
-    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nGenerated Launch Commands (when .atm.toml is absent, use placeholders):\n  claude:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --resume\n\n  codex:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    codex --dangerously-bypass-approvals-and-sandbox\n\n  gemini:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    gemini --model <model_name>\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn team-lead --runtime claude --folder /path/to/repo --team atm-dev\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
+    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nGenerated launch command:\n  (when .atm.toml is absent, substitute placeholders)\n\n  claude:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --resume\n\n  codex:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    codex --dangerously-bypass-approvals-and-sandbox\n\n  gemini:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    gemini --model <model_name>\n\n  opencode:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    opencode\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn team-lead --runtime claude --folder /path/to/repo --team atm-dev\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
 )]
 pub struct SpawnArgs {
     /// Agent name
@@ -1753,6 +1753,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                     action: CleanupActionKind::MailboxDelete,
                     reason: reason.clone(),
                 });
+                // Only preview session-prune when session metadata actually exists.
                 if member.session_id.as_deref().is_some() {
                     dry_run_rows.push(CleanupPreviewRow {
                         agent: member.name.clone(),

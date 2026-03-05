@@ -359,3 +359,20 @@ fn test_spawn_env_team_matching_toml_does_not_require_override() {
     assert!(!stderr.contains("Warning: team mismatch detected"));
     assert!(!stderr.contains("--override-team"));
 }
+
+#[test]
+fn test_spawn_help_without_atm_toml_includes_generated_launch_reference() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd.args(["teams", "spawn", "--help"]).assert().success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("Generated launch command:"));
+    assert!(stdout.contains("<team_name>"));
+    assert!(stdout.contains("<agent_name>"));
+    assert!(stdout.contains("claude"));
+    assert!(stdout.contains("codex"));
+    assert!(stdout.contains("gemini"));
+    assert!(stdout.contains("opencode"));
+}
