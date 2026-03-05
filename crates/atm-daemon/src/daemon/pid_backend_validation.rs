@@ -32,7 +32,11 @@ impl PidBackendValidation {
     }
 
     pub fn is_alive_mismatch(&self) -> bool {
-        self.alive && self.expected_rule != "-" && !self.matches_expected
+        // If sysinfo cannot resolve process details for a live PID, treat that
+        // as inconclusive rather than a hard backend mismatch.
+        let has_process_observation =
+            self.actual_process_name.is_some() || self.actual_process_args.is_some();
+        self.alive && self.expected_rule != "-" && has_process_observation && !self.matches_expected
     }
 }
 
@@ -58,6 +62,35 @@ pub(crate) fn validate_pid_backend(member: &AgentMember, pid: u32) -> PidBackend
         pid,
         alive,
         backend: backend_label(member),
+        expected_rule: rule.description().to_string(),
+        actual_process_name,
+        actual_process_args,
+        matches_expected,
+    }
+}
+
+pub(crate) fn validate_pid_runtime(runtime: Option<&str>, pid: u32) -> PidBackendValidation {
+    let rule = runtime
+        .map(backend_rule_for_runtime)
+        .unwrap_or(BackendRule::Unknown);
+    let alive = is_pid_alive(pid);
+    let actual_process_name = process_name_for_pid(pid);
+    let actual_process_args = process_args_for_pid(pid);
+    let matches_expected = if matches!(rule, BackendRule::Unknown) || !alive {
+        true
+    } else {
+        rule.matches(
+            actual_process_name.as_deref(),
+            actual_process_args.as_deref(),
+        )
+    };
+
+    PidBackendValidation {
+        pid,
+        alive,
+        backend: runtime
+            .map(backend_label_for_runtime)
+            .unwrap_or_else(|| "unknown".to_string()),
         expected_rule: rule.description().to_string(),
         actual_process_name,
         actual_process_args,
@@ -124,6 +157,24 @@ fn backend_label(member: &AgentMember) -> String {
         Some(BackendType::External) => "external".to_string(),
         Some(BackendType::Human(user)) => format!("human:{user}"),
         None => "unknown".to_string(),
+    }
+}
+
+fn backend_rule_for_runtime(runtime: &str) -> BackendRule {
+    match runtime.trim().to_lowercase().as_str() {
+        "claude" => BackendRule::Claude,
+        "codex" => BackendRule::Codex,
+        "gemini" => BackendRule::Gemini,
+        _ => BackendRule::Unknown,
+    }
+}
+
+fn backend_label_for_runtime(runtime: &str) -> String {
+    match backend_rule_for_runtime(runtime) {
+        BackendRule::Claude => "claude-code".to_string(),
+        BackendRule::Codex => "codex".to_string(),
+        BackendRule::Gemini => "gemini".to_string(),
+        BackendRule::Unknown => runtime.trim().to_lowercase(),
     }
 }
 
@@ -206,5 +257,30 @@ mod tests {
         assert!(BackendRule::Gemini.matches(Some("node"), Some("gemini --model 2.5-pro")));
         assert!(!BackendRule::Gemini.matches(Some("node"), Some("index.js")));
         assert!(!BackendRule::Gemini.matches(Some("gemini"), Some("gemini")));
+    }
+
+    #[test]
+    fn pid_validation_is_inconclusive_without_process_observation() {
+        let validation = PidBackendValidation {
+            pid: 1234,
+            alive: true,
+            backend: "codex".to_string(),
+            expected_rule: "comm=codex".to_string(),
+            actual_process_name: None,
+            actual_process_args: None,
+            matches_expected: false,
+        };
+        assert!(
+            !validation.is_alive_mismatch(),
+            "missing sysinfo process details should be treated as inconclusive"
+        );
+    }
+
+    #[test]
+    fn validate_pid_runtime_detects_codex_mismatch_for_live_non_codex_process() {
+        let res = validate_pid_runtime(Some("codex"), std::process::id());
+        assert!(res.alive);
+        assert_eq!(res.backend, "codex");
+        assert!(res.is_alive_mismatch());
     }
 }

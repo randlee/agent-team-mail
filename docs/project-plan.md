@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
-**Version**: 0.5
-**Date**: 2026-02-25
-**Status**: Phase X planning in progress (post-v0.30.0 release).
+**Version**: 0.6
+**Date**: 2026-03-05
+**Status**: Phase Z complete (post-v0.34.0 release).
 
 ---
 
@@ -164,6 +164,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | S | Runtime Adapters + Hook Installer | Gemini adapter, `atm init` hook installer | COMPLETE |
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
 | X | Team Onboarding + TUI/Doctor Stability | `/team-join`, spawn path normalization, `atm init` one-command setup, and carry-forward bug-debt mapping | PLANNED |
+| Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency (Z.1–Z.7 COMPLETE) | COMPLETE |
 
 ---
 
@@ -1405,10 +1406,112 @@ the current tranche focused on onboarding contract closure.
 | **Q** | Q.2 | Integration tests + cross-platform validation | COMPLETE | [#253](https://github.com/randlee/agent-team-mail/pull/253) |
 | **Q** | Q.3 | MCP Inspector CI smoke tests for `atm-agent-mcp` standalone tools | COMPLETE | — |
 | **Q** | Q.4 | Manual MCP Inspector testing with live Codex + collaborative watch verification | PLANNED | — |
+| **Z** | Z.1 | Quick Wins: Doctor + Release Fix | COMPLETE | [#423](https://github.com/randlee/agent-team-mail/pull/423) |
+| **Z** | Z.2 | Log Format + Doctor UX | COMPLETE | [#425](https://github.com/randlee/agent-team-mail/pull/425) |
+| **Z** | Z.3 | SSoT Fast Path (`register-hint`, send-path daemon sync) | COMPLETE | [#427](https://github.com/randlee/agent-team-mail/pull/427) |
+| **Z** | Z.4 | Canonical Member State Completion | COMPLETE | [#429](https://github.com/randlee/agent-team-mail/pull/429) |
+| **Z** | Z.5 | Lifecycle Logging + Hook Events | COMPLETE | [#430](https://github.com/randlee/agent-team-mail/pull/430) |
+| **Z** | Z.6 | Cross-folder Spawn + QA Blocker Closure | COMPLETE | [#431](https://github.com/randlee/agent-team-mail/pull/431) |
+| **Z** | Z.7 | Review Findings Hardening | COMPLETE (d1–7 shipped; d8–12 deferred) | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433), [#435](https://github.com/randlee/agent-team-mail/pull/435) |
 
-**Completed**: 99+ sprints across 23 phases (CI green)
-**Current version**: v0.27.0
-**Next**: Phase X (planning)
+**Completed**: 106+ sprints across 24 phases (CI green)
+**Current version**: v0.34.0
+**Current phase**: Phase Z (complete)
+
+---
+
+## 17.11 Phase Z: Daemon SSoT + Observability Hardening
+
+**Goal**: Close daemon single-source-of-truth gaps for member/session state and make
+doctor/log observability reliable and diagnosable from structured events.
+
+**Integration branch**: `integrate/phase-Z`
+
+**Dependency graph**:
+- Z.1 and Z.2 start in parallel.
+- Z.3 depends on Z.1 (register-hint + spawn metadata contract).
+- Z.4 depends on Z.3 (canonical union completion on top of fast path).
+- Z.5 is independent and can run in parallel with Z.3/Z.4.
+
+### Sprint Summary
+| Sprint | Name | PR | Branch | Issues | Status |
+|--------|------|----|--------|--------|--------|
+| Z.1 | Quick Wins: Doctor + Release Fix | [#423](https://github.com/randlee/agent-team-mail/pull/423) | `feature/pZ-s1-quick-wins` | #407, #408, #403, #399 | COMPLETE |
+| Z.2 | Log Format + Doctor UX | [#425](https://github.com/randlee/agent-team-mail/pull/425) | `feature/pZ-s2-log-format` | #410, #411, #412, #419 | COMPLETE |
+| Z.3 | SSoT Fast Path | [#427](https://github.com/randlee/agent-team-mail/pull/427) | `feature/pZ-s3-ssot-fast-path` | #413, #415, #409 | COMPLETE |
+| Z.4 | Canonical Member State Completion | [#429](https://github.com/randlee/agent-team-mail/pull/429) | `feature/pZ-s4-canonical-state` | #414, #416, #417, #418, #401, #402 | COMPLETE |
+| Z.5 | Lifecycle Logging + Hook Events | [#430](https://github.com/randlee/agent-team-mail/pull/430) | `feature/pZ-s5-observability` | #420, #421 | COMPLETE |
+| Z.6 | Cross-folder Spawn + QA Blocker Closure | [#431](https://github.com/randlee/agent-team-mail/pull/431) | `feature/pZ-s6-cross-folder-spawn` | #422, #424, #426, #428 | COMPLETE |
+| Z.7 | Review Findings Hardening | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433) | `feature/pZ-s7-review-hardening` | QA findings closure | COMPLETE |
+
+### Z.1 — Quick Wins: Doctor + Release Fix
+**Deliverables**
+1. #407: treat sysinfo process lookup `None` as inconclusive (not mismatch) in PID/backend validation.
+2. #408: short session-id formatting in doctor/member surfaces.
+3. #403: prevent reconcile pass from re-overwriting mismatch-offline states.
+4. #399: migrate release checks from fragile `curl` calls to resilient crates verification path.
+
+**Acceptance Criteria**
+1. Doctor no longer emits false Offline/PID mismatch from missing sysinfo process metadata.
+2. Session identifiers in doctor output are compact and human-parseable.
+3. Mismatch-offline transitions remain sticky until valid re-registration.
+4. Release verification paths avoid Cloudflare/IP-based transient failures.
+
+### Z.2 — Log Format + Doctor UX
+**Deliverables**
+1. #410/#411: normalize send log identity fields and sender->recipient formatting.
+2. #412: `ATM_LOG_MSG` binary contract (`1` enables preview, unset/other disables).
+3. #419: doctor log-window labeling with relative elapsed semantics.
+
+**Acceptance Criteria**
+1. Send log records always include sender/recipient identity + PID fields.
+2. Message preview appears only when `ATM_LOG_MSG=1`.
+3. Doctor log-window text and JSON fields agree on effective time window semantics.
+
+### Z.3 — SSoT Fast Path
+**Deliverables**
+1. #413: add `register-hint` daemon command path for external runtime/session registration.
+2. #415: remove send-path bypasses and route session truth through daemon.
+3. #409: `atm teams spawn` writes model/backend metadata before launch when daemon-backed path is active.
+
+**Acceptance Criteria**
+1. send/spawn command paths do not infer liveness independently of daemon canonical state.
+2. `register-hint` supports backward-compat handling (daemon unavailable skip, unknown command guidance).
+3. Spawn preserves daemon-unavailable UX while keeping metadata writes fail-open and model-safe.
+
+### Z.4 — Canonical Member State Completion
+**Deliverables**
+1. #414/#416: align register/teams/send code paths to daemon-owned canonical state.
+2. #417/#418: team-scoped union roster query (config members + daemon-only sessions) with cold-start PID-hint bootstrap.
+3. #401/#402: strict PID validation parity between send path and daemon validator.
+
+**Acceptance Criteria**
+1. `atm doctor`, `atm status`, and `atm members` read from the same canonical daemon snapshot.
+2. Daemon-only members are surfaced with explicit unregistered/ghost markers.
+3. PID/backend mismatch handling is consistent across lifecycle, send, and diagnostics.
+
+### Z.5 — Lifecycle Logging + Hook Events
+**Deliverables**
+1. #420: lifecycle transition logging (`member_state_change`, `member_activity_change`,
+   `session_id_change`, `process_id_change`) with reason/source fields.
+2. #421: first-class hook lifecycle logs (`hook.session_start`,
+   `hook.pre_compact`, `hook.compact_complete`, `hook.session_end`, `hook.failure`).
+3. Requirements alignment for event coverage and always-on hook observability semantics.
+
+**Acceptance Criteria**
+1. Offline<->Online transitions always emit INFO events exactly once per change on Unix builds (`#[cfg(unix)]` scope).
+2. Busy<->Idle transitions emit DEBUG-only events (no INFO spam).
+3. Hook lifecycle events are always emitted with consistent structured fields and WARN failure records.
+4. Doctor findings are diagnosable directly from structured logs without ad-hoc inference.
+
+### Z.7 Deferred Technical Debt Carry-Forward
+
+The following Z.7 deliverables (d8–d12) were deferred due to scope and are tracked as next-phase debt:
+
+- **d8**: `ATM_TEAM` env precedence test (non-mismatch path) — ATM-ZQA-001 test added to cover the fix; full precedence matrix coverage deferred
+- **d9–d12**: Advanced mismatch-override audit trails, cross-folder spawn edge cases, additional liveness-check hardening, and team-scoped register-lead conflict resolution
+
+These items should be addressed in the next hardening phase.
 
 ---
 
@@ -1434,6 +1537,9 @@ the current tranche focused on onboarding contract closure.
 | Phase N | [#221](https://github.com/randlee/agent-team-mail/pull/221) | Merged |
 | Phase O-R | [#238](https://github.com/randlee/agent-team-mail/pull/238) | Merged |
 | Phase P | Sprint PRs targeted develop directly (no integration branch) | Merged |
+| Phase Q | `integrate/phase-Q` → [#262](https://github.com/randlee/agent-team-mail/pull/262) | Merged |
+| Phase Y | `integrate/phase-Y` → [#396](https://github.com/randlee/agent-team-mail/pull/396) | Merged |
+| Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Open |
 
 ---
 

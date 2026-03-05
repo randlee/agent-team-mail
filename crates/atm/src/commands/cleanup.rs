@@ -491,6 +491,25 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
+    fn set_autostart_disabled_for_test() -> Option<String> {
+        let original = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        // SAFETY: test-only env mutation, callers use #[serial].
+        unsafe {
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "0");
+        }
+        original
+    }
+
+    fn restore_autostart_env(original: Option<String>) {
+        // SAFETY: test-only env mutation, callers use #[serial].
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
     fn create_test_team(temp_dir: &TempDir, team_name: &str) -> std::path::PathBuf {
         let team_dir = temp_dir.path().join(".claude/teams").join(team_name);
         let inboxes_dir = team_dir.join("inboxes");
@@ -573,6 +592,7 @@ mod tests {
         let inbox = team_dir.join("inboxes/publisher.json");
         std::fs::write(&inbox, "[]").unwrap();
 
+        let original_autostart = set_autostart_disabled_for_test();
         test_daemon_state::set(test_daemon_state::State {
             running: false,
             query_result: None,
@@ -581,6 +601,7 @@ mod tests {
         let result =
             execute_agent_cleanup(temp_dir.path(), "atm-dev", "publisher", false, false, 1);
         test_daemon_state::clear();
+        restore_autostart_env(original_autostart);
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -599,6 +620,7 @@ mod tests {
         std::fs::write(&inbox, "[]").unwrap();
         let home_env = temp_dir.path().to_string_lossy().to_string();
         let original_home = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -618,6 +640,7 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
         assert!(result.is_ok(), "cleanup should succeed: {result:?}");
 
         assert!(
