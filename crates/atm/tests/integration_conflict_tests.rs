@@ -7,7 +7,8 @@
 use assert_cmd::cargo;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 use tempfile::TempDir;
 
 /// Helper to set home directory for cross-platform test compatibility.
@@ -87,68 +88,146 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
     team_dir
 }
 
+fn workspace_bin_path(bin_name: &str) -> PathBuf {
+    #[allow(deprecated)]
+    {
+        cargo::cargo_bin(bin_name)
+    }
+}
+
+/// Explicit daemon process lifecycle guard for integration tests.
+///
+/// Spawns `atm-daemon` with a known PID and guarantees teardown via kill+wait.
+struct DaemonProcessGuard {
+    child: Child,
+    pid: u32,
+}
+
+impl DaemonProcessGuard {
+    fn spawn(home: &TempDir, team: &str) -> Self {
+        let daemon_bin = workspace_bin_path("atm-daemon");
+        let mut cmd = Command::new(daemon_bin);
+        cmd.env("ATM_HOME", home.path())
+            .env("ATM_DAEMON_AUTOSTART", "0")
+            .env_remove("ATM_CONFIG")
+            .env_remove("CLAUDE_SESSION_ID")
+            .arg("--team")
+            .arg(team)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let child = cmd.spawn().expect("failed to spawn atm-daemon");
+        let pid = child.id();
+        assert!(pid > 1, "spawned daemon PID must be > 1, got {pid}");
+        Self { child, pid }
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+impl Drop for DaemonProcessGuard {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 // ============================================================================
 // Category 1: Concurrent Write Tests
 // ============================================================================
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
-fn test_concurrent_sends_no_data_loss() {
+async fn test_concurrent_sends_no_data_loss() {
     // Multi-threaded test: simulate atm CLI and Claude Code writing to same inbox
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let daemon_guard = DaemonProcessGuard::spawn(&temp_dir, "test-team");
+    let daemon_pid = daemon_guard.pid();
+    assert!(daemon_pid > 1, "daemon must expose a stable known PID");
 
     let num_senders = 5;
     let messages_per_sender = 4;
+    let expected = (num_senders * messages_per_sender) as usize;
 
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).unwrap();
+    let atm_bin = workspace_bin_path("atm");
 
-    // Send messages in parallel using threads
-    let mut handles = Vec::new();
+    // Send messages in parallel using async tasks and bound the full send phase.
+    let mut senders = tokio::task::JoinSet::new();
 
     for sender_id in 0..num_senders {
         let temp_path = temp_dir.path().to_path_buf();
         let workdir_path = workdir.clone();
-        let handle = std::thread::spawn(move || {
+        let atm_bin_path = atm_bin.clone();
+        senders.spawn(async move {
             for msg_id in 0..messages_per_sender {
-                let mut cmd = cargo::cargo_bin_cmd!("atm");
+                let mut cmd = tokio::process::Command::new(&atm_bin_path);
                 cmd.env("ATM_HOME", &temp_path)
                     .env("ATM_DAEMON_AUTOSTART", "0")
                     .env_remove("ATM_CONFIG")
                     .env_remove("CLAUDE_SESSION_ID")
                     .env("ATM_TEAM", "test-team")
                     .env("ATM_IDENTITY", format!("sender-{sender_id}"))
-                    .current_dir(&workdir_path)
-                    .timeout(std::time::Duration::from_secs(10));
+                    .current_dir(&workdir_path);
                 cmd.arg("send")
                     .arg("agent-a")
                     .arg(format!("Message {msg_id} from sender {sender_id}"));
-                let result = cmd.assert();
-                // Allow both success and queued outcomes
-                let output = result.get_output();
-                assert!(
-                    output.status.success(),
-                    "Send should succeed or queue, got: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                let output = tokio::time::timeout(Duration::from_secs(10), cmd.output())
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "atm send timeout for sender={sender_id} msg={msg_id} (daemon pid={daemon_pid})"
+                        )
+                    })?
+                    .map_err(|e| format!("failed to execute atm send for sender={sender_id}: {e}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "atm send failed for sender={sender_id} msg={msg_id}: stderr={} stdout={}",
+                        String::from_utf8_lossy(&output.stderr),
+                        String::from_utf8_lossy(&output.stdout),
+                    ));
+                }
             }
+            Ok::<(), String>(())
         });
-        handles.push(handle);
     }
 
-    // Wait for all threads to complete
-    for handle in handles {
-        handle.join().expect("Thread panicked");
+    let send_phase = tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(joined) = senders.join_next().await {
+            match joined {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(e) => return Err(format!("sender task failed: {e}")),
+            }
+        }
+        Ok::<(), String>(())
+    })
+    .await;
+
+    match send_phase {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("concurrent send phase failed: {e}"),
+        Err(_) => {
+            senders.abort_all();
+            panic!("concurrent send phase timed out after 60s");
+        }
     }
 
-    // Drain queued spool messages until convergence. A single drain pass can leave
-    // pending entries under heavy lock contention (notably on Windows CI).
+    // Deterministic drain convergence: bounded by pass count, not wall-clock.
     let teams_dir = temp_dir.path().join(".claude/teams");
-    let deadline = Instant::now() + Duration::from_secs(5);
     let mut status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
-    while status.pending > 0 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
+    let max_drain_passes = expected * 20;
+    for _ in 0..max_drain_passes {
+        if status.pending == 0 {
+            break;
+        }
+        std::thread::yield_now();
         status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
     }
     assert_eq!(
@@ -171,7 +250,6 @@ fn test_concurrent_sends_no_data_loss() {
     let content = fs::read_to_string(&inbox_path).unwrap();
     let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
 
-    let expected = (num_senders * messages_per_sender) as usize;
     assert_eq!(
         messages.len(),
         expected,
