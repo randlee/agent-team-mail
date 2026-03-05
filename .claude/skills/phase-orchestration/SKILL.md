@@ -62,8 +62,8 @@ SPRINT SECTION: "Sprint {P}.{S}: {Title}" in the plan document.
 REQUIREMENTS: Read docs/{requirements-file} for FRs and acceptance criteria.
 
 WORKTREE:
-- Create: git -C /Users/randlee/Documents/github/agent-team-mail worktree add /Users/randlee/Documents/github/agent-team-mail-worktrees/feature/{P}-{S}-{slug} integrate/phase-{P}
-- Work in: /Users/randlee/Documents/github/agent-team-mail-worktrees/feature/{P}-{S}-{slug}
+- Create worktree via sc-git-worktree skill from integrate/phase-{P}
+- Work in: ../agent-team-mail-worktrees/feature/{P}-{S}-{slug}
 - Branch: git checkout -b feature/{P}-{S}-{slug}
 
 PR targets: integrate/phase-{P}
