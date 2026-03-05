@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from atm_hook_lib import first_str, send_hook_event, read_atm_toml  # noqa: E402
+from atm_hook_lib import first_str, send_hook_event, read_atm_toml, atm_home  # noqa: E402
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -88,6 +88,28 @@ def main() -> int:
             "process_id": os.getppid(),
         }
         send_hook_event(payload)
+
+    # Write session file for CLI identity resolution fallback.
+    # Only written when we have full routing context (session_id + team + identity).
+    # Uses os.getppid() — the long-lived Claude session process PID, not this
+    # short-lived hook subprocess.
+    if session_id and default_team and identity:
+        try:
+            import time
+            sessions_dir = atm_home() / ".claude" / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            session_file = sessions_dir / f"{session_id}.json"
+            session_data = {
+                "session_id": session_id,
+                "team": default_team,
+                "identity": identity,
+                "pid": os.getppid(),
+                "created_at": time.time(),
+                "updated_at": time.time(),
+            }
+            session_file.write_text(json.dumps(session_data))
+        except Exception as exc:
+            sys.stderr.write(f"[atm-hook] Failed to write session file: {exc}\n")
 
     return 0
 
