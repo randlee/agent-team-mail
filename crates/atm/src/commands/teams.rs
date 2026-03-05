@@ -406,13 +406,6 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         .team
         .clone()
         .unwrap_or_else(|| config.core.default_team.clone());
-    ensure_spawn_member_metadata(
-        &team_name,
-        &args.agent,
-        &args.runtime,
-        args.model.as_deref(),
-        &launch_dir,
-    )?;
 
     let parsed_env = parse_env_vars(&args.env)?;
 

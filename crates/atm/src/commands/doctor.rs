@@ -19,6 +19,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::util::hook_identity::read_hook_file;
+use crate::util::member_labels::UNREGISTERED_MARKER;
 use crate::util::settings::get_home_dir;
 
 #[derive(Args, Debug)]
@@ -126,8 +127,6 @@ struct MemberSnapshot {
     session_id: Option<String>,
     process_id: Option<u32>,
 }
-
-const UNREGISTERED_MARKER: &str = "[unregistered]";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct DoctorState {
@@ -531,22 +530,50 @@ where
         ));
     }
 
-    for member in &cfg.members {
-        let daemon_state = daemon_states.get(&member.name);
-        if let Some(state) = daemon_state
-            && state.source == "pid_backend_validation"
-        {
+    for state in daemon_states.values() {
+        if state.source != "pid_backend_validation" {
+            continue;
+        }
+        if let Some(details) = parse_pid_backend_mismatch_reason(&state.reason) {
             findings.push(finding(
                 Severity::Warn,
                 "pid_session_reconciliation",
                 "PID_PROCESS_MISMATCH",
                 format!(
-                    "Member '{}' failed daemon PID/backend validation: {}",
-                    member.name, state.reason
+                    "Member '{}' failed daemon PID/backend validation: backend='{}' expected='{}' actual='{}' pid={}{}",
+                    state.agent,
+                    details.backend,
+                    details.expected,
+                    details.actual,
+                    details.pid,
+                    if state.in_config {
+                        String::new()
+                    } else {
+                        " (daemon-only session)".to_string()
+                    }
                 ),
             ));
-            continue;
+        } else {
+            findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "PID_PROCESS_MISMATCH",
+                format!(
+                    "Member '{}' failed daemon PID/backend validation: {}{}",
+                    state.agent,
+                    state.reason,
+                    if state.in_config {
+                        String::new()
+                    } else {
+                        " (daemon-only session)".to_string()
+                    }
+                ),
+            ));
         }
+    }
+
+    for member in &cfg.members {
+        let daemon_state = daemon_states.get(&member.name);
         match daemon_state.map(|s| s.state.as_str()) {
             Some("offline") | Some("dead") if member.is_active == Some(true) => {
                 findings.push(finding(
@@ -600,6 +627,28 @@ where
     }
 
     (findings, daemon_states)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PidMismatchDetails {
+    backend: String,
+    expected: String,
+    actual: String,
+    pid: u32,
+}
+
+fn parse_pid_backend_mismatch_reason(reason: &str) -> Option<PidMismatchDetails> {
+    let rest = reason.strip_prefix("pid/backend mismatch: backend='")?;
+    let (backend, rest) = rest.split_once("' expected='")?;
+    let (expected, rest) = rest.split_once("' actual='")?;
+    let (actual, pid_part) = rest.rsplit_once("' pid=")?;
+    let pid = pid_part.parse::<u32>().ok()?;
+    Some(PidMismatchDetails {
+        backend: backend.to_string(),
+        expected: expected.to_string(),
+        actual: actual.to_string(),
+        pid,
+    })
 }
 
 fn check_roster_session_integrity(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
@@ -1841,6 +1890,55 @@ mod tests {
             }]))
         });
         assert!(findings.iter().any(|f| f.code == "GHOST_SESSION"));
+    }
+
+    #[test]
+    fn parse_pid_backend_mismatch_reason_extracts_expected_fields() {
+        let parsed = parse_pid_backend_mismatch_reason(
+            "pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=4242",
+        )
+        .expect("valid mismatch reason");
+        assert_eq!(parsed.backend, "codex");
+        assert_eq!(parsed.expected, "comm=codex");
+        assert_eq!(parsed.actual, "zsh");
+        assert_eq!(parsed.pid, 4242);
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_reports_pid_mismatch_for_daemon_only_state() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(Some(vec![CanonicalMemberState {
+                agent: "arch-ctm".to_string(),
+                state: "offline".to_string(),
+                activity: "unknown".to_string(),
+                session_id: Some("sess-ghost".to_string()),
+                process_id: Some(9999),
+                reason: "pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=9999"
+                    .to_string(),
+                source: "pid_backend_validation".to_string(),
+                in_config: false,
+            }]))
+        });
+
+        let mismatch = findings
+            .iter()
+            .find(|f| f.code == "PID_PROCESS_MISMATCH")
+            .expect("expected pid mismatch finding");
+        assert!(mismatch.message.contains("backend='codex'"));
+        assert!(mismatch.message.contains("expected='comm=codex'"));
+        assert!(mismatch.message.contains("actual='zsh'"));
+        assert!(mismatch.message.contains("pid=9999"));
+        assert!(mismatch.message.contains("daemon-only session"));
     }
 
     #[test]
