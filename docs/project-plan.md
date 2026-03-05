@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
-**Version**: 0.5
-**Date**: 2026-02-25
-**Status**: Phase X planning in progress (post-v0.30.0 release).
+**Version**: 0.6
+**Date**: 2026-03-05
+**Status**: Phase Z complete (post-v0.34.0 release).
 
 ---
 
@@ -1414,9 +1414,9 @@ the current tranche focused on onboarding contract closure.
 | **Z** | Z.6 | Cross-folder Spawn + QA Blocker Closure | COMPLETE | [#431](https://github.com/randlee/agent-team-mail/pull/431) |
 | **Z** | Z.7 | Review Findings Hardening | COMPLETE | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433) |
 
-**Completed**: 99+ sprints across 23 phases (CI green)
+**Completed**: 106+ sprints across 24+ phases (CI green)
 **Current version**: v0.34.0
-**Current phase**: Phase Z (execution)
+**Current phase**: Phase Z (complete)
 
 ---
 
@@ -1442,7 +1442,7 @@ doctor/log observability reliable and diagnosable from structured events.
 | Z.4 | Canonical Member State Completion | [#429](https://github.com/randlee/agent-team-mail/pull/429) | `feature/pZ-s4-canonical-state` | #414, #416, #417, #418, #401, #402 | COMPLETE |
 | Z.5 | Lifecycle Logging + Hook Events | [#430](https://github.com/randlee/agent-team-mail/pull/430) | `feature/pZ-s5-observability` | #420, #421 | COMPLETE |
 | Z.6 | Cross-folder Spawn + QA Blocker Closure | [#431](https://github.com/randlee/agent-team-mail/pull/431) | `feature/pZ-s6-cross-folder-spawn` | #422, #424, #426, #428 | COMPLETE |
-| Z.7 | Review Findings Hardening | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433) | `feature/pZ-s7-review-hardening` | QA findings closure | COMPLETE |
+| Z.7 | Review Findings Hardening | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433) | `feature/pZ-s7-review-hardening` | QA findings closure | COMPLETE (deliverables 1-7; items 8-12 deferred to next phase) |
 
 ### Z.1 — Quick Wins: Doctor + Release Fix
 **Deliverables**
@@ -1504,6 +1504,14 @@ doctor/log observability reliable and diagnosable from structured events.
 3. Hook lifecycle events are always emitted with consistent structured fields and WARN failure records.
 4. Doctor findings are diagnosable directly from structured logs without ad-hoc inference.
 
+### Carry-Forward Debt (Z.7 Deliverables 8-12)
+- Z.7 deliverables 8-12 were deferred and are tracked debt for the next phase.
+- Deferred items:
+  - Regression coverage for `--override-team` mismatch handling (fail/pass paths)
+  - Ownership guard fail-closed coverage when daemon/session sync is unavailable
+  - Explicit spawn-path env precedence coverage (`ATM_TEAM` over `.atm.toml` default team)
+  - Final plan/doc alignment pass across Z.1-Z.7 review-hardening deltas
+
 ---
 
 ## 20. Phase Integration PRs
@@ -1528,6 +1536,7 @@ doctor/log observability reliable and diagnosable from structured events.
 | Phase N | [#221](https://github.com/randlee/agent-team-mail/pull/221) | Merged |
 | Phase O-R | [#238](https://github.com/randlee/agent-team-mail/pull/238) | Merged |
 | Phase P | Sprint PRs targeted develop directly (no integration branch) | Merged |
+| Phase Z | [#436](https://github.com/randlee/agent-team-mail/pull/436) (`integrate/phase-Z`) | Pending merge |
 
 ---
 
