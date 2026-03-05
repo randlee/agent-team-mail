@@ -7,6 +7,7 @@
 use assert_cmd::cargo;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// Helper to set home directory for cross-platform test compatibility.
@@ -141,12 +142,23 @@ fn test_concurrent_sends_no_data_loss() {
         handle.join().expect("Thread panicked");
     }
 
-    // Drain any queued spool messages to make the final inbox count deterministic.
+    // Drain queued spool messages until convergence. A single drain pass can leave
+    // pending entries under heavy lock contention (notably on Windows CI).
     let teams_dir = temp_dir.path().join(".claude/teams");
-    let status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
+    while status.pending > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
+    }
     assert_eq!(
         status.failed, 0,
         "Expected no spool drain failures, got: {:?}",
+        status
+    );
+    assert_eq!(
+        status.pending, 0,
+        "Expected no pending spool entries after bounded drain retries, got: {:?}",
         status
     );
 
