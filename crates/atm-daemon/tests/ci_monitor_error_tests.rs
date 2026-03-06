@@ -14,11 +14,6 @@ use tokio_util::sync::CancellationToken;
 
 /// Helper to create a test PluginContext
 fn create_test_context(temp_dir: &TempDir, provider: Option<GitProvider>) -> PluginContext {
-    // Set ATM_HOME for cross-platform compliance
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
-
     let claude_root = temp_dir.path().join(".claude");
     let teams_root = claude_root.join("teams");
     std::fs::create_dir_all(&teams_root).unwrap();
