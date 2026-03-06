@@ -1013,7 +1013,7 @@ async fn retention_loop(ctx: PluginContext, cancel: CancellationToken) {
     // Extract report_dir from CI monitor plugin config if present
     let report_dir: Option<PathBuf> = ctx
         .config
-        .plugin_config("ci_monitor")
+        .plugin_config("gh_monitor")
         .and_then(|table| table.get("report_dir"))
         .and_then(|v| v.as_str())
         .map(PathBuf::from);

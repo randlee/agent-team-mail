@@ -212,7 +212,7 @@ mod tests {
 
         let plugins = vec![
             PluginStatus {
-                name: "ci_monitor".to_string(),
+                name: "gh_monitor".to_string(),
                 enabled: true,
                 status: PluginStatusKind::Running,
                 last_error: None,
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(status.pid, std::process::id());
         assert_eq!(status.plugins.len(), 2);
         assert_eq!(status.teams.len(), 1);
-        assert_eq!(status.plugins[0].name, "ci_monitor");
+        assert_eq!(status.plugins[0].name, "gh_monitor");
         assert!(status.plugins[0].enabled);
         assert_eq!(status.plugins[0].status, PluginStatusKind::Running);
         assert_eq!(status.plugins[1].name, "issues");

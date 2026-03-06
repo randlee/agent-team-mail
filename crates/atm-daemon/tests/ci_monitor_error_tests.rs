@@ -14,11 +14,6 @@ use tokio_util::sync::CancellationToken;
 
 /// Helper to create a test PluginContext
 fn create_test_context(temp_dir: &TempDir, provider: Option<GitProvider>) -> PluginContext {
-    // Set ATM_HOME for cross-platform compliance
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
-
     let claude_root = temp_dir.path().join(".claude");
     let teams_root = claude_root.join("teams");
     std::fs::create_dir_all(&teams_root).unwrap();
@@ -103,7 +98,7 @@ async fn test_api_failure_continues_polling() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -170,7 +165,7 @@ async fn test_auth_failure_simulation() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -250,7 +245,7 @@ async fn test_invalid_config_provider() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -298,7 +293,7 @@ async fn test_empty_config_uses_defaults() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -346,7 +341,7 @@ async fn test_invalid_config_values_use_defaults() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -397,7 +392,7 @@ async fn test_timeout_error_simulation() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -421,18 +416,6 @@ async fn test_timeout_error_simulation() {
         result.is_ok(),
         "Plugin should handle timeout errors gracefully"
     );
-}
-
-#[tokio::test]
-#[serial]
-async fn test_missing_gh_binary() {
-    // Testing that gh CLI is not found is difficult in integration tests
-    // because we can't reliably control the PATH in a way that works across all CI environments
-    // The GitHub provider already handles this case and returns appropriate errors
-    // This test documents the expected behavior but doesn't execute it
-
-    // Expected: GitHubActionsProvider should return PluginError::Provider with message about gh CLI not found
-    // when gh command is not available on PATH
 }
 
 #[tokio::test]
@@ -466,7 +449,7 @@ async fn test_network_error_simulation() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -524,7 +507,7 @@ async fn test_get_run_failure_continues() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),

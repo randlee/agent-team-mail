@@ -136,7 +136,7 @@ async fn test_ci_failure_delivers_inbox_message() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -226,7 +226,7 @@ async fn test_ci_deduplication() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -350,7 +350,7 @@ async fn test_status_transition_notification() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -384,7 +384,7 @@ async fn test_status_transition_notification() {
     ctx.roster
         .cleanup_plugin(
             "test-team",
-            "ci_monitor",
+            "gh_monitor",
             agent_team_mail_daemon::roster::CleanupMode::Hard,
         )
         .unwrap();
@@ -462,7 +462,7 @@ async fn test_multiple_failures() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -554,7 +554,7 @@ async fn test_branch_filtering() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -657,7 +657,7 @@ async fn test_conclusion_filtering() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -716,7 +716,7 @@ async fn test_synthetic_member_lifecycle() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -740,7 +740,7 @@ async fn test_synthetic_member_lifecycle() {
 
     assert!(ci_monitor.is_some(), "ci-monitor should be registered");
     let bot = ci_monitor.unwrap();
-    assert_eq!(bot["agentType"].as_str().unwrap(), "plugin:ci_monitor");
+    assert_eq!(bot["agentType"].as_str().unwrap(), "plugin:gh_monitor");
     assert_eq!(bot["isActive"].as_bool(), Some(true));
 
     // Shutdown plugin
@@ -786,7 +786,7 @@ async fn test_disabled_plugin_skips_init() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -845,7 +845,7 @@ async fn test_full_lifecycle_init_run_shutdown() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),

@@ -9,6 +9,7 @@ mod cleanup;
 mod config_cmd;
 mod daemon;
 mod doctor;
+mod gh;
 mod inbox;
 mod init;
 pub mod launch;
@@ -69,6 +70,9 @@ enum Commands {
     /// Run daemon/team health diagnostics
     Doctor(doctor::DoctorArgs),
 
+    /// GitHub CI monitor commands (daemon/plugin routed namespace)
+    Gh(gh::GhArgs),
+
     /// Run continuous operational health monitor and send ATM alerts
     Monitor(monitor::MonitorArgs),
 
@@ -122,6 +126,7 @@ impl Cli {
             Commands::Members(args) => members::execute(args),
             Commands::Status(args) => status::execute(args),
             Commands::Doctor(args) => doctor::execute(args),
+            Commands::Gh(args) => gh::execute(args),
             Commands::Monitor(args) => monitor::execute(args),
             Commands::Config(args) => config_cmd::execute(args),
             Commands::Cleanup(args) => cleanup::execute(args),
