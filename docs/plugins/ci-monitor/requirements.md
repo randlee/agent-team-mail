@@ -136,7 +136,7 @@ Failure notifications must include:
 - run id and attempt
 - branch
 - commit SHA (short + full)
-- classification (`test_fail`, `infra`, `timeout`, `cancelled`, `ci_not_started`, etc.)
+- classification (`test_fail`, `infra`, `timeout`, `cancelled`, `ci_not_started`, `merge_conflict`, etc.)
 - first failing step name (if available)
 - short bounded log excerpt
 - correlation/message id
@@ -189,7 +189,34 @@ Persistence behavior:
 
 ---
 
-## 10. Test Requirements
+## 10. PR Merge-Conflict Detection
+
+### GH-CI-FR-17 Pre-run DIRTY preflight
+
+For `atm gh monitor pr <number>`:
+- daemon must query PR `mergeStateStatus` before CI start-window polling begins
+- if `mergeStateStatus=DIRTY`:
+  - emit merge-conflict alert (`classification=merge_conflict`, `status=merge_conflict`)
+  - include `pr_url` and `merge_state_status` in alert/log payload
+  - persist monitor state as `merge_conflict`
+  - skip CI start-window polling
+  - skip `ci_not_started` alert for that invocation
+
+### GH-CI-FR-18 Post-completion DIRTY re-check
+
+After a monitored PR run reaches terminal state:
+- daemon must re-query PR `mergeStateStatus`
+- if `mergeStateStatus=DIRTY`, emit an additional merge-conflict alert
+- post-completion alert payload must include:
+  - `classification=merge_conflict`
+  - `status=merge_conflict`
+  - `pr_url`
+  - `merge_state_status`
+  - `run_conclusion`
+
+---
+
+## 11. Test Requirements
 
 ### GH-CI-TR-1 Availability transitions
 
@@ -219,14 +246,22 @@ Test:
 - final summary table fields
 - required failure URLs and metadata fields
 
-### GH-CI-TR-4 Failure isolation
+### GH-CI-TR-4 Merge-conflict detection
+
+Test:
+- preflight DIRTY PR emits merge-conflict alert and skips CI polling
+- clean PR preflight proceeds to CI polling (no merge-conflict alert)
+- post-completion DIRTY re-check emits merge-conflict alert with run conclusion
+- clean terminal PRs are unaffected
+
+### GH-CI-TR-5 Failure isolation
 
 Test:
 - plugin init failure does not crash daemon startup
 - plugin runtime failure does not terminate daemon process
 - unrelated plugins continue running when `gh_monitor` fails
 
-### GH-CI-TR-5 Runtime drift baselines
+### GH-CI-TR-6 Runtime drift baselines
 
 Test:
 - deterministic drift alert emission for a run exceeding configured threshold

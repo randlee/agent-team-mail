@@ -1949,6 +1949,17 @@ struct GhPullRequest {
     url: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPrView {
+    #[serde(default)]
+    merge_state_status: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    head_ref_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GhRunTerminalState {
     Success,
@@ -2067,27 +2078,59 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
                     );
                 }
             };
-            let timeout_secs = gh_request.start_timeout_secs.unwrap_or(120);
-            if timeout_secs == 0 {
-                status.state = "ci_not_started".to_string();
-                status.message =
-                    Some("No workflow run observed before start-timeout (0s).".to_string());
-            } else {
-                match wait_for_pr_run_start(pr_number, timeout_secs).await {
-                    Ok(Some(run_id)) => {
-                        status.run_id = Some(run_id);
-                    }
-                    Ok(None) => {
-                        status.state = "ci_not_started".to_string();
+            let mut preflight_blocked = false;
+            match fetch_pr_merge_state(pr_number).await {
+                Ok(Some(pr_view)) => {
+                    if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
+                        && is_pr_merge_state_dirty(merge_state_status)
+                    {
+                        status.state = "merge_conflict".to_string();
                         status.message = Some(format!(
-                            "No workflow run observed for PR #{pr_number} within {timeout_secs}s."
+                            "PR #{pr_number} has mergeStateStatus={merge_state_status}; resolve conflicts before CI monitoring."
                         ));
+                        emit_merge_conflict_alert(
+                            home,
+                            &status,
+                            pr_view.url.as_deref(),
+                            merge_state_status,
+                            None,
+                        );
+                        preflight_blocked = true;
                     }
-                    Err(e) => {
-                        status.state = "ci_not_started".to_string();
-                        status.message = Some(format!(
-                            "Unable to query workflow runs for PR #{pr_number}: {e}"
-                        ));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(
+                        team = %gh_request.team,
+                        pr = pr_number,
+                        "gh-monitor preflight mergeStateStatus lookup failed: {e}"
+                    );
+                }
+            }
+
+            if !preflight_blocked {
+                let timeout_secs = gh_request.start_timeout_secs.unwrap_or(120);
+                if timeout_secs == 0 {
+                    status.state = "ci_not_started".to_string();
+                    status.message =
+                        Some("No workflow run observed before start-timeout (0s).".to_string());
+                } else {
+                    match wait_for_pr_run_start(pr_number, timeout_secs).await {
+                        Ok(Some(run_id)) => {
+                            status.run_id = Some(run_id);
+                        }
+                        Ok(None) => {
+                            status.state = "ci_not_started".to_string();
+                            status.message = Some(format!(
+                                "No workflow run observed for PR #{pr_number} within {timeout_secs}s."
+                            ));
+                        }
+                        Err(e) => {
+                            status.state = "ci_not_started".to_string();
+                            status.message = Some(format!(
+                                "Unable to query workflow runs for PR #{pr_number}: {e}"
+                            ));
+                        }
                     }
                 }
             }
@@ -2277,9 +2320,9 @@ async fn try_find_pr_run_id(pr_number: u64) -> Result<Option<u64>> {
         "headRefName",
     ])
     .await?;
-    let branch = serde_json::from_str::<serde_json::Value>(&output)?
-        .get("headRefName")
-        .and_then(|v| v.as_str())
+    let branch = serde_json::from_str::<GhPrView>(&output)?
+        .head_ref_name
+        .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
@@ -2304,6 +2347,34 @@ async fn try_find_pr_run_id(pr_number: u64) -> Result<Option<u64>> {
         .first()
         .and_then(|run| run.get("databaseId"))
         .and_then(|v| v.as_u64()))
+}
+
+#[cfg(unix)]
+async fn fetch_pr_merge_state(pr_number: u64) -> Result<Option<GhPrView>> {
+    let output = run_gh_command(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "--json",
+        "mergeStateStatus,url",
+    ])
+    .await?;
+    let pr = serde_json::from_str::<GhPrView>(&output)?;
+    if pr
+        .merge_state_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(pr))
+}
+
+#[cfg(unix)]
+fn is_pr_merge_state_dirty(merge_state_status: &str) -> bool {
+    merge_state_status.trim().eq_ignore_ascii_case("dirty")
 }
 
 #[cfg(unix)]
@@ -2471,6 +2542,34 @@ async fn monitor_gh_run(
             run.jobs.len()
         ));
         upsert_gh_monitor_status(home, state)?;
+
+        if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
+            && let Ok(pr_number) = status_seed.target.trim().parse::<u64>()
+        {
+            match fetch_pr_merge_state(pr_number).await {
+                Ok(Some(pr_view)) => {
+                    if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
+                        && is_pr_merge_state_dirty(merge_state_status)
+                    {
+                        emit_merge_conflict_alert(
+                            home,
+                            status_seed,
+                            pr_view.url.as_deref(),
+                            merge_state_status,
+                            run.conclusion.as_deref(),
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(
+                        team = %status_seed.team,
+                        pr = %status_seed.target,
+                        "gh-monitor post-terminal mergeStateStatus lookup failed: {e}"
+                    );
+                }
+            }
+        }
         return Ok(());
     }
 }
@@ -2926,6 +3025,105 @@ fn emit_ci_not_started_alert(home: &std::path::Path, status: &GhMonitorStatus) {
                 team = %team,
                 agent = %agent,
                 "failed to emit ci_not_started alert: {e}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn emit_merge_conflict_alert(
+    home: &std::path::Path,
+    status: &GhMonitorStatus,
+    pr_url: Option<&str>,
+    merge_state_status: &str,
+    run_conclusion: Option<&str>,
+) {
+    let (from_agent, targets) = resolve_ci_alert_routing(home, &status.team);
+    let target_kind = match status.target_kind {
+        GhMonitorTargetKind::Pr => "pr",
+        GhMonitorTargetKind::Workflow => "workflow",
+        GhMonitorTargetKind::Run => "run",
+    };
+    let mut text = format!(
+        "[merge_conflict] Merge conflict detected for monitored target.\nclassification: merge_conflict\nstatus: merge_conflict\ntarget_kind: {target_kind}\ntarget: {}\npr_url: {}\nmerge_state_status: {}",
+        status.target,
+        pr_url.unwrap_or("(unknown)"),
+        merge_state_status
+    );
+    if let Some(run_conclusion) = run_conclusion {
+        text.push_str(&format!("\nrun_conclusion: {run_conclusion}"));
+    }
+    if let Some(message) = status.message.as_deref()
+        && !message.trim().is_empty()
+    {
+        text.push_str(&format!("\nreason: {message}"));
+    }
+
+    let summary = format!("merge_conflict: {}", status.target);
+    let mut extra_fields = serde_json::Map::new();
+    extra_fields.insert(
+        "classification".to_string(),
+        serde_json::Value::String("merge_conflict".to_string()),
+    );
+    extra_fields.insert(
+        "status".to_string(),
+        serde_json::Value::String("merge_conflict".to_string()),
+    );
+    extra_fields.insert(
+        "target_kind".to_string(),
+        serde_json::Value::String(target_kind.to_string()),
+    );
+    extra_fields.insert(
+        "pr_url".to_string(),
+        serde_json::Value::String(pr_url.unwrap_or("(unknown)").to_string()),
+    );
+    extra_fields.insert(
+        "merge_state_status".to_string(),
+        serde_json::Value::String(merge_state_status.to_string()),
+    );
+    if let Some(run_conclusion) = run_conclusion {
+        extra_fields.insert(
+            "run_conclusion".to_string(),
+            serde_json::Value::String(run_conclusion.to_string()),
+        );
+    }
+    emit_event_best_effort(EventFields {
+        level: "warn",
+        source: "atm-daemon",
+        action: "gh_monitor_merge_conflict",
+        team: Some(status.team.clone()),
+        target: Some(status.target.clone()),
+        result: Some("merge_conflict".to_string()),
+        error: Some(format!(
+            "merge_state_status={}",
+            merge_state_status.trim().to_uppercase()
+        )),
+        extra_fields,
+        ..Default::default()
+    });
+
+    for (agent, team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(&team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        let message = InboxMessage {
+            from: from_agent.clone(),
+            text: text.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(summary.clone()),
+            message_id: Some(uuid::Uuid::new_v4().to_string()),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) =
+            agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, &team, &agent)
+        {
+            warn!(
+                team = %team,
+                agent = %agent,
+                "failed to emit merge_conflict alert: {e}"
             );
         }
     }
@@ -4792,6 +4990,24 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
+    fn read_team_inbox_messages(
+        home_dir: &std::path::Path,
+        team: &str,
+        agent: &str,
+    ) -> Vec<InboxMessage> {
+        let path = home_dir
+            .join(".claude/teams")
+            .join(team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        if !path.exists() {
+            return Vec::new();
+        }
+        serde_json::from_str::<Vec<InboxMessage>>(&std::fs::read_to_string(path).unwrap())
+            .unwrap_or_default()
+    }
+
     fn set_member_backend(
         home_dir: &std::path::Path,
         team: &str,
@@ -5220,6 +5436,166 @@ mod tests {
         let err = resp.error.unwrap();
         assert_eq!(err.code, "MISSING_PARAMETER");
         assert!(err.message.contains("reference"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_preflight_dirty_pr_skips_polling() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), "atm-dev", "team-lead", &["team-lead"]);
+        std::fs::create_dir_all(temp.path().join(".claude/teams/atm-dev/inboxes")).unwrap();
+        let run_list_marker = temp.path().join("run-list-marker.txt");
+        let _marker_guard = EnvGuard::set(
+            "ATM_GH_RUN_LIST_MARKER",
+            run_list_marker.to_string_lossy().as_ref(),
+        );
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"mergeStateStatus":"DIRTY","url":"https://github.com/o/r/pull/123"}'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  echo "called" > "${ATM_GH_RUN_LIST_MARKER}"
+  echo '[{"databaseId":424242}]'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let req_json = r#"{"version":1,"request_id":"r-gh-preflight-dirty","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":30}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["state"].as_str(), Some("merge_conflict"));
+        assert_eq!(payload["run_id"], serde_json::Value::Null);
+        assert!(
+            !run_list_marker.exists(),
+            "preflight DIRTY must skip CI polling"
+        );
+
+        let inbox = read_team_inbox_messages(temp.path(), "atm-dev", "team-lead");
+        assert!(
+            inbox.iter().any(|msg| {
+                msg.text.contains("classification: merge_conflict")
+                    && msg.text.contains("status: merge_conflict")
+                    && msg.text.contains("merge_state_status: DIRTY")
+                    && msg.text.contains("pr_url: https://github.com/o/r/pull/123")
+            }),
+            "team lead should receive merge_conflict alert with required fields"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_clean_pr_proceeds_to_polling() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), "atm-dev", "team-lead", &["team-lead"]);
+        std::fs::create_dir_all(temp.path().join(".claude/teams/atm-dev/inboxes")).unwrap();
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "mergeStateStatus,url" ]; then
+  echo '{"mergeStateStatus":"CLEAN","url":"https://github.com/o/r/pull/123"}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "headRefName" ]; then
+  echo '{"headRefName":"feature/mock"}'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  echo '[{"databaseId":424242}]'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+  echo '{"databaseId":424242,"name":"ci","status":"completed","conclusion":"success","headBranch":"feature/mock","headSha":"abcdef1234567890","url":"https://github.com/o/r/actions/runs/424242","jobs":[{"databaseId":1,"name":"tests","status":"completed","conclusion":"success","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:10Z","steps":[],"url":"https://github.com/o/r/actions/runs/424242/job/1"}],"attempt":1,"pullRequests":[]}'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let req_json = r#"{"version":1,"request_id":"r-gh-preflight-clean","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":30}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["state"].as_str(), Some("monitoring"));
+        assert_eq!(payload["run_id"].as_u64(), Some(424242));
+
+        let inbox = read_team_inbox_messages(temp.path(), "atm-dev", "team-lead");
+        assert!(
+            !inbox
+                .iter()
+                .any(|msg| msg.text.contains("classification: merge_conflict")),
+            "clean preflight should not emit merge_conflict alerts"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_post_completion_dirty_check() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), "atm-dev", "team-lead", &["team-lead"]);
+        std::fs::create_dir_all(temp.path().join(".claude/teams/atm-dev/inboxes")).unwrap();
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+  echo '{"databaseId":42,"name":"ci","status":"completed","conclusion":"success","headBranch":"feature/mock","headSha":"abcdef1234567890","url":"https://github.com/o/r/actions/runs/42","jobs":[{"databaseId":1,"name":"tests","status":"completed","conclusion":"success","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:10Z","steps":[],"url":"https://github.com/o/r/actions/runs/42/job/1"}],"attempt":1,"pullRequests":[]}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "mergeStateStatus,url" ]; then
+  echo '{"mergeStateStatus":"DIRTY","url":"https://github.com/o/r/pull/123"}'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(42),
+            reference: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            message: None,
+        };
+        let gh_request = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            reference: None,
+            start_timeout_secs: Some(120),
+        };
+
+        monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
+            .await
+            .expect("monitor_gh_run should complete");
+
+        let inbox = read_team_inbox_messages(temp.path(), "atm-dev", "team-lead");
+        assert!(
+            inbox.iter().any(|msg| {
+                msg.text.contains("classification: merge_conflict")
+                    && msg.text.contains("status: merge_conflict")
+                    && msg.text.contains("merge_state_status: DIRTY")
+                    && msg.text.contains("pr_url: https://github.com/o/r/pull/123")
+                    && msg.text.contains("run_conclusion: success")
+            }),
+            "post-terminal DIRTY check must emit merge_conflict alert with run_conclusion"
+        );
     }
 
     #[tokio::test]
