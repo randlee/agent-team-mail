@@ -5467,7 +5467,7 @@ exit 1
         assert_eq!(payload["target_kind"].as_str(), Some("run"));
         assert_eq!(payload["target"].as_str(), Some("456789"));
         assert_eq!(payload["run_id"].as_u64(), Some(456789));
-        assert_eq!(payload["state"].as_str(), Some("tracking"));
+        assert_eq!(payload["state"].as_str(), Some("monitoring"));
 
         let status_req = r#"{"version":1,"request_id":"r-gh-run-status","command":"gh-status","payload":{"team":"atm-dev","target_kind":"run","target":"456789"}}"#;
         let status_resp = handle_gh_status_command(status_req, temp.path()).await;
@@ -5475,7 +5475,7 @@ exit 1
         let status = status_resp.payload.unwrap();
         assert_eq!(status["target_kind"].as_str(), Some("run"));
         assert_eq!(status["run_id"].as_u64(), Some(456789));
-        assert_eq!(status["state"].as_str(), Some("tracking"));
+        assert_eq!(status["state"].as_str(), Some("monitoring"));
     }
 
     #[tokio::test]
@@ -5502,7 +5502,7 @@ exit 1
         assert_eq!(payload["target"].as_str(), Some("ci"));
         assert_eq!(payload["reference"].as_str(), Some("develop"));
         assert_eq!(payload["run_id"].as_u64(), Some(987654));
-        assert_eq!(payload["state"].as_str(), Some("tracking"));
+        assert_eq!(payload["state"].as_str(), Some("monitoring"));
 
         let status_req = r#"{"version":1,"request_id":"r-gh-workflow-status","command":"gh-status","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci"}}"#;
         let status_resp = handle_gh_status_command(status_req, temp.path()).await;
@@ -5512,7 +5512,7 @@ exit 1
         assert_eq!(status["target"].as_str(), Some("ci"));
         assert_eq!(status["reference"].as_str(), Some("develop"));
         assert_eq!(status["run_id"].as_u64(), Some(987654));
-        assert_eq!(status["state"].as_str(), Some("tracking"));
+        assert_eq!(status["state"].as_str(), Some("monitoring"));
     }
 
     #[tokio::test]
