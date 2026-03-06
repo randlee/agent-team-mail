@@ -559,3 +559,88 @@ co_leaders = []
         .failure()
         .stderr(predicate::str::contains("SPAWN_UNAUTHORIZED"));
 }
+
+#[test]
+fn test_spawn_policy_allows_team_lead_explicitly() {
+    // team-lead identity must pass the gate (get daemon-not-running, not SPAWN_UNAUTHORIZED)
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(
+        workdir.join(".atm.toml"),
+        r#"
+[core]
+default_team = "atm-dev"
+identity = "team-lead"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = []
+"#
+        .trim_start(),
+    )
+    .unwrap();
+    write_team_config(&temp_dir, "atm-dev");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_IDENTITY", "team-lead")
+        .args([
+            "teams",
+            "spawn",
+            "some-agent",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        !stderr.contains("SPAWN_UNAUTHORIZED"),
+        "team-lead should not get SPAWN_UNAUTHORIZED, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_spawn_policy_defaults_leaders_only_when_no_team_section() {
+    // .atm.toml with [core] but no [team."atm-dev"] — must default to leaders-only
+    // and block non-lead without a TOML parse error
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(
+        workdir.join(".atm.toml"),
+        r#"
+[core]
+default_team = "atm-dev"
+identity = "team-lead"
+"#
+        .trim_start(),
+    )
+    .unwrap();
+    write_team_config(&temp_dir, "atm-dev");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_IDENTITY", "dev-1")
+        .args([
+            "teams",
+            "spawn",
+            "some-agent",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("SPAWN_UNAUTHORIZED"));
+}

@@ -585,7 +585,6 @@ fn apply_hook_event(
                             warn!(
                                 team = %team,
                                 agent = %agent_id,
-                                expected_session_id = %current_session_id,
                                 current_session_id = %current_session_id,
                                 received_session_id = %session_id,
                                 "SessionEnd session_id mismatch; ignoring"
