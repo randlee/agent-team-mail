@@ -384,7 +384,7 @@ async fn test_status_transition_notification() {
     ctx.roster
         .cleanup_plugin(
             "test-team",
-            "ci_monitor",
+            "gh_monitor",
             agent_team_mail_daemon::roster::CleanupMode::Hard,
         )
         .unwrap();

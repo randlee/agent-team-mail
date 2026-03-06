@@ -425,18 +425,6 @@ async fn test_timeout_error_simulation() {
 
 #[tokio::test]
 #[serial]
-async fn test_missing_gh_binary() {
-    // Testing that gh CLI is not found is difficult in integration tests
-    // because we can't reliably control the PATH in a way that works across all CI environments
-    // The GitHub provider already handles this case and returns appropriate errors
-    // This test documents the expected behavior but doesn't execute it
-
-    // Expected: GitHubActionsProvider should return PluginError::Provider with message about gh CLI not found
-    // when gh command is not available on PATH
-}
-
-#[tokio::test]
-#[serial]
 async fn test_network_error_simulation() {
     let temp_dir = TempDir::new().unwrap();
 

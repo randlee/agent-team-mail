@@ -4665,6 +4665,27 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn install_fake_gh_script(temp: &TempDir, script_body: &str) -> EnvGuard {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script_path = temp.path().join("gh");
+        std::fs::write(&script_path, script_body).expect("write fake gh script");
+        let mut perms = std::fs::metadata(&script_path)
+            .expect("stat fake gh script")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).expect("chmod fake gh script");
+
+        let previous_path = std::env::var("PATH").unwrap_or_default();
+        let composed = if previous_path.is_empty() {
+            temp.path().display().to_string()
+        } else {
+            format!("{}:{previous_path}", temp.path().display())
+        };
+        EnvGuard::set("PATH", &composed)
+    }
+
     #[derive(Clone, Default)]
     struct SharedLogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -5165,7 +5186,80 @@ mod tests {
         assert!(err.message.contains("reference"));
     }
 
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_terminal_failure_bypasses_progress_throttle_window() {
+        let temp = TempDir::new().unwrap();
+        let counter_path = temp.path().join("gh-counter.txt");
+        let _counter_guard = EnvGuard::set(
+            "ATM_GH_COUNTER_FILE",
+            counter_path.to_string_lossy().as_ref(),
+        );
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+COUNTER_FILE="${ATM_GH_COUNTER_FILE}"
+count=0
+if [ -f "$COUNTER_FILE" ]; then
+  count=$(cat "$COUNTER_FILE")
+fi
+count=$((count + 1))
+echo "$count" > "$COUNTER_FILE"
+
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+  if [ "$count" -eq 1 ]; then
+    echo '{"databaseId":42,"name":"ci","status":"in_progress","conclusion":null,"headBranch":"develop","headSha":"abcdef1234567890","url":"https://github.com/o/r/actions/runs/42","jobs":[{"databaseId":11,"name":"clippy","status":"completed","conclusion":"success","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:10Z","steps":[],"url":"https://github.com/o/r/actions/runs/42/job/11"},{"databaseId":12,"name":"tests","status":"in_progress","conclusion":null,"startedAt":"2026-03-06T00:00:00Z","completedAt":null,"steps":[],"url":"https://github.com/o/r/actions/runs/42/job/12"}],"attempt":1,"pullRequests":[]}'
+  else
+    echo '{"databaseId":42,"name":"ci","status":"completed","conclusion":"failure","headBranch":"develop","headSha":"abcdef1234567890","url":"https://github.com/o/r/actions/runs/42","jobs":[{"databaseId":11,"name":"clippy","status":"completed","conclusion":"success","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:10Z","steps":[],"url":"https://github.com/o/r/actions/runs/42/job/11"},{"databaseId":12,"name":"tests","status":"completed","conclusion":"failure","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:20Z","steps":[{"name":"suite","status":"completed","conclusion":"failure"}],"url":"https://github.com/o/r/actions/runs/42/job/12"}],"attempt":1,"pullRequests":[]}'
+  fi
+  exit 0
+fi
+
+echo "unsupported fake gh invocation: $*" >&2
+exit 1
+"#,
+        );
+
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "tracking".to_string(),
+            run_id: Some(42),
+            reference: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            message: None,
+        };
+        let gh_request = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            reference: None,
+            start_timeout_secs: Some(120),
+        };
+
+        let started = std::time::Instant::now();
+        monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
+            .await
+            .expect("monitor_gh_run should complete");
+        let elapsed = started.elapsed();
+
+        // First poll emits progress and sleeps 5s. The second poll is terminal failure
+        // and must bypass the 60s progress throttle window.
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "terminal update should bypass progress throttle, elapsed={elapsed:?}"
+        );
+
+        let state_map = load_gh_monitor_state_map(temp.path()).expect("state map");
+        let key = gh_monitor_key("atm-dev", GhMonitorTargetKind::Pr, "123", None);
+        let terminal = state_map.get(&key).expect("status entry");
+        assert_eq!(terminal.state, "failure");
+    }
+
     #[test]
+    #[cfg(unix)]
     fn test_should_emit_progress_rate_limited_to_one_minute() {
         let now = std::time::Instant::now();
         assert!(should_emit_progress(None, now));
@@ -5180,6 +5274,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_format_summary_table_contains_required_columns() {
         let run = GhRunView {
             database_id: 42,
@@ -5209,6 +5304,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_derive_pr_url_prefers_pr_target_fallback() {
         let run = GhRunView {
             database_id: 42,
@@ -5244,6 +5340,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_build_failure_payload_contains_required_fields() {
         let run = GhRunView {
             database_id: 42,
