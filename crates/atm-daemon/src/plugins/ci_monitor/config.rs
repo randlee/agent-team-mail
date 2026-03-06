@@ -100,6 +100,8 @@ pub struct CiMonitorConfig {
     pub runtime_drift_min_samples: usize,
     /// Maximum number of samples retained per workflow/job baseline
     pub runtime_history_limit: usize,
+    /// Cooldown window between repeated drift alerts for the same key (seconds)
+    pub alert_cooldown_secs: u64,
     /// Provider-specific configuration (passed to external providers)
     pub provider_config: Option<toml::Table>,
     /// Notification routing targets (empty = send as ci-monitor agent)
@@ -293,6 +295,18 @@ impl CiMonitorConfig {
             });
         }
 
+        let alert_cooldown_secs = table
+            .get("alert_cooldown")
+            .or_else(|| table.get("alert_cooldown_secs"))
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u64)
+            .unwrap_or(300);
+        if alert_cooldown_secs == 0 {
+            return Err(PluginError::Config {
+                message: "alert_cooldown must be at least 1 second".to_string(),
+            });
+        }
+
         // Parse notify_target (can be single string or array of strings)
         let notify_target = match table.get("notify_target") {
             Some(toml::Value::String(s)) => vec![NotifyTarget::parse(s)?],
@@ -329,6 +343,7 @@ impl CiMonitorConfig {
             runtime_drift_threshold_percent,
             runtime_drift_min_samples,
             runtime_history_limit,
+            alert_cooldown_secs,
             provider_config: Some(provider_config),
             notify_target,
             branch_matcher,
@@ -356,6 +371,7 @@ impl Default for CiMonitorConfig {
             runtime_drift_threshold_percent: 50,
             runtime_drift_min_samples: 3,
             runtime_history_limit: 50,
+            alert_cooldown_secs: 300,
             provider_config: None,
             notify_target: Vec::new(),
             branch_matcher: None,
@@ -389,6 +405,7 @@ mod tests {
         assert_eq!(config.runtime_drift_threshold_percent, 50);
         assert_eq!(config.runtime_drift_min_samples, 3);
         assert_eq!(config.runtime_history_limit, 50);
+        assert_eq!(config.alert_cooldown_secs, 300);
     }
 
     #[test]
@@ -422,6 +439,7 @@ runtime_drift_enabled = true
 runtime_drift_threshold_percent = 80
 runtime_drift_min_samples = 4
 runtime_history_limit = 120
+alert_cooldown = 45
 "#;
         let table: toml::Table = toml::from_str(toml_str).unwrap();
         let config = CiMonitorConfig::from_toml(&table).unwrap();
@@ -446,6 +464,7 @@ runtime_history_limit = 120
         assert_eq!(config.runtime_drift_threshold_percent, 80);
         assert_eq!(config.runtime_drift_min_samples, 4);
         assert_eq!(config.runtime_history_limit, 120);
+        assert_eq!(config.alert_cooldown_secs, 45);
     }
 
     #[test]
@@ -510,6 +529,17 @@ runtime_history_limit = 0
         let result = CiMonitorConfig::from_toml(&table);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("history_limit"));
+
+        let table: toml::Table = toml::from_str(
+            r#"
+team = "dev-team"
+alert_cooldown = 0
+"#,
+        )
+        .unwrap();
+        let result = CiMonitorConfig::from_toml(&table);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("alert_cooldown"));
     }
 
     #[test]

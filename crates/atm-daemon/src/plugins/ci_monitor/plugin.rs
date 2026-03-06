@@ -22,14 +22,17 @@ const RUNTIME_HISTORY_FILE_NAME: &str = "runtime-history.json";
 const RUNTIME_PROCESSED_RUN_LIMIT: usize = 500;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
 struct RuntimeHistory {
     workflow_samples: HashMap<String, Vec<u64>>,
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
+    drift_last_alert_epoch_secs: HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone)]
 struct RuntimeDriftEvent {
+    alert_key: String,
     kind: &'static str,
     name: String,
     current_secs: u64,
@@ -86,6 +89,12 @@ impl CiMonitorPlugin {
     /// which parses config from the PluginContext.
     pub fn with_config(mut self, config: CiMonitorConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_runtime_history(mut self, runtime_history: RuntimeHistory) -> Self {
+        self.runtime_history = runtime_history;
         self
     }
 
@@ -450,7 +459,7 @@ impl CiMonitorPlugin {
         }
     }
 
-    fn evaluate_runtime_drift(
+    pub(crate) fn evaluate_runtime_drift(
         samples: &[u64],
         current_secs: u64,
         min_samples: usize,
@@ -467,6 +476,18 @@ impl CiMonitorPlugin {
         (current_secs > threshold_secs).then_some(baseline_secs)
     }
 
+    fn is_alert_on_cooldown(
+        history: &RuntimeHistory,
+        alert_key: &str,
+        now_epoch_secs: i64,
+        cooldown_secs: u64,
+    ) -> bool {
+        let Some(last_alert_epoch_secs) = history.drift_last_alert_epoch_secs.get(alert_key) else {
+            return false;
+        };
+        now_epoch_secs.saturating_sub(*last_alert_epoch_secs) < cooldown_secs as i64
+    }
+
     fn update_runtime_history_and_build_alert(
         &mut self,
         run: &super::types::CiRun,
@@ -478,9 +499,11 @@ impl CiMonitorPlugin {
             return None;
         }
 
+        let now_epoch_secs = Utc::now().timestamp();
         let mut drift_events: Vec<RuntimeDriftEvent> = Vec::new();
 
         if let Some(run_secs) = Self::duration_secs(&run.created_at, &run.updated_at) {
+            let workflow_alert_key = format!("workflow::{}", run.name);
             let baseline = {
                 let existing = self
                     .runtime_history
@@ -496,12 +519,20 @@ impl CiMonitorPlugin {
                 )
             };
             if let Some(baseline_secs) = baseline {
-                drift_events.push(RuntimeDriftEvent {
-                    kind: "workflow",
-                    name: run.name.clone(),
-                    current_secs: run_secs,
-                    baseline_secs,
-                });
+                if !Self::is_alert_on_cooldown(
+                    &self.runtime_history,
+                    &workflow_alert_key,
+                    now_epoch_secs,
+                    self.config.alert_cooldown_secs,
+                ) {
+                    drift_events.push(RuntimeDriftEvent {
+                        alert_key: workflow_alert_key,
+                        kind: "workflow",
+                        name: run.name.clone(),
+                        current_secs: run_secs,
+                        baseline_secs,
+                    });
+                }
             }
             let samples = self
                 .runtime_history
@@ -533,12 +564,21 @@ impl CiMonitorPlugin {
                     )
                 };
                 if let Some(baseline_secs) = baseline {
-                    drift_events.push(RuntimeDriftEvent {
-                        kind: "job",
-                        name: job_key.clone(),
-                        current_secs: job_secs,
-                        baseline_secs,
-                    });
+                    let job_alert_key = format!("job::{job_key}");
+                    if !Self::is_alert_on_cooldown(
+                        &self.runtime_history,
+                        &job_alert_key,
+                        now_epoch_secs,
+                        self.config.alert_cooldown_secs,
+                    ) {
+                        drift_events.push(RuntimeDriftEvent {
+                            alert_key: job_alert_key,
+                            kind: "job",
+                            name: job_key.clone(),
+                            current_secs: job_secs,
+                            baseline_secs,
+                        });
+                    }
                 }
                 let samples = self.runtime_history.job_samples.entry(job_key).or_default();
                 samples.push(job_secs);
@@ -551,11 +591,18 @@ impl CiMonitorPlugin {
             &mut self.runtime_history.processed_run_ids,
             RUNTIME_PROCESSED_RUN_LIMIT,
         );
-        self.persist_runtime_history();
 
         if drift_events.is_empty() {
+            self.persist_runtime_history();
             return None;
         }
+
+        for event in &drift_events {
+            self.runtime_history
+                .drift_last_alert_epoch_secs
+                .insert(event.alert_key.clone(), now_epoch_secs);
+        }
+        self.persist_runtime_history();
 
         let threshold = self.config.runtime_drift_threshold_percent;
         let mut details = String::new();
@@ -1082,6 +1129,141 @@ mod tests {
         let key2 = plugin.dedup_key(&run2);
 
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_evaluate_runtime_drift_min_samples_and_threshold_boundary() {
+        // min_samples guard
+        assert_eq!(
+            CiMonitorPlugin::evaluate_runtime_drift(&[120], 300, 2, 50),
+            None
+        );
+
+        // threshold boundary is strict (must be greater than threshold, not equal)
+        assert_eq!(
+            CiMonitorPlugin::evaluate_runtime_drift(&[100, 100], 150, 2, 50),
+            None
+        );
+
+        // above threshold emits baseline
+        assert_eq!(
+            CiMonitorPlugin::evaluate_runtime_drift(&[100, 100], 151, 2, 50),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn test_runtime_drift_alert_message_deterministic() {
+        use crate::plugins::ci_monitor::{
+            CiRunConclusion, CiRunStatus, create_test_job, create_test_run,
+        };
+
+        let config = CiMonitorConfig {
+            runtime_drift_enabled: true,
+            runtime_drift_threshold_percent: 50,
+            runtime_drift_min_samples: 1,
+            alert_cooldown_secs: 300,
+            ..Default::default()
+        };
+
+        let mut history = RuntimeHistory::default();
+        history.workflow_samples.insert("CI".to_string(), vec![100]);
+        history
+            .job_samples
+            .insert("CI::build".to_string(), vec![100]);
+
+        let mut plugin = CiMonitorPlugin::new()
+            .with_config(config)
+            .with_runtime_history(history);
+
+        let mut run = create_test_run(
+            999,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        run.created_at = "2026-02-13T10:00:00Z".to_string();
+        run.updated_at = "2026-02-13T10:03:20Z".to_string(); // 200s
+
+        let mut job = create_test_job(
+            1001,
+            "build",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        job.started_at = Some("2026-02-13T10:00:10Z".to_string());
+        job.completed_at = Some("2026-02-13T10:03:30Z".to_string()); // 200s
+        run.jobs = Some(vec![job]);
+
+        let msg = plugin
+            .update_runtime_history_and_build_alert(&run)
+            .expect("expected runtime drift alert");
+        assert!(msg.text.contains("[runtime-drift:999]"));
+        assert!(
+            msg.text
+                .contains("workflow `CI` current=200s baseline=100s threshold=50%")
+        );
+        assert!(
+            msg.text
+                .contains("job `CI::build` current=200s baseline=100s threshold=50%")
+        );
+    }
+
+    #[test]
+    fn test_runtime_drift_alert_respects_alert_cooldown() {
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+
+        let config = CiMonitorConfig {
+            runtime_drift_enabled: true,
+            runtime_drift_threshold_percent: 50,
+            runtime_drift_min_samples: 1,
+            alert_cooldown_secs: 300,
+            ..Default::default()
+        };
+
+        let mut history = RuntimeHistory::default();
+        history.workflow_samples.insert("CI".to_string(), vec![100]);
+
+        let mut plugin = CiMonitorPlugin::new()
+            .with_config(config)
+            .with_runtime_history(history);
+
+        let mut slow_run_1 = create_test_run(
+            1001,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        slow_run_1.created_at = "2026-02-13T10:00:00Z".to_string();
+        slow_run_1.updated_at = "2026-02-13T10:03:20Z".to_string(); // 200s
+
+        let mut slow_run_2 = create_test_run(
+            1002,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        slow_run_2.created_at = "2026-02-13T10:04:00Z".to_string();
+        slow_run_2.updated_at = "2026-02-13T10:14:00Z".to_string(); // 600s
+
+        let first = plugin.update_runtime_history_and_build_alert(&slow_run_1);
+        assert!(first.is_some(), "first slow run should emit drift alert");
+
+        let second = plugin.update_runtime_history_and_build_alert(&slow_run_2);
+        assert!(
+            second.is_none(),
+            "second slow run should be suppressed by alert cooldown"
+        );
+        assert!(
+            plugin
+                .runtime_history
+                .drift_last_alert_epoch_secs
+                .contains_key("workflow::CI"),
+            "cooldown state should be persisted by key"
+        );
     }
 
     #[test]
