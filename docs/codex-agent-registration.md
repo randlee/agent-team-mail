@@ -117,32 +117,73 @@ Persist `session_registry` to disk (e.g., `~/.config/atm/session-registry.json`)
 
 ---
 
+## arch-ctm Investigation Findings (2026-03-06)
+
+arch-ctm investigated the root cause directly and found a more specific issue than the original analysis: the `backend_expected_rule` in `send.rs` matched Codex only when `comm=="codex"` and ignored the legacy `agentType` fallback. PPID traversal could not register a sender hint/session because the backend rule never fired.
+
+**arch-ctm's fixes (Option B implementation)**:
+1. `backend_expected_rule` now honors legacy `agentType=codex/gemini`
+2. Process matcher normalizes basename for full-path executables
+3. PPID traversal depth increased 8→16
+4. Non-hook session ID stabilized to `local:<agent>:pid:<pid>` on first send event
+5. Log format: removed pid/ppid prefix noise from send lines; only sender/recipient PID slots shown
+
+**Result**: `atm logs` now shows `arch-ctm@atm-dev [27068]` after first send event.
+
+**Remaining gap** (arch-ctm confirmed): `atm doctor` still emits `ACTIVE_WITHOUT_SESSION` because the session_registry in `socket.rs` is only populated via `session_start` hooks — the send-event path does not write to it. This is a separate doctor/session-query reconciliation issue.
+
+**Comparison vs. original Option A/B**:
+
+| | arch-ctm (Option B enhanced) | Option A (`atm register`) |
+|--|--|--|
+| `atm logs` PID | Yes — via PPID traversal on send | Yes — via explicit register call |
+| `atm doctor` session record | No — ACTIVE_WITHOUT_SESSION remains | Yes — explicit session_registry entry |
+| `atm cleanup` safety | No — still removed if no state record | Yes — explicit state record |
+| Launch script change | No | Yes |
+| Works without sending first | No | Yes |
+
 ## Recommendation
 
-**AC.2 sprint**: Implement **Option A** (self-registration) + **Option C** (cleanup guard) together.
+**AC.2 sprint**: Accept arch-ctm's Option B fixes for PID display (already implemented). Add **Option C** (cleanup guard for external agents) as a safety net, since arch-ctm's fix does not populate the session_registry and cleanup still treats no-state as stale.
 
-Option A gives correct behavior. Option C is a safety net that prevents the worst outcome (cleanup removing active agents) even if Option A registration is missed.
+Option A (`atm register`) can be deferred: once Option B+C are stable, Option A adds proper session tracking and removes the `ACTIVE_WITHOUT_SESSION` doctor noise.
 
-Option D (registry persistence) is useful but can be deferred to a follow-up sprint once A+C are stable.
+Option D (registry persistence) deferred until A+C are stable.
 
 ---
 
 ## Files to Modify
 
+### AC.2a — Option B fixes (arch-ctm, already implemented)
+| File | Change |
+|------|--------|
+| `crates/atm-daemon/src/daemon/send.rs` | Fix `backend_expected_rule` for legacy agentType codex/gemini |
+| `crates/atm-daemon/src/daemon/send.rs` | Normalize basename in process matcher |
+| `crates/atm-daemon/src/daemon/send.rs` | PPID traversal depth 8→16 |
+| `crates/atm-daemon/src/daemon/send.rs` | Synthetic session ID `local:<agent>:pid:<pid>` |
+| `crates/atm-daemon/src/daemon/send.rs` | Log format: remove pid/ppid noise from send lines |
+
+### AC.2b — Option C cleanup guard
+| File | Change |
+|------|--------|
+| `crates/atm-daemon/src/daemon/cleanup.rs` | Skip removal of `agentType` in `{"codex","gemini","external"}` unless `last_seen` > 7 days |
+
+### AC.2c — Option A (`atm register`) — deferred
 | File | Change |
 |------|--------|
 | `crates/atm-daemon/src/daemon/socket.rs` | Add `register` socket command handler |
-| `crates/atm-core/src/socket_protocol.rs` | Add `Register` request variant (or reuse hook_event infrastructure) |
+| `crates/atm-core/src/socket_protocol.rs` | Add `Register` request variant |
 | `crates/atm/src/commands/register.rs` | New `atm register` subcommand |
 | `crates/atm/src/main.rs` | Wire register subcommand |
-| `crates/atm-daemon/src/daemon/cleanup.rs` | Add `agentType` guard for external agents |
 | `scripts/launch-worker.sh` | Add `atm register` call after Codex startup |
 
-**Test coverage needed:**
-- `test_register_codex_agent_sets_session_record`
-- `test_register_sets_state_active`
+**Test coverage needed (AC.2b):**
 - `test_cleanup_does_not_remove_external_agent_without_state`
 - `test_cleanup_removes_external_agent_after_long_absence`
+
+**Test coverage needed (AC.2a, arch-ctm):**
+- Tests for `backend_expected_rule` with `agentType=codex`
+- Tests for PPID traversal finding Codex process
 
 ---
 
