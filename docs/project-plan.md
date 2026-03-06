@@ -1674,6 +1674,7 @@ progress/failure observability.
 | AB.3 | Progress + Final Reporting Payloads | TBD | `feature/pAB-s3-reporting-contract` | TBD | PLANNED |
 | AB.4 | Availability State + Connectivity Recovery Signals | TBD | `feature/pAB-s4-availability-state` | TBD | PLANNED |
 | AB.5 | Runtime Drift Baselines (Optional Enhancement) | TBD | `feature/pAB-s5-runtime-drift` | TBD | PLANNED |
+| AB.6 | PR Merge-Conflict + CI Gap Detection | TBD | `feature/pAB-s6-conflict-detection` | TBD | PLANNED |
 
 ### AB.1 — Requirements Lock + Core Plugin Contracts
 **Deliverables**
@@ -1733,6 +1734,16 @@ progress/failure observability.
 **Acceptance Criteria**
 1. Drift alert can be reproduced in deterministic integration tests.
 2. Baseline calculations are stable across restarts.
+
+### AB.6 — PR Merge-Conflict + CI Gap Detection
+**Deliverables**
+1. Post-CI-completion check: after a run completes, query `gh pr view --json mergeable,mergeStateStatus`. If `DIRTY`, emit a merge-conflict alert alongside the CI result.
+2. Pre-run detection: in `wait_for_pr_run_start`, if no run starts within timeout, check `mergeStateStatus`. If `DIRTY`, emit a `merge_conflict` alert (not generic `ci_not_started`).
+
+**Acceptance Criteria**
+1. Post-completion merge-conflict alert emitted when PR becomes DIRTY during a CI run.
+2. Pre-run merge-conflict alert emitted when PR is DIRTY before any run starts (distinct message from `ci_not_started`).
+3. Coverage maps to GH-CI-TR-2 and GH-CI-TR-4 in `docs/plugins/ci-monitor/requirements.md`.
 
 ---
 
