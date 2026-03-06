@@ -1595,71 +1595,6 @@ mod tests {
         .unwrap();
     }
 
-    thread_local! {
-        static TEST_CYCLE_STATE: super::SharedCycleState = super::new_reconcile_cycle_state();
-    }
-
-    fn reset_test_cycle_state() {
-        TEST_CYCLE_STATE.with(|state| {
-            let mut guard = state.lock().unwrap();
-            guard.absent_registry_cycles.clear();
-            guard.dead_member_cycles.clear();
-        });
-    }
-
-    fn reconcile_team_member_activity(
-        claude_root: &std::path::Path,
-        session_registry: &super::SharedSessionRegistry,
-        state_store: &super::SharedStateStore,
-    ) -> anyhow::Result<()> {
-        TEST_CYCLE_STATE.with(|cycle_state| {
-            super::reconcile_team_member_activity(
-                claude_root,
-                session_registry,
-                state_store,
-                cycle_state,
-            )
-        })
-    }
-
-    fn reconcile_team_member_activity_with_mode(
-        claude_root: &std::path::Path,
-        session_registry: &super::SharedSessionRegistry,
-        state_store: &super::SharedStateStore,
-        advance_absent_prune_cycles: bool,
-    ) -> anyhow::Result<()> {
-        TEST_CYCLE_STATE.with(|cycle_state| {
-            super::reconcile_team_member_activity_with_mode(
-                claude_root,
-                session_registry,
-                state_store,
-                cycle_state,
-                advance_absent_prune_cycles,
-            )
-        })
-    }
-
-    fn absent_cycle_contains(key: &str) -> bool {
-        TEST_CYCLE_STATE.with(|state| {
-            state
-                .lock()
-                .unwrap()
-                .absent_registry_cycles
-                .contains_key(key)
-        })
-    }
-
-    fn absent_cycle_get(key: &str) -> Option<u8> {
-        TEST_CYCLE_STATE.with(|state| {
-            state
-                .lock()
-                .unwrap()
-                .absent_registry_cycles
-                .get(key)
-                .copied()
-        })
-    }
-
     #[test]
     fn test_reconcile_seeds_state_store_from_config() {
         let tmp = TempDir::new().unwrap();
@@ -1693,7 +1628,14 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
 
         let tracker = state_store.lock().unwrap();
         assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Offline));
@@ -1733,7 +1675,14 @@ mod tests {
         );
         let sr = new_session_registry();
         let state_store = new_state_store();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert!(state_store.lock().unwrap().get_state("worker").is_some());
 
         // Remove worker from config and reconcile again.
@@ -1753,7 +1702,13 @@ mod tests {
                 }
             ]),
         );
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert!(state_store.lock().unwrap().get_state("worker").is_none());
     }
 
@@ -1791,7 +1746,14 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
 
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
             &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
@@ -1847,7 +1809,14 @@ mod tests {
             reg.upsert_for_team("atm-dev", "arch-ctm", "stale-session", live_pid);
         }
         let state_store = new_state_store();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
 
         let tracker = state_store.lock().unwrap();
         assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Offline));
@@ -1910,7 +1879,14 @@ mod tests {
         }
 
         let state_store = new_state_store();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
 
         let tracker = state_store.lock().unwrap();
         assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Offline));
@@ -2011,9 +1987,9 @@ mod tests {
 
     #[test]
     fn test_session_end_converges_to_remove_dead_member_from_roster_and_mailbox() {
-        reset_test_cycle_state();
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team(&team_name, "arch-ctm", "sess-session-end", i32::MAX as u32);
@@ -2021,8 +1997,20 @@ mod tests {
             reg.mark_dead_for_team(&team_name, "arch-ctm");
         }
         // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
@@ -2035,9 +2023,9 @@ mod tests {
 
     #[test]
     fn test_sigterm_escalation_converges_to_remove_dead_member_from_roster_and_mailbox() {
-        reset_test_cycle_state();
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team(&team_name, "arch-ctm", "sess-sigterm", i32::MAX as u32);
@@ -2045,8 +2033,20 @@ mod tests {
             reg.mark_dead_for_team(&team_name, "arch-ctm");
         }
         // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
@@ -2059,9 +2059,9 @@ mod tests {
 
     #[test]
     fn test_kill_timeout_fallback_converges_to_remove_dead_member_from_roster_and_mailbox() {
-        reset_test_cycle_state();
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team(&team_name, "arch-ctm", "sess-kill-timeout", i32::MAX as u32);
@@ -2069,8 +2069,20 @@ mod tests {
             reg.mark_dead_for_team(&team_name, "arch-ctm");
         }
         // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
@@ -2083,8 +2095,6 @@ mod tests {
 
     #[test]
     fn test_reconcile_prunes_stale_absent_dead_members_only_after_two_full_extra_cycles() {
-        reset_test_cycle_state();
-
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -2108,13 +2118,20 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team("atm-dev", "arch-ctm", "stale-sess", i32::MAX as u32);
             reg.mark_dead_for_team("atm-dev", "arch-ctm");
         }
 
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert!(
             sr.lock()
                 .unwrap()
@@ -2123,7 +2140,13 @@ mod tests {
             "first absent cycle should not prune dead member yet"
         );
 
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert!(
             sr.lock()
                 .unwrap()
@@ -2132,7 +2155,13 @@ mod tests {
             "second absent cycle should still not prune dead member"
         );
 
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert!(
             sr.lock()
                 .unwrap()
@@ -2144,8 +2173,6 @@ mod tests {
 
     #[test]
     fn test_reconcile_does_not_prune_absent_active_sessions() {
-        reset_test_cycle_state();
-
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -2169,13 +2196,26 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team("atm-dev", "arch-ctm", "active-sess", std::process::id());
         }
 
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
 
         assert!(
             sr.lock()
@@ -2188,8 +2228,6 @@ mod tests {
 
     #[test]
     fn test_reconcile_dispatch_mode_remove_then_readd_preserves_dead_session_record() {
-        reset_test_cycle_state();
-
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -2213,6 +2251,7 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team("atm-dev", "arch-ctm", "dead-sess", i32::MAX as u32);
@@ -2247,14 +2286,24 @@ mod tests {
                 }
             ]),
         );
-        reconcile_team_member_activity_with_mode(&home.join(".claude"), &sr, &state_store, true)
-            .unwrap();
+        super::reconcile_team_member_activity_with_mode(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+            true,
+        )
+        .unwrap();
         assert!(
             state_store.lock().unwrap().get_state("arch-ctm").is_some(),
             "member present in config should be seeded in state store"
         );
         assert!(
-            !absent_cycle_contains("atm-dev:arch-ctm"),
+            !cycle_state
+                .lock()
+                .unwrap()
+                .absent_registry_cycles
+                .contains_key("atm-dev:arch-ctm"),
             "presence should clear stale absent-cycle markers"
         );
 
@@ -2276,10 +2325,21 @@ mod tests {
                 }
             ]),
         );
-        reconcile_team_member_activity_with_mode(&home.join(".claude"), &sr, &state_store, true)
-            .unwrap();
+        super::reconcile_team_member_activity_with_mode(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+            true,
+        )
+        .unwrap();
         assert_eq!(
-            absent_cycle_get("atm-dev:arch-ctm"),
+            cycle_state
+                .lock()
+                .unwrap()
+                .absent_registry_cycles
+                .get("atm-dev:arch-ctm")
+                .copied(),
             Some(1),
             "first absent cycle should be recorded when member is removed"
         );
@@ -2320,8 +2380,14 @@ mod tests {
             ]),
         );
 
-        reconcile_team_member_activity_with_mode(&home.join(".claude"), &sr, &state_store, true)
-            .unwrap();
+        super::reconcile_team_member_activity_with_mode(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+            true,
+        )
+        .unwrap();
 
         assert!(
             sr.lock()
@@ -2335,15 +2401,17 @@ mod tests {
             "re-added member must remain registered in state store"
         );
         assert!(
-            !absent_cycle_contains("atm-dev:arch-ctm"),
+            !cycle_state
+                .lock()
+                .unwrap()
+                .absent_registry_cycles
+                .contains_key("atm-dev:arch-ctm"),
             "re-added member should clear absent-cycle marker"
         );
     }
 
     #[test]
     fn test_reconcile_config_dispatch_mode_does_not_advance_absent_prune_cycles() {
-        reset_test_cycle_state();
-
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -2367,6 +2435,7 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team("atm-dev", "arch-ctm", "dead-sess", i32::MAX as u32);
@@ -2374,10 +2443,11 @@ mod tests {
         }
 
         for _ in 0..5 {
-            reconcile_team_member_activity_with_mode(
+            super::reconcile_team_member_activity_with_mode(
                 &home.join(".claude"),
                 &sr,
                 &state_store,
+                &cycle_state,
                 false,
             )
             .unwrap();
