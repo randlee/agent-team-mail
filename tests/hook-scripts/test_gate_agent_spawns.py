@@ -87,7 +87,16 @@ def _run_gate(
 
         with patch("sys.stdin", StringIO(stdin_text)), \
              patch("pathlib.Path.home", return_value=home_dir), \
-             patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": tmpdir}, clear=False):
+             patch.dict(
+                 os.environ,
+                 {
+                     "CLAUDE_PROJECT_DIR": tmpdir,
+                     # Isolate tests from caller env identity/team leakage.
+                     "ATM_IDENTITY": "",
+                     "ATM_TEAM": "",
+                 },
+                 clear=False,
+             ):
             mod = _load_module("gate_agent_spawns", _GATE_PATH)
             # Override DEBUG_LOG to temp path to avoid polluting system tmp
             mod.DEBUG_LOG = Path(tmpdir) / "debug.jsonl"

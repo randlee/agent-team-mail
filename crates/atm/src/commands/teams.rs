@@ -30,6 +30,13 @@ use crate::util::settings::get_home_dir;
 /// each backup or auto-backup-on-resume. Increase if longer rollback windows
 /// are needed.
 const BACKUP_RETENTION_COUNT: usize = 5;
+const SPAWN_UNAUTHORIZED: &str = "SPAWN_UNAUTHORIZED";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnPolicy {
+    LeadersOnly,
+    AnyMember,
+}
 
 /// List all teams on this machine
 #[derive(Args, Debug)]
@@ -66,7 +73,7 @@ pub enum TeamsCommand {
 /// Spawn a team member (runtime-aware daemon launch)
 #[derive(Args, Debug)]
 #[command(
-    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn team-lead --runtime claude --folder /path/to/repo --team atm-dev\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
+    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nGenerated launch command:\n  (when .atm.toml is absent, substitute placeholders)\n\n  claude:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --resume\n\n  codex:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    codex --dangerously-bypass-approvals-and-sandbox\n\n  gemini:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    gemini --model <model_name>\n\n  opencode:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    opencode\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn team-lead --runtime claude --folder /path/to/repo --team atm-dev\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
 )]
 pub struct SpawnArgs {
     /// Agent name
@@ -263,6 +270,10 @@ pub struct CleanupArgs {
     /// Specific agent to clean up (if omitted, cleans all dead members)
     agent: Option<String>,
 
+    /// Show cleanup candidates without modifying team state
+    #[arg(long)]
+    dry_run: bool,
+
     /// Remove members even when the daemon is unreachable (unsafe — use only when daemon is known to be stopped)
     #[arg(long)]
     force: bool,
@@ -425,6 +436,46 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         .team
         .clone()
         .unwrap_or_else(|| config.core.default_team.clone());
+
+    if let Some((required_team, spawn_policy, co_leaders)) =
+        load_spawn_policy_from_toml(&current_dir)
+        && matches!(spawn_policy, SpawnPolicy::LeadersOnly)
+    {
+        let policy_team = required_team.unwrap_or_else(|| team_name.clone());
+        let caller_identity = resolve_spawn_caller_identity(
+            &home_dir,
+            &policy_team,
+            &resolve_identity(&config.core.identity, &config.roles, &config.aliases),
+        );
+        let mut allowed = vec!["team-lead".to_string()];
+        for identity in co_leaders {
+            if !identity.trim().is_empty() {
+                allowed.push(identity);
+            }
+        }
+        allowed.sort();
+        allowed.dedup();
+
+        let authorized = caller_identity
+            .as_deref()
+            .map(|id| allowed.iter().any(|allowed_id| allowed_id == id))
+            .unwrap_or(false);
+        if !authorized {
+            anyhow::bail!(
+                "{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n\
+                 \n\
+                 Policy team: {}\n\
+                 Allowed identities: {}\n\
+                 Resolved caller: {}\n\
+                 \n\
+                 Action: run spawn as team-lead or add caller to [team.\"{}\"].co_leaders in .atm.toml.",
+                policy_team,
+                allowed.join(", "),
+                caller_identity.unwrap_or_else(|| "<unknown>".to_string()),
+                policy_team
+            );
+        }
+    }
 
     let parsed_env = parse_env_vars(&args.env)?;
 
@@ -827,6 +878,90 @@ fn read_repo_default_team(current_dir: &Path) -> Option<String> {
         .map(str::trim)
         .filter(|team| !team.is_empty())
         .map(ToString::to_string)
+}
+
+fn load_spawn_policy_from_toml(
+    current_dir: &Path,
+) -> Option<(Option<String>, SpawnPolicy, Vec<String>)> {
+    let config_path = find_repo_local_atm_toml(current_dir)?;
+    let contents = fs::read_to_string(config_path).ok()?;
+    let value: toml::Value = toml::from_str(&contents).ok()?;
+
+    let required_team = value
+        .get("core")
+        .and_then(|core| core.get("default_team"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|team| !team.is_empty())
+        .map(ToString::to_string);
+
+    let mut spawn_policy = SpawnPolicy::LeadersOnly;
+    let mut co_leaders: Vec<String> = Vec::new();
+
+    if let Some(team) = required_team.as_deref()
+        && let Some(team_entry) = value
+            .get("team")
+            .and_then(toml::Value::as_table)
+            .and_then(|teams| teams.get(team))
+            .and_then(toml::Value::as_table)
+    {
+        if let Some(raw_policy) = team_entry.get("spawn_policy").and_then(toml::Value::as_str) {
+            spawn_policy = if raw_policy.trim() == "any-member" {
+                SpawnPolicy::AnyMember
+            } else {
+                SpawnPolicy::LeadersOnly
+            };
+        }
+
+        if let Some(values) = team_entry.get("co_leaders").and_then(toml::Value::as_array) {
+            co_leaders = values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|identity| !identity.is_empty())
+                .map(ToString::to_string)
+                .collect();
+            co_leaders.sort();
+            co_leaders.dedup();
+        }
+    }
+
+    Some((required_team, spawn_policy, co_leaders))
+}
+
+fn resolve_spawn_caller_identity(
+    home_dir: &Path,
+    team_name: &str,
+    resolved_identity: &str,
+) -> Option<String> {
+    if let Some(identity) = env_var_nonempty("ATM_IDENTITY") {
+        return Some(identity);
+    }
+
+    let trimmed_identity = resolved_identity.trim();
+    if !trimmed_identity.is_empty() && trimmed_identity != "human" {
+        return Some(trimmed_identity.to_string());
+    }
+
+    let session_id = env_var_nonempty("CLAUDE_SESSION_ID")?;
+    let config_path = home_dir
+        .join(".claude/teams")
+        .join(team_name)
+        .join("config.json");
+    if !config_path.exists() {
+        return None;
+    }
+
+    let team_config = read_team_config(&config_path).ok()?;
+    if team_config.lead_session_id == session_id {
+        return Some("team-lead".to_string());
+    }
+
+    team_config
+        .members
+        .iter()
+        .find(|member| member.session_id.as_deref() == Some(session_id.as_str()))
+        .map(|member| member.name.clone())
 }
 
 fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
@@ -1496,6 +1631,95 @@ fn kill_process(pid: u32) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CleanupActionKind {
+    RosterRemove,
+    MailboxDelete,
+    SessionPrune,
+}
+
+impl CleanupActionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RosterRemove => "roster-remove",
+            Self::MailboxDelete => "mailbox-delete",
+            Self::SessionPrune => "session-prune",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CleanupPreviewRow {
+    agent: String,
+    action: CleanupActionKind,
+    reason: String,
+}
+
+fn print_cleanup_preview(team: &str, rows: &[CleanupPreviewRow]) {
+    if rows.is_empty() {
+        println!("Nothing to clean up for team {team}.");
+        return;
+    }
+
+    let action_width = rows
+        .iter()
+        .map(|row| row.action.as_str().len())
+        .max()
+        .unwrap_or(6)
+        .max("Action".len());
+    let agent_width = rows
+        .iter()
+        .map(|row| row.agent.len())
+        .max()
+        .unwrap_or(5)
+        .max("Agent".len());
+
+    println!("Cleanup preview for team {team}:");
+    println!(
+        "{:<agent_width$}  {:<action_width$}  Reason",
+        "Agent",
+        "Action",
+        agent_width = agent_width,
+        action_width = action_width
+    );
+    println!(
+        "{:-<agent_width$}  {:-<action_width$}  {:-<6}",
+        "",
+        "",
+        "",
+        agent_width = agent_width,
+        action_width = action_width
+    );
+    for row in rows {
+        println!(
+            "{:<agent_width$}  {:<action_width$}  {}",
+            row.agent,
+            row.action.as_str(),
+            row.reason,
+            agent_width = agent_width,
+            action_width = action_width
+        );
+    }
+
+    let roster_remove = rows
+        .iter()
+        .filter(|row| row.action == CleanupActionKind::RosterRemove)
+        .count();
+    let mailbox_delete = rows
+        .iter()
+        .filter(|row| row.action == CleanupActionKind::MailboxDelete)
+        .count();
+    let session_prune = rows
+        .iter()
+        .filter(|row| row.action == CleanupActionKind::SessionPrune)
+        .count();
+    println!();
+    println!("Totals:");
+    println!("  roster-remove: {roster_remove}");
+    println!("  mailbox-delete: {mailbox_delete}");
+    println!("  session-prune: {session_prune}");
+}
+
 /// Implement `atm teams cleanup <team> [agent]`
 ///
 /// Removes members whose daemon session record indicates the process is dead
@@ -1518,6 +1742,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
 
     let mut removed_names: Vec<String> = Vec::new();
     let mut removed_orphan_mailboxes: Vec<String> = Vec::new();
+    let mut dry_run_rows: Vec<CleanupPreviewRow> = Vec::new();
 
     let members_to_check: Vec<_> = if let Some(ref agent_name) = args.agent {
         team_config
@@ -1558,9 +1783,9 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         // is treated as "unknown liveness" → the external agent is kept.
         let is_external = member.external_backend_type.is_some();
 
-        let is_dead = if args.force {
+        let (is_dead, dead_reason): (bool, Option<String>) = if args.force {
             // Force mode intentionally bypasses daemon liveness checks.
-            true
+            (true, Some("forced cleanup (--force)".to_string()))
         } else if is_external {
             // External agent: use session_id for the liveness query if available.
             let query_key = match &member.session_id {
@@ -1579,7 +1804,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             match agent_team_mail_core::daemon_client::query_session(&query_key) {
                 Ok(Some(ref info)) if !info.alive => {
                     // Daemon explicitly reports the session as dead → safe to remove.
-                    true
+                    (true, Some("daemon reports session dead".to_string()))
                 }
                 Ok(_) => {
                     // Daemon unreachable, session alive, or no record → keep the agent.
@@ -1608,11 +1833,21 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             ) {
                 Ok(Some(ref info)) => {
                     // Daemon responded with an explicit record — trust it.
-                    !info.alive
+                    (
+                        !info.alive,
+                        if !info.alive {
+                            Some("daemon reports session dead".to_string())
+                        } else {
+                            None
+                        },
+                    )
                 }
                 Ok(None) if daemon_running => {
                     // Daemon is running but has no record for this member — session is gone.
-                    true
+                    (
+                        true,
+                        Some("daemon has no active session record".to_string()),
+                    )
                 }
                 Ok(None) => {
                     // Daemon is not running: we cannot confirm liveness.
@@ -1637,10 +1872,32 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         };
 
         if is_dead {
-            // Coupled teardown: when a roster member is removed, remove all
-            // associated mailbox artifacts (inbox json/lock + mailbox dir).
-            remove_member_mailbox_artifacts(&team_dir, &member.name);
-            removed_names.push(member.name.clone());
+            let reason = dead_reason.unwrap_or_else(|| "candidate for cleanup".to_string());
+            if args.dry_run {
+                dry_run_rows.push(CleanupPreviewRow {
+                    agent: member.name.clone(),
+                    action: CleanupActionKind::RosterRemove,
+                    reason: reason.clone(),
+                });
+                dry_run_rows.push(CleanupPreviewRow {
+                    agent: member.name.clone(),
+                    action: CleanupActionKind::MailboxDelete,
+                    reason: reason.clone(),
+                });
+                // Only preview session-prune when session metadata actually exists.
+                if member.session_id.as_deref().is_some() {
+                    dry_run_rows.push(CleanupPreviewRow {
+                        agent: member.name.clone(),
+                        action: CleanupActionKind::SessionPrune,
+                        reason: "stale session metadata".to_string(),
+                    });
+                }
+            } else {
+                // Coupled teardown: when a roster member is removed, remove all
+                // associated mailbox artifacts (inbox json/lock + mailbox dir).
+                remove_member_mailbox_artifacts(&team_dir, &member.name);
+                removed_names.push(member.name.clone());
+            }
         } else {
             // Only print a warning when cleaning up a specific named agent.
             // In full-team-cleanup mode, alive members are silently skipped.
@@ -1651,7 +1908,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     }
 
     // Remove dead members from config
-    if !removed_names.is_empty() {
+    if !args.dry_run && !removed_names.is_empty() {
         team_config
             .members
             .retain(|m| !removed_names.contains(&m.name));
@@ -1662,11 +1919,31 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     // match any roster member.
     if args.agent.is_none() {
         let roster: HashSet<String> = team_config.members.iter().map(|m| m.name.clone()).collect();
-        removed_orphan_mailboxes = purge_orphan_mailboxes(&team_dir, &roster);
+        if args.dry_run {
+            for orphan in collect_orphan_mailboxes(&team_dir, &roster) {
+                dry_run_rows.push(CleanupPreviewRow {
+                    agent: orphan,
+                    action: CleanupActionKind::MailboxDelete,
+                    reason: "orphan mailbox not present in roster".to_string(),
+                });
+            }
+        } else {
+            removed_orphan_mailboxes = purge_orphan_mailboxes(&team_dir, &roster);
+        }
+    }
+
+    if args.dry_run {
+        print_cleanup_preview(&args.team, &dry_run_rows);
+        if !skipped_names.is_empty() {
+            let names = skipped_names.join(", ");
+            let count = skipped_names.len();
+            println!("Skipped {count} member(s) (daemon unreachable): {names}");
+        }
+        return Ok(());
     }
 
     if removed_names.is_empty() && removed_orphan_mailboxes.is_empty() && skipped_names.is_empty() {
-        println!("No stale members found.");
+        println!("Nothing to clean up for team {}.", args.team);
     } else {
         if !removed_names.is_empty() {
             let names = removed_names.join(", ");
@@ -1746,8 +2023,8 @@ fn remove_member_mailbox_artifacts(team_dir: &Path, member_name: &str) {
     }
 }
 
-fn purge_orphan_mailboxes(team_dir: &Path, roster: &HashSet<String>) -> Vec<String> {
-    let mut removed: HashSet<String> = HashSet::new();
+fn collect_orphan_mailboxes(team_dir: &Path, roster: &HashSet<String>) -> Vec<String> {
+    let mut found: HashSet<String> = HashSet::new();
 
     let inboxes_dir = team_dir.join("inboxes");
     if let Ok(entries) = fs::read_dir(&inboxes_dir) {
@@ -1760,14 +2037,9 @@ fn purge_orphan_mailboxes(team_dir: &Path, roster: &HashSet<String>) -> Vec<Stri
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if roster.contains(stem) {
-                continue;
+            if !roster.contains(stem) {
+                found.insert(stem.to_string());
             }
-            if let Err(e) = fs::remove_file(&path) {
-                warn!("Failed to remove orphan inbox artifact '{}': {e}", stem);
-                continue;
-            }
-            removed.insert(stem.to_string());
         }
     }
 
@@ -1781,14 +2053,49 @@ fn purge_orphan_mailboxes(team_dir: &Path, roster: &HashSet<String>) -> Vec<Stri
             let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if roster.contains(name) {
+            if !roster.contains(name) {
+                found.insert(name.to_string());
+            }
+        }
+    }
+
+    let mut list: Vec<String> = found.into_iter().collect();
+    list.sort();
+    list
+}
+
+fn purge_orphan_mailboxes(team_dir: &Path, roster: &HashSet<String>) -> Vec<String> {
+    let mut removed: HashSet<String> = HashSet::new();
+    let orphans = collect_orphan_mailboxes(team_dir, roster);
+
+    let inboxes_dir = team_dir.join("inboxes");
+    for orphan in &orphans {
+        for ext in ["json", "lock"] {
+            let path = inboxes_dir.join(format!("{orphan}.{ext}"));
+            if !path.exists() {
                 continue;
             }
-            if let Err(e) = fs::remove_dir_all(&path) {
-                warn!("Failed to remove orphan mailbox dir '{}': {e}", name);
-                continue;
+            if let Err(e) = fs::remove_file(&path) {
+                warn!(
+                    "Failed to remove orphan inbox artifact '{}': {e}",
+                    path.display()
+                );
+            } else {
+                removed.insert(orphan.clone());
             }
-            removed.insert(name.to_string());
+        }
+    }
+
+    let mailboxes_root = team_dir.join("mailboxes");
+    for orphan in &orphans {
+        let path = mailboxes_root.join(orphan);
+        if !path.exists() {
+            continue;
+        }
+        if let Err(e) = fs::remove_dir_all(&path) {
+            warn!("Failed to remove orphan mailbox dir '{}': {e}", orphan);
+        } else {
+            removed.insert(orphan.clone());
         }
     }
 
@@ -1802,6 +2109,7 @@ pub(crate) fn cleanup_single_agent(team: String, agent: String, force: bool) -> 
     cleanup(CleanupArgs {
         team,
         agent: Some(agent),
+        dry_run: false,
         force,
     })
 }
@@ -2448,6 +2756,7 @@ mod tests {
         let args = CleanupArgs {
             team: "nonexistent".to_string(),
             agent: None,
+            dry_run: false,
             force: false,
         };
 
@@ -2487,6 +2796,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: Some("publisher".to_string()),
+            dry_run: false,
             force: true,
         };
 
@@ -2534,6 +2844,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: Some("publisher".to_string()),
+            dry_run: false,
             force: true,
         };
 
@@ -2576,6 +2887,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: Some("publisher".to_string()),
+            dry_run: false,
             force: false,
         };
 
@@ -3223,6 +3535,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: None, // full-team cleanup
+            dry_run: false,
             force: true,
         };
 
@@ -3290,6 +3603,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: None,
+            dry_run: false,
             force: true,
         };
 
@@ -3352,6 +3666,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: Some("publisher".to_string()),
+            dry_run: false,
             force: true,
         };
 
