@@ -2,6 +2,8 @@
 
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
+use agent_team_mail_core::logging::{UnifiedLogMode, init_unified};
+use agent_team_mail_core::logging_event::LogEventV1;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
 use agent_team_mail_daemon::plugins::ci_monitor::{
@@ -101,6 +103,38 @@ fn read_health_record(temp_dir: &TempDir, team: &str) -> Option<serde_json::Valu
         .iter()
         .find(|record| record.get("team").and_then(|v| v.as_str()) == Some(team))
         .cloned()
+}
+
+fn read_spool_events(spool_dir: &Path) -> Vec<LogEventV1> {
+    let mut events = Vec::new();
+    if !spool_dir.exists() {
+        return events;
+    }
+
+    let mut paths: Vec<_> = std::fs::read_dir(spool_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
+                events.push(event);
+            }
+        }
+    }
+
+    events
 }
 
 #[tokio::test]
@@ -426,6 +460,16 @@ async fn test_status_transition_notification() {
 #[tokio::test(start_paused = true)]
 async fn test_health_transitions_emit_alerts_and_recover() {
     let temp_dir = TempDir::new().unwrap();
+    let spool_dir = temp_dir.path().join("log-spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+    let _log_guards = init_unified(
+        "atm-daemon",
+        UnifiedLogMode::ProducerFanIn {
+            daemon_socket: temp_dir.path().join("missing-daemon.sock"),
+            fallback_spool_dir: spool_dir.clone(),
+        },
+    )
+    .unwrap();
 
     let git_provider = GitProvider::GitHub {
         owner: "test".to_string(),
@@ -528,6 +572,26 @@ async fn test_health_transitions_emit_alerts_and_recover() {
             .text
             .contains("availability transition degraded -> healthy")),
         "expected transition alert degraded -> healthy"
+    );
+
+    std::thread::sleep(Duration::from_millis(200));
+    let transition_events: Vec<_> = read_spool_events(&spool_dir)
+        .into_iter()
+        .filter(|event| event.action == "gh_monitor_health_transition")
+        .collect();
+    assert!(
+        transition_events.iter().any(|event| {
+            event.team.as_deref() == Some("test-team")
+                && event.outcome.as_deref() == Some("healthy->degraded")
+        }),
+        "expected structured log for healthy->degraded transition"
+    );
+    assert!(
+        transition_events.iter().any(|event| {
+            event.team.as_deref() == Some("test-team")
+                && event.outcome.as_deref() == Some("degraded->healthy")
+        }),
+        "expected structured log for degraded->healthy transition"
     );
 }
 

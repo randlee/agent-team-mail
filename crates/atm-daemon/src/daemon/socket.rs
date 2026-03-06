@@ -2194,6 +2194,10 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
     // Config gate: invalid/disabled config moves availability into
     // disabled_config_error and blocks polling work.
     if let Err(reason) = validate_gh_monitor_config(home, &gh_request.team) {
+        // Intentional: command-dispatch config validation updates persisted
+        // availability state but does not emit a separate "manual" inbox
+        // notification path; transition alerts are emitted by the shared
+        // state-transition hook (when availability actually changes).
         let _ = set_gh_monitor_health_state(
             home,
             &gh_request.team,
