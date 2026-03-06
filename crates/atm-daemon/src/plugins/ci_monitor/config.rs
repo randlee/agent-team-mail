@@ -63,7 +63,7 @@ impl NotifyTarget {
     }
 }
 
-/// Configuration for the CI Monitor plugin, parsed from [plugins.ci_monitor]
+/// Configuration for the CI Monitor plugin, parsed from [plugins.gh_monitor]
 #[derive(Debug, Clone)]
 pub struct CiMonitorConfig {
     /// Whether the plugin is enabled
@@ -105,7 +105,7 @@ impl CiMonitorConfig {
     ///
     /// # Arguments
     ///
-    /// * `table` - The `[plugins.ci_monitor]` section from `.atm.toml`
+    /// * `table` - The `[plugins.gh_monitor]` section from `.atm.toml`
     ///
     /// # Errors
     ///
@@ -156,7 +156,7 @@ impl CiMonitorConfig {
         // Validate team is required
         if team.is_empty() {
             return Err(PluginError::Config {
-                message: "team is required in [plugins.ci_monitor]".to_string(),
+                message: "team is required in [plugins.gh_monitor]".to_string(),
             });
         }
 

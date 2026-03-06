@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
     let mut registry = PluginRegistry::new();
 
     // Register CI Monitor plugin if configured
-    if let Some(ci_config) = plugin_ctx.plugin_config("ci_monitor")
+    if let Some(ci_config) = plugin_ctx.plugin_config("gh_monitor")
         && ci_config
             .get("enabled")
             .and_then(|v| v.as_bool())

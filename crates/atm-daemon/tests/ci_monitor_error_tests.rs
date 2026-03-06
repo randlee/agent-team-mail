@@ -103,7 +103,7 @@ async fn test_api_failure_continues_polling() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -170,7 +170,7 @@ async fn test_auth_failure_simulation() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -250,7 +250,7 @@ async fn test_invalid_config_provider() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -298,7 +298,7 @@ async fn test_empty_config_uses_defaults() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -346,7 +346,7 @@ async fn test_invalid_config_values_use_defaults() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -397,7 +397,7 @@ async fn test_timeout_error_simulation() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -466,7 +466,7 @@ async fn test_network_error_simulation() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -524,7 +524,7 @@ async fn test_get_run_failure_continues() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),

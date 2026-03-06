@@ -2376,9 +2376,7 @@ fn resolve_ci_alert_routing(home: &std::path::Path, team: &str) -> (String, Vec<
         }
     };
 
-    let plugin_table = config
-        .plugin_config("gh_monitor")
-        .or_else(|| config.plugin_config("ci_monitor"));
+    let plugin_table = config.plugin_config("gh_monitor");
     let Some(plugin_table) = plugin_table else {
         return (
             "gh-monitor".to_string(),

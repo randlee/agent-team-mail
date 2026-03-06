@@ -22,7 +22,7 @@ use tracing::{debug, warn};
 pub struct CiMonitorPlugin {
     /// The CI provider (GitHub Actions, Azure Pipelines, etc.)
     provider: Option<Box<dyn ErasedCiProvider>>,
-    /// Plugin configuration from [plugins.ci_monitor]
+    /// Plugin configuration from [plugins.gh_monitor]
     config: CiMonitorConfig,
     /// Provider registry for runtime provider selection
     registry: Option<CiProviderRegistry>,
@@ -371,7 +371,7 @@ impl Default for CiMonitorPlugin {
 impl Plugin for CiMonitorPlugin {
     fn metadata(&self) -> PluginMetadata {
         PluginMetadata {
-            name: "ci_monitor",
+            name: "gh_monitor",
             version: "0.1.0",
             description: "Monitor CI/CD pipeline status and notify on failures",
             capabilities: vec![
@@ -384,7 +384,7 @@ impl Plugin for CiMonitorPlugin {
 
     async fn init(&mut self, ctx: &PluginContext) -> Result<(), PluginError> {
         // Parse config from context
-        let config_table = ctx.plugin_config("ci_monitor");
+        let config_table = ctx.plugin_config("gh_monitor");
         self.config = if let Some(table) = config_table {
             CiMonitorConfig::from_toml(table)?
         } else {
@@ -453,7 +453,7 @@ impl Plugin for CiMonitorPlugin {
         let member = AgentMember {
             agent_id: format!("{}@{}", self.config.agent, self.config.team),
             name: self.config.agent.clone(),
-            agent_type: "plugin:ci_monitor".to_string(),
+            agent_type: "plugin:gh_monitor".to_string(),
             model: "synthetic".to_string(),
             prompt: None,
             color: Some("blue".to_string()),
@@ -472,7 +472,7 @@ impl Plugin for CiMonitorPlugin {
         };
 
         ctx.roster
-            .add_member(&self.config.team, member, "ci_monitor")
+            .add_member(&self.config.team, member, "gh_monitor")
             .map_err(|e| PluginError::Init {
                 message: format!("Failed to register synthetic member: {e}"),
                 source: None,
@@ -690,7 +690,7 @@ impl Plugin for CiMonitorPlugin {
                 ctx.roster
                     .cleanup_plugin(
                         &self.config.team,
-                        "ci_monitor",
+                        "gh_monitor",
                         crate::roster::CleanupMode::Soft,
                     )
                     .map_err(|e| PluginError::Shutdown {
@@ -725,7 +725,7 @@ mod tests {
         let plugin = CiMonitorPlugin::new();
         let metadata = plugin.metadata();
 
-        assert_eq!(metadata.name, "ci_monitor");
+        assert_eq!(metadata.name, "gh_monitor");
         assert_eq!(metadata.version, "0.1.0");
         assert!(metadata.description.contains("CI/CD pipeline"));
 
@@ -1090,7 +1090,7 @@ notify_target = "team-lead"
 
         let mut config = Config::default();
         if let Some(table) = ci_monitor_config {
-            config.plugins.insert("ci_monitor".to_string(), table);
+            config.plugins.insert("gh_monitor".to_string(), table);
         }
 
         PluginContext {
