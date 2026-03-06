@@ -358,9 +358,12 @@ Init command:
   init <team> [--local] [--identity <name>] [--skip-team]
 
 GH subcommands (plugin-owned):
+  gh init
+  gh
   gh monitor pr <number> [--start-timeout <duration>] [--notify <agent[@team],...>]
   gh monitor workflow <name> --ref <branch|sha|pr>
   gh monitor run <run-id>
+  gh status
   gh status <pr|run|workflow> <value>
 ```
 
@@ -899,18 +902,28 @@ actual process name, and PID.
 
 #### Self-Registration for External Agents (Codex, Gemini) (REQUIRED)
 
-Codex and Gemini agents do not have a Claude Code hook system. The daemon MUST
-support self-registration for these agents via:
-- Implicit: `atm send` writes the agent's own PID and session ID to their roster entry
-  in `config.json` and creates a daemon state record if one does not exist.
-- Explicit: `atm register <team> <name>` performs the same registration explicitly.
+Codex and Gemini agents do not have Claude lifecycle hooks on every command
+path. The daemon MUST support self-registration for these agents via:
+- Implicit: `atm send` issues best-effort daemon `register-hint` registration
+  when sender PID/session hints are discoverable.
+- Explicit: `atm register <team> <name>` performs explicit registration.
 
-Self-registration uses `os.getpid()` of the calling Codex/Gemini process as the
-registered agent session PID.
+Ownership and write semantics:
+- `atm send` MUST NOT write session/process ownership fields into team
+  `config.json`.
+- `atm send` may update activity hints (`isActive`, `lastActive`) in
+  `config.json`; session/process truth remains daemon-owned.
 
-When self-registration creates a new daemon state record where an activity hint already
-existed, the daemon MUST emit an `ACTIVE_WITHOUT_SESSION` WARN finding to surface the
-gap, and MUST then create the daemon state record to resolve it.
+External runtime PID/session acquisition:
+- Hook/session files are accepted when present.
+- For non-hook runtime paths (Codex/Gemini CLI), sender PID may be derived from
+  process ancestry scan using backend validation rules.
+- If no valid PID/session hints are available, send still succeeds but daemon
+  registration is skipped (degraded signal state).
+
+When implicit or explicit registration creates/refreshes a daemon state record
+where an activity hint already existed, diagnostics may emit
+`ACTIVE_WITHOUT_SESSION` until reconciliation completes.
 
 Any successful PID/session registration path (`session_start` lifecycle upsert,
 `register-hint`, daemon bootstrap from roster hints) MUST set `last_alive_at` to
@@ -1029,8 +1042,9 @@ Required behavior:
   when `processId` is present, alive, and backend validation does not report a
   mismatch.
 - `atm send` PID fallback detection must use the same strict backend rules as the
-  daemon validator (`claude=comm:claude`, `codex=comm:codex`,
-  `gemini=comm:node+args~gemini`) and must not stamp unmatched fallback PIDs.
+  daemon validator (`claude=basename(comm):claude`,
+  `codex=basename(comm):codex`, `gemini=basename(comm):node+args~gemini`) and
+  must not stamp unmatched fallback PIDs.
 - If registry state says `Dead` but PID/backend validation indicates the tracked
   process is alive and validation is mismatched, daemon must keep dead/offline
   status and require explicit re-registration to clear mismatch.
@@ -2195,10 +2209,41 @@ Detailed GitHub CI monitor requirements are defined in:
 - `docs/plugins/ci-monitor/requirements.md`
 
 Core command contract:
+- `atm gh init` validates prerequisites (`gh` CLI presence/auth where required),
+  writes/updates `[plugins.gh_monitor]` config, and enables the plugin.
 - `atm gh monitor pr <number>` starts PR-oriented monitoring.
 - `atm gh monitor workflow <name> --ref <branch|sha|pr>` starts workflow-oriented monitoring (`--ref` is required for deterministic target selection).
 - `atm gh monitor run <run-id>` starts run-oriented monitoring.
-- `atm gh status <pr|run|workflow> <value>` returns current monitor state.
+- `atm gh` (no subcommand) returns GitHub monitor namespace status for the team.
+- `atm gh status` (no target) returns GitHub monitor health/availability status for the team.
+- `atm gh status <pr|run|workflow> <value>` returns current monitor state for a specific target.
+
+Operator status UX contract:
+- `atm gh` must not fail argument parsing and must always return a concise status
+  summary for the namespace.
+- `atm gh --help` must present the same top-level status semantics as `atm gh`,
+  including disabled guidance.
+- Both commands must explicitly report whether `gh_monitor` is:
+  - configured,
+  - enabled/disabled,
+  - currently available (`healthy` / `degraded` / `disabled_config_error`).
+- When not enabled, human output must clearly state that monitoring is disabled
+  and include next-step guidance to enable/configure `[plugins.gh_monitor]`.
+- JSON output must expose the same status fields without lossy conversion.
+- When `gh_monitor` is disabled/unconfigured, only the following command paths
+  are allowed:
+  - `atm gh`
+  - `atm gh init`
+  - help output (`atm gh --help`, `atm gh init --help`)
+  Other `atm gh ...` operations must fail fast with an actionable message to run
+  `atm gh init`.
+- When `gh_monitor` is enabled, `atm gh` must show:
+  - current configuration summary,
+  - lifecycle/availability status,
+  - current issue/health note (if any),
+  - concise command usage for monitor/status operations.
+- This command-gating pattern follows the global plugin namespace contract in
+  §5.8 and applies to all plugin-owned namespaces.
 
 Core behavior contract:
 - `atm gh monitor pr` must enforce a start timeout (`--start-timeout`, default `2m`).
@@ -2402,8 +2447,18 @@ temp/atm/<plugin-name>/
 
 - Each plugin may own one top-level CLI namespace.
 - The namespace owner is exclusive; no other plugin or core command may claim it.
-- Namespace dispatch must fail with a stable command error if the owning plugin
-  is unavailable or disabled.
+- Each plugin namespace must provide:
+  - `<namespace>` status entrypoint (no subcommand),
+  - `<namespace> init` setup/enable command,
+  - help output.
+- If a plugin is not configured/enabled for the current team, only the three
+  surfaces above are available. All other namespace operations must fail fast
+  with a stable, actionable init guidance error.
+- `<namespace>` status output must always make disabled/unconfigured state
+  explicit and list only currently available actions.
+- If plugin is enabled, `<namespace>` status output must include current
+  configuration summary, availability/lifecycle state, and current issue note
+  when present.
 - `atm gh` is reserved for the GitHub CI monitor plugin (`gh_monitor`).
 
 ### 5.9 Plugin Failure Isolation Contract

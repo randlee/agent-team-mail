@@ -306,34 +306,38 @@ pub fn format_event_human(event: &LogEventV1) -> String {
         String::new()
     };
 
-    let ppid_suffix = event
-        .fields
-        .get("ppid")
-        .and_then(|v| v.as_u64())
-        .map(|ppid| format!("/ppid={ppid}"))
-        .unwrap_or_default();
-
-    let target_suffix = if event.target.is_empty() {
-        String::new()
-    } else {
-        format!(" -> {}", event.target)
-    };
-
     let action_text = if event.action == "send" {
         format_send_action(event)
     } else {
-        format!("{}{}{}", event.action, msg_suffix, target_suffix)
+        let ppid_suffix = event
+            .fields
+            .get("ppid")
+            .and_then(|v| v.as_u64())
+            .map(|ppid| format!("/ppid={ppid}"))
+            .unwrap_or_default();
+        let target_suffix = if event.target.is_empty() {
+            String::new()
+        } else {
+            format!(" -> {}", event.target)
+        };
+        let action_text = format!("{}{}{}", event.action, msg_suffix, target_suffix);
+        return format!(
+            "{}  {}  [{}{} pid={}{}] {}",
+            event.ts,
+            colored_level,
+            event.source_binary,
+            agent_suffix,
+            event.pid,
+            ppid_suffix,
+            action_text,
+        );
     };
 
+    // For send events, avoid duplicate/competing PID semantics in the prefix.
+    // The send body already renders canonical sender/recipient PIDs.
     format!(
-        "{}  {}  [{}{} pid={}{}] {}",
-        event.ts,
-        colored_level,
-        event.source_binary,
-        agent_suffix,
-        event.pid,
-        ppid_suffix,
-        action_text,
+        "{}  {}  [{}{}] {}",
+        event.ts, colored_level, event.source_binary, agent_suffix, action_text
     )
 }
 
@@ -733,6 +737,9 @@ mod tests {
     #[test]
     fn test_format_human_send_uses_dash_for_missing_pids() {
         let mut ev = new_log_event("atm", "send", "atm::send", "info");
+        ev.agent = Some("arch-ctm".to_string());
+        ev.fields
+            .insert("ppid".to_string(), serde_json::Value::Number(123u64.into()));
         ev.fields.insert(
             "sender_agent".to_string(),
             serde_json::Value::String("team-lead".to_string()),
@@ -751,6 +758,14 @@ mod tests {
         );
         let rendered = format_event_human(&ev);
         assert!(rendered.contains("send team-lead@atm-dev [-] -> arch-ctm@atm-dev [-]"));
+        assert!(
+            !rendered.contains("pid="),
+            "send lines should only show sender/recipient PID slots"
+        );
+        assert!(
+            !rendered.contains("ppid="),
+            "send lines should not include emitter ppid in prefix"
+        );
     }
 
     // ── test_nonexistent_file_returns_empty ───────────────────────────────────
