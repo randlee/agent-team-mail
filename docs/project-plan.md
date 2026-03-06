@@ -2,7 +2,7 @@
 
 **Version**: 0.6
 **Date**: 2026-03-05
-**Status**: Phase Z complete (post-v0.34.0 release).
+**Status**: Phase AA complete (v0.36.0 released, PR #459 merged).
 
 ---
 
@@ -1415,18 +1415,21 @@ the current tranche focused on onboarding contract closure.
 | **Z** | Z.5 | Lifecycle Logging + Hook Events | COMPLETE | [#430](https://github.com/randlee/agent-team-mail/pull/430) |
 | **Z** | Z.6 | Cross-folder Spawn + QA Blocker Closure | COMPLETE | [#431](https://github.com/randlee/agent-team-mail/pull/431) |
 | **Z** | Z.7 | Review Findings Hardening | COMPLETE (d1–7 shipped; d8–12 deferred) | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433), [#435](https://github.com/randlee/agent-team-mail/pull/435) |
-| **AA** | AA.1 | Session-End Correctness Hardening | PLANNED | — |
-| **AB** | AB.1 | GitHub CI Monitor Requirements Lock + Core Contracts | PLANNED | — |
-| **AB** | AB.2 | `atm gh monitor` Command Surface | PLANNED | — |
-| **AB** | AB.3 | Progress + Final Reporting Payloads | PLANNED | — |
-| **AB** | AB.4 | Availability State + Connectivity Recovery Signals | PLANNED | — |
-| **AB** | AB.5 | Runtime Drift Baselines (Optional Enhancement) | PLANNED | — |
-| **AB** | AB.6 | PR Merge-Conflict + CI Gap Detection | PLANNED | — |
-| **AB** | AB.7 | Architecture Review Findings Hardening | PLANNED | — |
+| **AA** | AA.1 | Session-End Correctness Hardening | COMPLETE | [#453](https://github.com/randlee/agent-team-mail/pull/453) |
+| | AA.2 | Spawn Authorization Gate Alignment | COMPLETE | [#455](https://github.com/randlee/agent-team-mail/pull/455) |
+| | AA.3 | CI/Release Reliability Closure | COMPLETE | [#454](https://github.com/randlee/agent-team-mail/pull/454) |
+| | AA.4 | Cleanup + Spawn Help UX Polish | COMPLETE | [#457](https://github.com/randlee/agent-team-mail/pull/457) |
+| **AB** | AB.1 | GitHub CI Monitor Requirements Lock + Core Contracts | COMPLETE | [#462](https://github.com/randlee/agent-team-mail/pull/462) |
+| | AB.2 | `atm gh monitor` Command Surface | COMPLETE | [#463](https://github.com/randlee/agent-team-mail/pull/463) |
+| | AB.3 | Progress + Final Reporting Payloads | COMPLETE | [#464](https://github.com/randlee/agent-team-mail/pull/464) |
+| | AB.4 | Availability State + Connectivity Recovery Signals | COMPLETE | [#465](https://github.com/randlee/agent-team-mail/pull/465) |
+| | AB.5 | Runtime Drift Baselines (Optional Enhancement) | COMPLETE | [#466](https://github.com/randlee/agent-team-mail/pull/466) |
+| | AB.6 | PR Merge-Conflict + CI Gap Detection | COMPLETE | [#467](https://github.com/randlee/agent-team-mail/pull/467) |
+| | AB.7 | Architecture Review Findings Hardening | COMPLETE | [#468](https://github.com/randlee/agent-team-mail/pull/468) |
 
-**Completed**: 106+ sprints across 24 phases (CI green)
-**Current version**: v0.34.0
-**Current phase**: Phase AA (planning)
+**Completed**: 113+ sprints across 25 phases (CI green)
+**Current version**: v0.37.0
+**Current phase**: Phase AB COMPLETE — integration PR [#469](https://github.com/randlee/agent-team-mail/pull/469) pending merge
 **Next planned phase**: Phase AB (GitHub CI monitor command + availability hardening)
 
 ---
@@ -1547,10 +1550,10 @@ and harden release/test reliability and operator UX.
 ### Sprint Summary
 | Sprint | Name | PR | Branch | Issues | Status |
 |--------|------|----|--------|--------|--------|
-| AA.1 | Session-End Correctness Hardening | TBD | `feature/pAA-s1-session-end-correctness` | [#448](https://github.com/randlee/agent-team-mail/issues/448) | PLANNED |
-| AA.2 | Spawn Authorization Gate Alignment | TBD | `feature/pAA-s2-spawn-authorization` | [#394](https://github.com/randlee/agent-team-mail/issues/394) | PLANNED |
-| AA.3 | CI/Release Reliability Closure | TBD | `feature/pAA-s3-reliability-closure` | [#372](https://github.com/randlee/agent-team-mail/issues/372) | PLANNED |
-| AA.4 | Cleanup + Spawn Help UX Polish | TBD | `feature/pAA-s4-ux-polish` | [#373](https://github.com/randlee/agent-team-mail/issues/373), [#424](https://github.com/randlee/agent-team-mail/issues/424) | PLANNED |
+| AA.1 | Session-End Correctness Hardening | [#453](https://github.com/randlee/agent-team-mail/pull/453) | `feature/pAA-s1-session-end-correctness` | [#448](https://github.com/randlee/agent-team-mail/issues/448) | COMPLETE |
+| AA.2 | Spawn Authorization Gate Alignment | [#455](https://github.com/randlee/agent-team-mail/pull/455) | `feature/pAA-s2-spawn-authorization` | [#394](https://github.com/randlee/agent-team-mail/issues/394) | COMPLETE |
+| AA.3 | CI/Release Reliability Closure | [#454](https://github.com/randlee/agent-team-mail/pull/454) | `feature/pAA-s3-reliability-closure` | [#372](https://github.com/randlee/agent-team-mail/issues/372) | COMPLETE |
+| AA.4 | Cleanup + Spawn Help UX Polish | [#457](https://github.com/randlee/agent-team-mail/pull/457) | `feature/pAA-s4-ux-polish` | [#373](https://github.com/randlee/agent-team-mail/issues/373), [#424](https://github.com/randlee/agent-team-mail/issues/424) | COMPLETE |
 
 ### AA.1 — Session-End Correctness Hardening
 **Deliverables**
@@ -1671,13 +1674,13 @@ progress/failure observability.
 ### Sprint Summary
 | Sprint | Name | PR | Branch | Issues | Status |
 |--------|------|----|--------|--------|--------|
-| AB.1 | Requirements Lock + Core Plugin Contracts | TBD | `feature/pAB-s1-requirements-lock` | TBD | PLANNED |
-| AB.2 | `atm gh monitor` Command Surface | TBD | `feature/pAB-s2-gh-monitor-cli` | TBD | PLANNED |
-| AB.3 | Progress + Final Reporting Payloads | TBD | `feature/pAB-s3-reporting-contract` | TBD | PLANNED |
-| AB.4 | Availability State + Connectivity Recovery Signals | TBD | `feature/pAB-s4-availability-state` | TBD | PLANNED |
-| AB.5 | Runtime Drift Baselines (Optional Enhancement) | TBD | `feature/pAB-s5-runtime-drift` | TBD | PLANNED |
-| AB.6 | PR Merge-Conflict + CI Gap Detection | TBD | `feature/pAB-s6-conflict-detection` | TBD | PLANNED |
-| AB.7 | Architecture Review Findings Hardening | TBD | `feature/pAB-s7-arch-findings` | TBD | PLANNED |
+| AB.1 | Requirements Lock + Core Plugin Contracts | [#462](https://github.com/randlee/agent-team-mail/pull/462) | `feature/pAB-s1-requirements-lock` | — | COMPLETE |
+| AB.2 | `atm gh monitor` Command Surface | [#463](https://github.com/randlee/agent-team-mail/pull/463) | `feature/pAB-s2-gh-monitor-command` | — | COMPLETE |
+| AB.3 | Progress + Final Reporting Payloads | [#464](https://github.com/randlee/agent-team-mail/pull/464) | `feature/pAB-s3-reporting-contract` | — | COMPLETE |
+| AB.4 | Availability State + Connectivity Recovery Signals | [#465](https://github.com/randlee/agent-team-mail/pull/465) | `feature/pAB-s4-availability-state` | — | COMPLETE |
+| AB.5 | Runtime Drift Baselines (Optional Enhancement) | [#466](https://github.com/randlee/agent-team-mail/pull/466) | `feature/pAB-s5-runtime-drift` | — | COMPLETE |
+| AB.6 | PR Merge-Conflict + CI Gap Detection | [#467](https://github.com/randlee/agent-team-mail/pull/467) | `feature/pAB-s6-conflict-detection` | — | COMPLETE |
+| AB.7 | Architecture Review Findings Hardening | [#468](https://github.com/randlee/agent-team-mail/pull/468) | `feature/pAB-s7-arch-findings` | — | COMPLETE |
 
 ### AB.1 — Requirements Lock + Core Plugin Contracts
 **Deliverables**
@@ -1727,6 +1730,7 @@ progress/failure observability.
    `atm status` / `atm doctor`.
 3. Transient failures do not crash daemon.
 4. Coverage maps to `GH-CI-TR-1` in `docs/plugins/ci-monitor/requirements.md`.
+5. Coverage maps to `GH-CI-TR-4` in `docs/plugins/ci-monitor/requirements.md`.
 
 ### AB.5 — Runtime Drift Baselines (Optional Enhancement)
 **Deliverables**
@@ -1737,6 +1741,7 @@ progress/failure observability.
 **Acceptance Criteria**
 1. Drift alert can be reproduced in deterministic integration tests.
 2. Baseline calculations are stable across restarts.
+3. Coverage maps to `GH-CI-TR-5` in `docs/plugins/ci-monitor/requirements.md`.
 
 ### AB.6 — PR Merge-Conflict + CI Gap Detection
 **Deliverables**
@@ -1789,8 +1794,8 @@ progress/failure observability.
 | Phase Q | `integrate/phase-Q` → [#262](https://github.com/randlee/agent-team-mail/pull/262) | Merged |
 | Phase Y | `integrate/phase-Y` → [#396](https://github.com/randlee/agent-team-mail/pull/396) | Merged |
 | Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Merged |
-| Phase AA | `integrate/phase-AA` | Planning |
-| Phase AB | `integrate/phase-AB` | Planned |
+| Phase AA | `integrate/phase-AA` | Merged ([#459](https://github.com/randlee/agent-team-mail/pull/459)) |
+| Phase AB | `integrate/phase-AB` | [#469](https://github.com/randlee/agent-team-mail/pull/469) Pending merge |
 
 ---
 

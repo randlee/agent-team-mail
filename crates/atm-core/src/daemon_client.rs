@@ -705,6 +705,83 @@ pub enum RegisterHintOutcome {
     UnsupportedDaemon,
 }
 
+/// GH monitor target kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GhMonitorTargetKind {
+    Pr,
+    Workflow,
+    Run,
+}
+
+/// Request payload for daemon-routed `gh-monitor` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhMonitorRequest {
+    pub team: String,
+    pub target_kind: GhMonitorTargetKind,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_timeout_secs: Option<u64>,
+}
+
+/// Request payload for daemon-routed `gh-status` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhStatusRequest {
+    pub team: String,
+    pub target_kind: GhMonitorTargetKind,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
+/// Lifecycle action for the GitHub monitor plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GhMonitorLifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// Request payload for daemon-routed `gh-monitor-control` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhMonitorControlRequest {
+    pub team: String,
+    pub action: GhMonitorLifecycleAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_timeout_secs: Option<u64>,
+}
+
+/// Daemon response payload for `gh-monitor-control` / `gh-monitor-health`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhMonitorHealth {
+    pub team: String,
+    pub lifecycle_state: String,
+    pub availability_state: String,
+    pub in_flight: u64,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Daemon response payload for `gh-monitor`/`gh-status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhMonitorStatus {
+    pub team: String,
+    pub target_kind: GhMonitorTargetKind,
+    pub target: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 /// Query the daemon for the session record of a named agent.
 ///
 /// Returns:
@@ -965,6 +1042,131 @@ pub fn register_hint(
     };
 
     decode_register_hint_response(response)
+}
+
+/// Send a daemon-routed GitHub monitor request (`command: "gh-monitor"`).
+///
+/// Returns:
+/// - `Ok(Some(status))` when the daemon accepted the request and returned
+///   monitor status.
+/// - `Ok(None)` when daemon/socket is unavailable.
+/// - `Err` when daemon returns an explicit command error.
+pub fn gh_monitor(request: &GhMonitorRequest) -> anyhow::Result<Option<GhMonitorStatus>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-monitor".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    decode_gh_monitor_response(response).map(Some)
+}
+
+/// Query daemon-routed GitHub monitor status (`command: "gh-status"`).
+///
+/// Returns:
+/// - `Ok(Some(status))` when daemon has monitor state for the target.
+/// - `Ok(None)` when daemon/socket is unavailable.
+/// - `Err` when daemon returns an explicit command error.
+pub fn gh_status(request: &GhStatusRequest) -> anyhow::Result<Option<GhMonitorStatus>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-status".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    decode_gh_monitor_response(response).map(Some)
+}
+
+/// Send a daemon-routed GitHub monitor lifecycle request
+/// (`command: "gh-monitor-control"`).
+pub fn gh_monitor_control(
+    request: &GhMonitorControlRequest,
+) -> anyhow::Result<Option<GhMonitorHealth>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-monitor-control".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    decode_gh_monitor_health_response(response).map(Some)
+}
+
+/// Query daemon-routed GitHub monitor plugin health
+/// (`command: "gh-monitor-health"`).
+pub fn gh_monitor_health(team: &str) -> anyhow::Result<Option<GhMonitorHealth>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-monitor-health".to_string(),
+        payload: serde_json::json!({ "team": team }),
+    };
+
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    decode_gh_monitor_health_response(response).map(Some)
+}
+
+fn decode_gh_monitor_response(response: SocketResponse) -> anyhow::Result<GhMonitorStatus> {
+    if !response.is_ok() {
+        let Some(err) = response.error else {
+            anyhow::bail!("Daemon returned gh-monitor error status without error payload");
+        };
+        anyhow::bail!(
+            "Daemon returned error for {} command: {}: {}",
+            response.request_id,
+            err.code,
+            err.message
+        );
+    }
+
+    let payload = response
+        .payload
+        .ok_or_else(|| anyhow::anyhow!("Daemon returned ok status but no payload"))?;
+
+    serde_json::from_value::<GhMonitorStatus>(payload)
+        .map_err(|e| anyhow::anyhow!("Failed to parse GhMonitorStatus from daemon response: {e}"))
+}
+
+fn decode_gh_monitor_health_response(response: SocketResponse) -> anyhow::Result<GhMonitorHealth> {
+    if !response.is_ok() {
+        let Some(err) = response.error else {
+            anyhow::bail!("Daemon returned gh-monitor health error status without error payload");
+        };
+        anyhow::bail!(
+            "Daemon returned error for {} command: {}: {}",
+            response.request_id,
+            err.code,
+            err.message
+        );
+    }
+
+    let payload = response
+        .payload
+        .ok_or_else(|| anyhow::anyhow!("Daemon returned ok status but no payload"))?;
+
+    serde_json::from_value::<GhMonitorHealth>(payload)
+        .map_err(|e| anyhow::anyhow!("Failed to parse GhMonitorHealth from daemon response: {e}"))
 }
 
 fn decode_register_hint_response(response: SocketResponse) -> anyhow::Result<RegisterHintOutcome> {

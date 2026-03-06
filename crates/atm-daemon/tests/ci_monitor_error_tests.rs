@@ -3,7 +3,7 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
 use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
-use agent_team_mail_daemon::plugins::ci_monitor::{CiMonitorPlugin, MockCiProvider};
+use agent_team_mail_daemon::plugins::ci_monitor::{CiMonitorPlugin, MockCall, MockCiProvider};
 use agent_team_mail_daemon::roster::RosterService;
 use serial_test::serial;
 use std::path::Path;
@@ -14,11 +14,6 @@ use tokio_util::sync::CancellationToken;
 
 /// Helper to create a test PluginContext
 fn create_test_context(temp_dir: &TempDir, provider: Option<GitProvider>) -> PluginContext {
-    // Set ATM_HOME for cross-platform compliance
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
-
     let claude_root = temp_dir.path().join(".claude");
     let teams_root = claude_root.join("teams");
     std::fs::create_dir_all(&teams_root).unwrap();
@@ -72,6 +67,19 @@ fn create_team_config(teams_root: &Path, team_name: &str) {
     .unwrap();
 }
 
+fn read_health_record(temp_dir: &TempDir, team: &str) -> Option<serde_json::Value> {
+    let path = temp_dir
+        .path()
+        .join(".claude/daemon/gh-monitor-health.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let records = value.get("records")?.as_array()?;
+    records
+        .iter()
+        .find(|record| record.get("team").and_then(|v| v.as_str()) == Some(team))
+        .cloned()
+}
+
 #[tokio::test]
 #[serial]
 async fn test_api_failure_continues_polling() {
@@ -103,7 +111,7 @@ async fn test_api_failure_continues_polling() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -135,6 +143,71 @@ async fn test_api_failure_continues_polling() {
     assert!(
         inbox_messages.is_ok() && inbox_messages.unwrap().is_empty(),
         "No messages should be written on API failure"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[serial]
+async fn test_api_failure_uses_bounded_backoff() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let git_provider = GitProvider::GitHub {
+        owner: "test".to_string(),
+        repo: "repo".to_string(),
+    };
+    let mut ctx = create_test_context(&temp_dir, Some(git_provider));
+    create_team_config(ctx.mail.teams_root(), "test-team");
+
+    let mock_provider = MockCiProvider::new().with_error("API unavailable".to_string());
+    let provider_clone = mock_provider.clone();
+
+    let mut plugin_config = toml::Table::new();
+    plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
+    plugin_config.insert("poll_interval_secs".to_string(), toml::Value::Integer(10));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
+
+    let mut config = (*ctx.config).clone();
+    config
+        .plugins
+        .insert("gh_monitor".to_string(), plugin_config);
+    ctx = PluginContext::new(
+        ctx.system.clone(),
+        ctx.mail.clone(),
+        Arc::new(config),
+        ctx.roster.clone(),
+    );
+
+    let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(mock_provider));
+    plugin.init(&ctx).await.unwrap();
+
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(75)).await;
+    tokio::task::yield_now().await;
+    cancel.cancel();
+    tokio::task::yield_now().await;
+    let _ = run_task.await.unwrap();
+
+    let list_calls = provider_clone
+        .get_calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::ListRuns(_)))
+        .count();
+
+    // Immediate poll + backoff sequence (10s, 20s, 40s) should keep call count bounded.
+    assert!(
+        list_calls <= 4,
+        "bounded backoff should limit list_runs calls; got {list_calls}"
     );
 }
 
@@ -170,7 +243,7 @@ async fn test_auth_failure_simulation() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -250,7 +323,7 @@ async fn test_invalid_config_provider() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -267,6 +340,68 @@ async fn test_invalid_config_provider() {
     assert!(
         err_msg.contains("not registered") || err_msg.contains("nonexistent-provider"),
         "Error should mention provider not found: {err_msg}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_invalid_config_sets_disabled_health_at_init() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let git_provider = GitProvider::GitHub {
+        owner: "test".to_string(),
+        repo: "repo".to_string(),
+    };
+    let mut ctx = create_test_context(&temp_dir, Some(git_provider));
+    create_team_config(ctx.mail.teams_root(), "test-team");
+
+    let mut plugin_config = toml::Table::new();
+    plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
+    // Invalid by requirements (minimum is 10)
+    plugin_config.insert("poll_interval_secs".to_string(), toml::Value::Integer(1));
+
+    let mut config = (*ctx.config).clone();
+    config
+        .plugins
+        .insert("gh_monitor".to_string(), plugin_config);
+    ctx = PluginContext::new(
+        ctx.system.clone(),
+        ctx.mail.clone(),
+        Arc::new(config),
+        ctx.roster.clone(),
+    );
+
+    let mut plugin = CiMonitorPlugin::new();
+    let result = plugin.init(&ctx).await;
+    assert!(result.is_err(), "init should fail for invalid config");
+
+    let health = read_health_record(&temp_dir, "test-team").expect("health record expected");
+    assert_eq!(
+        health["availability_state"].as_str(),
+        Some("disabled_config_error")
+    );
+    assert!(
+        health["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid gh_monitor config"),
+        "health message should include invalid config reason"
+    );
+
+    let lead_messages = ctx.mail.read_inbox("test-team", "team-lead").unwrap();
+    assert!(
+        lead_messages.iter().any(|m| m
+            .text
+            .contains("availability transition healthy -> disabled_config_error")),
+        "team lead should receive disabled_config_error transition alert"
     );
 }
 
@@ -298,7 +433,7 @@ async fn test_empty_config_uses_defaults() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -346,7 +481,7 @@ async fn test_invalid_config_values_use_defaults() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -397,7 +532,7 @@ async fn test_timeout_error_simulation() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -421,18 +556,6 @@ async fn test_timeout_error_simulation() {
         result.is_ok(),
         "Plugin should handle timeout errors gracefully"
     );
-}
-
-#[tokio::test]
-#[serial]
-async fn test_missing_gh_binary() {
-    // Testing that gh CLI is not found is difficult in integration tests
-    // because we can't reliably control the PATH in a way that works across all CI environments
-    // The GitHub provider already handles this case and returns appropriate errors
-    // This test documents the expected behavior but doesn't execute it
-
-    // Expected: GitHubActionsProvider should return PluginError::Provider with message about gh CLI not found
-    // when gh command is not available on PATH
 }
 
 #[tokio::test]
@@ -466,7 +589,7 @@ async fn test_network_error_simulation() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -524,7 +647,7 @@ async fn test_get_run_failure_continues() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
