@@ -1421,6 +1421,8 @@ the current tranche focused on onboarding contract closure.
 | **AB** | AB.3 | Progress + Final Reporting Payloads | PLANNED | — |
 | **AB** | AB.4 | Availability State + Connectivity Recovery Signals | PLANNED | — |
 | **AB** | AB.5 | Runtime Drift Baselines (Optional Enhancement) | PLANNED | — |
+| **AB** | AB.6 | PR Merge-Conflict + CI Gap Detection | PLANNED | — |
+| **AB** | AB.7 | Architecture Review Findings Hardening | PLANNED | — |
 
 **Completed**: 106+ sprints across 24 phases (CI green)
 **Current version**: v0.34.0
@@ -1675,6 +1677,7 @@ progress/failure observability.
 | AB.4 | Availability State + Connectivity Recovery Signals | TBD | `feature/pAB-s4-availability-state` | TBD | PLANNED |
 | AB.5 | Runtime Drift Baselines (Optional Enhancement) | TBD | `feature/pAB-s5-runtime-drift` | TBD | PLANNED |
 | AB.6 | PR Merge-Conflict + CI Gap Detection | TBD | `feature/pAB-s6-conflict-detection` | TBD | PLANNED |
+| AB.7 | Architecture Review Findings Hardening | TBD | `feature/pAB-s7-arch-findings` | TBD | PLANNED |
 
 ### AB.1 — Requirements Lock + Core Plugin Contracts
 **Deliverables**
@@ -1744,6 +1747,20 @@ progress/failure observability.
 1. Post-completion merge-conflict alert emitted when PR becomes DIRTY during a CI run.
 2. Pre-run merge-conflict alert emitted when PR is DIRTY before any run starts (distinct message from `ci_not_started`).
 3. Coverage maps to GH-CI-TR-2 and GH-CI-TR-4 in `docs/plugins/ci-monitor/requirements.md`.
+
+### AB.7 — Architecture Review Findings Hardening
+**Deliverables**
+1. Fix PR start detection: scope `wait_for_pr_run_start` to PR number association + recency gate so stale/unrelated branch runs cannot be selected (GH-CI-FR-17 gap, socket.rs:2271-2306).
+2. Fix workflow status ambiguity: pass `ref` parameter in `gh status` workflow lookup (socket.rs:2209-2224) to prevent nondeterministic results with parallel refs.
+3. Fix classification schema drift: add `infra` class to `classify_failure` to match requirements.md:139 examples (socket.rs:2768-2781).
+4. Fix duplicate failure notifications: add dedup check so polling-path `should_notify_failure` skips notification when command-path `monitor_gh_run` terminal handler already fired for the same run ID.
+
+**Acceptance Criteria**
+1. `wait_for_pr_run_start` queries by PR number; stale same-branch runs are excluded. Test: two runs on same branch, only the PR-associated one is selected.
+2. `gh status` workflow lookup includes `ref` param. Test: parallel-ref scenario returns deterministic result.
+3. `classify_failure` returns `infra` for infra-category failures. Test: infra error input → `infra` classification.
+4. No double alert when both code paths fire for same run. Test: terminal command-path fires → polling-path suppressed.
+5. All tests: isolated temp dirs, process_id=0 pattern.
 
 ---
 
