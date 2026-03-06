@@ -8,15 +8,25 @@ use super::registry::{CiProviderFactory, CiProviderRegistry};
 use super::types::{CiFilter, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::GitProvider as GitProviderType;
+use agent_team_mail_core::daemon_client::GhMonitorHealth;
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::{AgentMember, InboxMessage};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
+
+const GH_MONITOR_BACKOFF_MAX_MULTIPLIER: u64 = 8;
+const GH_MONITOR_DEFAULT_FROM_AGENT: &str = "gh-monitor";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct GhMonitorHealthFile {
+    records: Vec<GhMonitorHealth>,
+}
 
 /// CI Monitor plugin — bridges CI provider runs to agent team messaging
 pub struct CiMonitorPlugin {
@@ -360,6 +370,245 @@ impl CiMonitorPlugin {
             unknown_fields: std::collections::HashMap::new(),
         }
     }
+
+    fn home_dir(ctx: &PluginContext) -> Option<PathBuf> {
+        ctx.system.claude_root.parent().map(|p| p.to_path_buf())
+    }
+
+    fn health_path(home: &std::path::Path) -> PathBuf {
+        home.join(".claude/daemon/gh-monitor-health.json")
+    }
+
+    fn state_path(home: &std::path::Path) -> PathBuf {
+        home.join(".claude/daemon/gh-monitor-state.json")
+    }
+
+    fn default_health(team: &str) -> GhMonitorHealth {
+        GhMonitorHealth {
+            team: team.to_string(),
+            lifecycle_state: "running".to_string(),
+            availability_state: "healthy".to_string(),
+            in_flight: 0,
+            updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            message: None,
+        }
+    }
+
+    fn load_health_map(
+        home: &std::path::Path,
+    ) -> Result<std::collections::HashMap<String, GhMonitorHealth>, PluginError> {
+        let path = Self::health_path(home);
+        if !path.exists() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let raw = std::fs::read_to_string(&path).map_err(|e| PluginError::Runtime {
+            message: format!(
+                "Failed to read gh monitor health file {}: {e}",
+                path.display()
+            ),
+            source: Some(Box::new(e)),
+        })?;
+        let file = serde_json::from_str::<GhMonitorHealthFile>(&raw).map_err(|e| {
+            PluginError::Runtime {
+                message: format!(
+                    "Failed to parse gh monitor health file {}: {e}",
+                    path.display()
+                ),
+                source: Some(Box::new(e)),
+            }
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for record in file.records {
+            map.insert(record.team.clone(), record);
+        }
+        Ok(map)
+    }
+
+    fn upsert_health(home: &std::path::Path, health: GhMonitorHealth) -> Result<(), PluginError> {
+        let mut map = Self::load_health_map(home)?;
+        map.insert(health.team.clone(), health);
+        let mut records: Vec<GhMonitorHealth> = map.into_values().collect();
+        records.sort_by(|a, b| a.team.cmp(&b.team));
+        let file = GhMonitorHealthFile { records };
+        let path = Self::health_path(home);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| PluginError::Runtime {
+                message: format!(
+                    "Failed to create gh monitor health parent directory {}: {e}",
+                    parent.display()
+                ),
+                source: Some(Box::new(e)),
+            })?;
+        }
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&file).map_err(|e| PluginError::Runtime {
+                message: format!("Failed to serialize gh monitor health: {e}"),
+                source: Some(Box::new(e)),
+            })?,
+        )
+        .map_err(|e| PluginError::Runtime {
+            message: format!(
+                "Failed to write gh monitor health file {}: {e}",
+                path.display()
+            ),
+            source: Some(Box::new(e)),
+        })?;
+        Ok(())
+    }
+
+    fn read_health(home: &std::path::Path, team: &str) -> Result<GhMonitorHealth, PluginError> {
+        let map = Self::load_health_map(home)?;
+        Ok(map
+            .get(team)
+            .cloned()
+            .unwrap_or_else(|| Self::default_health(team)))
+    }
+
+    fn count_in_flight_monitors(home: &std::path::Path, team: &str) -> u64 {
+        let path = Self::state_path(home);
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(_) => return 0,
+        };
+        let value = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v) => v,
+            Err(_) => return 0,
+        };
+        value
+            .get("records")
+            .and_then(|v| v.as_array())
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|record| {
+                        record.get("team").and_then(|v| v.as_str()) == Some(team)
+                            && record.get("state").and_then(|v| v.as_str()) == Some("tracking")
+                    })
+                    .count() as u64
+            })
+            .unwrap_or(0)
+    }
+
+    fn notify_targets(&self, team: &str) -> Vec<(String, String)> {
+        if self.config.notify_target.is_empty() {
+            return vec![("team-lead".to_string(), team.to_string())];
+        }
+        self.config
+            .notify_target
+            .iter()
+            .map(|target| {
+                (
+                    target.agent.clone(),
+                    target.team.clone().unwrap_or_else(|| team.to_string()),
+                )
+            })
+            .collect()
+    }
+
+    fn emit_health_transition(
+        &self,
+        ctx: &PluginContext,
+        team: &str,
+        old_state: &str,
+        new_state: &str,
+        reason: &str,
+    ) {
+        if old_state == new_state {
+            return;
+        }
+
+        let level = if new_state == "healthy" {
+            "info"
+        } else {
+            "warn"
+        };
+        emit_event_best_effort(EventFields {
+            level,
+            source: "atm-daemon",
+            action: "gh_monitor_health_transition",
+            team: Some(team.to_string()),
+            result: Some(format!("{old_state}->{new_state}")),
+            error: Some(reason.to_string()),
+            ..Default::default()
+        });
+
+        let from_agent = if self.config.agent.trim().is_empty() {
+            GH_MONITOR_DEFAULT_FROM_AGENT.to_string()
+        } else {
+            self.config.agent.clone()
+        };
+        let text = format!(
+            "[gh_monitor] availability transition {} -> {}\nreason: {}",
+            old_state, new_state, reason
+        );
+        for (agent, target_team) in self.notify_targets(team) {
+            let message = InboxMessage {
+                from: from_agent.clone(),
+                text: text.clone(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                read: false,
+                summary: Some(format!("gh_monitor: {new_state}")),
+                message_id: Some(uuid::Uuid::new_v4().to_string()),
+                unknown_fields: std::collections::HashMap::new(),
+            };
+            if let Err(e) = ctx.mail.send(&target_team, &agent, &message) {
+                warn!(
+                    team = %target_team,
+                    agent = %agent,
+                    "failed to emit gh_monitor transition alert: {e}"
+                );
+            }
+        }
+    }
+
+    fn set_health_state(
+        &self,
+        ctx: &PluginContext,
+        team: &str,
+        lifecycle_state: Option<&str>,
+        availability_state: Option<&str>,
+        message: Option<String>,
+    ) {
+        let Some(home) = Self::home_dir(ctx) else {
+            warn!("CI Monitor: unable to resolve home dir for gh monitor health update");
+            return;
+        };
+
+        let mut current = match Self::read_health(&home, team) {
+            Ok(current) => current,
+            Err(e) => {
+                warn!("CI Monitor: failed to read health state, using default: {e}");
+                Self::default_health(team)
+            }
+        };
+
+        let old_availability = current.availability_state.clone();
+        if let Some(lifecycle_state) = lifecycle_state {
+            current.lifecycle_state = lifecycle_state.to_string();
+        }
+        if let Some(availability_state) = availability_state {
+            current.availability_state = availability_state.to_string();
+        }
+        current.in_flight = Self::count_in_flight_monitors(&home, team);
+        current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        current.message = message.clone();
+
+        if old_availability != current.availability_state {
+            let reason = message.unwrap_or_else(|| "availability changed".to_string());
+            self.emit_health_transition(
+                ctx,
+                team,
+                &old_availability,
+                &current.availability_state,
+                &reason,
+            );
+        }
+
+        if let Err(e) = Self::upsert_health(&home, current) {
+            warn!("CI Monitor: failed to persist health state: {e}");
+        }
+    }
 }
 
 impl Default for CiMonitorPlugin {
@@ -386,7 +635,25 @@ impl Plugin for CiMonitorPlugin {
         // Parse config from context
         let config_table = ctx.plugin_config("gh_monitor");
         self.config = if let Some(table) = config_table {
-            CiMonitorConfig::from_toml(table)?
+            match CiMonitorConfig::from_toml(table) {
+                Ok(config) => config,
+                Err(e) => {
+                    let team_for_health = table
+                        .get("team")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or(ctx.config.core.default_team.as_str())
+                        .to_string();
+                    self.set_health_state(
+                        ctx,
+                        &team_for_health,
+                        Some("running"),
+                        Some("disabled_config_error"),
+                        Some(format!("invalid gh_monitor config: {e}")),
+                    );
+                    return Err(e);
+                }
+            }
         } else {
             CiMonitorConfig::default()
         };
@@ -434,11 +701,19 @@ impl Plugin for CiMonitorPlugin {
             // Create the CI provider from the registry
             // Pass provider_config for external providers
             let provider_config = self.config.provider_config.as_ref();
-            self.provider = Some(self.create_provider_from_registry(
-                &registry,
-                git_provider,
-                provider_config,
-            )?);
+            match self.create_provider_from_registry(&registry, git_provider, provider_config) {
+                Ok(provider) => self.provider = Some(provider),
+                Err(e) => {
+                    self.set_health_state(
+                        ctx,
+                        &self.config.team,
+                        Some("running"),
+                        Some("disabled_config_error"),
+                        Some(format!("provider init failed: {e}")),
+                    );
+                    return Err(e);
+                }
+            }
         }
 
         // Store registry for potential runtime use
@@ -545,6 +820,13 @@ impl Plugin for CiMonitorPlugin {
 
         // Store context for runtime use
         self.ctx = Some(ctx.clone());
+        self.set_health_state(
+            ctx,
+            &self.config.team,
+            Some("running"),
+            None,
+            Some("gh_monitor initialized".to_string()),
+        );
 
         Ok(())
     }
@@ -566,14 +848,18 @@ impl Plugin for CiMonitorPlugin {
             })?
             .clone();
 
-        let mut ticker = interval(Duration::from_secs(self.config.poll_interval_secs));
+        let base_poll_secs = self.config.poll_interval_secs.max(1);
+        let max_backoff_secs = base_poll_secs
+            .saturating_mul(GH_MONITOR_BACKOFF_MAX_MULTIPLIER)
+            .max(base_poll_secs);
+        let mut next_poll_secs = 0_u64;
 
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     break;
                 }
-                _ = ticker.tick() => {
+                _ = sleep(Duration::from_secs(next_poll_secs)) => {
                     // Evict old dedup cache entries
                     self.evict_old_dedup_entries();
 
@@ -596,6 +882,22 @@ impl Plugin for CiMonitorPlugin {
                     // Fetch all completed runs
                     match provider.list_runs(&filter).await {
                         Ok(runs) => {
+                            if next_poll_secs != base_poll_secs {
+                                debug!(
+                                    "CI Monitor: provider recovered, resetting poll delay {}s -> {}s",
+                                    next_poll_secs,
+                                    base_poll_secs
+                                );
+                            }
+                            next_poll_secs = base_poll_secs;
+                            self.set_health_state(
+                                &ctx,
+                                &self.config.team,
+                                Some("running"),
+                                Some("healthy"),
+                                Some("provider poll succeeded".to_string()),
+                            );
+
                             // Process each run
                             for run in runs {
                                 // Filter by branch using glob patterns (client-side)
@@ -612,6 +914,13 @@ impl Plugin for CiMonitorPlugin {
                                         Ok(r) => r,
                                         Err(e) => {
                                             warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
+                                            self.set_health_state(
+                                                &ctx,
+                                                &self.config.team,
+                                                Some("running"),
+                                                Some("degraded"),
+                                                Some(format!("provider get_run failed: {e}")),
+                                            );
                                             continue;
                                         }
                                     };
@@ -672,8 +981,22 @@ impl Plugin for CiMonitorPlugin {
                             }
                         }
                         Err(e) => {
+                            next_poll_secs = if next_poll_secs == 0 {
+                                base_poll_secs
+                            } else {
+                                (next_poll_secs.saturating_mul(2)).min(max_backoff_secs)
+                            };
                             warn!("CI Monitor: Failed to fetch runs: {e}");
-                            // Continue polling after error
+                            self.set_health_state(
+                                &ctx,
+                                &self.config.team,
+                                Some("running"),
+                                Some("degraded"),
+                                Some(format!(
+                                    "provider list_runs failed: {e}; backing off to {}s",
+                                    next_poll_secs
+                                )),
+                            );
                         }
                     }
                 }

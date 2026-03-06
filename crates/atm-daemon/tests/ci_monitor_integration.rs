@@ -90,6 +90,19 @@ fn read_inbox(teams_root: &Path, team: &str, agent: &str) -> Vec<InboxMessage> {
     serde_json::from_slice(&content).unwrap()
 }
 
+fn read_health_record(temp_dir: &TempDir, team: &str) -> Option<serde_json::Value> {
+    let path = temp_dir
+        .path()
+        .join(".claude/daemon/gh-monitor-health.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let records = value.get("records")?.as_array()?;
+    records
+        .iter()
+        .find(|record| record.get("team").and_then(|v| v.as_str()) == Some(team))
+        .cloned()
+}
+
 #[tokio::test]
 async fn test_ci_failure_delivers_inbox_message() {
     let temp_dir = TempDir::new().unwrap();
@@ -407,6 +420,114 @@ async fn test_status_transition_notification() {
         messages.len(),
         1,
         "Should deliver notification when run transitions to failure"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_health_transitions_emit_alerts_and_recover() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let git_provider = GitProvider::GitHub {
+        owner: "test".to_string(),
+        repo: "repo".to_string(),
+    };
+    let mut ctx = create_test_context(&temp_dir, Some(git_provider));
+    create_team_config(ctx.mail.teams_root(), "test-team");
+
+    let mut plugin_config = toml::Table::new();
+    plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
+    plugin_config.insert("poll_interval_secs".to_string(), toml::Value::Integer(10));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
+
+    let mut config = (*ctx.config).clone();
+    config
+        .plugins
+        .insert("gh_monitor".to_string(), plugin_config);
+    ctx = PluginContext::new(
+        ctx.system.clone(),
+        ctx.mail.clone(),
+        Arc::new(config),
+        ctx.roster.clone(),
+    );
+
+    // First run: provider error should transition to degraded and emit alert.
+    let provider_error = MockCiProvider::new().with_error("simulated provider outage".to_string());
+    let mut plugin1 = CiMonitorPlugin::new().with_provider(Box::new(provider_error));
+    plugin1.init(&ctx).await.unwrap();
+    let cancel1 = CancellationToken::new();
+    let run_cancel1 = cancel1.clone();
+    let run_task1 = tokio::spawn(async move { plugin1.run(run_cancel1).await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::task::yield_now().await;
+    cancel1.cancel();
+    tokio::task::yield_now().await;
+    let _ = run_task1.await.unwrap();
+
+    let health = read_health_record(&temp_dir, "test-team").expect("health record");
+    assert_eq!(
+        health["availability_state"].as_str(),
+        Some("degraded"),
+        "provider failure should transition health to degraded"
+    );
+
+    let lead_messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
+    assert!(
+        lead_messages.iter().any(|m| m
+            .text
+            .contains("availability transition healthy -> degraded")),
+        "expected transition alert healthy -> degraded"
+    );
+
+    // Restart plugin with healthy provider to verify degraded -> healthy recovery.
+    ctx.roster
+        .cleanup_plugin(
+            "test-team",
+            "gh_monitor",
+            agent_team_mail_daemon::roster::CleanupMode::Hard,
+        )
+        .unwrap();
+
+    let success_run = create_test_run(
+        777,
+        "CI",
+        "main",
+        CiRunStatus::Completed,
+        Some(CiRunConclusion::Success),
+    );
+    let provider_ok = MockCiProvider::with_runs(vec![success_run]);
+    let mut plugin2 = CiMonitorPlugin::new().with_provider(Box::new(provider_ok));
+    plugin2.init(&ctx).await.unwrap();
+    let cancel2 = CancellationToken::new();
+    let run_cancel2 = cancel2.clone();
+    let run_task2 = tokio::spawn(async move { plugin2.run(run_cancel2).await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::task::yield_now().await;
+    cancel2.cancel();
+    tokio::task::yield_now().await;
+    let _ = run_task2.await.unwrap();
+
+    let health = read_health_record(&temp_dir, "test-team").expect("health record");
+    assert_eq!(
+        health["availability_state"].as_str(),
+        Some("healthy"),
+        "successful provider poll should transition health to healthy"
+    );
+
+    let lead_messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
+    assert!(
+        lead_messages.iter().any(|m| m
+            .text
+            .contains("availability transition degraded -> healthy")),
+        "expected transition alert degraded -> healthy"
     );
 }
 
