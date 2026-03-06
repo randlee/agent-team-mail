@@ -1415,19 +1415,21 @@ the current tranche focused on onboarding contract closure.
 | **Z** | Z.5 | Lifecycle Logging + Hook Events | COMPLETE | [#430](https://github.com/randlee/agent-team-mail/pull/430) |
 | **Z** | Z.6 | Cross-folder Spawn + QA Blocker Closure | COMPLETE | [#431](https://github.com/randlee/agent-team-mail/pull/431) |
 | **Z** | Z.7 | Review Findings Hardening | COMPLETE (d1–7 shipped; d8–12 deferred) | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433), [#435](https://github.com/randlee/agent-team-mail/pull/435) |
-| **AA** | AA.1 | Session-End Correctness Hardening | COMPLETE | #453 |
-| | AA.2 | Spawn Authorization Gate Alignment | COMPLETE | #455 |
-| | AA.3 | CI/Release Reliability Closure | COMPLETE | #454 |
-| | AA.4 | Cleanup + Spawn Help UX Polish | COMPLETE | #457 |
-| **AB** | AB.1 | GitHub CI Monitor Requirements Lock + Core Contracts | PLANNED | — |
-| **AB** | AB.2 | `atm gh monitor` Command Surface | IN PROGRESS | #463 |
-| **AB** | AB.3 | Progress + Final Reporting Payloads | PLANNED | — |
-| **AB** | AB.4 | Availability State + Connectivity Recovery Signals | PLANNED | — |
-| **AB** | AB.5 | Runtime Drift Baselines (Optional Enhancement) | PLANNED | — |
+| **AA** | AA.1 | Session-End Correctness Hardening | COMPLETE | [#453](https://github.com/randlee/agent-team-mail/pull/453) |
+| | AA.2 | Spawn Authorization Gate Alignment | COMPLETE | [#455](https://github.com/randlee/agent-team-mail/pull/455) |
+| | AA.3 | CI/Release Reliability Closure | COMPLETE | [#454](https://github.com/randlee/agent-team-mail/pull/454) |
+| | AA.4 | Cleanup + Spawn Help UX Polish | COMPLETE | [#457](https://github.com/randlee/agent-team-mail/pull/457) |
+| **AB** | AB.1 | GitHub CI Monitor Requirements Lock + Core Contracts | COMPLETE | [#462](https://github.com/randlee/agent-team-mail/pull/462) |
+| | AB.2 | `atm gh monitor` Command Surface | COMPLETE | [#463](https://github.com/randlee/agent-team-mail/pull/463) |
+| | AB.3 | Progress + Final Reporting Payloads | COMPLETE | [#464](https://github.com/randlee/agent-team-mail/pull/464) |
+| | AB.4 | Availability State + Connectivity Recovery Signals | COMPLETE | [#465](https://github.com/randlee/agent-team-mail/pull/465) |
+| | AB.5 | Runtime Drift Baselines (Optional Enhancement) | COMPLETE | [#466](https://github.com/randlee/agent-team-mail/pull/466) |
+| | AB.6 | PR Merge-Conflict + CI Gap Detection | COMPLETE | [#467](https://github.com/randlee/agent-team-mail/pull/467) |
+| | AB.7 | Architecture Review Findings Hardening | COMPLETE | [#468](https://github.com/randlee/agent-team-mail/pull/468) |
 
-**Completed**: 106+ sprints across 24 phases (CI green)
-**Current version**: v0.36.0
-**Current phase**: Phase AB (gh_monitor CI plugin)
+**Completed**: 113+ sprints across 25 phases (CI green)
+**Current version**: v0.37.0
+**Current phase**: Phase AB COMPLETE — integration PR [#469](https://github.com/randlee/agent-team-mail/pull/469) pending merge
 **Next planned phase**: Phase AB (GitHub CI monitor command + availability hardening)
 
 ---
@@ -1672,11 +1674,13 @@ progress/failure observability.
 ### Sprint Summary
 | Sprint | Name | PR | Branch | Issues | Status |
 |--------|------|----|--------|--------|--------|
-| AB.1 | Requirements Lock + Core Plugin Contracts | TBD | `feature/pAB-s1-requirements-lock` | TBD | PLANNED |
-| AB.2 | `atm gh monitor` Command Surface | [#463](https://github.com/randlee/agent-team-mail/pull/463) | `feature/pAB-s2-gh-monitor-command` | TBD | IN PROGRESS |
-| AB.3 | Progress + Final Reporting Payloads | TBD | `feature/pAB-s3-reporting-contract` | TBD | PLANNED |
-| AB.4 | Availability State + Connectivity Recovery Signals | TBD | `feature/pAB-s4-availability-state` | TBD | PLANNED |
-| AB.5 | Runtime Drift Baselines (Optional Enhancement) | TBD | `feature/pAB-s5-runtime-drift` | TBD | PLANNED |
+| AB.1 | Requirements Lock + Core Plugin Contracts | [#462](https://github.com/randlee/agent-team-mail/pull/462) | `feature/pAB-s1-requirements-lock` | — | COMPLETE |
+| AB.2 | `atm gh monitor` Command Surface | [#463](https://github.com/randlee/agent-team-mail/pull/463) | `feature/pAB-s2-gh-monitor-command` | — | COMPLETE |
+| AB.3 | Progress + Final Reporting Payloads | [#464](https://github.com/randlee/agent-team-mail/pull/464) | `feature/pAB-s3-reporting-contract` | — | COMPLETE |
+| AB.4 | Availability State + Connectivity Recovery Signals | [#465](https://github.com/randlee/agent-team-mail/pull/465) | `feature/pAB-s4-availability-state` | — | COMPLETE |
+| AB.5 | Runtime Drift Baselines (Optional Enhancement) | [#466](https://github.com/randlee/agent-team-mail/pull/466) | `feature/pAB-s5-runtime-drift` | — | COMPLETE |
+| AB.6 | PR Merge-Conflict + CI Gap Detection | [#467](https://github.com/randlee/agent-team-mail/pull/467) | `feature/pAB-s6-conflict-detection` | — | COMPLETE |
+| AB.7 | Architecture Review Findings Hardening | [#468](https://github.com/randlee/agent-team-mail/pull/468) | `feature/pAB-s7-arch-findings` | — | COMPLETE |
 
 ### AB.1 — Requirements Lock + Core Plugin Contracts
 **Deliverables**
@@ -1739,6 +1743,30 @@ progress/failure observability.
 2. Baseline calculations are stable across restarts.
 3. Coverage maps to `GH-CI-TR-5` in `docs/plugins/ci-monitor/requirements.md`.
 
+### AB.6 — PR Merge-Conflict + CI Gap Detection
+**Deliverables**
+1. Pre-run preflight: before starting CI polling, check PR `mergeStateStatus`. If `DIRTY`, emit a `merge_conflict` alert (skip `ci_not_started`), do not start polling loop.
+2. Post-CI-completion check: after a run reaches terminal state, re-check `mergeStateStatus`. If `DIRTY`, emit an additional merge-conflict alert alongside the CI result.
+
+**Acceptance Criteria**
+1. Post-completion merge-conflict alert emitted when PR becomes DIRTY during a CI run.
+2. Pre-run merge-conflict alert emitted when PR is DIRTY before any run starts (distinct message from `ci_not_started`).
+3. Coverage maps to GH-CI-TR-2 and GH-CI-TR-4 in `docs/plugins/ci-monitor/requirements.md`.
+
+### AB.7 — Architecture Review Findings Hardening
+**Deliverables**
+1. Fix PR start detection: scope `wait_for_pr_run_start` to PR number association + recency gate so stale/unrelated branch runs cannot be selected (GH-CI-FR-17 gap, socket.rs:2271-2306).
+2. Fix workflow status ambiguity: pass `ref` parameter in `gh status` workflow lookup (socket.rs:2209-2224) to prevent nondeterministic results with parallel refs.
+3. Fix classification schema drift: add `infra` class to `classify_failure` to match requirements.md:139 examples (socket.rs:2768-2781).
+4. Fix duplicate failure notifications: add dedup check so polling-path `should_notify_failure` skips notification when command-path `monitor_gh_run` terminal handler already fired for the same run ID.
+
+**Acceptance Criteria**
+1. `wait_for_pr_run_start` queries by PR number; stale same-branch runs are excluded. Test: two runs on same branch, only the PR-associated one is selected.
+2. `gh status` workflow lookup includes `ref` param. Test: parallel-ref scenario returns deterministic result.
+3. `classify_failure` returns `infra` for infra-category failures. Test: infra error input → `infra` classification.
+4. No double alert when both code paths fire for same run. Test: terminal command-path fires → polling-path suppressed.
+5. All tests: isolated temp dirs, process_id=0 pattern.
+
 ---
 
 ## 20. Phase Integration PRs
@@ -1766,8 +1794,8 @@ progress/failure observability.
 | Phase Q | `integrate/phase-Q` → [#262](https://github.com/randlee/agent-team-mail/pull/262) | Merged |
 | Phase Y | `integrate/phase-Y` → [#396](https://github.com/randlee/agent-team-mail/pull/396) | Merged |
 | Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Merged |
-| Phase AA | `integrate/phase-AA` | Merged (#459) |
-| Phase AB | `integrate/phase-AB` | Planned |
+| Phase AA | `integrate/phase-AA` | Merged ([#459](https://github.com/randlee/agent-team-mail/pull/459)) |
+| Phase AB | `integrate/phase-AB` | [#469](https://github.com/randlee/agent-team-mail/pull/469) Pending merge |
 
 ---
 

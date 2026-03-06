@@ -47,8 +47,8 @@ pub struct ReadArgs {
     #[arg(long)]
     no_update_seen: bool,
 
-    /// Show only last N messages
-    #[arg(long)]
+    /// Show only last N messages (`--count` accepted as compatibility alias)
+    #[arg(long, visible_alias = "count")]
     limit: Option<usize>,
 
     /// Show messages after timestamp (ISO 8601 format)
