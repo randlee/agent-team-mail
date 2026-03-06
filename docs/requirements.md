@@ -338,6 +338,7 @@ Commands:
   cleanup     Apply retention policies
   mcp         MCP server setup and management
   init        Install/check ATM hook wiring for Claude Code
+  gh          GitHub CI monitor operations (plugin-owned namespace)
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
@@ -355,6 +356,12 @@ MCP subcommands:
 
 Init command:
   init <team> [--local] [--identity <name>] [--skip-team]
+
+GH subcommands (plugin-owned):
+  gh monitor pr <number> [--start-timeout <duration>] [--notify <agent[@team],...>]
+  gh monitor workflow <name> --ref <branch|sha|pr>
+  gh monitor run <run-id>
+  gh status <pr|run|workflow> <value>
 ```
 
 ### 4.2 Messaging Commands
@@ -494,7 +501,7 @@ atm read --all                   # read all messages (not just unread)
 | `--no-since-last-seen` | Disable seen-state filtering; show unread-only behavior |
 | `--no-mark` | Don't mark messages as read |
 | `--no-update-seen` | Don't update local seen-state watermark after reading |
-| `--limit <n>` | Show only last N messages |
+| `--limit <n>` | Show only last N messages (`--count <n>` accepted as compatibility alias) |
 | `--since <timestamp>` | Show messages after timestamp |
 | `--json` | Output as JSON |
 | `--from <name>` | Filter by sender |
@@ -2178,11 +2185,49 @@ Acceptance checks:
 - `cargo`/manual upgrade path includes explicit manual kill guidance.
 - Post-upgrade first daemon-backed `atm` invocation starts the upgraded daemon.
 
+### 4.11 GitHub CI Monitor Commands (`atm gh`)
+
+`atm gh` is the GitHub CI monitor command namespace owned by the `gh_monitor`
+plugin. It provides explicit CI monitoring operations and status visibility for
+operators and teammates.
+
+Detailed GitHub CI monitor requirements are defined in:
+- `docs/plugins/ci-monitor/requirements.md`
+
+Core command contract:
+- `atm gh monitor pr <number>` starts PR-oriented monitoring.
+- `atm gh monitor workflow <name> --ref <branch|sha|pr>` starts workflow-oriented monitoring.
+- `atm gh monitor run <run-id>` starts run-oriented monitoring.
+- `atm gh status <pr|run|workflow> <value>` returns current monitor state.
+
+Core behavior contract:
+- `atm gh monitor pr` must enforce a start timeout (`--start-timeout`, default `2m`).
+  If no matching workflow run starts within timeout, monitor recipients must be
+  notified via ATM mail and structured logs.
+- While monitoring an active run, progress updates must not exceed one message
+  per minute.
+- Terminal completion/failure state must be reported immediately (no throttle delay).
+- Final monitor completion message must include a tabular summary with each
+  job/test name, status, and runtime.
+- Failure notifications must include at minimum run URL, failed job URL(s)
+  when available, and PR URL for PR-monitoring mode.
+
+Connectivity and availability contract:
+- Invalid plugin configuration disables monitoring (`disabled_config_error`)
+  and must consume zero polling CPU until configuration is corrected.
+- Transient provider/connectivity/auth/rate-limit failures transition monitor
+  state to degraded and must emit both structured logs and ATM notifications to
+  designated monitor recipients.
+- Recovery (`degraded` -> `healthy`) must emit both structured logs and ATM
+  notification.
+
 ---
 
 ## 5. Plugin System (Daemon Only)
 
-Plugins live exclusively in `atm-daemon`. The CLI has no plugin awareness — it operates directly on files via `atm-core`.
+Plugins live exclusively in `atm-daemon`. Core CLI messaging/discovery commands
+operate directly on files via `atm-core`, while plugin-owned extension
+namespaces (for example `atm gh`) route through daemon/plugin handlers.
 
 ### 5.1 Design Principles
 
@@ -2322,8 +2367,12 @@ enabled = true
 poll_interval = "5m"
 labels = ["bug", "agent-task"]
 
-[plugins.ci-monitor]
+[plugins.gh_monitor]
 enabled = true
+
+# Optional future sibling using the same shared monitor contract
+[plugins.az_monitor]
+enabled = false
 
 [plugins.bridge]
 enabled = true
@@ -2343,6 +2392,33 @@ temp/atm/<plugin-name>/
 - Plugin's responsibility to manage (create, rotate, clean up)
 - No guaranteed persistence across reboots
 - Recommended for offline caching, report storage, sync state
+
+### 5.8 Plugin-Owned CLI Namespace Contract
+
+- Each plugin may own one top-level CLI namespace.
+- The namespace owner is exclusive; no other plugin or core command may claim it.
+- Namespace dispatch must fail with a stable command error if the owning plugin
+  is unavailable or disabled.
+- `atm gh` is reserved for the GitHub CI monitor plugin (`gh_monitor`).
+
+### 5.9 Plugin Failure Isolation Contract
+
+- Plugin init failures must not crash daemon startup.
+- Plugin runtime failures must not terminate daemon process or unrelated plugins.
+- Plugin status must be visible as `healthy`, `degraded`, or
+  `disabled_config_error` in daemon status surfaces.
+- If a plugin enters `disabled_config_error`, daemon must not keep a live
+  polling loop for that plugin.
+
+### 5.10 Plugin Config Key Canonicalization
+
+- Each plugin has one canonical configuration key under `[plugins.<key>]`.
+- Docs, parser, daemon registration, and tests must use the same canonical key.
+- `ci_monitor` is the shared contract/interface name for CI monitor behavior.
+- GitHub concrete plugin key is `gh_monitor`.
+- Azure concrete plugin key is `az_monitor` (planned).
+- Compatibility aliases (for example hyphenated legacy names) are optional and
+  must be explicitly documented if supported.
 
 ---
 
@@ -2370,7 +2446,14 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 
 **Providers**: GitHub Actions, Azure Pipelines, GitLab CI, etc.
 
-**Reference**: [`ci-monitor-design.md`](../../agent-teams-test/docs/ci-monitor-design.md)
+**Reference**:
+- `docs/plugins/ci-monitor/requirements.md`
+- `docs/ci-monitor-integration.md`
+
+**Naming model**:
+- `ci_monitor` = shared monitor contract/interface
+- `gh_monitor` = GitHub implementation (owns `atm gh`)
+- `az_monitor` = planned Azure implementation (future `atm az`)
 
 **Capabilities**: `InjectMessages`, `EventListener`
 
