@@ -3,16 +3,17 @@
 **Status**: Planning (2026-03-06)
 **Integration branch**: `integrate/phase-AC` (off `develop`)
 **Target version**: v0.38.0
-**Goal**: Codex agent reliability, daemon state hardening, `atm spawn` interactive UX
+**Goal**: Codex agent reliability, daemon state hardening, `atm spawn` interactive UX, gh-monitor config validation fix
 
 ---
 
 ## Background
 
-Phase AB delivered spawn gate (leaders-only), session scoping, CI hardening, and `atm spawn --help` / `cleanup --dry-run`. Two classes of bugs surfaced during AB that need systematic fixes in Phase AC:
+Phase AB delivered spawn gate (leaders-only), session scoping, CI hardening, and `atm spawn --help` / `cleanup --dry-run`. Three issues surfaced during AB that need systematic fixes in Phase AC:
 
-1. **Flaky test in event_loop.rs** — process-global statics mutated concurrently by non-serial tests. Root cause and fix designed; arch-ctm implementing.
-2. **Codex agent state persistence** — arch-ctm never registers with the daemon (Codex does not fire Claude Code hooks), causing `atm cleanup` to remove active Codex team members and `atm doctor` to show them as Offline/Unknown. Full root cause in `docs/codex-agent-registration.md`.
+1. **Flaky test in event_loop.rs** — process-global statics mutated concurrently by non-serial tests. **FIXED** by arch-ctm (41053cf, planning/phase-AC).
+2. **Codex agent state persistence** — arch-ctm showed `[-]` in all ATM logs; root cause was `backend_expected_rule` not recognising `agentType=codex`. **FIXED** by arch-ctm (da6cae5, planning/phase-AC). Cleanup guard still needed (AC.2b). Full analysis in `docs/codex-agent-registration.md`.
+3. **gh-monitor config validation** — `validate_gh_monitor_config` does not check `repo` is set; a config with `enabled=true` but no `repo` passes validation and returns "ok" instead of `CONFIG_ERROR`. Filed as issue #471. **Fix in AC.2b**.
 
 Additionally, the spawn UX prototype (`scripts/spawn-demo.sh`) was built and validated during Phase AB planning. Phase AC implements it in Rust.
 
@@ -20,13 +21,14 @@ Additionally, the spawn UX prototype (`scripts/spawn-demo.sh`) was built and val
 
 ## Sprint Overview
 
-| Sprint | Track | Description | Depends On |
-|--------|-------|-------------|------------|
-| AC.1 | Test | Fix flaky ReconcileCycleState test (event_loop.rs) | — |
-| AC.2 | Daemon | Codex self-registration (`atm register`) + cleanup guard | AC.1 |
-| AC.3 | CLI | `atm spawn` interactive review-panel UX | — |
+| Sprint | Track | Description | Status | Depends On |
+|--------|-------|-------------|--------|------------|
+| AC.1 | Test | Fix flaky ReconcileCycleState test (event_loop.rs) | **DONE** (41053cf) | — |
+| AC.1b | Daemon | Fix Codex PPID detection in send.rs (arch-ctm `[-]` bug) | **DONE** (da6cae5) | — |
+| AC.2 | Daemon | `atm cleanup` external agent guard + fix `validate_gh_monitor_config` repo check (#471) | Planned | AC.1 |
+| AC.3 | CLI | `atm spawn` interactive review-panel UX | Planned | — |
 
-AC.1 and AC.3 are independent and can run in parallel.
+AC.2 and AC.3 are independent and can run in parallel.
 
 ---
 
@@ -48,50 +50,57 @@ AC.1 and AC.3 are independent and can run in parallel.
 - No `#[serial]` needed for cycle isolation
 - `cargo clippy -p agent-team-mail-daemon` clean
 
-**Status**: In progress (arch-ctm on planning/phase-AC worktree). BF-001 QA finding resolved, fix in progress.
+**Status**: **COMPLETE** — arch-ctm commit 41053cf on planning/phase-AC. All 14 reconcile tests use per-test `super::new_reconcile_cycle_state()`. `cargo clippy` clean. Targeted reconcile tests: 10/10 pass.
 
 ---
 
-## Sprint AC.2 — Codex Agent Self-Registration
+## Sprint AC.1b — Codex PPID Detection (COMPLETE)
 
-**Goal**: arch-ctm shows correct PID/session in `atm logs`; `atm cleanup` does not remove active Codex agents.
+**Status**: **COMPLETE** — arch-ctm commit da6cae5 on planning/phase-AC.
 
-**Root cause**: See `docs/codex-agent-registration.md`.
+**Changes delivered**:
+- `backend_expected_rule` now honours `agentType=codex/gemini` (legacy fallback)
+- `process_matches_rule` normalises to basename (`rsplit('/').next()`)
+- PPID traversal depth 8→16
+- Stable session ID `local:{sender}:pid:{process_id}` for non-hook processes
+- Log format: emitter `pid/ppid` prefix removed from send lines; only sender/recipient PID slots shown
 
-**Changes**:
+**Remaining gap**: `atm doctor` still shows `ACTIVE_WITHOUT_SESSION` because the send path does not write to `session_registry`. Tracked in AC.2.
 
-### AC.2a — `atm register` command (daemon + CLI)
+---
 
-New socket command `register` in daemon `socket.rs`:
-- Validates agent is a known team member
-- Skips PID backend validation (external agents are not Claude processes)
-- Calls `session_registry.upsert_for_team()` + `state_store.set_state(Active)`
-- Emits session identity change events (same as `session_start`)
+## Sprint AC.2 — Cleanup Guard + gh-monitor Config Fix
 
-New `atm register` CLI subcommand:
-- Reads identity from `ATM_IDENTITY` / `.atm.toml` pipeline
-- Sends register event to daemon socket
-- Called by `launch-worker.sh` after Codex startup
+**Goal**: Prevent `atm cleanup` from removing active Codex agents; fix `validate_gh_monitor_config` to require `repo` (issue #471).
 
-### AC.2b — `atm cleanup` external agent guard
+**Root cause references**: `docs/codex-agent-registration.md`, issue #471.
 
-In cleanup logic: skip removal of members with `agentType` in `{"codex", "gemini", "external"}` unless `last_seen` is older than 7 days.
+### AC.2a — `atm cleanup` external agent guard
 
-This prevents cleanup from removing Codex agents that are active but simply have no daemon state record (because they have not yet called `atm register` in this daemon lifecycle).
+In cleanup logic: members with `agentType` in `{"codex", "gemini", "external"}` MUST NOT be removed unless `last_seen` is absent or older than 7 days (configurable).
+
+- `--dry-run` output must show retained external agents with reason `external-agent-no-state`
+
+### AC.2b — Fix `validate_gh_monitor_config` repo check (issue #471)
+
+In `crates/atm-daemon/src/daemon/socket.rs`, after parsing `CiMonitorConfig`, add:
+```rust
+if parsed.repo.as_deref().map(str::trim).unwrap_or("").is_empty() {
+    return Err("gh_monitor configuration missing required field: repo".to_string());
+}
+```
+This fixes `test_gh_monitor_invalid_config_transitions_to_disabled_config_error`.
 
 **Files**:
-- `crates/atm-daemon/src/daemon/socket.rs`
-- `crates/atm-core/src/socket_protocol.rs`
-- `crates/atm/src/commands/register.rs` (new)
-- `crates/atm/src/main.rs`
-- `crates/atm-daemon/src/daemon/cleanup.rs`
-- `scripts/launch-worker.sh`
+- `crates/atm-daemon/src/daemon/cleanup.rs` — external agent guard
+- `crates/atm-daemon/src/daemon/socket.rs` — repo validation fix
 
 **Acceptance criteria**:
-- After `atm register`, `atm logs` shows `arch-ctm@atm-dev [<pid>]` (not `[-]`)
-- After `atm register`, `atm doctor` shows arch-ctm as Online
 - `atm teams cleanup atm-dev` does not remove arch-ctm when it has no daemon state record
-- All new tests pass; no regression on existing tests
+- `--dry-run` shows retained external agents with correct reason
+- `test_gh_monitor_invalid_config_transitions_to_disabled_config_error` passes
+- `cargo test -p agent-team-mail-daemon` fully green
+- `cargo clippy -p agent-team-mail-daemon` clean
 
 ---
 
@@ -132,7 +141,7 @@ This prevents cleanup from removing Codex agents that are active but simply have
 develop
   └── integrate/phase-AC          (created from develop)
         ├── feature/AC-1-flaky-test-fix    -> PR -> integrate/phase-AC
-        ├── feature/AC-2-codex-register    -> PR -> integrate/phase-AC
+        ├── feature/AC-2-cleanup-guard     -> PR -> integrate/phase-AC
         └── feature/AC-3-spawn-interactive -> PR -> integrate/phase-AC
 ```
 

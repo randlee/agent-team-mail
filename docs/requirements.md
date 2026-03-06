@@ -634,6 +634,17 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 - Daemon cleanup commands MUST NOT delete mailbox or remove roster entry for a
   PID/session-verified active agent unless the caller explicitly requested kill semantics.
 
+**External-agent cleanup guard (REQUIRED)**:
+- Members with `agentType` in `{"codex", "gemini", "external"}` that have no
+  daemon state record MUST NOT be removed during `atm teams cleanup` unless
+  their `last_seen` timestamp in `state.json` is absent or older than a
+  configurable staleness threshold (default: 7 days).
+- Absence of a daemon state record is NOT equivalent to staleness for external
+  agents; these agents do not fire Claude Code lifecycle hooks and may be active
+  without a session_registry entry.
+- When an external agent is skipped due to this guard, `--dry-run` output MUST
+  include a row noting the member was retained with reason `external-agent-no-state`.
+
 **Command expectations**:
 - `atm cleanup --agent <name>`: non-destructive for active agents; applies teardown cleanup
   only when daemon verifies dead state (or explicit kill mode is requested). In kill mode,
@@ -692,6 +703,62 @@ Hook/path compatibility requirements:
 Non-goal:
 - Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
   baseline parity is the immediate requirement.
+
+### 4.3.2b `atm teams spawn` — Interactive Review-Panel Mode
+
+When `atm teams spawn` is invoked in a terminal (stdin is a tty) without `--yes`,
+it MUST enter interactive review-panel mode before executing any spawn side effects.
+
+**Terminal detection (REQUIRED)**:
+- Interactive mode MUST only activate when `stdin_is_tty()` returns true.
+- When stdin is not a tty, `atm teams spawn` MUST print to stderr:
+  `error: interactive mode requires a terminal (stdin is not a tty)`
+  followed by a hint showing the non-interactive invocation, then exit 1.
+- `--yes` flag bypasses tty check and executes spawn immediately without prompting.
+
+**Review panel (REQUIRED)**:
+- The panel MUST display spawn parameters as a numbered list with current values.
+  Minimum fields: `1. team`, `2. member`, `3. model`, `4. agent-type`,
+  `5. pane-mode`, `6. worktree`.
+- Unset optional fields MUST display `(none)` rather than an empty string.
+- When inside a tmux session, the panel MUST display the current session, window
+  index, and window name.
+- If the target member is already running (daemon state active), the panel MUST
+  display an inline warning: `⚠ member appears to be running already`.
+
+**Edit syntax (REQUIRED)**:
+- The user edits fields using `n=value` or comma-separated `n=value,m=value2`.
+  Whitespace around `=` and `,` MUST be tolerated.
+- Unrecognised formats MUST display a parse error inline and remain in the loop.
+- A bare Enter with no validation errors MUST confirm the spawn.
+- `Esc`, `q`, or `Q` MUST cancel with no side effects (exit 0).
+
+**Per-field validation (REQUIRED)**:
+- Each field MUST validate on edit and show an inline error marker when invalid.
+- When errors are present, Enter MUST NOT confirm; the panel MUST remain open.
+- The valid options for each errored field MUST be displayed below the separator.
+
+**Pane placement modes (REQUIRED)**:
+- `new-pane` (default): create a new tmux pane via `tmux split-window -h`.
+- `existing-pane`: list panes in the current window; prompt user to select by
+  pane index before confirming.
+- `current-pane`: send the launch command to the current pane.
+- Outside a tmux session, `new-pane` and `existing-pane` MUST fail with an
+  actionable message; `current-pane` is permitted.
+
+**Dry-run mode (REQUIRED)**:
+- `--dry-run` renders the review panel normally; on confirmation prints the
+  resolved tmux command(s) and launch command without executing side effects.
+- Output MUST include: pane placement action, fully resolved launch command with
+  all flags, and a description of the config registration step.
+- MUST print `No changes made (dry-run).` and exit 0.
+
+**Non-goal**:
+- The interactive panel renders line-by-line to a standard terminal; full
+  ratatui/crossterm TUI widget system is out of scope for this feature.
+
+**Reference**: `scripts/spawn-demo.sh` on `develop` (commit `e8f8cf0`) demonstrates
+the complete UX. The Rust implementation MUST match this behaviour.
 
 ### 4.3.2a `/team-join` Slash Command + `atm teams join` Contract
 
@@ -2262,6 +2329,10 @@ Core behavior contract:
 Connectivity and availability contract:
 - Invalid plugin configuration disables monitoring (`disabled_config_error`)
   and must consume zero polling CPU until configuration is corrected.
+- `validate_gh_monitor_config` MUST return `CONFIG_ERROR` when the `repo` field
+  is absent or empty in `[plugins.gh_monitor]`. A config with `enabled = true`
+  but no `repo` is invalid and MUST transition availability to
+  `disabled_config_error`. (See issue #471.)
 - Transient provider/connectivity/auth/rate-limit failures transition monitor
   state to degraded and must emit both structured logs and ATM notifications to
   designated monitor recipients.
