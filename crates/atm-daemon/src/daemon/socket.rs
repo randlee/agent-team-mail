@@ -5341,7 +5341,7 @@ mod tests {
             tracker.register_agent("team-lead");
             tracker.set_state("team-lead", AgentState::Idle);
         }
-        let req_json = r#"{"version":1,"request_id":"r2","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-xyz","process_id":1234}}"#;
+        let req_json = r#"{"version":1,"request_id":"r2","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-xyz","process_id":0}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         // State should remain Idle (not reset to Launching) — session_start only registers if not already tracked
