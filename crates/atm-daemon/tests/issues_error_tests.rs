@@ -147,8 +147,6 @@ async fn test_missing_provider_init_fails() {
     );
 }
 
-
-
 #[tokio::test]
 #[serial]
 async fn test_empty_config_uses_defaults() {
