@@ -24,10 +24,13 @@
 use agent_team_mail_core::control::{
     CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,
 };
-use agent_team_mail_core::daemon_client::{CanonicalMemberState, LaunchConfig, LaunchResult};
+use agent_team_mail_core::daemon_client::{
+    CanonicalMemberState, GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest,
+    LaunchConfig, LaunchResult,
+};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging_event::LogEventV1;
-use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -451,6 +454,10 @@ async fn handle_connection(
     // use async channel communication with the WorkerAdapterPlugin.
     let response = if is_launch_command(request_str) {
         handle_launch_command(request_str, &launch_tx).await
+    } else if is_gh_monitor_command(request_str) {
+        handle_gh_monitor_command(request_str, &home).await
+    } else if is_gh_status_command(request_str) {
+        handle_gh_status_command(request_str, &home).await
     } else if is_control_command(request_str) {
         handle_control_command(
             request_str,
@@ -522,6 +529,20 @@ fn is_launch_command(request_str: &str) -> bool {
 fn is_control_command(request_str: &str) -> bool {
     request_str.contains(r#""command":"control""#)
         || request_str.contains(r#""command": "control""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"gh-monitor"` command.
+#[cfg(unix)]
+fn is_gh_monitor_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"gh-monitor""#)
+        || request_str.contains(r#""command": "gh-monitor""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"gh-status"` command.
+#[cfg(unix)]
+fn is_gh_status_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"gh-status""#)
+        || request_str.contains(r#""command": "gh-status""#)
 }
 
 /// Quickly determine if a raw JSON line is a `"hook-event"` command.
@@ -1869,6 +1890,532 @@ async fn handle_launch_command(request_str: &str, launch_tx: &LaunchSender) -> S
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct GhMonitorStateFile {
+    records: Vec<GhMonitorStatus>,
+}
+
+#[cfg(unix)]
+async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse gh-monitor request: {e}"),
+            );
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let gh_request: GhMonitorRequest = match serde_json::from_value(request.payload.clone()) {
+        Ok(payload) => payload,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INVALID_PAYLOAD",
+                &format!("Failed to parse gh-monitor payload: {e}"),
+            );
+        }
+    };
+
+    if gh_request.team.trim().is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'team'",
+        );
+    }
+
+    if gh_request.target.trim().is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'target'",
+        );
+    }
+
+    if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow)
+        && gh_request
+            .reference
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+    {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'reference' for workflow monitor",
+        );
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut status = GhMonitorStatus {
+        team: gh_request.team.clone(),
+        target_kind: gh_request.target_kind,
+        target: gh_request.target.clone(),
+        state: "tracking".to_string(),
+        run_id: None,
+        reference: gh_request.reference.clone(),
+        updated_at: now,
+        message: None,
+    };
+
+    match gh_request.target_kind {
+        GhMonitorTargetKind::Run => {
+            status.run_id = gh_request.target.parse::<u64>().ok();
+        }
+        GhMonitorTargetKind::Workflow => {
+            if let Some(reference) = gh_request.reference.as_deref() {
+                match try_find_workflow_run_id(&gh_request.target, reference).await {
+                    Ok(Some(run_id)) => status.run_id = Some(run_id),
+                    Ok(None) => {}
+                    Err(e) => {
+                        status.message = Some(format!(
+                            "workflow run lookup unavailable; tracking without run id: {e}"
+                        ));
+                    }
+                }
+            }
+        }
+        GhMonitorTargetKind::Pr => {
+            let pr_number = match gh_request.target.parse::<u64>() {
+                Ok(value) if value > 0 => value,
+                _ => {
+                    return make_error_response(
+                        &request.request_id,
+                        "INVALID_PAYLOAD",
+                        "PR target must be a positive integer",
+                    );
+                }
+            };
+            let timeout_secs = gh_request.start_timeout_secs.unwrap_or(120);
+            if timeout_secs == 0 {
+                status.state = "ci_not_started".to_string();
+                status.message =
+                    Some("No workflow run observed before start-timeout (0s).".to_string());
+            } else {
+                match wait_for_pr_run_start(pr_number, timeout_secs).await {
+                    Ok(Some(run_id)) => {
+                        status.run_id = Some(run_id);
+                    }
+                    Ok(None) => {
+                        status.state = "ci_not_started".to_string();
+                        status.message = Some(format!(
+                            "No workflow run observed for PR #{pr_number} within {timeout_secs}s."
+                        ));
+                    }
+                    Err(e) => {
+                        status.state = "ci_not_started".to_string();
+                        status.message = Some(format!(
+                            "Unable to query workflow runs for PR #{pr_number}: {e}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Err(e) = upsert_gh_monitor_status(home, status.clone()) {
+        return make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            &format!("Failed to persist gh monitor state: {e}"),
+        );
+    }
+
+    if status.state == "ci_not_started" {
+        emit_ci_not_started_alert(home, &status);
+    }
+
+    make_ok_response(
+        &request.request_id,
+        serde_json::to_value(status).unwrap_or_default(),
+    )
+}
+
+#[cfg(unix)]
+async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse gh-status request: {e}"),
+            );
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let gh_request: GhStatusRequest = match serde_json::from_value(request.payload.clone()) {
+        Ok(payload) => payload,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INVALID_PAYLOAD",
+                &format!("Failed to parse gh-status payload: {e}"),
+            );
+        }
+    };
+
+    let state = match load_gh_monitor_state_map(home) {
+        Ok(map) => map,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INTERNAL_ERROR",
+                &format!("Failed to read gh monitor state: {e}"),
+            );
+        }
+    };
+
+    let key = gh_monitor_key(
+        &gh_request.team,
+        gh_request.target_kind,
+        &gh_request.target,
+        None,
+    );
+    if let Some(status) = state.get(&key) {
+        return make_ok_response(
+            &request.request_id,
+            serde_json::to_value(status).unwrap_or_default(),
+        );
+    }
+
+    if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow) {
+        let mut candidates: Vec<&GhMonitorStatus> = state
+            .values()
+            .filter(|record| {
+                record.team == gh_request.team
+                    && record.target_kind == GhMonitorTargetKind::Workflow
+                    && record.target == gh_request.target
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+        if let Some(status) = candidates.last() {
+            return make_ok_response(
+                &request.request_id,
+                serde_json::to_value(status).unwrap_or_default(),
+            );
+        }
+    }
+
+    make_error_response(
+        &request.request_id,
+        "MONITOR_NOT_FOUND",
+        "No gh monitor state found for requested target",
+    )
+}
+
+#[cfg(unix)]
+async fn wait_for_pr_run_start(pr_number: u64, timeout_secs: u64) -> Result<Option<u64>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if let Some(run_id) = try_find_pr_run_id(pr_number).await? {
+            return Ok(Some(run_id));
+        }
+
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let sleep_for = remaining.min(std::time::Duration::from_secs(5));
+        tokio::time::sleep(sleep_for).await;
+    }
+}
+
+#[cfg(unix)]
+async fn try_find_pr_run_id(pr_number: u64) -> Result<Option<u64>> {
+    let output = run_gh_command(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "--json",
+        "headRefName",
+    ])
+    .await?;
+    let branch = serde_json::from_str::<serde_json::Value>(&output)?
+        .get("headRefName")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let Some(branch) = branch else {
+        return Ok(None);
+    };
+
+    let output = run_gh_command(&[
+        "run",
+        "list",
+        "--branch",
+        &branch,
+        "--limit",
+        "1",
+        "--json",
+        "databaseId",
+    ])
+    .await?;
+    let runs = serde_json::from_str::<Vec<serde_json::Value>>(&output)?;
+    Ok(runs
+        .first()
+        .and_then(|run| run.get("databaseId"))
+        .and_then(|v| v.as_u64()))
+}
+
+#[cfg(unix)]
+async fn try_find_workflow_run_id(workflow: &str, reference: &str) -> Result<Option<u64>> {
+    let output = run_gh_command(&[
+        "run",
+        "list",
+        "--workflow",
+        workflow,
+        "--limit",
+        "20",
+        "--json",
+        "databaseId,headBranch,headSha",
+    ])
+    .await?;
+    let runs = serde_json::from_str::<Vec<serde_json::Value>>(&output)?;
+
+    for run in runs {
+        let branch = run.get("headBranch").and_then(|v| v.as_str());
+        let sha = run.get("headSha").and_then(|v| v.as_str());
+        let matches_ref =
+            branch == Some(reference) || sha.is_some_and(|s| s.starts_with(reference));
+        if matches_ref && let Some(run_id) = run.get("databaseId").and_then(|v| v.as_u64()) {
+            return Ok(Some(run_id));
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(unix)]
+async fn run_gh_command(args: &[&str]) -> Result<String> {
+    let output = tokio::process::Command::new("gh")
+        .args(args)
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("gh {} failed: {}", args.join(" "), stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(unix)]
+fn gh_monitor_state_path(home: &std::path::Path) -> PathBuf {
+    home.join(".claude/daemon/gh-monitor-state.json")
+}
+
+#[cfg(unix)]
+fn gh_monitor_key(
+    team: &str,
+    target_kind: GhMonitorTargetKind,
+    target: &str,
+    reference: Option<&str>,
+) -> String {
+    let kind = match target_kind {
+        GhMonitorTargetKind::Pr => "pr",
+        GhMonitorTargetKind::Workflow => "workflow",
+        GhMonitorTargetKind::Run => "run",
+    };
+    let reference = reference.unwrap_or_default();
+    format!(
+        "{}|{}|{}|{}",
+        team.trim(),
+        kind,
+        target.trim(),
+        reference.trim()
+    )
+}
+
+#[cfg(unix)]
+fn load_gh_monitor_state_map(
+    home: &std::path::Path,
+) -> Result<std::collections::HashMap<String, GhMonitorStatus>> {
+    let path = gh_monitor_state_path(home);
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let state = serde_json::from_str::<GhMonitorStateFile>(&raw)?;
+    let mut map = std::collections::HashMap::new();
+    for record in state.records {
+        let key = gh_monitor_key(
+            &record.team,
+            record.target_kind,
+            &record.target,
+            record.reference.as_deref(),
+        );
+        map.insert(key, record);
+    }
+    Ok(map)
+}
+
+#[cfg(unix)]
+fn upsert_gh_monitor_status(home: &std::path::Path, status: GhMonitorStatus) -> Result<()> {
+    let mut map = load_gh_monitor_state_map(home)?;
+    let key = gh_monitor_key(
+        &status.team,
+        status.target_kind,
+        &status.target,
+        status.reference.as_deref(),
+    );
+    map.insert(key, status);
+    let mut records: Vec<GhMonitorStatus> = map.into_values().collect();
+    records.sort_by(|a, b| {
+        let ak = gh_monitor_key(&a.team, a.target_kind, &a.target, a.reference.as_deref());
+        let bk = gh_monitor_key(&b.team, b.target_kind, &b.target, b.reference.as_deref());
+        ak.cmp(&bk)
+    });
+    let state = GhMonitorStateFile { records };
+    let path = gh_monitor_state_path(home);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&state)?)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn emit_ci_not_started_alert(home: &std::path::Path, status: &GhMonitorStatus) {
+    let (from_agent, targets) = resolve_ci_alert_routing(home, &status.team);
+    let text = format!(
+        "[ci_not_started] {} target '{}' did not produce a run in the start window.\n{}",
+        match status.target_kind {
+            GhMonitorTargetKind::Pr => "PR monitor",
+            GhMonitorTargetKind::Workflow => "workflow monitor",
+            GhMonitorTargetKind::Run => "run monitor",
+        },
+        status.target,
+        status.message.clone().unwrap_or_default()
+    );
+    let summary = format!("ci_not_started: {}", status.target);
+    for (agent, team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(&team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        let message = InboxMessage {
+            from: from_agent.clone(),
+            text: text.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(summary.clone()),
+            message_id: Some(uuid::Uuid::new_v4().to_string()),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) =
+            agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, &team, &agent)
+        {
+            warn!(
+                team = %team,
+                agent = %agent,
+                "failed to emit ci_not_started alert: {e}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn resolve_ci_alert_routing(home: &std::path::Path, team: &str) -> (String, Vec<(String, String)>) {
+    let current_dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(_) => {
+            return (
+                "gh-monitor".to_string(),
+                vec![("team-lead".to_string(), team.to_string())],
+            );
+        }
+    };
+    let config = match agent_team_mail_core::config::resolve_config(
+        &agent_team_mail_core::config::ConfigOverrides {
+            team: Some(team.to_string()),
+            ..Default::default()
+        },
+        &current_dir,
+        home,
+    ) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            return (
+                "gh-monitor".to_string(),
+                vec![("team-lead".to_string(), team.to_string())],
+            );
+        }
+    };
+
+    let plugin_table = config
+        .plugin_config("gh_monitor")
+        .or_else(|| config.plugin_config("ci_monitor"));
+    let Some(plugin_table) = plugin_table else {
+        return (
+            "gh-monitor".to_string(),
+            vec![("team-lead".to_string(), team.to_string())],
+        );
+    };
+
+    let parsed = match crate::plugins::ci_monitor::CiMonitorConfig::from_toml(plugin_table) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            return (
+                "gh-monitor".to_string(),
+                vec![("team-lead".to_string(), team.to_string())],
+            );
+        }
+    };
+
+    let from_agent = if parsed.agent.trim().is_empty() {
+        "gh-monitor".to_string()
+    } else {
+        parsed.agent
+    };
+    let targets = if parsed.notify_target.is_empty() {
+        vec![("team-lead".to_string(), team.to_string())]
+    } else {
+        parsed
+            .notify_target
+            .into_iter()
+            .map(|t| {
+                let target_team = t.team.unwrap_or_else(|| team.to_string());
+                (t.agent, target_team)
+            })
+            .collect()
+    };
+    (from_agent, targets)
+}
+
 /// Handle the `"control"` command asynchronously.
 #[cfg(unix)]
 async fn handle_control_command(
@@ -2419,6 +2966,18 @@ fn parse_and_dispatch(
             &request.request_id,
             "INTERNAL_ERROR",
             "stream-event command should have been handled by the async path",
+        ),
+        // "gh-monitor" is handled asynchronously before parse_and_dispatch is called.
+        "gh-monitor" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "gh-monitor command should have been handled by the async path",
+        ),
+        // "gh-status" is handled asynchronously before parse_and_dispatch is called.
+        "gh-status" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "gh-status command should have been handled by the async path",
         ),
         other => make_error_response(
             &request.request_id,
@@ -4010,6 +4569,55 @@ mod tests {
         assert!(!is_control_command(
             r#"{"version":1,"request_id":"r1","command":"agent-state","payload":{}}"#
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_gh_command_detection() {
+        assert!(is_gh_monitor_command(
+            r#"{"version":1,"request_id":"r1","command":"gh-monitor","payload":{}}"#
+        ));
+        assert!(is_gh_monitor_command(
+            r#"{"version":1,"request_id":"r1","command": "gh-monitor","payload":{}}"#
+        ));
+        assert!(is_gh_status_command(
+            r#"{"version":1,"request_id":"r1","command":"gh-status","payload":{}}"#
+        ));
+        assert!(is_gh_status_command(
+            r#"{"version":1,"request_id":"r1","command": "gh-status","payload":{}}"#
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_pr_timeout_zero_returns_ci_not_started_and_status_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let req_json = r#"{"version":1,"request_id":"r-gh-1","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":0}}"#;
+        let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+        let status_payload = monitor_resp.payload.unwrap();
+        assert_eq!(status_payload["state"].as_str(), Some("ci_not_started"));
+        assert_eq!(status_payload["target_kind"].as_str(), Some("pr"));
+        assert_eq!(status_payload["target"].as_str(), Some("123"));
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-2","command":"gh-status","payload":{"team":"atm-dev","target_kind":"pr","target":"123"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["state"].as_str(), Some("ci_not_started"));
+        assert_eq!(status["target_kind"].as_str(), Some("pr"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_workflow_requires_reference() {
+        let temp = TempDir::new().unwrap();
+        let req_json = r#"{"version":1,"request_id":"r-gh-3","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci"}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "MISSING_PARAMETER");
+        assert!(err.message.contains("reference"));
     }
 
     #[test]
