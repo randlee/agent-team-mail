@@ -8172,7 +8172,7 @@ exit 1
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
         let store = make_store();
         let sr = make_sr();
-        let req_json = r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-abc","process_id":9999}}"#;
+        let req_json = r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-abc","process_id":0}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -8184,7 +8184,7 @@ exit 1
         let reg = sr.lock().unwrap();
         let record = reg.query("team-lead").unwrap();
         assert_eq!(record.session_id, "sess-abc");
-        assert_eq!(record.process_id, 9999);
+        assert_eq!(record.process_id, 0);
 
         // Check agent registered in state tracker
         let tracker = store.lock().unwrap();
