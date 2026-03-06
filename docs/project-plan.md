@@ -1420,7 +1420,7 @@ the current tranche focused on onboarding contract closure.
 | | AA.3 | CI/Release Reliability Closure | COMPLETE | #454 |
 | | AA.4 | Cleanup + Spawn Help UX Polish | COMPLETE | #457 |
 | **AB** | AB.1 | GitHub CI Monitor Requirements Lock + Core Contracts | PLANNED | — |
-| **AB** | AB.2 | `atm gh monitor` Command Surface | PLANNED | — |
+| **AB** | AB.2 | `atm gh monitor` Command Surface | IN PROGRESS | #463 |
 | **AB** | AB.3 | Progress + Final Reporting Payloads | PLANNED | — |
 | **AB** | AB.4 | Availability State + Connectivity Recovery Signals | PLANNED | — |
 | **AB** | AB.5 | Runtime Drift Baselines (Optional Enhancement) | PLANNED | — |
@@ -1673,7 +1673,7 @@ progress/failure observability.
 | Sprint | Name | PR | Branch | Issues | Status |
 |--------|------|----|--------|--------|--------|
 | AB.1 | Requirements Lock + Core Plugin Contracts | TBD | `feature/pAB-s1-requirements-lock` | TBD | PLANNED |
-| AB.2 | `atm gh monitor` Command Surface | TBD | `feature/pAB-s2-gh-monitor-cli` | TBD | PLANNED |
+| AB.2 | `atm gh monitor` Command Surface | [#463](https://github.com/randlee/agent-team-mail/pull/463) | `feature/pAB-s2-gh-monitor-command` | TBD | IN PROGRESS |
 | AB.3 | Progress + Final Reporting Payloads | TBD | `feature/pAB-s3-reporting-contract` | TBD | PLANNED |
 | AB.4 | Availability State + Connectivity Recovery Signals | TBD | `feature/pAB-s4-availability-state` | TBD | PLANNED |
 | AB.5 | Runtime Drift Baselines (Optional Enhancement) | TBD | `feature/pAB-s5-runtime-drift` | TBD | PLANNED |
