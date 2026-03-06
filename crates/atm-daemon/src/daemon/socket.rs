@@ -6251,12 +6251,12 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "mergeStateStatus,url" ]; th
   echo '{"mergeStateStatus":"CLEAN","url":"https://github.com/o/r/pull/123"}'
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "headRefName" ]; then
-  echo '{"headRefName":"feature/mock"}'
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "headRefName,headRefOid,createdAt" ]; then
+  echo '{"headRefName":"feature/mock","headRefOid":"abcdef1234567890","createdAt":"2026-03-06T00:00:00Z"}'
   exit 0
 fi
 if [ "$1" = "run" ] && [ "$2" = "list" ]; then
-  echo '[{"databaseId":424242}]'
+  echo '[{"databaseId":424242,"headSha":"abcdef1234567890","createdAt":"2026-03-06T00:05:00Z"}]'
   exit 0
 fi
 if [ "$1" = "run" ] && [ "$2" = "view" ]; then
