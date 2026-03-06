@@ -1737,6 +1737,7 @@ progress/failure observability.
 **Acceptance Criteria**
 1. Drift alert can be reproduced in deterministic integration tests.
 2. Baseline calculations are stable across restarts.
+3. Coverage maps to `GH-CI-TR-5` in `docs/plugins/ci-monitor/requirements.md`.
 
 ---
 
