@@ -14,10 +14,10 @@ Out of scope: adding new CI providers beyond GitHub Actions (unless required for
 ---
 
 ## 1. Configuration (.atm.toml)
-The GitHub CI Monitor plugin is configured under `[plugins.ci_monitor]`. Current fields (per `crates/atm-daemon/src/plugins/ci_monitor/config.rs`):
+The GitHub CI Monitor plugin is configured under `[plugins.gh_monitor]`. Current fields (per `crates/atm-daemon/src/plugins/ci_monitor/config.rs`):
 
 ```toml
-[plugins.ci_monitor]
+[plugins.gh_monitor]
 enabled = true
 provider = "github"              # built-in provider (gh CLI)
 poll_interval_secs = 60           # minimum 10
@@ -241,7 +241,7 @@ Note: if needed, Sprint 9.0 + 9.1 can be merged into a single “CI Stabilizatio
 ## Appendix: Config Example for This Repo
 
 ```toml
-[plugins.ci_monitor]
+[plugins.gh_monitor]
 enabled = true
 provider = "github"
 poll_interval_secs = 60
