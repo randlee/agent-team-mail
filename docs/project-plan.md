@@ -1740,8 +1740,8 @@ progress/failure observability.
 
 ### AB.6 — PR Merge-Conflict + CI Gap Detection
 **Deliverables**
-1. Post-CI-completion check: after a run completes, query `gh pr view --json mergeable,mergeStateStatus`. If `DIRTY`, emit a merge-conflict alert alongside the CI result.
-2. Pre-run detection: in `wait_for_pr_run_start`, if no run starts within timeout, check `mergeStateStatus`. If `DIRTY`, emit a `merge_conflict` alert (not generic `ci_not_started`).
+1. Pre-run preflight: before starting CI polling, check PR `mergeStateStatus`. If `DIRTY`, emit a `merge_conflict` alert (skip `ci_not_started`), do not start polling loop.
+2. Post-CI-completion check: after a run reaches terminal state, re-check `mergeStateStatus`. If `DIRTY`, emit an additional merge-conflict alert alongside the CI result.
 
 **Acceptance Criteria**
 1. Post-completion merge-conflict alert emitted when PR becomes DIRTY during a CI run.
