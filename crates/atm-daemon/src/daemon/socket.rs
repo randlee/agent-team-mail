@@ -2048,6 +2048,24 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
     )
 }
 
+#[cfg(not(unix))]
+async fn handle_gh_monitor_command(request_str: &str, _home: &std::path::Path) -> SocketResponse {
+    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request_id")
+                .and_then(|request_id| request_id.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    make_error_response(
+        &request_id,
+        "UNSUPPORTED_PLATFORM",
+        "gh-monitor commands require Unix daemon transport",
+    )
+}
+
 #[cfg(unix)]
 async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> SocketResponse {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
@@ -2131,6 +2149,24 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         &request.request_id,
         "MONITOR_NOT_FOUND",
         "No gh monitor state found for requested target",
+    )
+}
+
+#[cfg(not(unix))]
+async fn handle_gh_status_command(request_str: &str, _home: &std::path::Path) -> SocketResponse {
+    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request_id")
+                .and_then(|request_id| request_id.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    make_error_response(
+        &request_id,
+        "UNSUPPORTED_PLATFORM",
+        "gh-status commands require Unix daemon transport",
     )
 }
 
@@ -4118,6 +4154,27 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn install_fake_gh_script(temp: &TempDir, script_body: &str) -> EnvGuard {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script_path = temp.path().join("gh");
+        std::fs::write(&script_path, script_body).expect("write fake gh script");
+        let mut perms = std::fs::metadata(&script_path)
+            .expect("stat fake gh script")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).expect("chmod fake gh script");
+
+        let previous_path = std::env::var("PATH").unwrap_or_default();
+        let composed = if previous_path.is_empty() {
+            temp.path().display().to_string()
+        } else {
+            format!("{}:{previous_path}", temp.path().display())
+        };
+        EnvGuard::set("PATH", &composed)
+    }
+
     #[derive(Clone, Default)]
     struct SharedLogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -4616,6 +4673,109 @@ mod tests {
         let err = resp.error.unwrap();
         assert_eq!(err.code, "MISSING_PARAMETER");
         assert!(err.message.contains("reference"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_wait_for_pr_run_start_success_path_finds_run() {
+        let temp = TempDir::new().unwrap();
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"headRefName":"feature/mock"}'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  echo '[{"databaseId":424242}]'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let run_id = wait_for_pr_run_start(123, 1).await.unwrap();
+        assert_eq!(run_id, Some(424242));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_run_target_success_status_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let req_json = r#"{"version":1,"request_id":"r-gh-run","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"456789"}}"#;
+        let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+        let payload = monitor_resp.payload.unwrap();
+        assert_eq!(payload["target_kind"].as_str(), Some("run"));
+        assert_eq!(payload["target"].as_str(), Some("456789"));
+        assert_eq!(payload["run_id"].as_u64(), Some(456789));
+        assert_eq!(payload["state"].as_str(), Some("tracking"));
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-run-status","command":"gh-status","payload":{"team":"atm-dev","target_kind":"run","target":"456789"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["target_kind"].as_str(), Some("run"));
+        assert_eq!(status["run_id"].as_u64(), Some(456789));
+        assert_eq!(status["state"].as_str(), Some("tracking"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_gh_monitor_workflow_success_status_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  echo '[{"databaseId":987654,"headBranch":"develop","headSha":"abcd1234"}]'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let req_json = r#"{"version":1,"request_id":"r-gh-workflow","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci","reference":"develop","start_timeout_secs":30}}"#;
+        let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+        let payload = monitor_resp.payload.unwrap();
+        assert_eq!(payload["target_kind"].as_str(), Some("workflow"));
+        assert_eq!(payload["target"].as_str(), Some("ci"));
+        assert_eq!(payload["reference"].as_str(), Some("develop"));
+        assert_eq!(payload["run_id"].as_u64(), Some(987654));
+        assert_eq!(payload["state"].as_str(), Some("tracking"));
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-workflow-status","command":"gh-status","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["target_kind"].as_str(), Some("workflow"));
+        assert_eq!(status["target"].as_str(), Some("ci"));
+        assert_eq!(status["reference"].as_str(), Some("develop"));
+        assert_eq!(status["run_id"].as_u64(), Some(987654));
+        assert_eq!(status["state"].as_str(), Some("tracking"));
+    }
+
+    #[tokio::test]
+    #[cfg(not(unix))]
+    async fn test_gh_monitor_non_unix_returns_unsupported_platform() {
+        let req_json = r#"{"version":1,"request_id":"r-gh-stub","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"1"}}"#;
+        let monitor_resp = handle_gh_monitor_command(req_json, std::path::Path::new(".")).await;
+        assert_eq!(monitor_resp.status, "error");
+        let error = monitor_resp.error.unwrap();
+        assert_eq!(error.code, "UNSUPPORTED_PLATFORM");
+    }
+
+    #[tokio::test]
+    #[cfg(not(unix))]
+    async fn test_gh_status_non_unix_returns_unsupported_platform() {
+        let req_json = r#"{"version":1,"request_id":"r-gh-status-stub","command":"gh-status","payload":{"team":"atm-dev","target_kind":"run","target":"1"}}"#;
+        let status_resp = handle_gh_status_command(req_json, std::path::Path::new(".")).await;
+        assert_eq!(status_resp.status, "error");
+        let error = status_resp.error.unwrap();
+        assert_eq!(error.code, "UNSUPPORTED_PLATFORM");
     }
 
     #[test]
