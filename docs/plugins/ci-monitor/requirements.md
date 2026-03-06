@@ -175,6 +175,18 @@ Plugin init/runtime failure must never crash daemon or block unrelated plugins.
 Plugin should maintain per-workflow/job timing baselines and alert when a run is
 significantly slower than historical norm (policy-configurable).
 
+Runtime drift policy config keys:
+- `runtime_drift_enabled` (default `false`)
+- `runtime_drift_threshold_percent` (integer > 0, default `50`)
+- `runtime_drift_min_samples` (integer >= 1, default `3`)
+- `runtime_history_limit` (integer >= 1, default `50`)
+
+Persistence behavior:
+- Runtime baselines must persist across plugin restarts.
+- Processed run IDs must persist so the same run does not repeatedly mutate
+  baselines or spam drift alerts after restart.
+- Runtime baseline history file location: `<report_dir>/runtime-history.json`.
+
 ---
 
 ## 10. Test Requirements
@@ -213,3 +225,10 @@ Test:
 - plugin init failure does not crash daemon startup
 - plugin runtime failure does not terminate daemon process
 - unrelated plugins continue running when `gh_monitor` fails
+
+### GH-CI-TR-5 Runtime drift baselines
+
+Test:
+- deterministic drift alert emission for a run exceeding configured threshold
+- baseline/history persistence across plugin restart
+- run dedup persistence across restart (same run ID is not reprocessed)

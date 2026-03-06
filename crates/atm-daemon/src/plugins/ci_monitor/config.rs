@@ -92,6 +92,14 @@ pub struct CiMonitorConfig {
     pub dedup_ttl_hours: u64,
     /// Report directory for failure reports (JSON + Markdown)
     pub report_dir: PathBuf,
+    /// Enable runtime drift monitoring/baselines
+    pub runtime_drift_enabled: bool,
+    /// Alert threshold for runtime drift (percentage slower than baseline)
+    pub runtime_drift_threshold_percent: u64,
+    /// Minimum baseline samples before drift alerts are evaluated
+    pub runtime_drift_min_samples: usize,
+    /// Maximum number of samples retained per workflow/job baseline
+    pub runtime_history_limit: usize,
     /// Provider-specific configuration (passed to external providers)
     pub provider_config: Option<toml::Table>,
     /// Notification routing targets (empty = send as ci-monitor agent)
@@ -247,6 +255,44 @@ impl CiMonitorConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("temp/atm/ci-monitor"));
 
+        let runtime_drift_enabled = table
+            .get("runtime_drift_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let runtime_drift_threshold_percent = table
+            .get("runtime_drift_threshold_percent")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u64)
+            .unwrap_or(50);
+        if runtime_drift_threshold_percent == 0 {
+            return Err(PluginError::Config {
+                message: "runtime_drift_threshold_percent must be greater than 0".to_string(),
+            });
+        }
+
+        let runtime_drift_min_samples = table
+            .get("runtime_drift_min_samples")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(3);
+        if runtime_drift_min_samples == 0 {
+            return Err(PluginError::Config {
+                message: "runtime_drift_min_samples must be at least 1".to_string(),
+            });
+        }
+
+        let runtime_history_limit = table
+            .get("runtime_history_limit")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(50);
+        if runtime_history_limit == 0 {
+            return Err(PluginError::Config {
+                message: "runtime_history_limit must be at least 1".to_string(),
+            });
+        }
+
         // Parse notify_target (can be single string or array of strings)
         let notify_target = match table.get("notify_target") {
             Some(toml::Value::String(s)) => vec![NotifyTarget::parse(s)?],
@@ -279,6 +325,10 @@ impl CiMonitorConfig {
             dedup_strategy,
             dedup_ttl_hours,
             report_dir,
+            runtime_drift_enabled,
+            runtime_drift_threshold_percent,
+            runtime_drift_min_samples,
+            runtime_history_limit,
             provider_config: Some(provider_config),
             notify_target,
             branch_matcher,
@@ -302,6 +352,10 @@ impl Default for CiMonitorConfig {
             dedup_strategy: DedupStrategy::PerCommit,
             dedup_ttl_hours: 24,
             report_dir: PathBuf::from("temp/atm/ci-monitor"),
+            runtime_drift_enabled: false,
+            runtime_drift_threshold_percent: 50,
+            runtime_drift_min_samples: 3,
+            runtime_history_limit: 50,
             provider_config: None,
             notify_target: Vec::new(),
             branch_matcher: None,
@@ -331,6 +385,10 @@ mod tests {
         assert_eq!(config.dedup_strategy, DedupStrategy::PerCommit);
         assert_eq!(config.dedup_ttl_hours, 24);
         assert_eq!(config.report_dir, PathBuf::from("temp/atm/ci-monitor"));
+        assert!(!config.runtime_drift_enabled);
+        assert_eq!(config.runtime_drift_threshold_percent, 50);
+        assert_eq!(config.runtime_drift_min_samples, 3);
+        assert_eq!(config.runtime_history_limit, 50);
     }
 
     #[test]
@@ -360,6 +418,10 @@ team = "qa-team"
 agent = "ci-bot"
 watched_branches = ["main", "develop"]
 notify_on = ["failure", "timed_out", "cancelled"]
+runtime_drift_enabled = true
+runtime_drift_threshold_percent = 80
+runtime_drift_min_samples = 4
+runtime_history_limit = 120
 "#;
         let table: toml::Table = toml::from_str(toml_str).unwrap();
         let config = CiMonitorConfig::from_toml(&table).unwrap();
@@ -380,6 +442,10 @@ notify_on = ["failure", "timed_out", "cancelled"]
                 CiRunConclusion::Cancelled
             ]
         );
+        assert!(config.runtime_drift_enabled);
+        assert_eq!(config.runtime_drift_threshold_percent, 80);
+        assert_eq!(config.runtime_drift_min_samples, 4);
+        assert_eq!(config.runtime_history_limit, 120);
     }
 
     #[test]
@@ -408,6 +474,42 @@ poll_interval_secs = 5
                 .to_string()
                 .contains("at least 10 seconds")
         );
+    }
+
+    #[test]
+    fn test_runtime_drift_config_validation() {
+        let table: toml::Table = toml::from_str(
+            r#"
+team = "dev-team"
+runtime_drift_threshold_percent = 0
+"#,
+        )
+        .unwrap();
+        let result = CiMonitorConfig::from_toml(&table);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("threshold"));
+
+        let table: toml::Table = toml::from_str(
+            r#"
+team = "dev-team"
+runtime_drift_min_samples = 0
+"#,
+        )
+        .unwrap();
+        let result = CiMonitorConfig::from_toml(&table);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("min_samples"));
+
+        let table: toml::Table = toml::from_str(
+            r#"
+team = "dev-team"
+runtime_history_limit = 0
+"#,
+        )
+        .unwrap();
+        let result = CiMonitorConfig::from_toml(&table);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("history_limit"));
     }
 
     #[test]
