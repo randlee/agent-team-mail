@@ -1417,6 +1417,10 @@ the current tranche focused on onboarding contract closure.
 | **Z** | Z.7 | Review Findings Hardening | COMPLETE (d1–7 shipped; d8–12 deferred) | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433), [#435](https://github.com/randlee/agent-team-mail/pull/435) |
 | **AA** | AA.1 | Session-End Correctness Hardening | PLANNED | — |
 | **AB** | AB.1 | GitHub CI Monitor Requirements Lock + Core Contracts | PLANNED | — |
+| **AB** | AB.2 | `atm gh monitor` Command Surface | PLANNED | — |
+| **AB** | AB.3 | Progress + Final Reporting Payloads | PLANNED | — |
+| **AB** | AB.4 | Availability State + Connectivity Recovery Signals | PLANNED | — |
+| **AB** | AB.5 | Runtime Drift Baselines (Optional Enhancement) | PLANNED | — |
 
 **Completed**: 106+ sprints across 24 phases (CI green)
 **Current version**: v0.34.0
@@ -1692,6 +1696,7 @@ progress/failure observability.
 **Acceptance Criteria**
 1. `atm gh monitor pr <n>` reports `ci_not_started` when timeout expires with no run.
 2. Workflow and run monitor commands resolve and track expected run targets.
+3. Coverage maps to `GH-CI-TR-2` in `docs/plugins/ci-monitor/requirements.md`.
 
 ### AB.3 — Progress + Final Reporting Payloads
 **Deliverables**
@@ -1703,6 +1708,7 @@ progress/failure observability.
 1. Progress is rate-limited under active monitoring.
 2. Terminal completion/failure message is immediate and complete.
 3. Failure notifications include required URLs and identifying metadata.
+4. Coverage maps to `GH-CI-TR-3` in `docs/plugins/ci-monitor/requirements.md`.
 
 ### AB.4 — Availability State + Connectivity Recovery Signals
 **Deliverables**
@@ -1713,8 +1719,10 @@ progress/failure observability.
 
 **Acceptance Criteria**
 1. Transition events are visible in logs and ATM mail.
-2. Invalid configuration does not run polling.
+2. Invalid configuration does not run polling and status is visible in
+   `atm status` / `atm doctor`.
 3. Transient failures do not crash daemon.
+4. Coverage maps to `GH-CI-TR-1` in `docs/plugins/ci-monitor/requirements.md`.
 
 ### AB.5 — Runtime Drift Baselines (Optional Enhancement)
 **Deliverables**
