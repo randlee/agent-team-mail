@@ -2,7 +2,9 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest, gh_monitor, gh_status,
+    GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction, GhMonitorRequest,
+    GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest, gh_monitor, gh_monitor_control,
+    gh_monitor_health, gh_status,
 };
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
@@ -46,6 +48,14 @@ enum MonitorTarget {
     Workflow(MonitorWorkflowArgs),
     /// Monitor a specific workflow run id
     Run(MonitorRunArgs),
+    /// Start gh_monitor plugin polling lifecycle
+    Start(MonitorStartArgs),
+    /// Stop gh_monitor plugin polling lifecycle (with in-flight drain window)
+    Stop(MonitorStopArgs),
+    /// Restart gh_monitor plugin polling lifecycle
+    Restart(MonitorRestartArgs),
+    /// Query gh_monitor plugin lifecycle/availability health
+    Status(MonitorHealthArgs),
 }
 
 #[derive(Args, Debug)]
@@ -77,6 +87,26 @@ struct MonitorRunArgs {
     /// Workflow run id
     run_id: u64,
 }
+
+#[derive(Args, Debug)]
+struct MonitorStartArgs {}
+
+#[derive(Args, Debug)]
+struct MonitorStopArgs {
+    /// Graceful drain timeout in seconds before force-stop (default 30s)
+    #[arg(long = "drain-timeout", default_value_t = 30)]
+    drain_timeout_secs: u64,
+}
+
+#[derive(Args, Debug)]
+struct MonitorRestartArgs {
+    /// Graceful drain timeout in seconds before restart (default 30s)
+    #[arg(long = "drain-timeout", default_value_t = 30)]
+    drain_timeout_secs: u64,
+}
+
+#[derive(Args, Debug)]
+struct MonitorHealthArgs {}
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum StatusTargetKind {
@@ -112,51 +142,100 @@ pub fn execute(args: GhArgs) -> Result<()> {
     agent_team_mail_core::daemon_client::ensure_daemon_running()
         .context("failed to auto-start daemon for atm gh command")?;
 
-    let status = match args.command {
-        GhCommand::Monitor(monitor) => {
-            let request = build_monitor_request(team, monitor);
-            gh_monitor(&request)?.ok_or_else(|| {
-                anyhow::anyhow!("daemon is not reachable for atm gh monitor command")
-            })?
-        }
+    enum GhOutput {
+        MonitorStatus(GhMonitorStatus),
+        MonitorHealth(GhMonitorHealth),
+    }
+
+    let output = match args.command {
+        GhCommand::Monitor(monitor) => match monitor.target {
+            MonitorTarget::Pr(pr) => {
+                let request = GhMonitorRequest {
+                    team: team.to_string(),
+                    target_kind: GhMonitorTargetKind::Pr,
+                    target: pr.number.to_string(),
+                    reference: None,
+                    start_timeout_secs: Some(pr.start_timeout_secs),
+                };
+                GhOutput::MonitorStatus(gh_monitor(&request)?.ok_or_else(|| {
+                    anyhow::anyhow!("daemon is not reachable for atm gh monitor command")
+                })?)
+            }
+            MonitorTarget::Workflow(workflow) => {
+                let request = GhMonitorRequest {
+                    team: team.to_string(),
+                    target_kind: GhMonitorTargetKind::Workflow,
+                    target: workflow.name,
+                    reference: Some(workflow.reference),
+                    start_timeout_secs: Some(workflow.start_timeout_secs),
+                };
+                GhOutput::MonitorStatus(gh_monitor(&request)?.ok_or_else(|| {
+                    anyhow::anyhow!("daemon is not reachable for atm gh monitor command")
+                })?)
+            }
+            MonitorTarget::Run(run) => {
+                let request = GhMonitorRequest {
+                    team: team.to_string(),
+                    target_kind: GhMonitorTargetKind::Run,
+                    target: run.run_id.to_string(),
+                    reference: None,
+                    start_timeout_secs: None,
+                };
+                GhOutput::MonitorStatus(gh_monitor(&request)?.ok_or_else(|| {
+                    anyhow::anyhow!("daemon is not reachable for atm gh monitor command")
+                })?)
+            }
+            MonitorTarget::Start(_start) => {
+                let request = GhMonitorControlRequest {
+                    team: team.to_string(),
+                    action: GhMonitorLifecycleAction::Start,
+                    drain_timeout_secs: None,
+                };
+                GhOutput::MonitorHealth(gh_monitor_control(&request)?.ok_or_else(|| {
+                    anyhow::anyhow!("daemon is not reachable for atm gh monitor start command")
+                })?)
+            }
+            MonitorTarget::Stop(stop) => {
+                let request = GhMonitorControlRequest {
+                    team: team.to_string(),
+                    action: GhMonitorLifecycleAction::Stop,
+                    drain_timeout_secs: Some(stop.drain_timeout_secs),
+                };
+                GhOutput::MonitorHealth(gh_monitor_control(&request)?.ok_or_else(|| {
+                    anyhow::anyhow!("daemon is not reachable for atm gh monitor stop command")
+                })?)
+            }
+            MonitorTarget::Restart(restart) => {
+                let request = GhMonitorControlRequest {
+                    team: team.to_string(),
+                    action: GhMonitorLifecycleAction::Restart,
+                    drain_timeout_secs: Some(restart.drain_timeout_secs),
+                };
+                GhOutput::MonitorHealth(gh_monitor_control(&request)?.ok_or_else(|| {
+                    anyhow::anyhow!("daemon is not reachable for atm gh monitor restart command")
+                })?)
+            }
+            MonitorTarget::Status(_status) => {
+                GhOutput::MonitorHealth(gh_monitor_health(team)?.ok_or_else(|| {
+                    anyhow::anyhow!("daemon is not reachable for atm gh monitor status command")
+                })?)
+            }
+        },
         GhCommand::Status(status) => {
             let request = GhStatusRequest {
                 team: team.to_string(),
                 target_kind: status_kind_to_wire(status.target_kind),
                 target: status.target,
             };
-            gh_status(&request)?.ok_or_else(|| {
+            GhOutput::MonitorStatus(gh_status(&request)?.ok_or_else(|| {
                 anyhow::anyhow!("daemon is not reachable for atm gh status command")
-            })?
+            })?)
         }
     };
 
-    print_status(&status, args.json)
-}
-
-fn build_monitor_request(team: &str, monitor: MonitorArgs) -> GhMonitorRequest {
-    match monitor.target {
-        MonitorTarget::Pr(pr) => GhMonitorRequest {
-            team: team.to_string(),
-            target_kind: GhMonitorTargetKind::Pr,
-            target: pr.number.to_string(),
-            reference: None,
-            start_timeout_secs: Some(pr.start_timeout_secs),
-        },
-        MonitorTarget::Workflow(workflow) => GhMonitorRequest {
-            team: team.to_string(),
-            target_kind: GhMonitorTargetKind::Workflow,
-            target: workflow.name,
-            reference: Some(workflow.reference),
-            start_timeout_secs: Some(workflow.start_timeout_secs),
-        },
-        MonitorTarget::Run(run) => GhMonitorRequest {
-            team: team.to_string(),
-            target_kind: GhMonitorTargetKind::Run,
-            target: run.run_id.to_string(),
-            reference: None,
-            start_timeout_secs: None,
-        },
+    match output {
+        GhOutput::MonitorStatus(status) => print_status(&status, args.json),
+        GhOutput::MonitorHealth(health) => print_health(&health, args.json),
     }
 }
 
@@ -200,21 +279,36 @@ fn print_status(status: &GhMonitorStatus, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn print_health(health: &GhMonitorHealth, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(health)?);
+        return Ok(());
+    }
+
+    println!("Team:              {}", health.team);
+    println!("Lifecycle:         {}", health.lifecycle_state);
+    println!("Availability:      {}", health.availability_state);
+    println!("In-flight Monitors {}", health.in_flight);
+    if let Some(message) = health.message.as_deref() {
+        println!("Message:           {message}");
+    }
+    println!("Updated At:        {}", health.updated_at);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn build_monitor_request_pr_maps_fields() {
-        let req = build_monitor_request(
-            "atm-dev",
-            MonitorArgs {
-                target: MonitorTarget::Pr(MonitorPrArgs {
-                    number: 123,
-                    start_timeout_secs: 15,
-                }),
-            },
-        );
+        let req = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: 123.to_string(),
+            reference: None,
+            start_timeout_secs: Some(15),
+        };
         assert_eq!(req.team, "atm-dev");
         assert_eq!(req.target_kind, GhMonitorTargetKind::Pr);
         assert_eq!(req.target, "123");
@@ -223,16 +317,13 @@ mod tests {
 
     #[test]
     fn build_monitor_request_workflow_maps_fields() {
-        let req = build_monitor_request(
-            "atm-dev",
-            MonitorArgs {
-                target: MonitorTarget::Workflow(MonitorWorkflowArgs {
-                    name: "ci".to_string(),
-                    reference: "develop".to_string(),
-                    start_timeout_secs: 20,
-                }),
-            },
-        );
+        let req = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Workflow,
+            target: "ci".to_string(),
+            reference: Some("develop".to_string()),
+            start_timeout_secs: Some(20),
+        };
         assert_eq!(req.target_kind, GhMonitorTargetKind::Workflow);
         assert_eq!(req.target, "ci");
         assert_eq!(req.reference.as_deref(), Some("develop"));
@@ -241,12 +332,13 @@ mod tests {
 
     #[test]
     fn build_monitor_request_run_maps_fields() {
-        let req = build_monitor_request(
-            "atm-dev",
-            MonitorArgs {
-                target: MonitorTarget::Run(MonitorRunArgs { run_id: 987654 }),
-            },
-        );
+        let req = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Run,
+            target: "987654".to_string(),
+            reference: None,
+            start_timeout_secs: None,
+        };
         assert_eq!(req.target_kind, GhMonitorTargetKind::Run);
         assert_eq!(req.target, "987654");
         assert_eq!(req.reference, None);

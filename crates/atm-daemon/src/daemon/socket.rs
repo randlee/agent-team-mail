@@ -25,8 +25,9 @@ use agent_team_mail_core::control::{
     CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,
 };
 use agent_team_mail_core::daemon_client::{
-    CanonicalMemberState, GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest,
-    LaunchConfig, LaunchResult,
+    CanonicalMemberState, GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction,
+    GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest, LaunchConfig,
+    LaunchResult,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging_event::LogEventV1;
@@ -456,6 +457,10 @@ async fn handle_connection(
         handle_launch_command(request_str, &launch_tx).await
     } else if is_gh_monitor_command(request_str) {
         handle_gh_monitor_command(request_str, &home).await
+    } else if is_gh_monitor_control_command(request_str) {
+        handle_gh_monitor_control_command(request_str, &home).await
+    } else if is_gh_monitor_health_command(request_str) {
+        handle_gh_monitor_health_command(request_str, &home).await
     } else if is_gh_status_command(request_str) {
         handle_gh_status_command(request_str, &home).await
     } else if is_control_command(request_str) {
@@ -543,6 +548,20 @@ fn is_gh_monitor_command(request_str: &str) -> bool {
 fn is_gh_status_command(request_str: &str) -> bool {
     request_str.contains(r#""command":"gh-status""#)
         || request_str.contains(r#""command": "gh-status""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"gh-monitor-control"` command.
+#[cfg(unix)]
+fn is_gh_monitor_control_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"gh-monitor-control""#)
+        || request_str.contains(r#""command": "gh-monitor-control""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"gh-monitor-health"` command.
+#[cfg(unix)]
+fn is_gh_monitor_health_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"gh-monitor-health""#)
+        || request_str.contains(r#""command": "gh-monitor-health""#)
 }
 
 /// Quickly determine if a raw JSON line is a `"hook-event"` command.
@@ -1895,6 +1914,211 @@ struct GhMonitorStateFile {
     records: Vec<GhMonitorStatus>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct GhMonitorHealthFile {
+    records: Vec<GhMonitorHealth>,
+}
+
+#[cfg(unix)]
+fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
+    GhMonitorHealth {
+        team: team.to_string(),
+        lifecycle_state: "running".to_string(),
+        availability_state: "healthy".to_string(),
+        in_flight: 0,
+        updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        message: None,
+    }
+}
+
+#[cfg(unix)]
+fn gh_monitor_health_path(home: &std::path::Path) -> PathBuf {
+    home.join(".claude/daemon/gh-monitor-health.json")
+}
+
+#[cfg(unix)]
+fn load_gh_monitor_health_map(
+    home: &std::path::Path,
+) -> Result<std::collections::HashMap<String, GhMonitorHealth>> {
+    let path = gh_monitor_health_path(home);
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let file = serde_json::from_str::<GhMonitorHealthFile>(&raw)?;
+    let mut map = std::collections::HashMap::new();
+    for record in file.records {
+        map.insert(record.team.clone(), record);
+    }
+    Ok(map)
+}
+
+#[cfg(unix)]
+fn upsert_gh_monitor_health(home: &std::path::Path, health: GhMonitorHealth) -> Result<()> {
+    let mut map = load_gh_monitor_health_map(home)?;
+    map.insert(health.team.clone(), health);
+    let mut records: Vec<GhMonitorHealth> = map.into_values().collect();
+    records.sort_by(|a, b| a.team.cmp(&b.team));
+    let file = GhMonitorHealthFile { records };
+    let path = gh_monitor_health_path(home);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&file)?)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_gh_monitor_health(home: &std::path::Path, team: &str) -> Result<GhMonitorHealth> {
+    let map = load_gh_monitor_health_map(home)?;
+    Ok(map
+        .get(team)
+        .cloned()
+        .unwrap_or_else(|| default_gh_monitor_health(team)))
+}
+
+#[cfg(unix)]
+fn count_in_flight_monitors(home: &std::path::Path, team: &str) -> u64 {
+    load_gh_monitor_state_map(home)
+        .ok()
+        .map(|map| {
+            map.values()
+                .filter(|status| status.team == team && status.state == "tracking")
+                .count() as u64
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn emit_gh_monitor_health_transition(
+    home: &std::path::Path,
+    team: &str,
+    old_state: &str,
+    new_state: &str,
+    reason: &str,
+) {
+    if old_state == new_state {
+        return;
+    }
+
+    let level = if new_state == "healthy" {
+        "info"
+    } else {
+        "warn"
+    };
+    emit_event_best_effort(EventFields {
+        level,
+        source: "atm-daemon",
+        action: "gh_monitor_health_transition",
+        team: Some(team.to_string()),
+        result: Some(format!("{old_state}->{new_state}")),
+        error: Some(reason.to_string()),
+        ..Default::default()
+    });
+
+    let (from_agent, targets) = resolve_ci_alert_routing(home, team);
+    let text = format!(
+        "[gh_monitor] availability transition {} -> {}\nreason: {}",
+        old_state, new_state, reason
+    );
+    for (agent, target_team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(&target_team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        let message = InboxMessage {
+            from: from_agent.clone(),
+            text: text.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(format!("gh_monitor: {new_state}")),
+            message_id: Some(uuid::Uuid::new_v4().to_string()),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) = agent_team_mail_core::io::inbox::inbox_append(
+            &inbox_path,
+            &message,
+            &target_team,
+            &agent,
+        ) {
+            warn!(
+                team = %target_team,
+                agent = %agent,
+                "failed to emit gh_monitor transition alert: {e}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_gh_monitor_health_state(
+    home: &std::path::Path,
+    team: &str,
+    lifecycle_state: Option<&str>,
+    availability_state: Option<&str>,
+    in_flight: Option<u64>,
+    message: Option<String>,
+) -> Result<GhMonitorHealth> {
+    let mut current = read_gh_monitor_health(home, team)?;
+    let old_availability = current.availability_state.clone();
+
+    if let Some(lifecycle_state) = lifecycle_state {
+        current.lifecycle_state = lifecycle_state.to_string();
+    }
+    if let Some(availability_state) = availability_state {
+        current.availability_state = availability_state.to_string();
+    }
+    if let Some(in_flight) = in_flight {
+        current.in_flight = in_flight;
+    }
+    current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    current.message = message;
+
+    if old_availability != current.availability_state {
+        let reason = current
+            .message
+            .clone()
+            .unwrap_or_else(|| "availability changed".to_string());
+        emit_gh_monitor_health_transition(
+            home,
+            team,
+            &old_availability,
+            &current.availability_state,
+            &reason,
+        );
+    }
+
+    upsert_gh_monitor_health(home, current.clone())?;
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn validate_gh_monitor_config(
+    home: &std::path::Path,
+    team: &str,
+) -> std::result::Result<(), String> {
+    let current_dir = std::env::current_dir().map_err(|e| e.to_string())?;
+    let config = agent_team_mail_core::config::resolve_config(
+        &agent_team_mail_core::config::ConfigOverrides {
+            team: Some(team.to_string()),
+            ..Default::default()
+        },
+        &current_dir,
+        home,
+    )
+    .map_err(|e| e.to_string())?;
+    let table = config
+        .plugin_config("gh_monitor")
+        .ok_or_else(|| "missing [plugins.gh_monitor] configuration".to_string())?;
+    let parsed =
+        crate::plugins::ci_monitor::CiMonitorConfig::from_toml(table).map_err(|e| e.to_string())?;
+    if !parsed.enabled {
+        return Err("gh_monitor plugin disabled in configuration".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhRunView {
@@ -2023,6 +2247,47 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         );
     }
 
+    // Lifecycle gate: monitor operations require running lifecycle state.
+    let current_health = match read_gh_monitor_health(home, &gh_request.team) {
+        Ok(health) => health,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INTERNAL_ERROR",
+                &format!("Failed to read gh monitor health: {e}"),
+            );
+        }
+    };
+    if current_health.lifecycle_state != "running" {
+        return make_error_response(
+            &request.request_id,
+            "MONITOR_STOPPED",
+            "gh monitor lifecycle is not running (run `atm gh monitor start` first)",
+        );
+    }
+
+    // Config gate: invalid/disabled config moves availability into
+    // disabled_config_error and blocks polling work.
+    if let Err(reason) = validate_gh_monitor_config(home, &gh_request.team) {
+        // Intentional: command-dispatch config validation updates persisted
+        // availability state but does not emit a separate "manual" inbox
+        // notification path; transition alerts are emitted by the shared
+        // state-transition hook (when availability actually changes).
+        let _ = set_gh_monitor_health_state(
+            home,
+            &gh_request.team,
+            None,
+            Some("disabled_config_error"),
+            Some(0),
+            Some(reason.clone()),
+        );
+        return make_error_response(
+            &request.request_id,
+            "CONFIG_ERROR",
+            &format!("gh_monitor unavailable: {reason}"),
+        );
+    }
+
     if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow)
         && gh_request
             .reference
@@ -2050,6 +2315,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         message: None,
     };
 
+    let mut transient_failure: Option<String> = None;
     match gh_request.target_kind {
         GhMonitorTargetKind::Run => {
             status.run_id = gh_request.target.parse::<u64>().ok();
@@ -2060,6 +2326,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
                     Ok(Some(run_id)) => status.run_id = Some(run_id),
                     Ok(None) => {}
                     Err(e) => {
+                        transient_failure = Some(format!("{e}"));
                         status.message = Some(format!(
                             "workflow run lookup unavailable; tracking without run id: {e}"
                         ));
@@ -2126,6 +2393,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
                             ));
                         }
                         Err(e) => {
+                            transient_failure = Some(format!("{e}"));
                             status.state = "ci_not_started".to_string();
                             status.message = Some(format!(
                                 "Unable to query workflow runs for PR #{pr_number}: {e}"
@@ -2138,6 +2406,14 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
     }
 
     if let Err(e) = upsert_gh_monitor_status(home, status.clone()) {
+        let _ = set_gh_monitor_health_state(
+            home,
+            &gh_request.team,
+            None,
+            Some("degraded"),
+            None,
+            Some(format!("failed to persist monitor status: {e}")),
+        );
         return make_error_response(
             &request.request_id,
             "INTERNAL_ERROR",
@@ -2164,9 +2440,258 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         });
     }
 
+    if let Some(reason) = transient_failure {
+        let _ = set_gh_monitor_health_state(
+            home,
+            &gh_request.team,
+            None,
+            Some("degraded"),
+            Some(count_in_flight_monitors(home, &gh_request.team)),
+            Some(format!("transient provider/gh failure: {reason}")),
+        );
+    } else {
+        let _ = set_gh_monitor_health_state(
+            home,
+            &gh_request.team,
+            Some("running"),
+            Some("healthy"),
+            Some(count_in_flight_monitors(home, &gh_request.team)),
+            Some("monitor request succeeded".to_string()),
+        );
+    }
+
     make_ok_response(
         &request.request_id,
         serde_json::to_value(status).unwrap_or_default(),
+    )
+}
+
+#[cfg(unix)]
+async fn handle_gh_monitor_control_command(
+    request_str: &str,
+    home: &std::path::Path,
+) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse gh-monitor-control request: {e}"),
+            );
+        }
+    };
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let control: GhMonitorControlRequest = match serde_json::from_value(request.payload.clone()) {
+        Ok(payload) => payload,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INVALID_PAYLOAD",
+                &format!("Failed to parse gh-monitor-control payload: {e}"),
+            );
+        }
+    };
+    if control.team.trim().is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'team'",
+        );
+    }
+
+    let health = match control.action {
+        GhMonitorLifecycleAction::Start => match set_gh_monitor_health_state(
+            home,
+            &control.team,
+            Some("running"),
+            None,
+            Some(count_in_flight_monitors(home, &control.team)),
+            Some("gh monitor lifecycle started".to_string()),
+        ) {
+            Ok(health) => health,
+            Err(e) => {
+                return make_error_response(
+                    &request.request_id,
+                    "INTERNAL_ERROR",
+                    &format!("failed to update monitor lifecycle state: {e}"),
+                );
+            }
+        },
+        GhMonitorLifecycleAction::Stop => {
+            let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
+            let _ = set_gh_monitor_health_state(
+                home,
+                &control.team,
+                Some("draining"),
+                None,
+                Some(count_in_flight_monitors(home, &control.team)),
+                Some(format!(
+                    "draining in-flight monitors (timeout={}s)",
+                    drain_timeout_secs
+                )),
+            );
+
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(drain_timeout_secs.max(1));
+            let mut in_flight = count_in_flight_monitors(home, &control.team);
+            while in_flight > 0 && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                in_flight = count_in_flight_monitors(home, &control.team);
+            }
+
+            let message = if in_flight == 0 {
+                "gh monitor lifecycle stopped after in-flight drain".to_string()
+            } else {
+                format!(
+                    "drain timeout reached; stopped with {} in-flight monitor(s)",
+                    in_flight
+                )
+            };
+            match set_gh_monitor_health_state(
+                home,
+                &control.team,
+                Some("stopped"),
+                None,
+                Some(in_flight),
+                Some(message),
+            ) {
+                Ok(health) => health,
+                Err(e) => {
+                    return make_error_response(
+                        &request.request_id,
+                        "INTERNAL_ERROR",
+                        &format!("failed to stop monitor lifecycle: {e}"),
+                    );
+                }
+            }
+        }
+        GhMonitorLifecycleAction::Restart => {
+            let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
+            let _ = set_gh_monitor_health_state(
+                home,
+                &control.team,
+                Some("draining"),
+                None,
+                Some(count_in_flight_monitors(home, &control.team)),
+                Some(format!(
+                    "draining in-flight monitors before restart (timeout={}s)",
+                    drain_timeout_secs
+                )),
+            );
+
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(drain_timeout_secs.max(1));
+            let mut in_flight = count_in_flight_monitors(home, &control.team);
+            while in_flight > 0 && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                in_flight = count_in_flight_monitors(home, &control.team);
+            }
+
+            match set_gh_monitor_health_state(
+                home,
+                &control.team,
+                Some("running"),
+                Some("healthy"),
+                Some(in_flight),
+                Some(if in_flight == 0 {
+                    "gh monitor lifecycle restarted after in-flight drain".to_string()
+                } else {
+                    format!(
+                        "gh monitor lifecycle restarted after drain timeout; {} in-flight monitor(s) remain",
+                        in_flight
+                    )
+                }),
+            ) {
+                Ok(health) => health,
+                Err(e) => {
+                    return make_error_response(
+                        &request.request_id,
+                        "INTERNAL_ERROR",
+                        &format!("failed to restart monitor lifecycle: {e}"),
+                    );
+                }
+            }
+        }
+    };
+
+    make_ok_response(
+        &request.request_id,
+        serde_json::to_value(health).unwrap_or_default(),
+    )
+}
+
+#[cfg(unix)]
+async fn handle_gh_monitor_health_command(
+    request_str: &str,
+    home: &std::path::Path,
+) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse gh-monitor-health request: {e}"),
+            );
+        }
+    };
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let team = request
+        .payload
+        .get("team")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if team.is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'team'",
+        );
+    }
+
+    let health = match read_gh_monitor_health(home, &team) {
+        Ok(mut health) => {
+            health.in_flight = count_in_flight_monitors(home, &team);
+            health
+        }
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INTERNAL_ERROR",
+                &format!("Failed to read gh monitor health: {e}"),
+            );
+        }
+    };
+    make_ok_response(
+        &request.request_id,
+        serde_json::to_value(health).unwrap_or_default(),
     )
 }
 
@@ -2185,6 +2710,48 @@ async fn handle_gh_monitor_command(request_str: &str, _home: &std::path::Path) -
         &request_id,
         "UNSUPPORTED_PLATFORM",
         "gh-monitor commands require Unix daemon transport",
+    )
+}
+
+#[cfg(not(unix))]
+async fn handle_gh_monitor_control_command(
+    request_str: &str,
+    _home: &std::path::Path,
+) -> SocketResponse {
+    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request_id")
+                .and_then(|request_id| request_id.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    make_error_response(
+        &request_id,
+        "UNSUPPORTED_PLATFORM",
+        "gh-monitor-control commands require Unix daemon transport",
+    )
+}
+
+#[cfg(not(unix))]
+async fn handle_gh_monitor_health_command(
+    request_str: &str,
+    _home: &std::path::Path,
+) -> SocketResponse {
+    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request_id")
+                .and_then(|request_id| request_id.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    make_error_response(
+        &request_id,
+        "UNSUPPORTED_PLATFORM",
+        "gh-monitor-health commands require Unix daemon transport",
     )
 }
 
@@ -3758,6 +4325,18 @@ fn parse_and_dispatch(
             "INTERNAL_ERROR",
             "gh-status command should have been handled by the async path",
         ),
+        // "gh-monitor-control" is handled asynchronously before parse_and_dispatch is called.
+        "gh-monitor-control" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "gh-monitor-control command should have been handled by the async path",
+        ),
+        // "gh-monitor-health" is handled asynchronously before parse_and_dispatch is called.
+        "gh-monitor-health" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "gh-monitor-health command should have been handled by the async path",
+        ),
         other => make_error_response(
             &request.request_id,
             "UNKNOWN_COMMAND",
@@ -4834,6 +5413,7 @@ mod tests {
     use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
     use serial_test::serial;
+    use std::path::Path;
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -4869,6 +5449,42 @@ mod tests {
             command: command.to_string(),
             payload,
         }
+    }
+
+    fn write_gh_monitor_config(home: &Path, team: &str) {
+        let cfg_dir = home.join(".config/atm");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let config = format!(
+            r#"[core]
+default_team = "{team}"
+identity = "daemon-test"
+
+[plugins.gh_monitor]
+enabled = true
+team = "{team}"
+agent = "gh-monitor"
+poll_interval_secs = 60
+"#
+        );
+        std::fs::write(cfg_dir.join("config.toml"), config).unwrap();
+    }
+
+    fn write_invalid_gh_monitor_config(home: &Path, team: &str) {
+        let cfg_dir = home.join(".config/atm");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let config = format!(
+            r#"[core]
+default_team = "{team}"
+identity = "daemon-test"
+
+[plugins.gh_monitor]
+enabled = true
+team = "{team}"
+agent = "gh-monitor"
+poll_interval_secs = 1
+"#
+        );
+        std::fs::write(cfg_dir.join("config.toml"), config).unwrap();
     }
 
     struct EnvGuard {
@@ -5404,12 +6020,19 @@ mod tests {
         assert!(is_gh_status_command(
             r#"{"version":1,"request_id":"r1","command": "gh-status","payload":{}}"#
         ));
+        assert!(is_gh_monitor_control_command(
+            r#"{"version":1,"request_id":"r1","command":"gh-monitor-control","payload":{}}"#
+        ));
+        assert!(is_gh_monitor_health_command(
+            r#"{"version":1,"request_id":"r1","command":"gh-monitor-health","payload":{}}"#
+        ));
     }
 
     #[tokio::test]
     #[cfg(unix)]
     async fn test_gh_monitor_pr_timeout_zero_returns_ci_not_started_and_status_roundtrip() {
         let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
         let req_json = r#"{"version":1,"request_id":"r-gh-1","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":0}}"#;
         let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
         assert_eq!(monitor_resp.status, "ok");
@@ -5430,6 +6053,7 @@ mod tests {
     #[cfg(unix)]
     async fn test_gh_monitor_workflow_requires_reference() {
         let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
         let req_json = r#"{"version":1,"request_id":"r-gh-3","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci"}}"#;
         let resp = handle_gh_monitor_command(req_json, temp.path()).await;
         assert_eq!(resp.status, "error");
@@ -5898,6 +6522,7 @@ exit 1
     #[cfg(unix)]
     async fn test_gh_monitor_run_target_success_status_roundtrip() {
         let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
         let req_json = r#"{"version":1,"request_id":"r-gh-run","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"456789"}}"#;
         let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
         assert_eq!(monitor_resp.status, "ok");
@@ -5921,6 +6546,7 @@ exit 1
     #[serial]
     async fn test_gh_monitor_workflow_success_status_roundtrip() {
         let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
         let _path_guard = install_fake_gh_script(
             &temp,
             r#"#!/bin/sh
@@ -5954,6 +6580,81 @@ exit 1
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_control_start_stop_restart_and_health() {
+        let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
+
+        let start_req = r#"{"version":1,"request_id":"r-gh-start","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"start"}}"#;
+        let start_resp = handle_gh_monitor_control_command(start_req, temp.path()).await;
+        assert_eq!(start_resp.status, "ok");
+        let start = start_resp.payload.unwrap();
+        assert_eq!(start["lifecycle_state"].as_str(), Some("running"));
+
+        let stop_req = r#"{"version":1,"request_id":"r-gh-stop","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"stop","drain_timeout_secs":1}}"#;
+        let stop_resp = handle_gh_monitor_control_command(stop_req, temp.path()).await;
+        assert_eq!(stop_resp.status, "ok");
+        let stop = stop_resp.payload.unwrap();
+        assert_eq!(stop["lifecycle_state"].as_str(), Some("stopped"));
+
+        let restart_req = r#"{"version":1,"request_id":"r-gh-restart","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"restart","drain_timeout_secs":1}}"#;
+        let restart_resp = handle_gh_monitor_control_command(restart_req, temp.path()).await;
+        assert_eq!(restart_resp.status, "ok");
+        let restart = restart_resp.payload.unwrap();
+        assert_eq!(restart["lifecycle_state"].as_str(), Some("running"));
+
+        let health_req = r#"{"version":1,"request_id":"r-gh-health","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let health = health_resp.payload.unwrap();
+        assert_eq!(health["team"].as_str(), Some("atm-dev"));
+        assert_eq!(health["lifecycle_state"].as_str(), Some("running"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_command_rejected_when_lifecycle_stopped() {
+        let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let _ = set_gh_monitor_health_state(
+            temp.path(),
+            "atm-dev",
+            Some("stopped"),
+            Some("healthy"),
+            Some(0),
+            Some("manually stopped for test".to_string()),
+        );
+
+        let req_json = r#"{"version":1,"request_id":"r-gh-stopped","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"42"}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "MONITOR_STOPPED");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_invalid_config_transitions_to_disabled_config_error() {
+        let temp = TempDir::new().unwrap();
+        write_invalid_gh_monitor_config(temp.path(), "atm-dev");
+
+        let req_json = r#"{"version":1,"request_id":"r-gh-config","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"42"}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "CONFIG_ERROR");
+
+        let health_req = r#"{"version":1,"request_id":"r-gh-health","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let health = health_resp.payload.unwrap();
+        assert_eq!(
+            health["availability_state"].as_str(),
+            Some("disabled_config_error")
+        );
+    }
+
+    #[tokio::test]
     #[cfg(not(unix))]
     async fn test_gh_monitor_non_unix_returns_unsupported_platform() {
         let req_json = r#"{"version":1,"request_id":"r-gh-stub","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"1"}}"#;
@@ -5970,6 +6671,26 @@ exit 1
         let status_resp = handle_gh_status_command(req_json, std::path::Path::new(".")).await;
         assert_eq!(status_resp.status, "error");
         let error = status_resp.error.unwrap();
+        assert_eq!(error.code, "UNSUPPORTED_PLATFORM");
+    }
+
+    #[tokio::test]
+    #[cfg(not(unix))]
+    async fn test_gh_monitor_control_non_unix_returns_unsupported_platform() {
+        let req_json = r#"{"version":1,"request_id":"r-gh-control-stub","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"stop"}}"#;
+        let resp = handle_gh_monitor_control_command(req_json, std::path::Path::new(".")).await;
+        assert_eq!(resp.status, "error");
+        let error = resp.error.unwrap();
+        assert_eq!(error.code, "UNSUPPORTED_PLATFORM");
+    }
+
+    #[tokio::test]
+    #[cfg(not(unix))]
+    async fn test_gh_monitor_health_non_unix_returns_unsupported_platform() {
+        let req_json = r#"{"version":1,"request_id":"r-gh-health-stub","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let resp = handle_gh_monitor_health_command(req_json, std::path::Path::new(".")).await;
+        assert_eq!(resp.status, "error");
+        let error = resp.error.unwrap();
         assert_eq!(error.code, "UNSUPPORTED_PLATFORM");
     }
 
