@@ -144,25 +144,39 @@ Wrong:
 - **With `name`** → full tmux teammate (own pane, can compact, survives context limit)
 - **Without `name`** → sidechain background agent (no pane, dies at context limit)
 
-#### Rule 2: Only Team Lead Can Use `team_name`
+#### Rule 2: Enforce `.atm.toml` Spawn Policy (`leaders-only` / `any-member`)
 
-If `team_name` is provided and the caller's `session_id` does **not** match `leadSessionId` in the team's `config.json`, the call is **blocked**.
+For spawn-capable Task calls (providing `name` and/or `team_name`), the gate enforces
+`.atm.toml` team policy:
+- default: `leaders-only`
+- optional override: `any-member`
+- optional `co_leaders` list under `[team."<default_team>"]`
 
+Under `leaders-only`, unauthorized callers are blocked with stable error code
+`SPAWN_UNAUTHORIZED`.
+
+**Hook path** (PreToolUse):
 ```
-BLOCKED: Only the team lead can spawn agents with team_name.
+SPAWN_UNAUTHORIZED: leaders-only spawn policy violation.
 
-You are a teammate. Use background agents:
-  Task(subagent_type="...", run_in_background=true, prompt="...")  # no team_name
-
-NOT allowed from teammates:
-  Task(..., team_name="atm-dev", ...)  # creates named teammate = pane exhaustion
+Policy team: atm-dev
+Allowed identities: arch-atm, team-lead
+Resolved caller: dev-1
 ```
 
-**Why**: Each named teammate with `team_name` creates a new tmux pane. Without this gate, orchestrators can accidentally spawn their own named sub-teammates, creating a pane explosion (for example: 3 scrum-masters × 2 sub-agents each = 9 panes). The correct pattern for orchestrators is to spawn implementation/review helpers as **background agents** (no `name`, no `team_name`).
+**CLI path** (`atm teams spawn`):
+```
+error: SPAWN_UNAUTHORIZED — spawn policy violation for team atm-dev
+Caller 'dev-1' is not authorized under leaders-only policy (co_leaders: [arch-atm])
+```
 
-The gate reads `leadSessionId` from `~/.claude/teams/<team>/config.json` and compares it to `session_id` in the hook payload. Only the session whose ID matches `leadSessionId` can pass a `team_name`.
+`SPAWN_UNAUTHORIZED` is a stable error code shared between the hook and CLI paths. Tooling
+may grep for this string to detect policy violations in either path.
 
-**Fail-open behavior**: If no team config exists (new team) or `leadSessionId` is absent, the check is skipped and the call is allowed. This prevents the gate from blocking legitimate first-time setup.
+Identity resolution uses `ATM_IDENTITY` when present, else team config/session
+mapping (`leadSessionId` and `members[].sessionId`) for the default team.
+Team config lookup must resolve from `${ATM_HOME}/.claude/teams/<team>/config.json`
+(`ATM_HOME` first, home-directory fallback).
 
 #### Rule 3: `team_name` Must Match `.atm.toml`
 
@@ -188,8 +202,8 @@ resume should use explicit `--session-id` and/or `CLAUDE_SESSION_ID`.
 ### What Is NOT Blocked
 
 - Spawning any non-orchestrator agent type (e.g., `rust-developer`, `rust-qa-agent`, `general-purpose`) — with or without `name`
-- Background agents spawned without `team_name` by teammates (the dev/QA pattern used by scrum-masters)
-- Any call where `team_name` matches the configured default and `session_id` matches `leadSessionId`
+- Spawn-capable calls when policy is `any-member`
+- Spawn-capable calls by authorized identities under `leaders-only` (`team-lead` + `co_leaders`)
 
 ---
 
@@ -369,7 +383,27 @@ Committed to the repository. Applies to all interactive Claude Code sessions ope
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\""
+            "command": "bash -c 'if test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\"; then python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\"; else exit 0; fi'"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/atm-identity-write.py\" && python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/atm-identity-write.py\" || true'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/atm-identity-cleanup.py\" && python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/atm-identity-cleanup.py\" || true'"
           }
         ]
       }
@@ -379,7 +413,7 @@ Committed to the repository. Applies to all interactive Claude Code sessions ope
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/teammate-idle-relay.py\""
+            "command": "bash -c 'test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/teammate-idle-relay.py\" && python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/teammate-idle-relay.py\" || true'"
           }
         ]
       }
@@ -488,6 +522,7 @@ All hook scripts follow these conventions:
 - **Codex and Gemini agents do not fire Claude Code hooks.** They have no hook system. Instead, they use the self-registration path: their PID and session ID are written to their roster entry when they call `atm send` or the explicit `atm register <team> <name>` command. The registered PID is `os.getpid()` of the Codex/Gemini process itself.
 - **SessionStart may have a race condition for tmux teammates.** The tmux pane may not finish shell initialization before the claude command is sent via `send-keys`. Unverified from official docs but consistent with observed behavior (0 SessionStart entries for teammates).
 - **`SessionStart` is global, not project-scoped.** All sessions on the machine get the hook output, even in unrelated projects. The hook gracefully does nothing if `.atm.toml` is absent.
+- **Spawn gate fails open when `.atm.toml` is absent.** If no `.atm.toml` exists in the project root (bootstrap scenario or repo without config), both the hook and CLI paths allow spawning unconditionally. This is intentional to allow team bootstrap without chicken-and-egg configuration problems. Once `.atm.toml` is present, policy is enforced.
 - **`leadSessionId` must be current** for Rule 2 to work correctly. If `atm teams resume` has not been run after a session restart, the gate may incorrectly block the team lead. See `atm teams resume` documentation and issue [#141](https://github.com/randlee/agent-team-mail/issues/141).
 - **Daemon session registry is currently keyed by agent name only.** Cross-team duplicate member names can collide in session tracking until the registry is migrated to a team-scoped key (`(team, name)`).
 - **Agent-teams is pre-release** as of Claude Code v2.1.39. Hook behavior may change in future versions.

@@ -29,6 +29,19 @@ pub enum SessionState {
     Dead,
 }
 
+/// Result of attempting a session-scoped dead-mark operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkDeadForSessionOutcome {
+    /// Matching active session was marked dead.
+    MarkedDead,
+    /// Matching session was already dead (idempotent replay).
+    AlreadyDead,
+    /// No tracked session exists for the target team/member.
+    UnknownSession,
+    /// Team/member exists but session IDs do not match.
+    SessionMismatch { current_session_id: String },
+}
+
 /// A single agent session record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -222,6 +235,33 @@ impl SessionRegistry {
             record.updated_at = chrono::Utc::now().to_rfc3339();
             self.persist_best_effort();
         }
+    }
+
+    /// Mark a team-scoped session as dead only when `session_id` matches.
+    pub fn mark_dead_for_team_session(
+        &mut self,
+        team: &str,
+        name: &str,
+        session_id: &str,
+    ) -> MarkDeadForSessionOutcome {
+        let Some(record) = self.sessions.get_mut(&make_key(team, name)) else {
+            return MarkDeadForSessionOutcome::UnknownSession;
+        };
+
+        if record.session_id != session_id {
+            return MarkDeadForSessionOutcome::SessionMismatch {
+                current_session_id: record.session_id.clone(),
+            };
+        }
+
+        if record.state == SessionState::Dead {
+            return MarkDeadForSessionOutcome::AlreadyDead;
+        }
+
+        record.state = SessionState::Dead;
+        record.updated_at = chrono::Utc::now().to_rfc3339();
+        self.persist_best_effort();
+        MarkDeadForSessionOutcome::MarkedDead
     }
 
     /// Remove a team-scoped session record.
@@ -430,6 +470,58 @@ mod tests {
         let mut reg = SessionRegistry::new();
         // Should not panic
         reg.mark_dead("ghost");
+    }
+
+    #[test]
+    fn test_mark_dead_for_team_session_marks_matching_active_record_dead() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-1", 1234);
+
+        let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "sess-1");
+        assert_eq!(outcome, MarkDeadForSessionOutcome::MarkedDead);
+        assert_eq!(
+            reg.query_for_team("atm-dev", "arch-ctm").unwrap().state,
+            SessionState::Dead
+        );
+    }
+
+    #[test]
+    fn test_mark_dead_for_team_session_returns_already_dead_for_duplicate_replay() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-1", 1234);
+        reg.mark_dead_for_team("atm-dev", "arch-ctm");
+
+        let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "sess-1");
+        assert_eq!(outcome, MarkDeadForSessionOutcome::AlreadyDead);
+        assert_eq!(
+            reg.query_for_team("atm-dev", "arch-ctm").unwrap().state,
+            SessionState::Dead
+        );
+    }
+
+    #[test]
+    fn test_mark_dead_for_team_session_returns_unknown_when_member_not_registered() {
+        let mut reg = SessionRegistry::new();
+        let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "sess-1");
+        assert_eq!(outcome, MarkDeadForSessionOutcome::UnknownSession);
+    }
+
+    #[test]
+    fn test_mark_dead_for_team_session_returns_mismatch_without_state_change() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-current", 1234);
+
+        let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "sess-other");
+        assert_eq!(
+            outcome,
+            MarkDeadForSessionOutcome::SessionMismatch {
+                current_session_id: "sess-current".to_string()
+            }
+        );
+        assert_eq!(
+            reg.query_for_team("atm-dev", "arch-ctm").unwrap().state,
+            SessionState::Active
+        );
     }
 
     #[test]

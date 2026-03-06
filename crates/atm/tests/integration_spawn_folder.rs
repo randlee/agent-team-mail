@@ -14,6 +14,57 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
         .current_dir(&workdir);
 }
 
+fn write_team_config(home: &TempDir, team: &str) {
+    let team_dir = home.path().join(".claude/teams").join(team);
+    fs::create_dir_all(&team_dir).unwrap();
+    let config = serde_json::json!({
+        "name": team,
+        "createdAt": 1739284800000u64,
+        "leadAgentId": format!("team-lead@{team}"),
+        "leadSessionId": "lead-sess",
+        "members": [
+            {
+                "agentId": format!("team-lead@{team}"),
+                "name": "team-lead",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1739284800000u64,
+                "tmuxPaneId": "",
+                "cwd": ".",
+                "subscriptions": [],
+                "sessionId": "lead-sess"
+            },
+            {
+                "agentId": format!("arch-atm@{team}"),
+                "name": "arch-atm",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1739284800000u64,
+                "tmuxPaneId": "",
+                "cwd": ".",
+                "subscriptions": [],
+                "sessionId": "co-sess"
+            },
+            {
+                "agentId": format!("dev-1@{team}"),
+                "name": "dev-1",
+                "agentType": "general-purpose",
+                "model": "unknown",
+                "joinedAt": 1739284800000u64,
+                "tmuxPaneId": "",
+                "cwd": ".",
+                "subscriptions": [],
+                "sessionId": "dev-sess"
+            }
+        ]
+    });
+    fs::write(
+        team_dir.join("config.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn test_spawn_folder_rejects_nonexistent_directory() {
     let temp_dir = TempDir::new().unwrap();
@@ -358,4 +409,244 @@ fn test_spawn_env_team_matching_toml_does_not_require_override() {
     );
     assert!(!stderr.contains("Warning: team mismatch detected"));
     assert!(!stderr.contains("--override-team"));
+}
+
+#[test]
+fn test_spawn_help_without_atm_toml_includes_generated_launch_reference() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd.args(["teams", "spawn", "--help"]).assert().success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("Generated launch command:"));
+    assert!(stdout.contains("<team_name>"));
+    assert!(stdout.contains("<agent_name>"));
+    assert!(stdout.contains("claude"));
+    assert!(stdout.contains("codex"));
+    assert!(stdout.contains("gemini"));
+    assert!(stdout.contains("opencode"));
+}
+
+#[test]
+fn test_spawn_policy_blocks_unauthorized_identity() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(
+        workdir.join(".atm.toml"),
+        r#"
+[core]
+default_team = "atm-dev"
+identity = "team-lead"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+        .trim_start(),
+    )
+    .unwrap();
+    write_team_config(&temp_dir, "atm-dev");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_IDENTITY", "dev-1")
+        .args([
+            "teams",
+            "spawn",
+            "agent-policy",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("SPAWN_UNAUTHORIZED"));
+}
+
+#[test]
+fn test_spawn_policy_allows_co_leader() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(
+        workdir.join(".atm.toml"),
+        r#"
+[core]
+default_team = "atm-dev"
+identity = "team-lead"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+        .trim_start(),
+    )
+    .unwrap();
+    write_team_config(&temp_dir, "atm-dev");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_IDENTITY", "arch-atm")
+        .args([
+            "teams",
+            "spawn",
+            "agent-policy",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("Daemon is not running")
+    );
+    assert!(!stderr.contains("SPAWN_UNAUTHORIZED"));
+}
+
+#[test]
+fn test_spawn_policy_named_spawn_without_team_name_still_checked() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(
+        workdir.join(".atm.toml"),
+        r#"
+[core]
+default_team = "atm-dev"
+identity = "team-lead"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = []
+"#
+        .trim_start(),
+    )
+    .unwrap();
+    write_team_config(&temp_dir, "atm-dev");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_IDENTITY", "dev-1")
+        .args([
+            "teams",
+            "spawn",
+            "named-worker",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("SPAWN_UNAUTHORIZED"));
+}
+
+#[test]
+fn test_spawn_policy_allows_team_lead_explicitly() {
+    // team-lead identity must pass the gate (get daemon-not-running, not SPAWN_UNAUTHORIZED)
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(
+        workdir.join(".atm.toml"),
+        r#"
+[core]
+default_team = "atm-dev"
+identity = "team-lead"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = []
+"#
+        .trim_start(),
+    )
+    .unwrap();
+    write_team_config(&temp_dir, "atm-dev");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_IDENTITY", "team-lead")
+        .args([
+            "teams",
+            "spawn",
+            "some-agent",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        !stderr.contains("SPAWN_UNAUTHORIZED"),
+        "team-lead should not get SPAWN_UNAUTHORIZED, got: {stderr}"
+    );
+    // Positive assertion: must fail for the expected reason (daemon unavailable), not silently
+    assert!(
+        stderr.contains("Daemon") || stdout.contains("Daemon") || stdout.contains("daemon"),
+        "team-lead should fail with daemon-unavailable error, got stderr={stderr} stdout={stdout}"
+    );
+}
+
+#[test]
+fn test_spawn_policy_defaults_leaders_only_when_no_team_section() {
+    // .atm.toml with [core] but no [team."atm-dev"] — must default to leaders-only
+    // and block non-lead without a TOML parse error
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(
+        workdir.join(".atm.toml"),
+        r#"
+[core]
+default_team = "atm-dev"
+identity = "team-lead"
+"#
+        .trim_start(),
+    )
+    .unwrap();
+    write_team_config(&temp_dir, "atm-dev");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_IDENTITY", "dev-1")
+        .args([
+            "teams",
+            "spawn",
+            "some-agent",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("SPAWN_UNAUTHORIZED"));
 }

@@ -8,7 +8,7 @@
 //!
 //! - `agent-turn-complete` → [`AgentStateTracker`] (agent transitions to Idle)
 //! - `session-start` → [`SessionRegistry`] (`upsert` with session ID and PID)
-//! - `session-end` → [`SessionRegistry`] (`mark_dead` for the agent)
+//! - `session-end` → [`SessionRegistry`] (session-scoped dead-mark)
 //!
 //! ## Event Format
 //!
@@ -32,7 +32,7 @@
 //! the offset resets to 0 and the file is read from the beginning.
 
 use super::agent_state::{AgentState, AgentStateTracker};
-use crate::daemon::session_registry::SharedSessionRegistry;
+use crate::daemon::session_registry::{MarkDeadForSessionOutcome, SharedSessionRegistry};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::schema::TeamConfig;
@@ -546,7 +546,7 @@ fn apply_hook_event(
                 }
             }
         }
-        "session-end" => {
+        "session-end" | "session_end" => {
             let agent_id = match &event.agent {
                 Some(id) => id.clone(),
                 None => {
@@ -554,13 +554,47 @@ fn apply_hook_event(
                     return;
                 }
             };
+            let session_id = match event
+                .session_id
+                .as_deref()
+                .filter(|sid| !sid.trim().is_empty())
+            {
+                Some(sid) => sid,
+                None => {
+                    debug!("SessionEnd hook missing sessionId for {agent_id}; skipping");
+                    return;
+                }
+            };
             debug!("SessionEnd hook received for {agent_id}");
             if let Some(registry) = session_registry {
                 let mut reg = registry.lock().unwrap();
                 if let Some(team) = event.team.as_deref() {
-                    reg.mark_dead_for_team(team, &agent_id);
+                    match reg.mark_dead_for_team_session(team, &agent_id, session_id) {
+                        MarkDeadForSessionOutcome::MarkedDead => {}
+                        MarkDeadForSessionOutcome::AlreadyDead => {
+                            debug!(
+                                "SessionEnd duplicate ignored for {agent_id}@{team} session={session_id}"
+                            );
+                        }
+                        MarkDeadForSessionOutcome::UnknownSession => {
+                            debug!(
+                                "SessionEnd ignored for unknown session {agent_id}@{team} session={session_id}"
+                            );
+                        }
+                        MarkDeadForSessionOutcome::SessionMismatch { current_session_id } => {
+                            warn!(
+                                team = %team,
+                                agent = %agent_id,
+                                current_session_id = %current_session_id,
+                                received_session_id = %session_id,
+                                "SessionEnd session_id mismatch; ignoring"
+                            );
+                        }
+                    }
                 } else {
-                    reg.mark_dead(&agent_id);
+                    debug!(
+                        "SessionEnd hook missing team for {agent_id}; skipping scoped dead-mark"
+                    );
                 }
             }
         }
@@ -828,7 +862,30 @@ mod tests {
         let mut deduper = make_deduper();
         let registry = new_session_registry();
 
-        // First register via session-start
+        // First register via session-start in a team-scoped record.
+        registry
+            .lock()
+            .unwrap()
+            .upsert_for_team("atm-dev", "arch-ctm", "sess-abc", 4242);
+
+        let json =
+            r#"{"type":"session-end","agent":"arch-ctm","team":"atm-dev","sessionId":"sess-abc"}"#;
+        process_hook_line(json, &state, Some(&registry), None, &mut deduper);
+
+        let reg = registry.lock().unwrap();
+        let record = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("arch-ctm should be in registry");
+        use crate::daemon::session_registry::SessionState;
+        assert_eq!(record.state, SessionState::Dead);
+    }
+
+    #[test]
+    fn test_session_end_missing_team_skips_unscoped_mark_dead() {
+        let state = make_state();
+        let mut deduper = make_deduper();
+        let registry = new_session_registry();
+
         registry
             .lock()
             .unwrap()
@@ -840,6 +897,97 @@ mod tests {
         let reg = registry.lock().unwrap();
         let record = reg
             .query("arch-ctm")
+            .expect("arch-ctm should be in registry");
+        use crate::daemon::session_registry::SessionState;
+        assert_eq!(
+            record.state,
+            SessionState::Active,
+            "missing-team session-end must not apply unscoped dead mark"
+        );
+    }
+
+    #[test]
+    fn test_session_end_team_scoped_unknown_session_is_noop() {
+        let state = make_state();
+        let mut deduper = make_deduper();
+        let registry = new_session_registry();
+
+        let json = r#"{"type":"session-end","agent":"arch-ctm","team":"atm-dev","sessionId":"sess-unknown"}"#;
+        process_hook_line(json, &state, Some(&registry), None, &mut deduper);
+
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_session_end_team_scoped_mismatch_is_noop() {
+        let state = make_state();
+        let mut deduper = make_deduper();
+        let registry = new_session_registry();
+
+        registry
+            .lock()
+            .unwrap()
+            .upsert_for_team("atm-dev", "arch-ctm", "sess-current", 4242);
+
+        let json = r#"{"type":"session-end","agent":"arch-ctm","team":"atm-dev","sessionId":"sess-other"}"#;
+        process_hook_line(json, &state, Some(&registry), None, &mut deduper);
+
+        let reg = registry.lock().unwrap();
+        let record = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("arch-ctm should be in registry");
+        use crate::daemon::session_registry::SessionState;
+        assert_eq!(record.state, SessionState::Active);
+        assert_eq!(record.session_id, "sess-current");
+    }
+
+    #[test]
+    fn test_session_end_team_scoped_already_dead_is_noop() {
+        let state = make_state();
+        let mut deduper = make_deduper();
+        let registry = new_session_registry();
+
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-abc", 4242);
+            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+        }
+
+        let json =
+            r#"{"type":"session-end","agent":"arch-ctm","team":"atm-dev","sessionId":"sess-abc"}"#;
+        process_hook_line(json, &state, Some(&registry), None, &mut deduper);
+
+        let reg = registry.lock().unwrap();
+        let record = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("arch-ctm should be in registry");
+        use crate::daemon::session_registry::SessionState;
+        assert_eq!(record.state, SessionState::Dead);
+    }
+
+    #[test]
+    fn test_session_end_underscore_alias_marks_dead() {
+        let state = make_state();
+        let mut deduper = make_deduper();
+        let registry = new_session_registry();
+
+        registry
+            .lock()
+            .unwrap()
+            .upsert_for_team("atm-dev", "arch-ctm", "sess-underscore", 4242);
+
+        let json = r#"{"type":"session_end","agent":"arch-ctm","team":"atm-dev","sessionId":"sess-underscore"}"#;
+        process_hook_line(json, &state, Some(&registry), None, &mut deduper);
+
+        let reg = registry.lock().unwrap();
+        let record = reg
+            .query_for_team("atm-dev", "arch-ctm")
             .expect("arch-ctm should be in registry");
         use crate::daemon::session_registry::SessionState;
         assert_eq!(record.state, SessionState::Dead);

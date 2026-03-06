@@ -40,7 +40,7 @@ use crate::daemon::pid_backend_validation::{
 };
 
 use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
-use crate::daemon::session_registry::SharedSessionRegistry;
+use crate::daemon::session_registry::{MarkDeadForSessionOutcome, SharedSessionRegistry};
 use crate::plugins::worker_adapter::AgentState;
 
 // ── Public API (cross-platform stubs) ────────────────────────────────────────
@@ -1638,35 +1638,66 @@ async fn handle_hook_event_command_with_dedup(
                     serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
                 );
             }
-            {
-                session_registry
-                    .lock()
-                    .unwrap()
-                    .mark_dead_for_team(&team, &agent);
-            }
-            let (old_state, new_state) = {
-                let mut tracker = state_store.lock().unwrap();
-                let current = tracker.get_state(&agent);
-                if tracker.get_state(&agent).is_some() {
-                    tracker.set_state_with_context(
+            let mark_dead_outcome = if session_id.trim().is_empty() {
+                MarkDeadForSessionOutcome::UnknownSession
+            } else {
+                let mut registry = session_registry.lock().unwrap();
+                registry.mark_dead_for_team_session(&team, &agent, &session_id)
+            };
+
+            match mark_dead_outcome {
+                MarkDeadForSessionOutcome::MarkedDead => {
+                    let (old_state, new_state) = {
+                        let mut tracker = state_store.lock().unwrap();
+                        let current = tracker.get_state(&agent);
+                        if tracker.get_state(&agent).is_some() {
+                            tracker.set_state_with_context(
+                                &agent,
+                                AgentState::Offline,
+                                "session_end lifecycle",
+                                "hook_event",
+                            );
+                        }
+                        let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                        (current, updated)
+                    };
+                    emit_member_transition_events(
+                        &team,
                         &agent,
-                        AgentState::Offline,
-                        "session_end lifecycle",
-                        "hook_event",
+                        old_state,
+                        new_state,
+                        "hook_event.session_end",
+                        Some(session_id.as_str()),
+                        process_id,
                     );
                 }
-                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
-                (current, updated)
-            };
-            emit_member_transition_events(
-                &team,
-                &agent,
-                old_state,
-                new_state,
-                "hook_event.session_end",
-                Some(session_id.as_str()),
-                process_id,
-            );
+                MarkDeadForSessionOutcome::AlreadyDead => {
+                    debug!(
+                        team = %team,
+                        agent = %agent,
+                        session_id = %session_id,
+                        "hook_event session_end duplicate ignored (already dead)"
+                    );
+                }
+                MarkDeadForSessionOutcome::UnknownSession => {
+                    debug!(
+                        team = %team,
+                        agent = %agent,
+                        session_id = %session_id,
+                        "hook_event session_end ignored (unknown session)"
+                    );
+                }
+                MarkDeadForSessionOutcome::SessionMismatch { current_session_id } => {
+                    warn!(
+                        team = %team,
+                        agent = %agent,
+                        expected_session_id = %current_session_id,
+                        current_session_id = %current_session_id,
+                        received_session_id = %session_id,
+                        "hook_event session_end session_id mismatch; ignoring"
+                    );
+                }
+            }
             emit_hook_success(
                 event_type.as_str(),
                 &team,
@@ -5310,7 +5341,7 @@ mod tests {
             tracker.register_agent("team-lead");
             tracker.set_state("team-lead", AgentState::Idle);
         }
-        let req_json = r#"{"version":1,"request_id":"r2","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-xyz","process_id":1234}}"#;
+        let req_json = r#"{"version":1,"request_id":"r2","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-xyz","process_id":0}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         // State should remain Idle (not reset to Launching) — session_start only registers if not already tracked
@@ -5461,6 +5492,135 @@ mod tests {
         // State tracker should be Killed
         let tracker = store.lock().unwrap();
         assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Offline));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_unknown_session_is_noop() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("team-lead");
+            tracker.set_state("team-lead", AgentState::Idle);
+        }
+        let req_json = r#"{"version":1,"request_id":"r5-unknown","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-missing","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "team-lead")
+                .is_none(),
+            "unknown session_end must not create tombstone state"
+        );
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_already_dead_is_noop() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("team-lead");
+            tracker.set_state("team-lead", AgentState::Offline);
+        }
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "team-lead", "sess-dead", 1111);
+            reg.mark_dead_for_team("atm-dev", "team-lead");
+        }
+        let req_json = r#"{"version":1,"request_id":"r5-dead","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-dead","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "team-lead").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Dead
+        );
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Offline));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_mismatched_session_is_noop() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("team-lead");
+            tracker.set_state("team-lead", AgentState::Idle);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "team-lead", "sess-current", 1111);
+        }
+        let req_json = r#"{"version":1,"request_id":"r5-mismatch","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-other","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "team-lead").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Active
+        );
+        assert_eq!(record.session_id, "sess-current");
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_without_session_id_is_noop() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("team-lead");
+            tracker.set_state("team-lead", AgentState::Idle);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "team-lead", "sess-current", 1111);
+        }
+        let req_json = r#"{"version":1,"request_id":"r5-no-session","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "team-lead").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Active
+        );
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
     }
 
     #[cfg(unix)]
@@ -6400,6 +6560,7 @@ mod tests {
                 "event": "session_end",
                 "agent": "arch-ctm",
                 "team": "atm-dev",
+                "session_id": "codex:sess-end-test",
                 "source": {"kind": "atm_mcp"},
             }),
         };
