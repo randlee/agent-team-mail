@@ -1,6 +1,6 @@
 # GitHub CI Monitor Plugin Requirements
 
-> **Status**: Draft
+> **Status**: Locked (AB.1)
 > **Scope**: GitHub CI monitoring behavior, plugin-owned `atm gh` command namespace, and observability contract
 
 ---
@@ -206,3 +206,10 @@ Test:
 - immediate terminal update
 - final summary table fields
 - required failure URLs and metadata fields
+
+### GH-CI-TR-4 Failure isolation
+
+Test:
+- plugin init failure does not crash daemon startup
+- plugin runtime failure does not terminate daemon process
+- unrelated plugins continue running when `gh_monitor` fails
