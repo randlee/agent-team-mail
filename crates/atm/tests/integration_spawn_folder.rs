@@ -601,9 +601,15 @@ co_leaders = []
         .failure();
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
         !stderr.contains("SPAWN_UNAUTHORIZED"),
         "team-lead should not get SPAWN_UNAUTHORIZED, got: {stderr}"
+    );
+    // Positive assertion: must fail for the expected reason (daemon unavailable), not silently
+    assert!(
+        stderr.contains("Daemon") || stdout.contains("Daemon") || stdout.contains("daemon"),
+        "team-lead should fail with daemon-unavailable error, got stderr={stderr} stdout={stdout}"
     );
 }
 
