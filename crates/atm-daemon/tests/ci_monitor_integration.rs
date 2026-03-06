@@ -2,8 +2,6 @@
 
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
-use agent_team_mail_core::logging::{UnifiedLogMode, init_unified};
-use agent_team_mail_core::logging_event::LogEventV1;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
 use agent_team_mail_daemon::plugins::ci_monitor::{
@@ -90,51 +88,6 @@ fn read_inbox(teams_root: &Path, team: &str, agent: &str) -> Vec<InboxMessage> {
 
     let content = std::fs::read(&inbox_path).unwrap();
     serde_json::from_slice(&content).unwrap()
-}
-
-fn read_health_record(temp_dir: &TempDir, team: &str) -> Option<serde_json::Value> {
-    let path = temp_dir
-        .path()
-        .join(".claude/daemon/gh-monitor-health.json");
-    let content = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let records = value.get("records")?.as_array()?;
-    records
-        .iter()
-        .find(|record| record.get("team").and_then(|v| v.as_str()) == Some(team))
-        .cloned()
-}
-
-fn read_spool_events(spool_dir: &Path) -> Vec<LogEventV1> {
-    let mut events = Vec::new();
-    if !spool_dir.exists() {
-        return events;
-    }
-
-    let mut paths: Vec<_> = std::fs::read_dir(spool_dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .collect();
-    paths.sort();
-
-    for path in paths {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        for line in content.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
-                events.push(event);
-            }
-        }
-    }
-
-    events
 }
 
 #[tokio::test]
@@ -301,6 +254,11 @@ async fn test_ci_deduplication() {
         dedup_strategy: agent_team_mail_daemon::plugins::ci_monitor::DedupStrategy::PerCommit,
         dedup_ttl_hours: 24,
         report_dir: std::path::PathBuf::from("temp/atm/ci-monitor"),
+        runtime_drift_enabled: false,
+        runtime_drift_threshold_percent: 50,
+        runtime_drift_min_samples: 3,
+        runtime_history_limit: 50,
+        alert_cooldown_secs: 300,
         provider_config: None,
         notify_target: Vec::new(),
         branch_matcher: None,
@@ -458,18 +416,8 @@ async fn test_status_transition_notification() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn test_health_transitions_emit_alerts_and_recover() {
+async fn test_runtime_drift_alert_persisted_across_restart() {
     let temp_dir = TempDir::new().unwrap();
-    let spool_dir = temp_dir.path().join("log-spool");
-    std::fs::create_dir_all(&spool_dir).unwrap();
-    let _log_guards = init_unified(
-        "atm-daemon",
-        UnifiedLogMode::ProducerFanIn {
-            daemon_socket: temp_dir.path().join("missing-daemon.sock"),
-            fallback_spool_dir: spool_dir.clone(),
-        },
-    )
-    .unwrap();
 
     let git_provider = GitProvider::GitHub {
         owner: "test".to_string(),
@@ -489,6 +437,22 @@ async fn test_health_transitions_emit_alerts_and_recover() {
         "agent".to_string(),
         toml::Value::String("ci-monitor".to_string()),
     );
+    plugin_config.insert(
+        "runtime_drift_enabled".to_string(),
+        toml::Value::Boolean(true),
+    );
+    plugin_config.insert(
+        "runtime_drift_threshold_percent".to_string(),
+        toml::Value::Integer(50),
+    );
+    plugin_config.insert(
+        "runtime_drift_min_samples".to_string(),
+        toml::Value::Integer(1),
+    );
+    plugin_config.insert(
+        "runtime_history_limit".to_string(),
+        toml::Value::Integer(20),
+    );
 
     let mut config = (*ctx.config).clone();
     config
@@ -501,36 +465,61 @@ async fn test_health_transitions_emit_alerts_and_recover() {
         ctx.roster.clone(),
     );
 
-    // First run: provider error should transition to degraded and emit alert.
-    let provider_error = MockCiProvider::new().with_error("simulated provider outage".to_string());
-    let mut plugin1 = CiMonitorPlugin::new().with_provider(Box::new(provider_error));
-    plugin1.init(&ctx).await.unwrap();
-    let cancel1 = CancellationToken::new();
-    let run_cancel1 = cancel1.clone();
-    let run_task1 = tokio::spawn(async move { plugin1.run(run_cancel1).await });
+    let mut baseline_job = create_test_job(
+        901,
+        "build",
+        CiRunStatus::Completed,
+        Some(CiRunConclusion::Failure),
+    );
+    baseline_job.started_at = Some("2026-02-13T10:01:00Z".to_string());
+    baseline_job.completed_at = Some("2026-02-13T10:04:00Z".to_string()); // 180s
+    let mut baseline_run = create_test_run(
+        901,
+        "CI",
+        "main",
+        CiRunStatus::Completed,
+        Some(CiRunConclusion::Failure),
+    );
+    baseline_run.created_at = "2026-02-13T10:00:00Z".to_string();
+    baseline_run.updated_at = "2026-02-13T10:05:00Z".to_string(); // 300s
+    baseline_run.jobs = Some(vec![baseline_job]);
+    let replayed_baseline_run = baseline_run.clone();
+
+    let mut slow_job = create_test_job(
+        902,
+        "build",
+        CiRunStatus::Completed,
+        Some(CiRunConclusion::Failure),
+    );
+    slow_job.started_at = Some("2026-02-13T11:01:00Z".to_string());
+    slow_job.completed_at = Some("2026-02-13T11:09:00Z".to_string()); // 480s (> +50%)
+    let mut slow_run = create_test_run(
+        902,
+        "CI",
+        "main",
+        CiRunStatus::Completed,
+        Some(CiRunConclusion::Failure),
+    );
+    slow_run.created_at = "2026-02-13T11:00:00Z".to_string();
+    slow_run.updated_at = "2026-02-13T11:15:00Z".to_string(); // 900s (> +50%)
+    slow_run.jobs = Some(vec![slow_job]);
+
+    // First process start: persist baseline history from run #901.
+    let provider_v1 = MockCiProvider::with_runs(vec![baseline_run]);
+    let mut plugin_v1 = CiMonitorPlugin::new().with_provider(Box::new(provider_v1));
+    plugin_v1.init(&ctx).await.unwrap();
+    let cancel_v1 = CancellationToken::new();
+    let run_cancel_v1 = cancel_v1.clone();
+    let run_task_v1 = tokio::spawn(async move { plugin_v1.run(run_cancel_v1).await });
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(10)).await;
     tokio::task::yield_now().await;
-    cancel1.cancel();
+    cancel_v1.cancel();
     tokio::task::yield_now().await;
-    let _ = run_task1.await.unwrap();
+    let _ = run_task_v1.await.unwrap();
 
-    let health = read_health_record(&temp_dir, "test-team").expect("health record");
-    assert_eq!(
-        health["availability_state"].as_str(),
-        Some("degraded"),
-        "provider failure should transition health to degraded"
-    );
-
-    let lead_messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
-    assert!(
-        lead_messages.iter().any(|m| m
-            .text
-            .contains("availability transition healthy -> degraded")),
-        "expected transition alert healthy -> degraded"
-    );
-
-    // Restart plugin with healthy provider to verify degraded -> healthy recovery.
+    // Restart plugin process and feed run #901 (already processed) and #902.
+    // Run #901 must not produce a duplicate drift alert after restart.
     ctx.roster
         .cleanup_plugin(
             "test-team",
@@ -538,60 +527,58 @@ async fn test_health_transitions_emit_alerts_and_recover() {
             agent_team_mail_daemon::roster::CleanupMode::Hard,
         )
         .unwrap();
-
-    let success_run = create_test_run(
-        777,
-        "CI",
-        "main",
-        CiRunStatus::Completed,
-        Some(CiRunConclusion::Success),
-    );
-    let provider_ok = MockCiProvider::with_runs(vec![success_run]);
-    let mut plugin2 = CiMonitorPlugin::new().with_provider(Box::new(provider_ok));
-    plugin2.init(&ctx).await.unwrap();
-    let cancel2 = CancellationToken::new();
-    let run_cancel2 = cancel2.clone();
-    let run_task2 = tokio::spawn(async move { plugin2.run(run_cancel2).await });
+    let provider_v2 = MockCiProvider::with_runs(vec![replayed_baseline_run, slow_run]);
+    let mut plugin_v2 = CiMonitorPlugin::new().with_provider(Box::new(provider_v2));
+    plugin_v2.init(&ctx).await.unwrap();
+    let cancel_v2 = CancellationToken::new();
+    let run_cancel_v2 = cancel_v2.clone();
+    let run_task_v2 = tokio::spawn(async move { plugin_v2.run(run_cancel_v2).await });
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(10)).await;
     tokio::task::yield_now().await;
-    cancel2.cancel();
+    cancel_v2.cancel();
     tokio::task::yield_now().await;
-    let _ = run_task2.await.unwrap();
+    let _ = run_task_v2.await.unwrap();
 
-    let health = read_health_record(&temp_dir, "test-team").expect("health record");
-    assert_eq!(
-        health["availability_state"].as_str(),
-        Some("healthy"),
-        "successful provider poll should transition health to healthy"
-    );
-
-    let lead_messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
-    assert!(
-        lead_messages.iter().any(|m| m
-            .text
-            .contains("availability transition degraded -> healthy")),
-        "expected transition alert degraded -> healthy"
-    );
-
-    std::thread::sleep(Duration::from_millis(200));
-    let transition_events: Vec<_> = read_spool_events(&spool_dir)
-        .into_iter()
-        .filter(|event| event.action == "gh_monitor_health_transition")
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let drift_messages: Vec<_> = messages
+        .iter()
+        .filter(|m| m.text.contains("[runtime-drift:"))
         .collect();
-    assert!(
-        transition_events.iter().any(|event| {
-            event.team.as_deref() == Some("test-team")
-                && event.outcome.as_deref() == Some("healthy->degraded")
-        }),
-        "expected structured log for healthy->degraded transition"
+    assert_eq!(
+        drift_messages.len(),
+        1,
+        "Expected exactly one runtime drift alert across restart replay"
     );
     assert!(
-        transition_events.iter().any(|event| {
-            event.team.as_deref() == Some("test-team")
-                && event.outcome.as_deref() == Some("degraded->healthy")
-        }),
-        "expected structured log for degraded->healthy transition"
+        drift_messages[0].text.contains("[runtime-drift:902]"),
+        "Expected persisted-baseline runtime drift alert for run 902"
+    );
+    assert!(
+        !drift_messages
+            .iter()
+            .any(|m| m.text.contains("[runtime-drift:901]")),
+        "Run 901 replay after restart must not generate a duplicate drift alert"
+    );
+
+    let history_path = temp_dir
+        .path()
+        .join("temp/atm/ci-monitor/runtime-history.json");
+    assert!(
+        history_path.exists(),
+        "runtime history file should be persisted"
+    );
+    let history: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
+    assert_eq!(
+        history["workflow_samples"]["CI"].as_array().unwrap().len(),
+        2,
+        "workflow baseline should include both samples across restart"
+    );
+    assert_eq!(
+        history["processed_run_ids"].as_array().unwrap().len(),
+        2,
+        "processed run ids should persist across restart"
     );
 }
 

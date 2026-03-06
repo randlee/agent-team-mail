@@ -5,27 +5,38 @@ use super::github::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
-use super::types::{CiFilter, CiRunConclusion, CiRunStatus};
+use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::GitProvider as GitProviderType;
-use agent_team_mail_core::daemon_client::GhMonitorHealth;
-use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::{AgentMember, InboxMessage};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-const GH_MONITOR_BACKOFF_MAX_MULTIPLIER: u64 = 8;
-const GH_MONITOR_DEFAULT_FROM_AGENT: &str = "gh-monitor";
+const RUNTIME_HISTORY_FILE_NAME: &str = "runtime-history.json";
+const RUNTIME_PROCESSED_RUN_LIMIT: usize = 500;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-struct GhMonitorHealthFile {
-    records: Vec<GhMonitorHealth>,
+#[serde(default)]
+struct RuntimeHistory {
+    workflow_samples: HashMap<String, Vec<u64>>,
+    job_samples: HashMap<String, Vec<u64>>,
+    processed_run_ids: Vec<u64>,
+    drift_last_alert_epoch_secs: HashMap<String, i64>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeDriftEvent {
+    alert_key: String,
+    kind: &'static str,
+    name: String,
+    current_secs: u64,
+    baseline_secs: u64,
 }
 
 /// CI Monitor plugin — bridges CI provider runs to agent team messaging
@@ -42,6 +53,10 @@ pub struct CiMonitorPlugin {
     ctx: Option<PluginContext>,
     /// Tracking: seen run dedup keys with their timestamps
     seen_runs: HashMap<String, DateTime<Utc>>,
+    /// Runtime duration baselines and processed-run dedup state.
+    runtime_history: RuntimeHistory,
+    /// Persisted runtime history path (initialized in init when enabled).
+    runtime_history_path: Option<PathBuf>,
 }
 
 impl CiMonitorPlugin {
@@ -54,6 +69,8 @@ impl CiMonitorPlugin {
             loader: None,
             ctx: None,
             seen_runs: HashMap::new(),
+            runtime_history: RuntimeHistory::default(),
+            runtime_history_path: None,
         }
     }
 
@@ -72,6 +89,12 @@ impl CiMonitorPlugin {
     /// which parses config from the PluginContext.
     pub fn with_config(mut self, config: CiMonitorConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_runtime_history(mut self, runtime_history: RuntimeHistory) -> Self {
+        self.runtime_history = runtime_history;
         self
     }
 
@@ -371,243 +394,304 @@ impl CiMonitorPlugin {
         }
     }
 
-    fn home_dir(ctx: &PluginContext) -> Option<PathBuf> {
-        ctx.system.claude_root.parent().map(|p| p.to_path_buf())
+    fn runtime_history_file_path(report_dir: &std::path::Path) -> PathBuf {
+        report_dir.join(RUNTIME_HISTORY_FILE_NAME)
     }
 
-    fn health_path(home: &std::path::Path) -> PathBuf {
-        home.join(".claude/daemon/gh-monitor-health.json")
-    }
-
-    fn state_path(home: &std::path::Path) -> PathBuf {
-        home.join(".claude/daemon/gh-monitor-state.json")
-    }
-
-    fn default_health(team: &str) -> GhMonitorHealth {
-        GhMonitorHealth {
-            team: team.to_string(),
-            lifecycle_state: "running".to_string(),
-            availability_state: "healthy".to_string(),
-            in_flight: 0,
-            updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            message: None,
+    fn load_runtime_history(path: &std::path::Path) -> RuntimeHistory {
+        match std::fs::read_to_string(path) {
+            Ok(content) => match serde_json::from_str::<RuntimeHistory>(&content) {
+                Ok(history) => history,
+                Err(e) => {
+                    warn!(
+                        "CI Monitor: Failed to parse runtime history {}: {}",
+                        path.display(),
+                        e
+                    );
+                    RuntimeHistory::default()
+                }
+            },
+            Err(_) => RuntimeHistory::default(),
         }
     }
 
-    fn load_health_map(
-        home: &std::path::Path,
-    ) -> Result<std::collections::HashMap<String, GhMonitorHealth>, PluginError> {
-        let path = Self::health_path(home);
-        if !path.exists() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let raw = std::fs::read_to_string(&path).map_err(|e| PluginError::Runtime {
-            message: format!(
-                "Failed to read gh monitor health file {}: {e}",
-                path.display()
-            ),
-            source: Some(Box::new(e)),
-        })?;
-        let file = serde_json::from_str::<GhMonitorHealthFile>(&raw).map_err(|e| {
-            PluginError::Runtime {
-                message: format!(
-                    "Failed to parse gh monitor health file {}: {e}",
-                    path.display()
-                ),
-                source: Some(Box::new(e)),
-            }
-        })?;
-        let mut map = std::collections::HashMap::new();
-        for record in file.records {
-            map.insert(record.team.clone(), record);
-        }
-        Ok(map)
-    }
-
-    fn upsert_health(home: &std::path::Path, health: GhMonitorHealth) -> Result<(), PluginError> {
-        let mut map = Self::load_health_map(home)?;
-        map.insert(health.team.clone(), health);
-        let mut records: Vec<GhMonitorHealth> = map.into_values().collect();
-        records.sort_by(|a, b| a.team.cmp(&b.team));
-        let file = GhMonitorHealthFile { records };
-        let path = Self::health_path(home);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| PluginError::Runtime {
-                message: format!(
-                    "Failed to create gh monitor health parent directory {}: {e}",
-                    parent.display()
-                ),
-                source: Some(Box::new(e)),
-            })?;
-        }
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&file).map_err(|e| PluginError::Runtime {
-                message: format!("Failed to serialize gh monitor health: {e}"),
-                source: Some(Box::new(e)),
-            })?,
-        )
-        .map_err(|e| PluginError::Runtime {
-            message: format!(
-                "Failed to write gh monitor health file {}: {e}",
-                path.display()
-            ),
-            source: Some(Box::new(e)),
-        })?;
-        Ok(())
-    }
-
-    fn read_health(home: &std::path::Path, team: &str) -> Result<GhMonitorHealth, PluginError> {
-        let map = Self::load_health_map(home)?;
-        Ok(map
-            .get(team)
-            .cloned()
-            .unwrap_or_else(|| Self::default_health(team)))
-    }
-
-    fn count_in_flight_monitors(home: &std::path::Path, team: &str) -> u64 {
-        let path = Self::state_path(home);
-        let raw = match std::fs::read_to_string(path) {
-            Ok(raw) => raw,
-            Err(_) => return 0,
-        };
-        let value = match serde_json::from_str::<serde_json::Value>(&raw) {
-            Ok(v) => v,
-            Err(_) => return 0,
-        };
-        value
-            .get("records")
-            .and_then(|v| v.as_array())
-            .map(|records| {
-                records
-                    .iter()
-                    .filter(|record| {
-                        record.get("team").and_then(|v| v.as_str()) == Some(team)
-                            && record.get("state").and_then(|v| v.as_str()) == Some("tracking")
-                    })
-                    .count() as u64
-            })
-            .unwrap_or(0)
-    }
-
-    fn notify_targets(&self, team: &str) -> Vec<(String, String)> {
-        if self.config.notify_target.is_empty() {
-            return vec![("team-lead".to_string(), team.to_string())];
-        }
-        self.config
-            .notify_target
-            .iter()
-            .map(|target| {
-                (
-                    target.agent.clone(),
-                    target.team.clone().unwrap_or_else(|| team.to_string()),
-                )
-            })
-            .collect()
-    }
-
-    fn emit_health_transition(
-        &self,
-        ctx: &PluginContext,
-        team: &str,
-        old_state: &str,
-        new_state: &str,
-        reason: &str,
-    ) {
-        if old_state == new_state {
-            return;
-        }
-
-        let level = if new_state == "healthy" {
-            "info"
-        } else {
-            "warn"
-        };
-        emit_event_best_effort(EventFields {
-            level,
-            source: "atm-daemon",
-            action: "gh_monitor_health_transition",
-            team: Some(team.to_string()),
-            result: Some(format!("{old_state}->{new_state}")),
-            error: Some(reason.to_string()),
-            ..Default::default()
-        });
-
-        let from_agent = if self.config.agent.trim().is_empty() {
-            GH_MONITOR_DEFAULT_FROM_AGENT.to_string()
-        } else {
-            self.config.agent.clone()
-        };
-        let text = format!(
-            "[gh_monitor] availability transition {} -> {}\nreason: {}",
-            old_state, new_state, reason
-        );
-        for (agent, target_team) in self.notify_targets(team) {
-            let message = InboxMessage {
-                from: from_agent.clone(),
-                text: text.clone(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                read: false,
-                summary: Some(format!("gh_monitor: {new_state}")),
-                message_id: Some(uuid::Uuid::new_v4().to_string()),
-                unknown_fields: std::collections::HashMap::new(),
-            };
-            if let Err(e) = ctx.mail.send(&target_team, &agent, &message) {
-                warn!(
-                    team = %target_team,
-                    agent = %agent,
-                    "failed to emit gh_monitor transition alert: {e}"
-                );
-            }
-        }
-    }
-
-    fn set_health_state(
-        &self,
-        ctx: &PluginContext,
-        team: &str,
-        lifecycle_state: Option<&str>,
-        availability_state: Option<&str>,
-        message: Option<String>,
-    ) {
-        let Some(home) = Self::home_dir(ctx) else {
-            warn!("CI Monitor: unable to resolve home dir for gh monitor health update");
+    fn persist_runtime_history(&self) {
+        let Some(path) = &self.runtime_history_path else {
             return;
         };
-
-        let mut current = match Self::read_health(&home, team) {
-            Ok(current) => current,
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            warn!(
+                "CI Monitor: Failed to create runtime history directory {}: {}",
+                parent.display(),
+                e
+            );
+            return;
+        }
+        let serialized = match serde_json::to_string_pretty(&self.runtime_history) {
+            Ok(s) => s,
             Err(e) => {
-                warn!("CI Monitor: failed to read health state, using default: {e}");
-                Self::default_health(team)
+                warn!("CI Monitor: Failed to serialize runtime history: {e}");
+                return;
             }
         };
-
-        let old_availability = current.availability_state.clone();
-        if let Some(lifecycle_state) = lifecycle_state {
-            current.lifecycle_state = lifecycle_state.to_string();
-        }
-        if let Some(availability_state) = availability_state {
-            current.availability_state = availability_state.to_string();
-        }
-        current.in_flight = Self::count_in_flight_monitors(&home, team);
-        current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        current.message = message.clone();
-
-        if old_availability != current.availability_state {
-            let reason = message.unwrap_or_else(|| "availability changed".to_string());
-            self.emit_health_transition(
-                ctx,
-                team,
-                &old_availability,
-                &current.availability_state,
-                &reason,
+        if let Err(e) = std::fs::write(path, serialized) {
+            warn!(
+                "CI Monitor: Failed to write runtime history {}: {}",
+                path.display(),
+                e
             );
         }
+    }
 
-        if let Err(e) = Self::upsert_health(&home, current) {
-            warn!("CI Monitor: failed to persist health state: {e}");
+    fn duration_secs(start: &str, end: &str) -> Option<u64> {
+        let start = chrono::DateTime::parse_from_rfc3339(start).ok()?;
+        let end = chrono::DateTime::parse_from_rfc3339(end).ok()?;
+        let delta = end.signed_duration_since(start).num_seconds();
+        (delta > 0).then_some(delta as u64)
+    }
+
+    fn trim_history_samples(samples: &mut Vec<u64>, limit: usize) {
+        if samples.len() > limit {
+            let overflow = samples.len() - limit;
+            samples.drain(0..overflow);
         }
+    }
+
+    pub(crate) fn evaluate_runtime_drift(
+        samples: &[u64],
+        current_secs: u64,
+        min_samples: usize,
+        threshold_percent: u64,
+    ) -> Option<u64> {
+        if samples.len() < min_samples {
+            return None;
+        }
+        let baseline_secs = samples.iter().sum::<u64>() / samples.len() as u64;
+        if baseline_secs == 0 {
+            return None;
+        }
+        let threshold_secs = baseline_secs.saturating_mul(100 + threshold_percent) / 100;
+        (current_secs > threshold_secs).then_some(baseline_secs)
+    }
+
+    fn is_alert_on_cooldown(
+        history: &RuntimeHistory,
+        alert_key: &str,
+        now_epoch_secs: i64,
+        cooldown_secs: u64,
+    ) -> bool {
+        let Some(last_alert_epoch_secs) = history.drift_last_alert_epoch_secs.get(alert_key) else {
+            return false;
+        };
+        now_epoch_secs.saturating_sub(*last_alert_epoch_secs) < cooldown_secs as i64
+    }
+
+    fn update_runtime_history_and_build_alert(
+        &mut self,
+        run: &super::types::CiRun,
+    ) -> Option<InboxMessage> {
+        if !self.config.runtime_drift_enabled {
+            return None;
+        }
+        if self.runtime_history.processed_run_ids.contains(&run.id) {
+            return None;
+        }
+
+        let now_epoch_secs = Utc::now().timestamp();
+        let mut drift_events: Vec<RuntimeDriftEvent> = Vec::new();
+
+        if let Some(run_secs) = Self::duration_secs(&run.created_at, &run.updated_at) {
+            let workflow_alert_key = format!("workflow::{}", run.name);
+            let baseline = {
+                let existing = self
+                    .runtime_history
+                    .workflow_samples
+                    .get(&run.name)
+                    .cloned()
+                    .unwrap_or_default();
+                Self::evaluate_runtime_drift(
+                    &existing,
+                    run_secs,
+                    self.config.runtime_drift_min_samples,
+                    self.config.runtime_drift_threshold_percent,
+                )
+            };
+            if let Some(baseline_secs) = baseline {
+                if !Self::is_alert_on_cooldown(
+                    &self.runtime_history,
+                    &workflow_alert_key,
+                    now_epoch_secs,
+                    self.config.alert_cooldown_secs,
+                ) {
+                    drift_events.push(RuntimeDriftEvent {
+                        alert_key: workflow_alert_key,
+                        kind: "workflow",
+                        name: run.name.clone(),
+                        current_secs: run_secs,
+                        baseline_secs,
+                    });
+                }
+            }
+            let samples = self
+                .runtime_history
+                .workflow_samples
+                .entry(run.name.clone())
+                .or_default();
+            samples.push(run_secs);
+            Self::trim_history_samples(samples, self.config.runtime_history_limit);
+        }
+
+        if let Some(jobs) = run.jobs.as_ref() {
+            for job in jobs {
+                let Some(job_secs) = Self::job_duration_secs(job) else {
+                    continue;
+                };
+                let job_key = format!("{}::{}", run.name, job.name);
+                let baseline = {
+                    let existing = self
+                        .runtime_history
+                        .job_samples
+                        .get(&job_key)
+                        .cloned()
+                        .unwrap_or_default();
+                    Self::evaluate_runtime_drift(
+                        &existing,
+                        job_secs,
+                        self.config.runtime_drift_min_samples,
+                        self.config.runtime_drift_threshold_percent,
+                    )
+                };
+                if let Some(baseline_secs) = baseline {
+                    let job_alert_key = format!("job::{job_key}");
+                    if !Self::is_alert_on_cooldown(
+                        &self.runtime_history,
+                        &job_alert_key,
+                        now_epoch_secs,
+                        self.config.alert_cooldown_secs,
+                    ) {
+                        drift_events.push(RuntimeDriftEvent {
+                            alert_key: job_alert_key,
+                            kind: "job",
+                            name: job_key.clone(),
+                            current_secs: job_secs,
+                            baseline_secs,
+                        });
+                    }
+                }
+                let samples = self.runtime_history.job_samples.entry(job_key).or_default();
+                samples.push(job_secs);
+                Self::trim_history_samples(samples, self.config.runtime_history_limit);
+            }
+        }
+
+        self.runtime_history.processed_run_ids.push(run.id);
+        Self::trim_processed_ids(
+            &mut self.runtime_history.processed_run_ids,
+            RUNTIME_PROCESSED_RUN_LIMIT,
+        );
+
+        if drift_events.is_empty() {
+            self.persist_runtime_history();
+            return None;
+        }
+
+        for event in &drift_events {
+            self.runtime_history
+                .drift_last_alert_epoch_secs
+                .insert(event.alert_key.clone(), now_epoch_secs);
+        }
+        self.persist_runtime_history();
+
+        let threshold = self.config.runtime_drift_threshold_percent;
+        let mut details = String::new();
+        for event in &drift_events {
+            let line = format!(
+                "- {} `{}` current={}s baseline={}s threshold={}%",
+                event.kind, event.name, event.current_secs, event.baseline_secs, threshold
+            );
+            if !details.is_empty() {
+                details.push('\n');
+            }
+            details.push_str(&line);
+        }
+
+        Some(InboxMessage {
+            from: self.config.agent.clone(),
+            text: format!(
+                "[runtime-drift:{}] Significant runtime drift detected\nWorkflow: {}\nBranch: {}\nRun URL: {}\n{}",
+                run.id, run.name, run.head_branch, run.url, details
+            ),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(format!(
+                "Runtime drift detected for {} (#{}).",
+                run.name, run.id
+            )),
+            message_id: Some(format!("ci-drift-{}", run.id)),
+            unknown_fields: std::collections::HashMap::new(),
+        })
+    }
+
+    fn trim_processed_ids(ids: &mut Vec<u64>, limit: usize) {
+        if ids.len() > limit {
+            let overflow = ids.len() - limit;
+            ids.drain(0..overflow);
+        }
+    }
+
+    fn job_duration_secs(job: &CiJob) -> Option<u64> {
+        let start = job.started_at.as_deref()?;
+        let end = job.completed_at.as_deref()?;
+        Self::duration_secs(start, end)
+    }
+
+    fn send_message_to_targets(
+        &self,
+        ctx: &PluginContext,
+        msg: &InboxMessage,
+        run_id: u64,
+    ) -> bool {
+        if self.config.notify_target.is_empty() {
+            if let Err(e) = ctx.mail.send(&self.config.team, &self.config.agent, msg) {
+                warn!(
+                    "CI Monitor: Failed to send message for run #{}: {e}",
+                    run_id
+                );
+                return false;
+            }
+            return true;
+        }
+
+        let mut sent_count = 0;
+        for target in &self.config.notify_target {
+            let target_team = target.team.as_ref().unwrap_or(&self.config.team);
+            let inbox_path = ctx
+                .mail
+                .teams_root()
+                .join(target_team)
+                .join("inboxes")
+                .join(format!("{}.json", target.agent));
+            if !inbox_path.exists() {
+                warn!(
+                    "CI Monitor: Target inbox '{}@{}' not found at {}. Target may not exist or hasn't joined yet.",
+                    target.agent,
+                    target_team,
+                    inbox_path.display()
+                );
+            }
+
+            if let Err(e) = ctx.mail.send(target_team, &target.agent, msg) {
+                warn!(
+                    "CI Monitor: Failed to send message to {}@{}: {}",
+                    target.agent, target_team, e
+                );
+            } else {
+                sent_count += 1;
+            }
+        }
+        sent_count > 0
     }
 }
 
@@ -635,25 +719,7 @@ impl Plugin for CiMonitorPlugin {
         // Parse config from context
         let config_table = ctx.plugin_config("gh_monitor");
         self.config = if let Some(table) = config_table {
-            match CiMonitorConfig::from_toml(table) {
-                Ok(config) => config,
-                Err(e) => {
-                    let team_for_health = table
-                        .get("team")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.trim().is_empty())
-                        .unwrap_or(ctx.config.core.default_team.as_str())
-                        .to_string();
-                    self.set_health_state(
-                        ctx,
-                        &team_for_health,
-                        Some("running"),
-                        Some("disabled_config_error"),
-                        Some(format!("invalid gh_monitor config: {e}")),
-                    );
-                    return Err(e);
-                }
-            }
+            CiMonitorConfig::from_toml(table)?
         } else {
             CiMonitorConfig::default()
         };
@@ -673,6 +739,15 @@ impl Plugin for CiMonitorPlugin {
         // Resolve report directory relative to repo root when configured as a relative path
         if !self.config.report_dir.is_absolute() {
             self.config.report_dir = repo.path.join(&self.config.report_dir);
+        }
+
+        if self.config.runtime_drift_enabled {
+            let history_path = Self::runtime_history_file_path(&self.config.report_dir);
+            self.runtime_history = Self::load_runtime_history(&history_path);
+            self.runtime_history_path = Some(history_path);
+        } else {
+            self.runtime_history = RuntimeHistory::default();
+            self.runtime_history_path = None;
         }
 
         // Determine ATM config root from canonical home resolution.
@@ -701,19 +776,11 @@ impl Plugin for CiMonitorPlugin {
             // Create the CI provider from the registry
             // Pass provider_config for external providers
             let provider_config = self.config.provider_config.as_ref();
-            match self.create_provider_from_registry(&registry, git_provider, provider_config) {
-                Ok(provider) => self.provider = Some(provider),
-                Err(e) => {
-                    self.set_health_state(
-                        ctx,
-                        &self.config.team,
-                        Some("running"),
-                        Some("disabled_config_error"),
-                        Some(format!("provider init failed: {e}")),
-                    );
-                    return Err(e);
-                }
-            }
+            self.provider = Some(self.create_provider_from_registry(
+                &registry,
+                git_provider,
+                provider_config,
+            )?);
         }
 
         // Store registry for potential runtime use
@@ -820,13 +887,6 @@ impl Plugin for CiMonitorPlugin {
 
         // Store context for runtime use
         self.ctx = Some(ctx.clone());
-        self.set_health_state(
-            ctx,
-            &self.config.team,
-            Some("running"),
-            None,
-            Some("gh_monitor initialized".to_string()),
-        );
 
         Ok(())
     }
@@ -848,29 +908,16 @@ impl Plugin for CiMonitorPlugin {
             })?
             .clone();
 
-        let base_poll_secs = self.config.poll_interval_secs.max(1);
-        let max_backoff_secs = base_poll_secs
-            .saturating_mul(GH_MONITOR_BACKOFF_MAX_MULTIPLIER)
-            .max(base_poll_secs);
-        let mut next_poll_secs = 0_u64;
+        let mut ticker = interval(Duration::from_secs(self.config.poll_interval_secs));
 
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     break;
                 }
-                _ = sleep(Duration::from_secs(next_poll_secs)) => {
+                _ = ticker.tick() => {
                     // Evict old dedup cache entries
                     self.evict_old_dedup_entries();
-
-                    // Get provider reference for this iteration
-                    let provider = match self.provider.as_ref() {
-                        Some(p) => p,
-                        None => {
-                            warn!("CI Monitor: Provider disappeared during run");
-                            break;
-                        }
-                    };
 
                     // Build filter from config (no branch filter - we'll filter client-side)
                     let filter = CiFilter {
@@ -880,24 +927,15 @@ impl Plugin for CiMonitorPlugin {
                     };
 
                     // Fetch all completed runs
-                    match provider.list_runs(&filter).await {
+                    let runs = match self.provider.as_ref() {
+                        Some(provider) => provider.list_runs(&filter).await,
+                        None => {
+                            warn!("CI Monitor: Provider disappeared during run");
+                            break;
+                        }
+                    };
+                    match runs {
                         Ok(runs) => {
-                            if next_poll_secs != base_poll_secs {
-                                debug!(
-                                    "CI Monitor: provider recovered, resetting poll delay {}s -> {}s",
-                                    next_poll_secs,
-                                    base_poll_secs
-                                );
-                            }
-                            next_poll_secs = base_poll_secs;
-                            self.set_health_state(
-                                &ctx,
-                                &self.config.team,
-                                Some("running"),
-                                Some("healthy"),
-                                Some("provider poll succeeded".to_string()),
-                            );
-
                             // Process each run
                             for run in runs {
                                 // Filter by branch using glob patterns (client-side)
@@ -905,26 +943,43 @@ impl Plugin for CiMonitorPlugin {
                                     continue;
                                 }
 
-                                // Check if this run matches our notification criteria
-                                if let Some(conclusion) = run.conclusion
-                                    && self.config.notify_on.contains(&conclusion)
-                                {
-                                    // Fetch full run details with jobs
-                                    let full_run = match provider.get_run(run.id).await {
-                                        Ok(r) => r,
-                                        Err(e) => {
-                                            warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
-                                            self.set_health_state(
-                                                &ctx,
-                                                &self.config.team,
-                                                Some("running"),
-                                                Some("degraded"),
-                                                Some(format!("provider get_run failed: {e}")),
-                                            );
-                                            continue;
-                                        }
-                                    };
+                                let should_notify_failure = run
+                                    .conclusion
+                                    .map(|c| self.config.notify_on.contains(&c))
+                                    .unwrap_or(false);
+                                let needs_full_run =
+                                    should_notify_failure || self.config.runtime_drift_enabled;
+                                if !needs_full_run {
+                                    continue;
+                                }
 
+                                // Fetch full run details with jobs
+                                let full_run_result = match self.provider.as_ref() {
+                                    Some(provider) => provider.get_run(run.id).await,
+                                    None => {
+                                        warn!("CI Monitor: Provider disappeared during run");
+                                        break;
+                                    }
+                                };
+                                let full_run = match full_run_result {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
+                                        continue;
+                                    }
+                                };
+
+                                // Runtime drift alerts (optional enhancement): update persisted
+                                // baselines and notify on significant slowdowns.
+                                if let Some(drift_msg) =
+                                    self.update_runtime_history_and_build_alert(&full_run)
+                                {
+                                    if self.send_message_to_targets(&ctx, &drift_msg, run.id) {
+                                        debug!("CI Monitor: Runtime drift alert sent for run #{}", run.id);
+                                    }
+                                }
+
+                                if should_notify_failure {
                                     // Generate dedup key
                                     let key = self.dedup_key(&full_run);
 
@@ -940,63 +995,16 @@ impl Plugin for CiMonitorPlugin {
 
                                     // Create notification message
                                     let msg = self.run_to_message(&full_run);
-
-                                    // Send to configured targets or default to ci-monitor agent
-                                    if self.config.notify_target.is_empty() {
-                                        // Default: send as ci-monitor agent to its own inbox
-                                        if let Err(e) = ctx.mail.send(&self.config.team, &self.config.agent, &msg) {
-                                            warn!("CI Monitor: Failed to send message for run #{}: {e}", run.id);
-                                        } else {
-                                            debug!("CI Monitor: Notified about run #{} ({:?})", run.id, conclusion);
-                                            self.seen_runs.insert(key.clone(), Utc::now());
-                                        }
-                                    } else {
-                                        // Send to each configured target
-                                        let mut sent_count = 0;
-                                        for target in &self.config.notify_target {
-                                            let target_team = target.team.as_ref().unwrap_or(&self.config.team);
-
-                                            // Check if target inbox exists (warns on first message if not found)
-                                            let inbox_path = ctx.mail.teams_root().join(target_team).join("inboxes").join(format!("{}.json", target.agent));
-                                            if !inbox_path.exists() {
-                                                warn!(
-                                                    "CI Monitor: Target inbox '{}@{}' not found at {}. \
-                                                     Target may not exist or hasn't joined the team yet.",
-                                                    target.agent, target_team, inbox_path.display()
-                                                );
-                                            }
-
-                                            if let Err(e) = ctx.mail.send(target_team, &target.agent, &msg) {
-                                                warn!("CI Monitor: Failed to send message to {}@{}: {e}", target.agent, target_team);
-                                            } else {
-                                                sent_count += 1;
-                                            }
-                                        }
-                                        if sent_count > 0 {
-                                            debug!("CI Monitor: Notified {} targets about run #{} ({:?})", sent_count, run.id, conclusion);
-                                            self.seen_runs.insert(key, Utc::now());
-                                        }
+                                    if self.send_message_to_targets(&ctx, &msg, run.id) {
+                                        debug!("CI Monitor: Notified about run #{}", run.id);
+                                        self.seen_runs.insert(key, Utc::now());
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            next_poll_secs = if next_poll_secs == 0 {
-                                base_poll_secs
-                            } else {
-                                (next_poll_secs.saturating_mul(2)).min(max_backoff_secs)
-                            };
                             warn!("CI Monitor: Failed to fetch runs: {e}");
-                            self.set_health_state(
-                                &ctx,
-                                &self.config.team,
-                                Some("running"),
-                                Some("degraded"),
-                                Some(format!(
-                                    "provider list_runs failed: {e}; backing off to {}s",
-                                    next_poll_secs
-                                )),
-                            );
+                            // Continue polling after error
                         }
                     }
                 }
@@ -1121,6 +1129,141 @@ mod tests {
         let key2 = plugin.dedup_key(&run2);
 
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_evaluate_runtime_drift_min_samples_and_threshold_boundary() {
+        // min_samples guard
+        assert_eq!(
+            CiMonitorPlugin::evaluate_runtime_drift(&[120], 300, 2, 50),
+            None
+        );
+
+        // threshold boundary is strict (must be greater than threshold, not equal)
+        assert_eq!(
+            CiMonitorPlugin::evaluate_runtime_drift(&[100, 100], 150, 2, 50),
+            None
+        );
+
+        // above threshold emits baseline
+        assert_eq!(
+            CiMonitorPlugin::evaluate_runtime_drift(&[100, 100], 151, 2, 50),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn test_runtime_drift_alert_message_deterministic() {
+        use crate::plugins::ci_monitor::{
+            CiRunConclusion, CiRunStatus, create_test_job, create_test_run,
+        };
+
+        let config = CiMonitorConfig {
+            runtime_drift_enabled: true,
+            runtime_drift_threshold_percent: 50,
+            runtime_drift_min_samples: 1,
+            alert_cooldown_secs: 300,
+            ..Default::default()
+        };
+
+        let mut history = RuntimeHistory::default();
+        history.workflow_samples.insert("CI".to_string(), vec![100]);
+        history
+            .job_samples
+            .insert("CI::build".to_string(), vec![100]);
+
+        let mut plugin = CiMonitorPlugin::new()
+            .with_config(config)
+            .with_runtime_history(history);
+
+        let mut run = create_test_run(
+            999,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        run.created_at = "2026-02-13T10:00:00Z".to_string();
+        run.updated_at = "2026-02-13T10:03:20Z".to_string(); // 200s
+
+        let mut job = create_test_job(
+            1001,
+            "build",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        job.started_at = Some("2026-02-13T10:00:10Z".to_string());
+        job.completed_at = Some("2026-02-13T10:03:30Z".to_string()); // 200s
+        run.jobs = Some(vec![job]);
+
+        let msg = plugin
+            .update_runtime_history_and_build_alert(&run)
+            .expect("expected runtime drift alert");
+        assert!(msg.text.contains("[runtime-drift:999]"));
+        assert!(
+            msg.text
+                .contains("workflow `CI` current=200s baseline=100s threshold=50%")
+        );
+        assert!(
+            msg.text
+                .contains("job `CI::build` current=200s baseline=100s threshold=50%")
+        );
+    }
+
+    #[test]
+    fn test_runtime_drift_alert_respects_alert_cooldown() {
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+
+        let config = CiMonitorConfig {
+            runtime_drift_enabled: true,
+            runtime_drift_threshold_percent: 50,
+            runtime_drift_min_samples: 1,
+            alert_cooldown_secs: 300,
+            ..Default::default()
+        };
+
+        let mut history = RuntimeHistory::default();
+        history.workflow_samples.insert("CI".to_string(), vec![100]);
+
+        let mut plugin = CiMonitorPlugin::new()
+            .with_config(config)
+            .with_runtime_history(history);
+
+        let mut slow_run_1 = create_test_run(
+            1001,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        slow_run_1.created_at = "2026-02-13T10:00:00Z".to_string();
+        slow_run_1.updated_at = "2026-02-13T10:03:20Z".to_string(); // 200s
+
+        let mut slow_run_2 = create_test_run(
+            1002,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        slow_run_2.created_at = "2026-02-13T10:04:00Z".to_string();
+        slow_run_2.updated_at = "2026-02-13T10:14:00Z".to_string(); // 600s
+
+        let first = plugin.update_runtime_history_and_build_alert(&slow_run_1);
+        assert!(first.is_some(), "first slow run should emit drift alert");
+
+        let second = plugin.update_runtime_history_and_build_alert(&slow_run_2);
+        assert!(
+            second.is_none(),
+            "second slow run should be suppressed by alert cooldown"
+        );
+        assert!(
+            plugin
+                .runtime_history
+                .drift_last_alert_epoch_secs
+                .contains_key("workflow::CI"),
+            "cooldown state should be persisted by key"
+        );
     }
 
     #[test]
