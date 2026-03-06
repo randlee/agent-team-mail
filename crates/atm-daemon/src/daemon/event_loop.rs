@@ -1013,7 +1013,7 @@ async fn retention_loop(ctx: PluginContext, cancel: CancellationToken) {
     // Extract report_dir from CI monitor plugin config if present
     let report_dir: Option<PathBuf> = ctx
         .config
-        .plugin_config("ci_monitor")
+        .plugin_config("gh_monitor")
         .and_then(|table| table.get("report_dir"))
         .and_then(|v| v.as_str())
         .map(PathBuf::from);
@@ -1291,7 +1291,7 @@ async fn status_writer_loop(
     info!("Status writer loop started (interval: 30s)");
 
     // Write initial status at startup
-    let plugin_statuses = build_plugin_statuses(&plugins).await;
+    let plugin_statuses = build_plugin_statuses(&plugins, &ctx).await;
     let teams = get_active_teams(&ctx).await;
     if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone()) {
         error!("Failed to write initial daemon status: {}", e);
@@ -1309,7 +1309,7 @@ async fn status_writer_loop(
             _ = interval.tick() => {
                 debug!("Writing daemon status");
 
-                let plugin_statuses = build_plugin_statuses(&plugins).await;
+                let plugin_statuses = build_plugin_statuses(&plugins, &ctx).await;
                 let teams = get_active_teams(&ctx).await;
 
                 if let Err(e) = status_writer.write_status(plugin_statuses, teams) {
@@ -1325,22 +1325,74 @@ async fn status_writer_loop(
 /// Build plugin status list from running plugins
 async fn build_plugin_statuses(
     plugins: &[(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)],
+    ctx: &PluginContext,
 ) -> Vec<PluginStatus> {
     let mut statuses = Vec::new();
 
     for (metadata, _plugin_arc) in plugins {
-        // For now, all plugins are running (we don't track per-plugin errors yet)
-        // Future enhancement: track plugin-level errors via shared state
+        let mut status_kind = PluginStatusKind::Running;
+        let mut last_error = None;
+        let mut last_updated = Some(format_timestamp(SystemTime::now()));
+        let mut enabled = true;
+
+        // GH monitor plugin lifecycle/availability projection:
+        // daemon status surfaces should expose healthy|degraded|disabled_config_error
+        // through existing PluginStatusKind fields.
+        if matches!(metadata.name, "gh_monitor" | "ci_monitor")
+            && let Some((kind, error, updated)) = gh_monitor_plugin_status_projection(ctx)
+        {
+            status_kind = kind;
+            last_error = error;
+            last_updated = updated.or_else(|| Some(format_timestamp(SystemTime::now())));
+            enabled = !matches!(status_kind, PluginStatusKind::Disabled);
+        }
+
         statuses.push(PluginStatus {
             name: metadata.name.to_string(),
-            enabled: true,
-            status: PluginStatusKind::Running,
-            last_error: None,
-            last_updated: Some(format_timestamp(SystemTime::now())),
+            enabled,
+            status: status_kind,
+            last_error,
+            last_updated,
         });
     }
 
     statuses
+}
+
+fn gh_monitor_plugin_status_projection(
+    ctx: &PluginContext,
+) -> Option<(PluginStatusKind, Option<String>, Option<String>)> {
+    let home_dir = ctx.system.claude_root.parent()?.to_path_buf();
+    let path = home_dir.join(".claude/daemon/gh-monitor-health.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<Value>(&raw).ok()?;
+    let records = value.get("records")?.as_array()?;
+    let team = &ctx.config.core.default_team;
+    let record = records
+        .iter()
+        .find(|r| r.get("team").and_then(|t| t.as_str()) == Some(team.as_str()))
+        .or_else(|| records.first())?;
+
+    let availability = record
+        .get("availability_state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("healthy");
+    let message = record
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let updated = record
+        .get("updated_at")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let kind = match availability {
+        "healthy" => PluginStatusKind::Running,
+        "degraded" => PluginStatusKind::Error,
+        "disabled_config_error" => PluginStatusKind::Disabled,
+        _ => PluginStatusKind::Running,
+    };
+    Some((kind, message, updated))
 }
 
 /// Get list of active teams from the teams directory (async wrapper)
@@ -1789,9 +1841,14 @@ mod tests {
         );
     }
 
-    fn assert_terminal_non_lead_cleanup(home: &std::path::Path, inbox_dir: &std::path::Path) {
+    fn assert_terminal_non_lead_cleanup(
+        home: &std::path::Path,
+        team_name: &str,
+        inbox_dir: &std::path::Path,
+    ) {
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
-            &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
+            &stdfs::read_to_string(home.join(format!(".claude/teams/{team_name}/config.json")))
+                .unwrap(),
         )
         .unwrap();
         assert!(
@@ -1804,24 +1861,34 @@ mod tests {
         );
     }
 
+    fn unique_test_team_name() -> String {
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("atm-dev-{now_nanos}")
+    }
+
     fn setup_dead_terminal_non_lead() -> (
         TempDir,
         std::path::PathBuf,
+        String,
         super::SharedSessionRegistry,
         super::SharedStateStore,
     ) {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
-        let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");
+        let team_name = unique_test_team_name();
+        let inbox_dir = home.join(format!(".claude/teams/{team_name}/inboxes"));
         stdfs::create_dir_all(&inbox_dir).unwrap();
         stdfs::write(inbox_dir.join("arch-ctm.json"), "[]").unwrap();
         write_team_config(
             home,
-            "atm-dev",
+            &team_name,
             serde_json::json!([
                 {
-                    "agentId": "team-lead@atm-dev",
+                    "agentId": format!("team-lead@{}", team_name),
                     "name": "team-lead",
                     "agentType": "general-purpose",
                     "model": "unknown",
@@ -1831,7 +1898,7 @@ mod tests {
                     "isActive": true
                 },
                 {
-                    "agentId": "arch-ctm@atm-dev",
+                    "agentId": format!("arch-ctm@{}", team_name),
                     "name": "arch-ctm",
                     "agentType": "codex",
                     "model": "unknown",
@@ -1845,7 +1912,7 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
-        (tmp, inbox_dir, sr, state_store)
+        (tmp, inbox_dir, team_name, sr, state_store)
     }
 
     #[test]
@@ -1853,22 +1920,22 @@ mod tests {
     fn test_session_end_converges_to_remove_dead_member_from_roster_and_mailbox() {
         super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
         super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
-        let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
+        let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         {
             let mut reg = sr.lock().unwrap();
-            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-session-end", i32::MAX as u32);
+            reg.upsert_for_team(&team_name, "arch-ctm", "sess-session-end", i32::MAX as u32);
             // Simulate hook_watcher SessionEnd processing.
-            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+            reg.mark_dead_for_team(&team_name, "arch-ctm");
         }
         // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        assert_terminal_non_lead_cleanup(home, &inbox_dir);
+        assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
                 .unwrap()
-                .query_for_team("atm-dev", "arch-ctm")
+                .query_for_team(&team_name, "arch-ctm")
                 .is_none(),
             "terminal non-lead session record should be removed"
         );
@@ -1879,22 +1946,22 @@ mod tests {
     fn test_sigterm_escalation_converges_to_remove_dead_member_from_roster_and_mailbox() {
         super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
         super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
-        let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
+        let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         {
             let mut reg = sr.lock().unwrap();
-            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-sigterm", i32::MAX as u32);
+            reg.upsert_for_team(&team_name, "arch-ctm", "sess-sigterm", i32::MAX as u32);
             // Simulate daemon --kill escalation where SIGTERM eventually marks the session dead.
-            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+            reg.mark_dead_for_team(&team_name, "arch-ctm");
         }
         // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        assert_terminal_non_lead_cleanup(home, &inbox_dir);
+        assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
                 .unwrap()
-                .query_for_team("atm-dev", "arch-ctm")
+                .query_for_team(&team_name, "arch-ctm")
                 .is_none(),
             "terminal non-lead session record should be removed"
         );
@@ -1905,22 +1972,22 @@ mod tests {
     fn test_kill_timeout_fallback_converges_to_remove_dead_member_from_roster_and_mailbox() {
         super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
         super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
-        let (tmp, inbox_dir, sr, state_store) = setup_dead_terminal_non_lead();
+        let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         {
             let mut reg = sr.lock().unwrap();
-            reg.upsert_for_team("atm-dev", "arch-ctm", "sess-kill-timeout", i32::MAX as u32);
+            reg.upsert_for_team(&team_name, "arch-ctm", "sess-kill-timeout", i32::MAX as u32);
             // Simulate daemon --kill exhausting graceful waits and forcing termination.
-            reg.mark_dead_for_team("atm-dev", "arch-ctm");
+            reg.mark_dead_for_team(&team_name, "arch-ctm");
         }
         // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
         reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        assert_terminal_non_lead_cleanup(home, &inbox_dir);
+        assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
                 .unwrap()
-                .query_for_team("atm-dev", "arch-ctm")
+                .query_for_team(&team_name, "arch-ctm")
                 .is_none(),
             "terminal non-lead session record should be removed"
         );

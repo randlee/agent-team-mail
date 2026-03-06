@@ -28,11 +28,11 @@
 //! In your `.atm.toml`:
 //!
 //! ```toml
-//! [plugins.ci_monitor]
+//! [plugins.gh_monitor]
 //! enabled = true
 //! provider = "azure-pipelines"
 //!
-//! [plugins.ci_monitor.azure]
+//! [plugins.gh_monitor.azure]
 //! organization = "your-org"
 //! project = "your-project"
 //! ```

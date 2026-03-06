@@ -181,15 +181,15 @@ async fn main() -> Result<()> {
     // Create plugin registry
     let mut registry = PluginRegistry::new();
 
-    // Register CI Monitor plugin if configured
-    if let Some(ci_config) = plugin_ctx.plugin_config("ci_monitor")
+    // Register GH Monitor plugin if configured
+    if let Some(ci_config) = plugin_ctx.plugin_config("gh_monitor")
         && ci_config
             .get("enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
     {
         registry.register(agent_team_mail_daemon::plugins::ci_monitor::CiMonitorPlugin::new());
-        info!("Registered CI Monitor plugin");
+        info!("Registered GH Monitor plugin");
     }
 
     // Register Issues plugin if configured

@@ -24,10 +24,14 @@
 use agent_team_mail_core::control::{
     CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,
 };
-use agent_team_mail_core::daemon_client::{CanonicalMemberState, LaunchConfig, LaunchResult};
+use agent_team_mail_core::daemon_client::{
+    CanonicalMemberState, GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction,
+    GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest, LaunchConfig,
+    LaunchResult,
+};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging_event::LogEventV1;
-use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -451,6 +455,14 @@ async fn handle_connection(
     // use async channel communication with the WorkerAdapterPlugin.
     let response = if is_launch_command(request_str) {
         handle_launch_command(request_str, &launch_tx).await
+    } else if is_gh_monitor_command(request_str) {
+        handle_gh_monitor_command(request_str, &home).await
+    } else if is_gh_monitor_control_command(request_str) {
+        handle_gh_monitor_control_command(request_str, &home).await
+    } else if is_gh_monitor_health_command(request_str) {
+        handle_gh_monitor_health_command(request_str, &home).await
+    } else if is_gh_status_command(request_str) {
+        handle_gh_status_command(request_str, &home).await
     } else if is_control_command(request_str) {
         handle_control_command(
             request_str,
@@ -522,6 +534,34 @@ fn is_launch_command(request_str: &str) -> bool {
 fn is_control_command(request_str: &str) -> bool {
     request_str.contains(r#""command":"control""#)
         || request_str.contains(r#""command": "control""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"gh-monitor"` command.
+#[cfg(unix)]
+fn is_gh_monitor_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"gh-monitor""#)
+        || request_str.contains(r#""command": "gh-monitor""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"gh-status"` command.
+#[cfg(unix)]
+fn is_gh_status_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"gh-status""#)
+        || request_str.contains(r#""command": "gh-status""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"gh-monitor-control"` command.
+#[cfg(unix)]
+fn is_gh_monitor_control_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"gh-monitor-control""#)
+        || request_str.contains(r#""command": "gh-monitor-control""#)
+}
+
+/// Quickly determine if a raw JSON line is a `"gh-monitor-health"` command.
+#[cfg(unix)]
+fn is_gh_monitor_health_command(request_str: &str) -> bool {
+    request_str.contains(r#""command":"gh-monitor-health""#)
+        || request_str.contains(r#""command": "gh-monitor-health""#)
 }
 
 /// Quickly determine if a raw JSON line is a `"hook-event"` command.
@@ -1869,6 +1909,1971 @@ async fn handle_launch_command(request_str: &str, launch_tx: &LaunchSender) -> S
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct GhMonitorStateFile {
+    records: Vec<GhMonitorStatus>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct GhMonitorHealthFile {
+    records: Vec<GhMonitorHealth>,
+}
+
+#[cfg(unix)]
+fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
+    GhMonitorHealth {
+        team: team.to_string(),
+        lifecycle_state: "running".to_string(),
+        availability_state: "healthy".to_string(),
+        in_flight: 0,
+        updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        message: None,
+    }
+}
+
+#[cfg(unix)]
+fn gh_monitor_health_path(home: &std::path::Path) -> PathBuf {
+    home.join(".claude/daemon/gh-monitor-health.json")
+}
+
+#[cfg(unix)]
+fn load_gh_monitor_health_map(
+    home: &std::path::Path,
+) -> Result<std::collections::HashMap<String, GhMonitorHealth>> {
+    let path = gh_monitor_health_path(home);
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let file = serde_json::from_str::<GhMonitorHealthFile>(&raw)?;
+    let mut map = std::collections::HashMap::new();
+    for record in file.records {
+        map.insert(record.team.clone(), record);
+    }
+    Ok(map)
+}
+
+#[cfg(unix)]
+fn upsert_gh_monitor_health(home: &std::path::Path, health: GhMonitorHealth) -> Result<()> {
+    let mut map = load_gh_monitor_health_map(home)?;
+    map.insert(health.team.clone(), health);
+    let mut records: Vec<GhMonitorHealth> = map.into_values().collect();
+    records.sort_by(|a, b| a.team.cmp(&b.team));
+    let file = GhMonitorHealthFile { records };
+    let path = gh_monitor_health_path(home);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&file)?)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_gh_monitor_health(home: &std::path::Path, team: &str) -> Result<GhMonitorHealth> {
+    let map = load_gh_monitor_health_map(home)?;
+    Ok(map
+        .get(team)
+        .cloned()
+        .unwrap_or_else(|| default_gh_monitor_health(team)))
+}
+
+#[cfg(unix)]
+fn count_in_flight_monitors(home: &std::path::Path, team: &str) -> u64 {
+    load_gh_monitor_state_map(home)
+        .ok()
+        .map(|map| {
+            map.values()
+                .filter(|status| status.team == team && status.state == "tracking")
+                .count() as u64
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn emit_gh_monitor_health_transition(
+    home: &std::path::Path,
+    team: &str,
+    old_state: &str,
+    new_state: &str,
+    reason: &str,
+) {
+    if old_state == new_state {
+        return;
+    }
+
+    let level = if new_state == "healthy" {
+        "info"
+    } else {
+        "warn"
+    };
+    emit_event_best_effort(EventFields {
+        level,
+        source: "atm-daemon",
+        action: "gh_monitor_health_transition",
+        team: Some(team.to_string()),
+        result: Some(format!("{old_state}->{new_state}")),
+        error: Some(reason.to_string()),
+        ..Default::default()
+    });
+
+    let (from_agent, targets) = resolve_ci_alert_routing(home, team);
+    let text = format!(
+        "[gh_monitor] availability transition {} -> {}\nreason: {}",
+        old_state, new_state, reason
+    );
+    for (agent, target_team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(&target_team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        let message = InboxMessage {
+            from: from_agent.clone(),
+            text: text.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(format!("gh_monitor: {new_state}")),
+            message_id: Some(uuid::Uuid::new_v4().to_string()),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) = agent_team_mail_core::io::inbox::inbox_append(
+            &inbox_path,
+            &message,
+            &target_team,
+            &agent,
+        ) {
+            warn!(
+                team = %target_team,
+                agent = %agent,
+                "failed to emit gh_monitor transition alert: {e}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_gh_monitor_health_state(
+    home: &std::path::Path,
+    team: &str,
+    lifecycle_state: Option<&str>,
+    availability_state: Option<&str>,
+    in_flight: Option<u64>,
+    message: Option<String>,
+) -> Result<GhMonitorHealth> {
+    let mut current = read_gh_monitor_health(home, team)?;
+    let old_availability = current.availability_state.clone();
+
+    if let Some(lifecycle_state) = lifecycle_state {
+        current.lifecycle_state = lifecycle_state.to_string();
+    }
+    if let Some(availability_state) = availability_state {
+        current.availability_state = availability_state.to_string();
+    }
+    if let Some(in_flight) = in_flight {
+        current.in_flight = in_flight;
+    }
+    current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    current.message = message;
+
+    if old_availability != current.availability_state {
+        let reason = current
+            .message
+            .clone()
+            .unwrap_or_else(|| "availability changed".to_string());
+        emit_gh_monitor_health_transition(
+            home,
+            team,
+            &old_availability,
+            &current.availability_state,
+            &reason,
+        );
+    }
+
+    upsert_gh_monitor_health(home, current.clone())?;
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn validate_gh_monitor_config(
+    home: &std::path::Path,
+    team: &str,
+) -> std::result::Result<(), String> {
+    let current_dir = std::env::current_dir().map_err(|e| e.to_string())?;
+    let config = agent_team_mail_core::config::resolve_config(
+        &agent_team_mail_core::config::ConfigOverrides {
+            team: Some(team.to_string()),
+            ..Default::default()
+        },
+        &current_dir,
+        home,
+    )
+    .map_err(|e| e.to_string())?;
+    let table = config
+        .plugin_config("gh_monitor")
+        .ok_or_else(|| "missing [plugins.gh_monitor] configuration".to_string())?;
+    let parsed =
+        crate::plugins::ci_monitor::CiMonitorConfig::from_toml(table).map_err(|e| e.to_string())?;
+    if !parsed.enabled {
+        return Err("gh_monitor plugin disabled in configuration".to_string());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRunView {
+    database_id: u64,
+    name: String,
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+    head_branch: String,
+    head_sha: String,
+    url: String,
+    #[serde(default)]
+    jobs: Vec<GhRunJob>,
+    #[serde(default)]
+    attempt: Option<u64>,
+    #[serde(default)]
+    pull_requests: Vec<GhPullRequest>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRunJob {
+    database_id: u64,
+    name: String,
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    completed_at: Option<String>,
+    #[serde(default)]
+    steps: Vec<GhRunStep>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRunStep {
+    name: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPullRequest {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPrLookupView {
+    #[serde(default)]
+    head_ref_name: Option<String>,
+    #[serde(default)]
+    head_ref_oid: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPrView {
+    #[serde(default)]
+    merge_state_status: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRunListEntry {
+    #[serde(default)]
+    database_id: Option<u64>,
+    #[serde(default)]
+    head_sha: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhRunTerminalState {
+    Success,
+    Failure,
+    TimedOut,
+    Cancelled,
+    ActionRequired,
+    Other,
+}
+
+#[cfg(unix)]
+async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse gh-monitor request: {e}"),
+            );
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let gh_request: GhMonitorRequest = match serde_json::from_value(request.payload.clone()) {
+        Ok(payload) => payload,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INVALID_PAYLOAD",
+                &format!("Failed to parse gh-monitor payload: {e}"),
+            );
+        }
+    };
+
+    if gh_request.team.trim().is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'team'",
+        );
+    }
+
+    if gh_request.target.trim().is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'target'",
+        );
+    }
+
+    // Lifecycle gate: monitor operations require running lifecycle state.
+    let current_health = match read_gh_monitor_health(home, &gh_request.team) {
+        Ok(health) => health,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INTERNAL_ERROR",
+                &format!("Failed to read gh monitor health: {e}"),
+            );
+        }
+    };
+    if current_health.lifecycle_state != "running" {
+        return make_error_response(
+            &request.request_id,
+            "MONITOR_STOPPED",
+            "gh monitor lifecycle is not running (run `atm gh monitor start` first)",
+        );
+    }
+
+    // Config gate: invalid/disabled config moves availability into
+    // disabled_config_error and blocks polling work.
+    if let Err(reason) = validate_gh_monitor_config(home, &gh_request.team) {
+        // Intentional: command-dispatch config validation updates persisted
+        // availability state but does not emit a separate "manual" inbox
+        // notification path; transition alerts are emitted by the shared
+        // state-transition hook (when availability actually changes).
+        let _ = set_gh_monitor_health_state(
+            home,
+            &gh_request.team,
+            None,
+            Some("disabled_config_error"),
+            Some(0),
+            Some(reason.clone()),
+        );
+        return make_error_response(
+            &request.request_id,
+            "CONFIG_ERROR",
+            &format!("gh_monitor unavailable: {reason}"),
+        );
+    }
+
+    if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow)
+        && gh_request
+            .reference
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+    {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'reference' for workflow monitor",
+        );
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut status = GhMonitorStatus {
+        team: gh_request.team.clone(),
+        target_kind: gh_request.target_kind,
+        target: gh_request.target.clone(),
+        state: "monitoring".to_string(),
+        run_id: None,
+        reference: gh_request.reference.clone(),
+        updated_at: now,
+        message: None,
+    };
+
+    let mut transient_failure: Option<String> = None;
+    match gh_request.target_kind {
+        GhMonitorTargetKind::Run => {
+            status.run_id = gh_request.target.parse::<u64>().ok();
+        }
+        GhMonitorTargetKind::Workflow => {
+            if let Some(reference) = gh_request.reference.as_deref() {
+                match try_find_workflow_run_id(&gh_request.target, reference).await {
+                    Ok(Some(run_id)) => status.run_id = Some(run_id),
+                    Ok(None) => {}
+                    Err(e) => {
+                        transient_failure = Some(format!("{e}"));
+                        status.message = Some(format!(
+                            "workflow run lookup unavailable; tracking without run id: {e}"
+                        ));
+                    }
+                }
+            }
+        }
+        GhMonitorTargetKind::Pr => {
+            let pr_number = match gh_request.target.parse::<u64>() {
+                Ok(value) if value > 0 => value,
+                _ => {
+                    return make_error_response(
+                        &request.request_id,
+                        "INVALID_PAYLOAD",
+                        "PR target must be a positive integer",
+                    );
+                }
+            };
+            let mut preflight_blocked = false;
+            match fetch_pr_merge_state(pr_number).await {
+                Ok(Some(pr_view)) => {
+                    if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
+                        && is_pr_merge_state_dirty(merge_state_status)
+                    {
+                        status.state = "merge_conflict".to_string();
+                        status.message = Some(format!(
+                            "PR #{pr_number} has mergeStateStatus={merge_state_status}; resolve conflicts before CI monitoring."
+                        ));
+                        emit_merge_conflict_alert(
+                            home,
+                            &status,
+                            pr_view.url.as_deref(),
+                            merge_state_status,
+                            None,
+                        );
+                        preflight_blocked = true;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(
+                        team = %gh_request.team,
+                        pr = pr_number,
+                        "gh-monitor preflight mergeStateStatus lookup failed: {e}"
+                    );
+                }
+            }
+
+            if !preflight_blocked {
+                let timeout_secs = gh_request.start_timeout_secs.unwrap_or(120);
+                if timeout_secs == 0 {
+                    status.state = "ci_not_started".to_string();
+                    status.message =
+                        Some("No workflow run observed before start-timeout (0s).".to_string());
+                } else {
+                    match wait_for_pr_run_start(pr_number, timeout_secs).await {
+                        Ok(Some(run_id)) => {
+                            status.run_id = Some(run_id);
+                        }
+                        Ok(None) => {
+                            status.state = "ci_not_started".to_string();
+                            status.message = Some(format!(
+                                "No workflow run observed for PR #{pr_number} within {timeout_secs}s."
+                            ));
+                        }
+                        Err(e) => {
+                            transient_failure = Some(format!("{e}"));
+                            status.state = "ci_not_started".to_string();
+                            status.message = Some(format!(
+                                "Unable to query workflow runs for PR #{pr_number}: {e}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Err(e) = upsert_gh_monitor_status(home, status.clone()) {
+        let _ = set_gh_monitor_health_state(
+            home,
+            &gh_request.team,
+            None,
+            Some("degraded"),
+            None,
+            Some(format!("failed to persist monitor status: {e}")),
+        );
+        return make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            &format!("Failed to persist gh monitor state: {e}"),
+        );
+    }
+
+    if status.state == "ci_not_started" {
+        emit_ci_not_started_alert(home, &status);
+    } else if let Some(run_id) = status.run_id {
+        let home = home.to_path_buf();
+        let status_seed = status.clone();
+        let gh_request = gh_request.clone();
+        tokio::spawn(async move {
+            if let Err(e) = monitor_gh_run(home.as_path(), &status_seed, &gh_request, run_id).await
+            {
+                warn!(
+                    team = %status_seed.team,
+                    target = %status_seed.target,
+                    run_id = run_id,
+                    "gh monitor background task failed: {e}"
+                );
+            }
+        });
+    }
+
+    if let Some(reason) = transient_failure {
+        let _ = set_gh_monitor_health_state(
+            home,
+            &gh_request.team,
+            None,
+            Some("degraded"),
+            Some(count_in_flight_monitors(home, &gh_request.team)),
+            Some(format!("transient provider/gh failure: {reason}")),
+        );
+    } else {
+        let _ = set_gh_monitor_health_state(
+            home,
+            &gh_request.team,
+            Some("running"),
+            Some("healthy"),
+            Some(count_in_flight_monitors(home, &gh_request.team)),
+            Some("monitor request succeeded".to_string()),
+        );
+    }
+
+    make_ok_response(
+        &request.request_id,
+        serde_json::to_value(status).unwrap_or_default(),
+    )
+}
+
+#[cfg(unix)]
+async fn handle_gh_monitor_control_command(
+    request_str: &str,
+    home: &std::path::Path,
+) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse gh-monitor-control request: {e}"),
+            );
+        }
+    };
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let control: GhMonitorControlRequest = match serde_json::from_value(request.payload.clone()) {
+        Ok(payload) => payload,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INVALID_PAYLOAD",
+                &format!("Failed to parse gh-monitor-control payload: {e}"),
+            );
+        }
+    };
+    if control.team.trim().is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'team'",
+        );
+    }
+
+    let health = match control.action {
+        GhMonitorLifecycleAction::Start => match set_gh_monitor_health_state(
+            home,
+            &control.team,
+            Some("running"),
+            None,
+            Some(count_in_flight_monitors(home, &control.team)),
+            Some("gh monitor lifecycle started".to_string()),
+        ) {
+            Ok(health) => health,
+            Err(e) => {
+                return make_error_response(
+                    &request.request_id,
+                    "INTERNAL_ERROR",
+                    &format!("failed to update monitor lifecycle state: {e}"),
+                );
+            }
+        },
+        GhMonitorLifecycleAction::Stop => {
+            let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
+            let _ = set_gh_monitor_health_state(
+                home,
+                &control.team,
+                Some("draining"),
+                None,
+                Some(count_in_flight_monitors(home, &control.team)),
+                Some(format!(
+                    "draining in-flight monitors (timeout={}s)",
+                    drain_timeout_secs
+                )),
+            );
+
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(drain_timeout_secs.max(1));
+            let mut in_flight = count_in_flight_monitors(home, &control.team);
+            while in_flight > 0 && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                in_flight = count_in_flight_monitors(home, &control.team);
+            }
+
+            let message = if in_flight == 0 {
+                "gh monitor lifecycle stopped after in-flight drain".to_string()
+            } else {
+                format!(
+                    "drain timeout reached; stopped with {} in-flight monitor(s)",
+                    in_flight
+                )
+            };
+            match set_gh_monitor_health_state(
+                home,
+                &control.team,
+                Some("stopped"),
+                None,
+                Some(in_flight),
+                Some(message),
+            ) {
+                Ok(health) => health,
+                Err(e) => {
+                    return make_error_response(
+                        &request.request_id,
+                        "INTERNAL_ERROR",
+                        &format!("failed to stop monitor lifecycle: {e}"),
+                    );
+                }
+            }
+        }
+        GhMonitorLifecycleAction::Restart => {
+            let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
+            let _ = set_gh_monitor_health_state(
+                home,
+                &control.team,
+                Some("draining"),
+                None,
+                Some(count_in_flight_monitors(home, &control.team)),
+                Some(format!(
+                    "draining in-flight monitors before restart (timeout={}s)",
+                    drain_timeout_secs
+                )),
+            );
+
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(drain_timeout_secs.max(1));
+            let mut in_flight = count_in_flight_monitors(home, &control.team);
+            while in_flight > 0 && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                in_flight = count_in_flight_monitors(home, &control.team);
+            }
+
+            match set_gh_monitor_health_state(
+                home,
+                &control.team,
+                Some("running"),
+                Some("healthy"),
+                Some(in_flight),
+                Some(if in_flight == 0 {
+                    "gh monitor lifecycle restarted after in-flight drain".to_string()
+                } else {
+                    format!(
+                        "gh monitor lifecycle restarted after drain timeout; {} in-flight monitor(s) remain",
+                        in_flight
+                    )
+                }),
+            ) {
+                Ok(health) => health,
+                Err(e) => {
+                    return make_error_response(
+                        &request.request_id,
+                        "INTERNAL_ERROR",
+                        &format!("failed to restart monitor lifecycle: {e}"),
+                    );
+                }
+            }
+        }
+    };
+
+    make_ok_response(
+        &request.request_id,
+        serde_json::to_value(health).unwrap_or_default(),
+    )
+}
+
+#[cfg(unix)]
+async fn handle_gh_monitor_health_command(
+    request_str: &str,
+    home: &std::path::Path,
+) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse gh-monitor-health request: {e}"),
+            );
+        }
+    };
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let team = request
+        .payload
+        .get("team")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if team.is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'team'",
+        );
+    }
+
+    let health = match read_gh_monitor_health(home, &team) {
+        Ok(mut health) => {
+            health.in_flight = count_in_flight_monitors(home, &team);
+            health
+        }
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INTERNAL_ERROR",
+                &format!("Failed to read gh monitor health: {e}"),
+            );
+        }
+    };
+    make_ok_response(
+        &request.request_id,
+        serde_json::to_value(health).unwrap_or_default(),
+    )
+}
+
+#[cfg(not(unix))]
+async fn handle_gh_monitor_command(request_str: &str, _home: &std::path::Path) -> SocketResponse {
+    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request_id")
+                .and_then(|request_id| request_id.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    make_error_response(
+        &request_id,
+        "UNSUPPORTED_PLATFORM",
+        "gh-monitor commands require Unix daemon transport",
+    )
+}
+
+#[cfg(not(unix))]
+async fn handle_gh_monitor_control_command(
+    request_str: &str,
+    _home: &std::path::Path,
+) -> SocketResponse {
+    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request_id")
+                .and_then(|request_id| request_id.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    make_error_response(
+        &request_id,
+        "UNSUPPORTED_PLATFORM",
+        "gh-monitor-control commands require Unix daemon transport",
+    )
+}
+
+#[cfg(not(unix))]
+async fn handle_gh_monitor_health_command(
+    request_str: &str,
+    _home: &std::path::Path,
+) -> SocketResponse {
+    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request_id")
+                .and_then(|request_id| request_id.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    make_error_response(
+        &request_id,
+        "UNSUPPORTED_PLATFORM",
+        "gh-monitor-health commands require Unix daemon transport",
+    )
+}
+
+#[cfg(unix)]
+async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> SocketResponse {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse gh-status request: {e}"),
+            );
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return make_error_response(
+            &request.request_id,
+            "VERSION_MISMATCH",
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        );
+    }
+
+    let gh_request: GhStatusRequest = match serde_json::from_value(request.payload.clone()) {
+        Ok(payload) => payload,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INVALID_PAYLOAD",
+                &format!("Failed to parse gh-status payload: {e}"),
+            );
+        }
+    };
+
+    let state = match load_gh_monitor_state_map(home) {
+        Ok(map) => map,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INTERNAL_ERROR",
+                &format!("Failed to read gh monitor state: {e}"),
+            );
+        }
+    };
+
+    let key = gh_monitor_key(
+        &gh_request.team,
+        gh_request.target_kind,
+        &gh_request.target,
+        gh_request.reference.as_deref(),
+    );
+    if let Some(status) = state.get(&key) {
+        return make_ok_response(
+            &request.request_id,
+            serde_json::to_value(status).unwrap_or_default(),
+        );
+    }
+
+    if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow) {
+        let mut candidates: Vec<&GhMonitorStatus> = state
+            .values()
+            .filter(|record| {
+                record.team == gh_request.team
+                    && record.target_kind == GhMonitorTargetKind::Workflow
+                    && record.target == gh_request.target
+                    && gh_request
+                        .reference
+                        .as_deref()
+                        .is_none_or(|reference| record.reference.as_deref() == Some(reference))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+        if let Some(status) = candidates.last() {
+            return make_ok_response(
+                &request.request_id,
+                serde_json::to_value(status).unwrap_or_default(),
+            );
+        }
+    }
+
+    make_error_response(
+        &request.request_id,
+        "MONITOR_NOT_FOUND",
+        "No gh monitor state found for requested target",
+    )
+}
+
+#[cfg(not(unix))]
+async fn handle_gh_status_command(request_str: &str, _home: &std::path::Path) -> SocketResponse {
+    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request_id")
+                .and_then(|request_id| request_id.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    make_error_response(
+        &request_id,
+        "UNSUPPORTED_PLATFORM",
+        "gh-status commands require Unix daemon transport",
+    )
+}
+
+#[cfg(unix)]
+async fn wait_for_pr_run_start(pr_number: u64, timeout_secs: u64) -> Result<Option<u64>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if let Some(run_id) = try_find_pr_run_id(pr_number).await? {
+            return Ok(Some(run_id));
+        }
+
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let sleep_for = remaining.min(std::time::Duration::from_secs(5));
+        tokio::time::sleep(sleep_for).await;
+    }
+}
+
+#[cfg(unix)]
+async fn try_find_pr_run_id(pr_number: u64) -> Result<Option<u64>> {
+    let output = run_gh_command(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "--json",
+        "headRefName,headRefOid,createdAt",
+    ])
+    .await?;
+    let pr_view = serde_json::from_str::<GhPrLookupView>(&output)?;
+    let branch = pr_view
+        .head_ref_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let pr_head_sha = pr_view
+        .head_ref_oid
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let pr_created_at = pr_view
+        .created_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let Some(branch) = branch else {
+        return Ok(None);
+    };
+
+    let output = run_gh_command(&[
+        "run",
+        "list",
+        "--branch",
+        &branch,
+        "--limit",
+        "20",
+        "--json",
+        "databaseId,headSha,createdAt",
+    ])
+    .await?;
+    let runs = serde_json::from_str::<Vec<GhRunListEntry>>(&output)?;
+    for run in runs {
+        let Some(run_id) = run.database_id else {
+            continue;
+        };
+
+        if let Some(expected_head_sha) = pr_head_sha.as_deref()
+            && run
+                .head_sha
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                != Some(expected_head_sha)
+        {
+            continue;
+        }
+
+        if !run_passes_pr_recency_gate(run.created_at.as_deref(), pr_created_at.as_deref()) {
+            continue;
+        }
+
+        return Ok(Some(run_id));
+    }
+
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn run_passes_pr_recency_gate(run_created_at: Option<&str>, pr_created_at: Option<&str>) -> bool {
+    let Some(pr_created_at) = pr_created_at else {
+        return true;
+    };
+    let Some(run_created_at) = run_created_at else {
+        return true;
+    };
+
+    let parse_ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok();
+    let Some(pr_ts) = parse_ts(pr_created_at) else {
+        return true;
+    };
+    let Some(run_ts) = parse_ts(run_created_at) else {
+        return true;
+    };
+
+    run_ts >= pr_ts
+}
+
+#[cfg(unix)]
+async fn fetch_pr_merge_state(pr_number: u64) -> Result<Option<GhPrView>> {
+    let output = run_gh_command(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "--json",
+        "mergeStateStatus,url",
+    ])
+    .await?;
+    let pr = serde_json::from_str::<GhPrView>(&output)?;
+    if pr
+        .merge_state_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(pr))
+}
+
+#[cfg(unix)]
+fn is_pr_merge_state_dirty(merge_state_status: &str) -> bool {
+    merge_state_status.trim().eq_ignore_ascii_case("dirty")
+}
+
+#[cfg(unix)]
+async fn try_find_workflow_run_id(workflow: &str, reference: &str) -> Result<Option<u64>> {
+    let output = run_gh_command(&[
+        "run",
+        "list",
+        "--workflow",
+        workflow,
+        "--limit",
+        "20",
+        "--json",
+        "databaseId,headBranch,headSha",
+    ])
+    .await?;
+    let runs = serde_json::from_str::<Vec<serde_json::Value>>(&output)?;
+
+    for run in runs {
+        let branch = run.get("headBranch").and_then(|v| v.as_str());
+        let sha = run.get("headSha").and_then(|v| v.as_str());
+        let matches_ref =
+            branch == Some(reference) || sha.is_some_and(|s| s.starts_with(reference));
+        if matches_ref && let Some(run_id) = run.get("databaseId").and_then(|v| v.as_u64()) {
+            return Ok(Some(run_id));
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(unix)]
+async fn run_gh_command(args: &[&str]) -> Result<String> {
+    let output = tokio::process::Command::new("gh")
+        .args(args)
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("gh {} failed: {}", args.join(" "), stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(unix)]
+async fn monitor_gh_run(
+    home: &std::path::Path,
+    status_seed: &GhMonitorStatus,
+    gh_request: &GhMonitorRequest,
+    run_id: u64,
+) -> Result<()> {
+    let (from_agent, targets) = resolve_ci_alert_routing(home, &status_seed.team);
+    let mut seen_completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut pending_completed: Vec<GhRunJob> = Vec::new();
+    let mut last_progress_emit: Option<std::time::Instant> = None;
+    let mut first_poll = true;
+
+    loop {
+        let run = fetch_run_view(run_id).await?;
+        let completed_jobs: Vec<GhRunJob> = run
+            .jobs
+            .iter()
+            .filter(|job| is_job_completed(job))
+            .cloned()
+            .collect();
+        for job in completed_jobs {
+            if seen_completed.insert(job.database_id) {
+                pending_completed.push(job);
+            }
+        }
+
+        let terminal = classify_terminal_state(&run);
+        if terminal.is_none() {
+            let now = std::time::Instant::now();
+            if should_emit_progress(last_progress_emit, now) && !pending_completed.is_empty() {
+                let message = format_progress_message(&run, &pending_completed);
+                let summary = format!(
+                    "ci progress: run {} ({}/{})",
+                    run.database_id,
+                    count_completed_jobs(&run),
+                    run.jobs.len()
+                );
+                emit_ci_monitor_message(
+                    home,
+                    &from_agent,
+                    &targets,
+                    &summary,
+                    &message,
+                    Some(format!(
+                        "ci-progress-{}-{}",
+                        run.database_id,
+                        uuid::Uuid::new_v4()
+                    )),
+                );
+                pending_completed.clear();
+                last_progress_emit = Some(now);
+            }
+
+            let mut state = status_seed.clone();
+            state.run_id = Some(run.database_id);
+            state.state = "monitoring".to_string();
+            state.updated_at = chrono::Utc::now().to_rfc3339();
+            state.message = Some(format!(
+                "Run {} still in progress ({}/{})",
+                run.database_id,
+                count_completed_jobs(&run),
+                run.jobs.len()
+            ));
+            upsert_gh_monitor_status(home, state)?;
+
+            // Send first update quickly to make monitor state visible, then settle
+            // into a lighter poll cadence.
+            let sleep_secs = if first_poll { 5 } else { 15 };
+            first_poll = false;
+            tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+            continue;
+        }
+
+        let terminal = terminal.unwrap_or(GhRunTerminalState::Other);
+        let summary_table = format_summary_table(&run);
+        let mut message = format!(
+            "CI monitor terminal update\nRun: {}\nWorkflow: {}\nState: {}\nURL: {}\n\n{}\n",
+            run.database_id,
+            run.name,
+            terminal_state_label(terminal),
+            run.url,
+            summary_table
+        );
+
+        if terminal != GhRunTerminalState::Success {
+            let correlation_id = format!("ci-failure-{}-{}", run.database_id, uuid::Uuid::new_v4());
+            let failure_payload =
+                build_failure_payload(&run, status_seed, gh_request, &correlation_id).await;
+            message.push_str("\nFailure details:\n");
+            message.push_str(&failure_payload);
+        }
+
+        let summary = format!(
+            "ci terminal: run {} {}",
+            run.database_id,
+            terminal_state_label(terminal)
+        );
+        emit_ci_monitor_message(
+            home,
+            &from_agent,
+            &targets,
+            &summary,
+            &message,
+            Some(format!(
+                "ci-terminal-{}-{}",
+                run.database_id,
+                uuid::Uuid::new_v4()
+            )),
+        );
+
+        let mut state = status_seed.clone();
+        state.run_id = Some(run.database_id);
+        state.state = terminal_state_label(terminal)
+            .to_lowercase()
+            .replace(' ', "_");
+        state.updated_at = chrono::Utc::now().to_rfc3339();
+        state.message = Some(format!(
+            "Terminal: {} ({}/{})",
+            terminal_state_label(terminal),
+            count_completed_jobs(&run),
+            run.jobs.len()
+        ));
+        upsert_gh_monitor_status(home, state)?;
+
+        if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
+            && let Ok(pr_number) = status_seed.target.trim().parse::<u64>()
+        {
+            match fetch_pr_merge_state(pr_number).await {
+                Ok(Some(pr_view)) => {
+                    if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
+                        && is_pr_merge_state_dirty(merge_state_status)
+                    {
+                        emit_merge_conflict_alert(
+                            home,
+                            status_seed,
+                            pr_view.url.as_deref(),
+                            merge_state_status,
+                            run.conclusion.as_deref(),
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(
+                        team = %status_seed.team,
+                        pr = %status_seed.target,
+                        "gh-monitor post-terminal mergeStateStatus lookup failed: {e}"
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
+}
+
+#[cfg(unix)]
+async fn fetch_run_view(run_id: u64) -> Result<GhRunView> {
+    let output = run_gh_command(&[
+        "run",
+        "view",
+        &run_id.to_string(),
+        "--json",
+        "databaseId,name,status,conclusion,headBranch,headSha,url,jobs,attempt,pullRequests",
+    ])
+    .await?;
+    let run = serde_json::from_str::<GhRunView>(&output)?;
+    Ok(run)
+}
+
+#[cfg(unix)]
+fn should_emit_progress(
+    last_progress_emit: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    match last_progress_emit {
+        None => true,
+        Some(prev) => now.duration_since(prev) >= std::time::Duration::from_secs(60),
+    }
+}
+
+#[cfg(unix)]
+fn is_job_completed(job: &GhRunJob) -> bool {
+    job.status.eq_ignore_ascii_case("completed")
+}
+
+#[cfg(unix)]
+fn count_completed_jobs(run: &GhRunView) -> usize {
+    run.jobs.iter().filter(|job| is_job_completed(job)).count()
+}
+
+#[cfg(unix)]
+fn format_progress_message(run: &GhRunView, pending_completed: &[GhRunJob]) -> String {
+    let new_jobs = pending_completed
+        .iter()
+        .map(|job| format!("{}({})", job.name, job_status_label(job)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CI monitor progress\nRun: {}\nWorkflow: {}\nCompleted: {}/{}\nNewly completed: {}\nRun URL: {}",
+        run.database_id,
+        run.name,
+        count_completed_jobs(run),
+        run.jobs.len(),
+        if new_jobs.is_empty() {
+            "(none)"
+        } else {
+            &new_jobs
+        },
+        run.url
+    )
+}
+
+#[cfg(unix)]
+fn job_status_label(job: &GhRunJob) -> &'static str {
+    match job
+        .conclusion
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "success" => "success",
+        "failure" => "failure",
+        "timedout" | "timed_out" => "timed_out",
+        "cancelled" => "cancelled",
+        "actionrequired" | "action_required" => "action_required",
+        _ => {
+            if is_job_completed(job) {
+                "completed"
+            } else {
+                "in_progress"
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn classify_terminal_state(run: &GhRunView) -> Option<GhRunTerminalState> {
+    if !run.status.eq_ignore_ascii_case("completed") && run.conclusion.is_none() {
+        return None;
+    }
+    let state = match run
+        .conclusion
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "success" => GhRunTerminalState::Success,
+        "failure" => GhRunTerminalState::Failure,
+        "timedout" | "timed_out" => GhRunTerminalState::TimedOut,
+        "cancelled" => GhRunTerminalState::Cancelled,
+        "actionrequired" | "action_required" => GhRunTerminalState::ActionRequired,
+        _ => GhRunTerminalState::Other,
+    };
+    Some(state)
+}
+
+#[cfg(unix)]
+fn terminal_state_label(state: GhRunTerminalState) -> &'static str {
+    match state {
+        GhRunTerminalState::Success => "SUCCESS",
+        GhRunTerminalState::Failure => "FAILURE",
+        GhRunTerminalState::TimedOut => "TIMED_OUT",
+        GhRunTerminalState::Cancelled => "CANCELLED",
+        GhRunTerminalState::ActionRequired => "ACTION_REQUIRED",
+        GhRunTerminalState::Other => "UNKNOWN",
+    }
+}
+
+#[cfg(unix)]
+fn format_summary_table(run: &GhRunView) -> String {
+    let mut lines = Vec::new();
+    lines.push("| Job/Test | Status | Runtime |".to_string());
+    lines.push("|---|---|---|".to_string());
+    for job in &run.jobs {
+        lines.push(format!(
+            "| {} | {} | {} |",
+            job.name,
+            job_status_label(job),
+            format_job_runtime(job)
+        ));
+    }
+    lines.join("\n")
+}
+
+#[cfg(unix)]
+fn format_job_runtime(job: &GhRunJob) -> String {
+    let Some(started) = job.started_at.as_deref() else {
+        return "-".to_string();
+    };
+    let Some(completed) = job.completed_at.as_deref() else {
+        return "-".to_string();
+    };
+    let Ok(started_dt) = chrono::DateTime::parse_from_rfc3339(started) else {
+        return "-".to_string();
+    };
+    let Ok(completed_dt) = chrono::DateTime::parse_from_rfc3339(completed) else {
+        return "-".to_string();
+    };
+    let duration = completed_dt.signed_duration_since(started_dt);
+    let secs = duration.num_seconds().max(0);
+    format!("{}m {}s", secs / 60, secs % 60)
+}
+
+#[cfg(unix)]
+fn emit_ci_monitor_message(
+    home: &std::path::Path,
+    from_agent: &str,
+    targets: &[(String, String)],
+    summary: &str,
+    text: &str,
+    message_id: Option<String>,
+) {
+    for (agent, team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        let message = InboxMessage {
+            from: from_agent.to_string(),
+            text: text.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(summary.to_string()),
+            message_id: message_id.clone(),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) =
+            agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, team, agent)
+        {
+            warn!(
+                team = %team,
+                agent = %agent,
+                "failed to emit ci monitor message: {e}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn build_failure_payload(
+    run: &GhRunView,
+    status_seed: &GhMonitorStatus,
+    gh_request: &GhMonitorRequest,
+    correlation_id: &str,
+) -> String {
+    let failed_jobs: Vec<&GhRunJob> = run
+        .jobs
+        .iter()
+        .filter(|job| matches!(job_status_label(job), "failure" | "timed_out"))
+        .collect();
+    let failed_job_names = failed_jobs
+        .iter()
+        .map(|job| job.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let failed_job_urls = failed_jobs
+        .iter()
+        .map(|job| {
+            job.url.clone().unwrap_or_else(|| {
+                format!("{}/job/{}", run.url.trim_end_matches('/'), job.database_id)
+            })
+        })
+        .collect::<Vec<_>>();
+    let first_failing_step = failed_jobs
+        .iter()
+        .flat_map(|job| job.steps.iter())
+        .find(|step| {
+            let conclusion = step
+                .conclusion
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase();
+            let status = step.status.as_deref().unwrap_or_default().to_lowercase();
+            conclusion == "failure"
+                || conclusion == "timed_out"
+                || conclusion == "timedout"
+                || status == "failed"
+        })
+        .map(|step| step.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let failed_log_excerpt = if let Some(first_job) = failed_jobs.first() {
+        fetch_failed_log_excerpt(first_job.database_id)
+            .await
+            .unwrap_or_else(|_| "(log excerpt unavailable)".to_string())
+    } else {
+        "(no failed jobs captured)".to_string()
+    };
+
+    let classification = classify_failure(run);
+    let pr_url = derive_pr_url(run, status_seed, gh_request);
+    let repo_base = derive_repo_base_from_run_url(&run.url).unwrap_or_default();
+    let next_action = if failed_jobs.is_empty() {
+        format!("atm gh status run {}", run.database_id)
+    } else {
+        format!("gh run view {} --log-failed", run.database_id)
+    };
+    format!(
+        "run_url: {run_url}\nfailed_job_urls: {failed_job_urls}\npr_url: {pr_url}\nworkflow: {workflow}\njob_names: {job_names}\nrun_id: {run_id}\nrun_attempt: {attempt}\nbranch: {branch}\ncommit_short: {sha_short}\ncommit_full: {sha_full}\nclassification: {classification}\nfirst_failing_step: {first_failing_step}\nlog_excerpt: {log_excerpt}\ncorrelation_id: {correlation_id}\nnext_action_hint: {next_action}\nrepo_base: {repo_base}",
+        run_url = run.url,
+        failed_job_urls = if failed_job_urls.is_empty() {
+            "(none)".to_string()
+        } else {
+            failed_job_urls.join(", ")
+        },
+        pr_url = pr_url.unwrap_or_else(|| "(unknown)".to_string()),
+        workflow = run.name,
+        job_names = if failed_job_names.is_empty() {
+            "(none)".to_string()
+        } else {
+            failed_job_names
+        },
+        run_id = run.database_id,
+        attempt = run.attempt.unwrap_or(1),
+        branch = run.head_branch,
+        sha_short = short_sha(&run.head_sha),
+        sha_full = run.head_sha,
+        classification = classification,
+        first_failing_step = first_failing_step,
+        log_excerpt = failed_log_excerpt
+            .replace('\n', " ")
+            .chars()
+            .take(240)
+            .collect::<String>(),
+        correlation_id = correlation_id,
+        next_action = next_action,
+        repo_base = repo_base,
+    )
+}
+
+#[cfg(unix)]
+async fn fetch_failed_log_excerpt(job_id: u64) -> Result<String> {
+    let output = run_gh_command(&["run", "view", "--job", &job_id.to_string(), "--log"]).await?;
+    let excerpt = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    Ok(excerpt)
+}
+
+#[cfg(unix)]
+fn classify_failure(run: &GhRunView) -> &'static str {
+    match run
+        .conclusion
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "timedout" | "timed_out" => "timeout",
+        "cancelled" => "cancelled",
+        "actionrequired" | "action_required" => "action_required",
+        "failure" => {
+            if is_infra_failure(run) {
+                "infra"
+            } else {
+                "test_fail"
+            }
+        }
+        _ => "unknown",
+    }
+}
+
+#[cfg(unix)]
+fn is_infra_failure(run: &GhRunView) -> bool {
+    const INFRA_HINTS: &[&str] = &[
+        "runner",
+        "infrastructure",
+        "resource exhausted",
+        "no space",
+        "disk",
+        "network",
+        "connection",
+        "service unavailable",
+        "timed out waiting",
+        "oom",
+        "out of memory",
+    ];
+
+    let contains_infra_hint = |value: &str| {
+        let lowered = value.to_lowercase();
+        INFRA_HINTS.iter().any(|hint| lowered.contains(hint))
+    };
+
+    run.jobs.iter().any(|job| {
+        let failed = matches!(job_status_label(job), "failure" | "timed_out");
+        failed
+            && (contains_infra_hint(&job.name)
+                || job.steps.iter().any(|step| contains_infra_hint(&step.name)))
+    })
+}
+
+#[cfg(unix)]
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(8).collect::<String>()
+}
+
+#[cfg(unix)]
+fn derive_repo_base_from_run_url(run_url: &str) -> Option<String> {
+    let parts = run_url.split('/').collect::<Vec<_>>();
+    if parts.len() < 5 {
+        return None;
+    }
+    Some(format!(
+        "{}//{}/{}/{}",
+        parts[0], parts[2], parts[3], parts[4]
+    ))
+}
+
+#[cfg(unix)]
+fn derive_pr_url(
+    run: &GhRunView,
+    status_seed: &GhMonitorStatus,
+    gh_request: &GhMonitorRequest,
+) -> Option<String> {
+    if let Some(url) = run.pull_requests.iter().find_map(|pr| pr.url.clone()) {
+        return Some(url);
+    }
+    if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
+        && let Some(repo_base) = derive_repo_base_from_run_url(&run.url)
+    {
+        return Some(format!("{}/pull/{}", repo_base, status_seed.target.trim()));
+    }
+    None
+}
+
+#[cfg(unix)]
+fn gh_monitor_state_path(home: &std::path::Path) -> PathBuf {
+    home.join(".claude/daemon/gh-monitor-state.json")
+}
+
+#[cfg(unix)]
+fn gh_monitor_key(
+    team: &str,
+    target_kind: GhMonitorTargetKind,
+    target: &str,
+    reference: Option<&str>,
+) -> String {
+    let kind = match target_kind {
+        GhMonitorTargetKind::Pr => "pr",
+        GhMonitorTargetKind::Workflow => "workflow",
+        GhMonitorTargetKind::Run => "run",
+    };
+    let reference = reference.unwrap_or_default();
+    format!(
+        "{}|{}|{}|{}",
+        team.trim(),
+        kind,
+        target.trim(),
+        reference.trim()
+    )
+}
+
+#[cfg(unix)]
+fn load_gh_monitor_state_map(
+    home: &std::path::Path,
+) -> Result<std::collections::HashMap<String, GhMonitorStatus>> {
+    let path = gh_monitor_state_path(home);
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let state = serde_json::from_str::<GhMonitorStateFile>(&raw)?;
+    let mut map = std::collections::HashMap::new();
+    for record in state.records {
+        let key = gh_monitor_key(
+            &record.team,
+            record.target_kind,
+            &record.target,
+            record.reference.as_deref(),
+        );
+        map.insert(key, record);
+    }
+    Ok(map)
+}
+
+#[cfg(unix)]
+fn upsert_gh_monitor_status(home: &std::path::Path, status: GhMonitorStatus) -> Result<()> {
+    let mut map = load_gh_monitor_state_map(home)?;
+    let key = gh_monitor_key(
+        &status.team,
+        status.target_kind,
+        &status.target,
+        status.reference.as_deref(),
+    );
+    map.insert(key, status);
+    let mut records: Vec<GhMonitorStatus> = map.into_values().collect();
+    records.sort_by(|a, b| {
+        let ak = gh_monitor_key(&a.team, a.target_kind, &a.target, a.reference.as_deref());
+        let bk = gh_monitor_key(&b.team, b.target_kind, &b.target, b.reference.as_deref());
+        ak.cmp(&bk)
+    });
+    let state = GhMonitorStateFile { records };
+    let path = gh_monitor_state_path(home);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&state)?)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn emit_ci_not_started_alert(home: &std::path::Path, status: &GhMonitorStatus) {
+    let (from_agent, targets) = resolve_ci_alert_routing(home, &status.team);
+    let text = format!(
+        "[ci_not_started] {} target '{}' did not produce a run in the start window.\n{}",
+        match status.target_kind {
+            GhMonitorTargetKind::Pr => "PR monitor",
+            GhMonitorTargetKind::Workflow => "workflow monitor",
+            GhMonitorTargetKind::Run => "run monitor",
+        },
+        status.target,
+        status.message.clone().unwrap_or_default()
+    );
+    let summary = format!("ci_not_started: {}", status.target);
+    for (agent, team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(&team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        let message = InboxMessage {
+            from: from_agent.clone(),
+            text: text.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(summary.clone()),
+            message_id: Some(uuid::Uuid::new_v4().to_string()),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) =
+            agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, &team, &agent)
+        {
+            warn!(
+                team = %team,
+                agent = %agent,
+                "failed to emit ci_not_started alert: {e}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn emit_merge_conflict_alert(
+    home: &std::path::Path,
+    status: &GhMonitorStatus,
+    pr_url: Option<&str>,
+    merge_state_status: &str,
+    run_conclusion: Option<&str>,
+) {
+    let (from_agent, targets) = resolve_ci_alert_routing(home, &status.team);
+    let target_kind = match status.target_kind {
+        GhMonitorTargetKind::Pr => "pr",
+        GhMonitorTargetKind::Workflow => "workflow",
+        GhMonitorTargetKind::Run => "run",
+    };
+    let mut text = format!(
+        "[merge_conflict] Merge conflict detected for monitored target.\nclassification: merge_conflict\nstatus: merge_conflict\ntarget_kind: {target_kind}\ntarget: {}\npr_url: {}\nmerge_state_status: {}",
+        status.target,
+        pr_url.unwrap_or("(unknown)"),
+        merge_state_status
+    );
+    if let Some(run_conclusion) = run_conclusion {
+        text.push_str(&format!("\nrun_conclusion: {run_conclusion}"));
+    }
+    if let Some(message) = status.message.as_deref()
+        && !message.trim().is_empty()
+    {
+        text.push_str(&format!("\nreason: {message}"));
+    }
+
+    let summary = format!("merge_conflict: {}", status.target);
+    let mut extra_fields = serde_json::Map::new();
+    extra_fields.insert(
+        "classification".to_string(),
+        serde_json::Value::String("merge_conflict".to_string()),
+    );
+    extra_fields.insert(
+        "status".to_string(),
+        serde_json::Value::String("merge_conflict".to_string()),
+    );
+    extra_fields.insert(
+        "target_kind".to_string(),
+        serde_json::Value::String(target_kind.to_string()),
+    );
+    extra_fields.insert(
+        "pr_url".to_string(),
+        serde_json::Value::String(pr_url.unwrap_or("(unknown)").to_string()),
+    );
+    extra_fields.insert(
+        "merge_state_status".to_string(),
+        serde_json::Value::String(merge_state_status.to_string()),
+    );
+    if let Some(run_conclusion) = run_conclusion {
+        extra_fields.insert(
+            "run_conclusion".to_string(),
+            serde_json::Value::String(run_conclusion.to_string()),
+        );
+    }
+    emit_event_best_effort(EventFields {
+        level: "warn",
+        source: "atm-daemon",
+        action: "gh_monitor_merge_conflict",
+        team: Some(status.team.clone()),
+        target: Some(status.target.clone()),
+        result: Some("merge_conflict".to_string()),
+        error: Some(format!(
+            "merge_state_status={}",
+            merge_state_status.trim().to_uppercase()
+        )),
+        extra_fields,
+        ..Default::default()
+    });
+
+    for (agent, team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(&team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        let message = InboxMessage {
+            from: from_agent.clone(),
+            text: text.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(summary.clone()),
+            message_id: Some(uuid::Uuid::new_v4().to_string()),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) =
+            agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, &team, &agent)
+        {
+            warn!(
+                team = %team,
+                agent = %agent,
+                "failed to emit merge_conflict alert: {e}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn resolve_ci_alert_routing(home: &std::path::Path, team: &str) -> (String, Vec<(String, String)>) {
+    let current_dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(_) => {
+            return (
+                "gh-monitor".to_string(),
+                vec![("team-lead".to_string(), team.to_string())],
+            );
+        }
+    };
+    let config = match agent_team_mail_core::config::resolve_config(
+        &agent_team_mail_core::config::ConfigOverrides {
+            team: Some(team.to_string()),
+            ..Default::default()
+        },
+        &current_dir,
+        home,
+    ) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            return (
+                "gh-monitor".to_string(),
+                vec![("team-lead".to_string(), team.to_string())],
+            );
+        }
+    };
+
+    let plugin_table = config.plugin_config("gh_monitor");
+    let Some(plugin_table) = plugin_table else {
+        return (
+            "gh-monitor".to_string(),
+            vec![("team-lead".to_string(), team.to_string())],
+        );
+    };
+
+    let parsed = match crate::plugins::ci_monitor::CiMonitorConfig::from_toml(plugin_table) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            return (
+                "gh-monitor".to_string(),
+                vec![("team-lead".to_string(), team.to_string())],
+            );
+        }
+    };
+
+    let from_agent = if parsed.agent.trim().is_empty() {
+        "gh-monitor".to_string()
+    } else {
+        parsed.agent
+    };
+    let targets = if parsed.notify_target.is_empty() {
+        vec![("team-lead".to_string(), team.to_string())]
+    } else {
+        parsed
+            .notify_target
+            .into_iter()
+            .map(|t| {
+                let target_team = t.team.unwrap_or_else(|| team.to_string());
+                (t.agent, target_team)
+            })
+            .collect()
+    };
+    (from_agent, targets)
+}
+
 /// Handle the `"control"` command asynchronously.
 #[cfg(unix)]
 async fn handle_control_command(
@@ -2419,6 +4424,30 @@ fn parse_and_dispatch(
             &request.request_id,
             "INTERNAL_ERROR",
             "stream-event command should have been handled by the async path",
+        ),
+        // "gh-monitor" is handled asynchronously before parse_and_dispatch is called.
+        "gh-monitor" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "gh-monitor command should have been handled by the async path",
+        ),
+        // "gh-status" is handled asynchronously before parse_and_dispatch is called.
+        "gh-status" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "gh-status command should have been handled by the async path",
+        ),
+        // "gh-monitor-control" is handled asynchronously before parse_and_dispatch is called.
+        "gh-monitor-control" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "gh-monitor-control command should have been handled by the async path",
+        ),
+        // "gh-monitor-health" is handled asynchronously before parse_and_dispatch is called.
+        "gh-monitor-health" => make_error_response(
+            &request.request_id,
+            "INTERNAL_ERROR",
+            "gh-monitor-health command should have been handled by the async path",
         ),
         other => make_error_response(
             &request.request_id,
@@ -3496,6 +5525,7 @@ mod tests {
     use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
     use serial_test::serial;
+    use std::path::Path;
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -3533,6 +5563,42 @@ mod tests {
         }
     }
 
+    fn write_gh_monitor_config(home: &Path, team: &str) {
+        let cfg_dir = home.join(".config/atm");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let config = format!(
+            r#"[core]
+default_team = "{team}"
+identity = "daemon-test"
+
+[plugins.gh_monitor]
+enabled = true
+team = "{team}"
+agent = "gh-monitor"
+poll_interval_secs = 60
+"#
+        );
+        std::fs::write(cfg_dir.join("config.toml"), config).unwrap();
+    }
+
+    fn write_invalid_gh_monitor_config(home: &Path, team: &str) {
+        let cfg_dir = home.join(".config/atm");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let config = format!(
+            r#"[core]
+default_team = "{team}"
+identity = "daemon-test"
+
+[plugins.gh_monitor]
+enabled = true
+team = "{team}"
+agent = "gh-monitor"
+poll_interval_secs = 1
+"#
+        );
+        std::fs::write(cfg_dir.join("config.toml"), config).unwrap();
+    }
+
     struct EnvGuard {
         key: &'static str,
         previous: Option<String>,
@@ -3559,6 +5625,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn install_fake_gh_script(temp: &TempDir, script_body: &str) -> EnvGuard {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script_path = temp.path().join("gh");
+        std::fs::write(&script_path, script_body).expect("write fake gh script");
+        let mut perms = std::fs::metadata(&script_path)
+            .expect("stat fake gh script")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).expect("chmod fake gh script");
+
+        let previous_path = std::env::var("PATH").unwrap_or_default();
+        let composed = if previous_path.is_empty() {
+            temp.path().display().to_string()
+        } else {
+            format!("{}:{previous_path}", temp.path().display())
+        };
+        EnvGuard::set("PATH", &composed)
     }
 
     #[derive(Clone, Default)]
@@ -3629,6 +5716,24 @@ mod tests {
             serde_json::to_string_pretty(&config).unwrap(),
         )
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn read_team_inbox_messages(
+        home_dir: &std::path::Path,
+        team: &str,
+        agent: &str,
+    ) -> Vec<InboxMessage> {
+        let path = home_dir
+            .join(".claude/teams")
+            .join(team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        if !path.exists() {
+            return Vec::new();
+        }
+        serde_json::from_str::<Vec<InboxMessage>>(&std::fs::read_to_string(path).unwrap())
+            .unwrap_or_default()
     }
 
     fn set_member_backend(
@@ -4010,6 +6115,764 @@ mod tests {
         assert!(!is_control_command(
             r#"{"version":1,"request_id":"r1","command":"agent-state","payload":{}}"#
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_gh_command_detection() {
+        assert!(is_gh_monitor_command(
+            r#"{"version":1,"request_id":"r1","command":"gh-monitor","payload":{}}"#
+        ));
+        assert!(is_gh_monitor_command(
+            r#"{"version":1,"request_id":"r1","command": "gh-monitor","payload":{}}"#
+        ));
+        assert!(is_gh_status_command(
+            r#"{"version":1,"request_id":"r1","command":"gh-status","payload":{}}"#
+        ));
+        assert!(is_gh_status_command(
+            r#"{"version":1,"request_id":"r1","command": "gh-status","payload":{}}"#
+        ));
+        assert!(is_gh_monitor_control_command(
+            r#"{"version":1,"request_id":"r1","command":"gh-monitor-control","payload":{}}"#
+        ));
+        assert!(is_gh_monitor_health_command(
+            r#"{"version":1,"request_id":"r1","command":"gh-monitor-health","payload":{}}"#
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_pr_timeout_zero_returns_ci_not_started_and_status_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let req_json = r#"{"version":1,"request_id":"r-gh-1","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":0}}"#;
+        let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+        let status_payload = monitor_resp.payload.unwrap();
+        assert_eq!(status_payload["state"].as_str(), Some("ci_not_started"));
+        assert_eq!(status_payload["target_kind"].as_str(), Some("pr"));
+        assert_eq!(status_payload["target"].as_str(), Some("123"));
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-2","command":"gh-status","payload":{"team":"atm-dev","target_kind":"pr","target":"123"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["state"].as_str(), Some("ci_not_started"));
+        assert_eq!(status["target_kind"].as_str(), Some("pr"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_workflow_requires_reference() {
+        let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let req_json = r#"{"version":1,"request_id":"r-gh-3","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci"}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "MISSING_PARAMETER");
+        assert!(err.message.contains("reference"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_preflight_dirty_pr_skips_polling() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        write_hook_auth_team_config(temp.path(), "atm-dev", "team-lead", &["team-lead"]);
+        std::fs::create_dir_all(temp.path().join(".claude/teams/atm-dev/inboxes")).unwrap();
+        let run_list_marker = temp.path().join("run-list-marker.txt");
+        let _marker_guard = EnvGuard::set(
+            "ATM_GH_RUN_LIST_MARKER",
+            run_list_marker.to_string_lossy().as_ref(),
+        );
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"mergeStateStatus":"DIRTY","url":"https://github.com/o/r/pull/123"}'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  echo "called" > "${ATM_GH_RUN_LIST_MARKER}"
+  echo '[{"databaseId":424242}]'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let req_json = r#"{"version":1,"request_id":"r-gh-preflight-dirty","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":30}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["state"].as_str(), Some("merge_conflict"));
+        assert_eq!(payload["run_id"], serde_json::Value::Null);
+        assert!(
+            !run_list_marker.exists(),
+            "preflight DIRTY must skip CI polling"
+        );
+
+        let inbox = read_team_inbox_messages(temp.path(), "atm-dev", "team-lead");
+        assert!(
+            inbox.iter().any(|msg| {
+                msg.text.contains("classification: merge_conflict")
+                    && msg.text.contains("status: merge_conflict")
+                    && msg.text.contains("merge_state_status: DIRTY")
+                    && msg.text.contains("pr_url: https://github.com/o/r/pull/123")
+            }),
+            "team lead should receive merge_conflict alert with required fields"
+        );
+        assert!(
+            !inbox.iter().any(|msg| {
+                msg.text.contains("classification: ci_not_started")
+                    || msg.text.contains("[ci_not_started]")
+            }),
+            "DIRTY preflight must suppress ci_not_started alerts"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_clean_pr_proceeds_to_polling() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        write_hook_auth_team_config(temp.path(), "atm-dev", "team-lead", &["team-lead"]);
+        std::fs::create_dir_all(temp.path().join(".claude/teams/atm-dev/inboxes")).unwrap();
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "mergeStateStatus,url" ]; then
+  echo '{"mergeStateStatus":"CLEAN","url":"https://github.com/o/r/pull/123"}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "headRefName,headRefOid,createdAt" ]; then
+  echo '{"headRefName":"feature/mock","headRefOid":"abcdef1234567890","createdAt":"2026-03-06T00:00:00Z"}'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  echo '[{"databaseId":424242,"headSha":"abcdef1234567890","createdAt":"2026-03-06T00:05:00Z"}]'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+  echo '{"databaseId":424242,"name":"ci","status":"completed","conclusion":"success","headBranch":"feature/mock","headSha":"abcdef1234567890","url":"https://github.com/o/r/actions/runs/424242","jobs":[{"databaseId":1,"name":"tests","status":"completed","conclusion":"success","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:10Z","steps":[],"url":"https://github.com/o/r/actions/runs/424242/job/1"}],"attempt":1,"pullRequests":[]}'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let req_json = r#"{"version":1,"request_id":"r-gh-preflight-clean","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":30}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["state"].as_str(), Some("monitoring"));
+        assert_eq!(payload["run_id"].as_u64(), Some(424242));
+
+        let inbox = read_team_inbox_messages(temp.path(), "atm-dev", "team-lead");
+        assert!(
+            !inbox
+                .iter()
+                .any(|msg| msg.text.contains("classification: merge_conflict")),
+            "clean preflight should not emit merge_conflict alerts"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_post_completion_dirty_check() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), "atm-dev", "team-lead", &["team-lead"]);
+        std::fs::create_dir_all(temp.path().join(".claude/teams/atm-dev/inboxes")).unwrap();
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+  echo '{"databaseId":42,"name":"ci","status":"completed","conclusion":"success","headBranch":"feature/mock","headSha":"abcdef1234567890","url":"https://github.com/o/r/actions/runs/42","jobs":[{"databaseId":1,"name":"tests","status":"completed","conclusion":"success","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:10Z","steps":[],"url":"https://github.com/o/r/actions/runs/42/job/1"}],"attempt":1,"pullRequests":[]}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "mergeStateStatus,url" ]; then
+  echo '{"mergeStateStatus":"DIRTY","url":"https://github.com/o/r/pull/123"}'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(42),
+            reference: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            message: None,
+        };
+        let gh_request = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            reference: None,
+            start_timeout_secs: Some(120),
+        };
+
+        monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
+            .await
+            .expect("monitor_gh_run should complete");
+
+        let inbox = read_team_inbox_messages(temp.path(), "atm-dev", "team-lead");
+        assert!(
+            inbox.iter().any(|msg| {
+                msg.text.contains("classification: merge_conflict")
+                    && msg.text.contains("status: merge_conflict")
+                    && msg.text.contains("merge_state_status: DIRTY")
+                    && msg.text.contains("pr_url: https://github.com/o/r/pull/123")
+                    && msg.text.contains("run_conclusion: success")
+            }),
+            "post-terminal DIRTY check must emit merge_conflict alert with run_conclusion"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_post_completion_clean_check_emits_no_merge_conflict_alert() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), "atm-dev", "team-lead", &["team-lead"]);
+        std::fs::create_dir_all(temp.path().join(".claude/teams/atm-dev/inboxes")).unwrap();
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+  echo '{"databaseId":42,"name":"ci","status":"completed","conclusion":"success","headBranch":"feature/mock","headSha":"abcdef1234567890","url":"https://github.com/o/r/actions/runs/42","jobs":[{"databaseId":1,"name":"tests","status":"completed","conclusion":"success","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:10Z","steps":[],"url":"https://github.com/o/r/actions/runs/42/job/1"}],"attempt":1,"pullRequests":[]}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "mergeStateStatus,url" ]; then
+  echo '{"mergeStateStatus":"CLEAN","url":"https://github.com/o/r/pull/123"}'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(42),
+            reference: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            message: None,
+        };
+        let gh_request = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            reference: None,
+            start_timeout_secs: Some(120),
+        };
+
+        monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
+            .await
+            .expect("monitor_gh_run should complete");
+
+        let inbox = read_team_inbox_messages(temp.path(), "atm-dev", "team-lead");
+        assert!(
+            !inbox
+                .iter()
+                .any(|msg| msg.text.contains("classification: merge_conflict")),
+            "post-terminal CLEAN check must not emit merge_conflict alert"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_terminal_failure_bypasses_progress_throttle_window() {
+        let temp = TempDir::new().unwrap();
+        let counter_path = temp.path().join("gh-counter.txt");
+        let _counter_guard = EnvGuard::set(
+            "ATM_GH_COUNTER_FILE",
+            counter_path.to_string_lossy().as_ref(),
+        );
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+COUNTER_FILE="${ATM_GH_COUNTER_FILE}"
+count=0
+if [ -f "$COUNTER_FILE" ]; then
+  count=$(cat "$COUNTER_FILE")
+fi
+count=$((count + 1))
+echo "$count" > "$COUNTER_FILE"
+
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+  if [ "$count" -eq 1 ]; then
+    echo '{"databaseId":42,"name":"ci","status":"in_progress","conclusion":null,"headBranch":"develop","headSha":"abcdef1234567890","url":"https://github.com/o/r/actions/runs/42","jobs":[{"databaseId":11,"name":"clippy","status":"completed","conclusion":"success","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:10Z","steps":[],"url":"https://github.com/o/r/actions/runs/42/job/11"},{"databaseId":12,"name":"tests","status":"in_progress","conclusion":null,"startedAt":"2026-03-06T00:00:00Z","completedAt":null,"steps":[],"url":"https://github.com/o/r/actions/runs/42/job/12"}],"attempt":1,"pullRequests":[]}'
+  else
+    echo '{"databaseId":42,"name":"ci","status":"completed","conclusion":"failure","headBranch":"develop","headSha":"abcdef1234567890","url":"https://github.com/o/r/actions/runs/42","jobs":[{"databaseId":11,"name":"clippy","status":"completed","conclusion":"success","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:10Z","steps":[],"url":"https://github.com/o/r/actions/runs/42/job/11"},{"databaseId":12,"name":"tests","status":"completed","conclusion":"failure","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:20Z","steps":[{"name":"suite","status":"completed","conclusion":"failure"}],"url":"https://github.com/o/r/actions/runs/42/job/12"}],"attempt":1,"pullRequests":[]}'
+  fi
+  exit 0
+fi
+
+echo "unsupported fake gh invocation: $*" >&2
+exit 1
+"#,
+        );
+
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "tracking".to_string(),
+            run_id: Some(42),
+            reference: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            message: None,
+        };
+        let gh_request = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            reference: None,
+            start_timeout_secs: Some(120),
+        };
+
+        let started = std::time::Instant::now();
+        monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
+            .await
+            .expect("monitor_gh_run should complete");
+        let elapsed = started.elapsed();
+
+        // First poll emits progress and sleeps 5s. The second poll is terminal failure
+        // and must bypass the 60s progress throttle window.
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "terminal update should bypass progress throttle, elapsed={elapsed:?}"
+        );
+
+        let state_map = load_gh_monitor_state_map(temp.path()).expect("state map");
+        let key = gh_monitor_key("atm-dev", GhMonitorTargetKind::Pr, "123", None);
+        let terminal = state_map.get(&key).expect("status entry");
+        assert_eq!(terminal.state, "failure");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_should_emit_progress_rate_limited_to_one_minute() {
+        let now = std::time::Instant::now();
+        assert!(should_emit_progress(None, now));
+        assert!(!should_emit_progress(
+            Some(now - std::time::Duration::from_secs(59)),
+            now
+        ));
+        assert!(should_emit_progress(
+            Some(now - std::time::Duration::from_secs(60)),
+            now
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_format_summary_table_contains_required_columns() {
+        let run = GhRunView {
+            database_id: 42,
+            name: "ci".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("success".to_string()),
+            head_branch: "develop".to_string(),
+            head_sha: "abcdef1234567890".to_string(),
+            url: "https://github.com/o/r/actions/runs/42".to_string(),
+            jobs: vec![GhRunJob {
+                database_id: 1,
+                name: "clippy".to_string(),
+                status: "completed".to_string(),
+                conclusion: Some("success".to_string()),
+                started_at: Some("2026-03-06T00:00:00Z".to_string()),
+                completed_at: Some("2026-03-06T00:00:10Z".to_string()),
+                steps: Vec::new(),
+                url: Some("https://github.com/o/r/actions/runs/42/job/1".to_string()),
+            }],
+            attempt: Some(1),
+            pull_requests: Vec::new(),
+        };
+
+        let table = format_summary_table(&run);
+        assert!(table.contains("| Job/Test | Status | Runtime |"));
+        assert!(table.contains("| clippy | success |"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_derive_pr_url_prefers_pr_target_fallback() {
+        let run = GhRunView {
+            database_id: 42,
+            name: "ci".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            head_branch: "feature/x".to_string(),
+            head_sha: "abcdef1234567890".to_string(),
+            url: "https://github.com/o/r/actions/runs/42".to_string(),
+            jobs: Vec::new(),
+            attempt: Some(1),
+            pull_requests: Vec::new(),
+        };
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(42),
+            reference: None,
+            updated_at: "2026-03-06T00:00:00Z".to_string(),
+            message: None,
+        };
+        let request = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            reference: None,
+            start_timeout_secs: Some(120),
+        };
+        let pr_url = derive_pr_url(&run, &status_seed, &request);
+        assert_eq!(pr_url.as_deref(), Some("https://github.com/o/r/pull/123"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_wait_for_pr_run_start_success_path_finds_run() {
+        let temp = TempDir::new().unwrap();
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"headRefName":"feature/mock","headRefOid":"sha-pr-123","createdAt":"2026-03-06T00:00:00Z"}'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  echo '[{"databaseId":111111,"headSha":"sha-older","createdAt":"2026-03-05T23:59:59Z"},{"databaseId":222222,"headSha":"sha-pr-123","createdAt":"2026-03-06T00:05:00Z"},{"databaseId":333333,"headSha":"sha-pr-123","createdAt":"2026-03-05T23:00:00Z"}]'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let run_id = wait_for_pr_run_start(123, 1).await.unwrap();
+        assert_eq!(run_id, Some(222222));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_build_failure_payload_contains_required_fields() {
+        let run = GhRunView {
+            database_id: 42,
+            name: "ci".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            head_branch: "feature/x".to_string(),
+            head_sha: "abcdef1234567890".to_string(),
+            url: "https://github.com/o/r/actions/runs/42".to_string(),
+            jobs: Vec::new(),
+            attempt: Some(2),
+            pull_requests: Vec::new(),
+        };
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(42),
+            reference: None,
+            updated_at: "2026-03-06T00:00:00Z".to_string(),
+            message: None,
+        };
+        let request = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            reference: None,
+            start_timeout_secs: Some(120),
+        };
+        let payload = build_failure_payload(&run, &status_seed, &request, "corr-1").await;
+        for required in [
+            "run_url:",
+            "failed_job_urls:",
+            "pr_url:",
+            "workflow:",
+            "job_names:",
+            "run_id:",
+            "run_attempt:",
+            "branch:",
+            "commit_short:",
+            "commit_full:",
+            "classification:",
+            "first_failing_step:",
+            "log_excerpt:",
+            "correlation_id:",
+            "next_action_hint:",
+        ] {
+            assert!(
+                payload.contains(required),
+                "failure payload missing field marker: {required}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_classify_failure_infra_when_runner_failure_detected() {
+        let run = GhRunView {
+            database_id: 88,
+            name: "ci".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            head_branch: "main".to_string(),
+            head_sha: "abcdef1234567890".to_string(),
+            url: "https://github.com/o/r/actions/runs/88".to_string(),
+            jobs: vec![GhRunJob {
+                database_id: 101,
+                name: "Runner provisioning failed".to_string(),
+                status: "completed".to_string(),
+                conclusion: Some("failure".to_string()),
+                started_at: None,
+                completed_at: None,
+                steps: vec![GhRunStep {
+                    name: "Set up runner".to_string(),
+                    status: Some("completed".to_string()),
+                    conclusion: Some("failure".to_string()),
+                }],
+                url: None,
+            }],
+            attempt: Some(1),
+            pull_requests: Vec::new(),
+        };
+
+        assert_eq!(classify_failure(&run), "infra");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_run_target_success_status_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let req_json = r#"{"version":1,"request_id":"r-gh-run","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"456789"}}"#;
+        let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+        let payload = monitor_resp.payload.unwrap();
+        assert_eq!(payload["target_kind"].as_str(), Some("run"));
+        assert_eq!(payload["target"].as_str(), Some("456789"));
+        assert_eq!(payload["run_id"].as_u64(), Some(456789));
+        assert_eq!(payload["state"].as_str(), Some("monitoring"));
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-run-status","command":"gh-status","payload":{"team":"atm-dev","target_kind":"run","target":"456789"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["target_kind"].as_str(), Some("run"));
+        assert_eq!(status["run_id"].as_u64(), Some(456789));
+        assert_eq!(status["state"].as_str(), Some("monitoring"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_gh_monitor_workflow_success_status_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  echo '[{"databaseId":987654,"headBranch":"develop","headSha":"abcd1234"}]'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let req_json = r#"{"version":1,"request_id":"r-gh-workflow","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci","reference":"develop","start_timeout_secs":30}}"#;
+        let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+        let payload = monitor_resp.payload.unwrap();
+        assert_eq!(payload["target_kind"].as_str(), Some("workflow"));
+        assert_eq!(payload["target"].as_str(), Some("ci"));
+        assert_eq!(payload["reference"].as_str(), Some("develop"));
+        assert_eq!(payload["run_id"].as_u64(), Some(987654));
+        assert_eq!(payload["state"].as_str(), Some("monitoring"));
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-workflow-status","command":"gh-status","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["target_kind"].as_str(), Some("workflow"));
+        assert_eq!(status["target"].as_str(), Some("ci"));
+        assert_eq!(status["reference"].as_str(), Some("develop"));
+        assert_eq!(status["run_id"].as_u64(), Some(987654));
+        assert_eq!(status["state"].as_str(), Some("monitoring"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
+        let temp = TempDir::new().unwrap();
+        let status_a = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Workflow,
+            target: "ci".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(111),
+            reference: Some("develop".to_string()),
+            updated_at: "2026-03-06T00:00:10Z".to_string(),
+            message: None,
+        };
+        let status_b = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Workflow,
+            target: "ci".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(222),
+            reference: Some("release/v1".to_string()),
+            updated_at: "2026-03-06T00:00:11Z".to_string(),
+            message: None,
+        };
+        upsert_gh_monitor_status(temp.path(), status_a).unwrap();
+        upsert_gh_monitor_status(temp.path(), status_b).unwrap();
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-workflow-ref","command":"gh-status","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci","reference":"release/v1"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["reference"].as_str(), Some("release/v1"));
+        assert_eq!(status["run_id"].as_u64(), Some(222));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_control_start_stop_restart_and_health() {
+        let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
+
+        let start_req = r#"{"version":1,"request_id":"r-gh-start","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"start"}}"#;
+        let start_resp = handle_gh_monitor_control_command(start_req, temp.path()).await;
+        assert_eq!(start_resp.status, "ok");
+        let start = start_resp.payload.unwrap();
+        assert_eq!(start["lifecycle_state"].as_str(), Some("running"));
+
+        let stop_req = r#"{"version":1,"request_id":"r-gh-stop","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"stop","drain_timeout_secs":1}}"#;
+        let stop_resp = handle_gh_monitor_control_command(stop_req, temp.path()).await;
+        assert_eq!(stop_resp.status, "ok");
+        let stop = stop_resp.payload.unwrap();
+        assert_eq!(stop["lifecycle_state"].as_str(), Some("stopped"));
+
+        let restart_req = r#"{"version":1,"request_id":"r-gh-restart","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"restart","drain_timeout_secs":1}}"#;
+        let restart_resp = handle_gh_monitor_control_command(restart_req, temp.path()).await;
+        assert_eq!(restart_resp.status, "ok");
+        let restart = restart_resp.payload.unwrap();
+        assert_eq!(restart["lifecycle_state"].as_str(), Some("running"));
+
+        let health_req = r#"{"version":1,"request_id":"r-gh-health","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let health = health_resp.payload.unwrap();
+        assert_eq!(health["team"].as_str(), Some("atm-dev"));
+        assert_eq!(health["lifecycle_state"].as_str(), Some("running"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_command_rejected_when_lifecycle_stopped() {
+        let temp = TempDir::new().unwrap();
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let _ = set_gh_monitor_health_state(
+            temp.path(),
+            "atm-dev",
+            Some("stopped"),
+            Some("healthy"),
+            Some(0),
+            Some("manually stopped for test".to_string()),
+        );
+
+        let req_json = r#"{"version":1,"request_id":"r-gh-stopped","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"42"}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "MONITOR_STOPPED");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_invalid_config_transitions_to_disabled_config_error() {
+        let temp = TempDir::new().unwrap();
+        write_invalid_gh_monitor_config(temp.path(), "atm-dev");
+
+        let req_json = r#"{"version":1,"request_id":"r-gh-config","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"42"}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "CONFIG_ERROR");
+
+        let health_req = r#"{"version":1,"request_id":"r-gh-health","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let health = health_resp.payload.unwrap();
+        assert_eq!(
+            health["availability_state"].as_str(),
+            Some("disabled_config_error")
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(not(unix))]
+    async fn test_gh_monitor_non_unix_returns_unsupported_platform() {
+        let req_json = r#"{"version":1,"request_id":"r-gh-stub","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"1"}}"#;
+        let monitor_resp = handle_gh_monitor_command(req_json, std::path::Path::new(".")).await;
+        assert_eq!(monitor_resp.status, "error");
+        let error = monitor_resp.error.unwrap();
+        assert_eq!(error.code, "UNSUPPORTED_PLATFORM");
+    }
+
+    #[tokio::test]
+    #[cfg(not(unix))]
+    async fn test_gh_status_non_unix_returns_unsupported_platform() {
+        let req_json = r#"{"version":1,"request_id":"r-gh-status-stub","command":"gh-status","payload":{"team":"atm-dev","target_kind":"run","target":"1"}}"#;
+        let status_resp = handle_gh_status_command(req_json, std::path::Path::new(".")).await;
+        assert_eq!(status_resp.status, "error");
+        let error = status_resp.error.unwrap();
+        assert_eq!(error.code, "UNSUPPORTED_PLATFORM");
+    }
+
+    #[tokio::test]
+    #[cfg(not(unix))]
+    async fn test_gh_monitor_control_non_unix_returns_unsupported_platform() {
+        let req_json = r#"{"version":1,"request_id":"r-gh-control-stub","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"stop"}}"#;
+        let resp = handle_gh_monitor_control_command(req_json, std::path::Path::new(".")).await;
+        assert_eq!(resp.status, "error");
+        let error = resp.error.unwrap();
+        assert_eq!(error.code, "UNSUPPORTED_PLATFORM");
+    }
+
+    #[tokio::test]
+    #[cfg(not(unix))]
+    async fn test_gh_monitor_health_non_unix_returns_unsupported_platform() {
+        let req_json = r#"{"version":1,"request_id":"r-gh-health-stub","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let resp = handle_gh_monitor_health_command(req_json, std::path::Path::new(".")).await;
+        assert_eq!(resp.status, "error");
+        let error = resp.error.unwrap();
+        assert_eq!(error.code, "UNSUPPORTED_PLATFORM");
     }
 
     #[test]
@@ -5309,7 +8172,7 @@ mod tests {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
         let store = make_store();
         let sr = make_sr();
-        let req_json = r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-abc","process_id":9999}}"#;
+        let req_json = r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-abc","process_id":0}}"#;
         let resp = handle_hook_event_command(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -5321,7 +8184,7 @@ mod tests {
         let reg = sr.lock().unwrap();
         let record = reg.query("team-lead").unwrap();
         assert_eq!(record.session_id, "sess-abc");
-        assert_eq!(record.process_id, 9999);
+        assert_eq!(record.process_id, 0);
 
         // Check agent registered in state tracker
         let tracker = store.lock().unwrap();

@@ -172,7 +172,7 @@ pub struct AddMemberArgs {
     /// Agent name (unique within team)
     agent: String,
 
-    /// Agent type (e.g., "codex", "human", "plugin:ci_monitor")
+    /// Agent type (e.g., "codex", "human", "plugin:gh_monitor")
     #[arg(long, default_value = "codex")]
     agent_type: String,
 

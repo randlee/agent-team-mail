@@ -40,6 +40,59 @@ impl MockPlugin {
     }
 }
 
+/// Plugin that fails immediately from run(), used to verify task isolation.
+struct FailingRunPlugin {
+    name: String,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl FailingRunPlugin {
+    fn new(name: impl Into<String>, events: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            name: name.into(),
+            events,
+        }
+    }
+}
+
+impl Plugin for FailingRunPlugin {
+    fn metadata(&self) -> PluginMetadata {
+        PluginMetadata {
+            name: Box::leak(self.name.clone().into_boxed_str()),
+            version: "1.0.0",
+            description: "Failing plugin for isolation testing",
+            capabilities: vec![Capability::CiMonitor],
+        }
+    }
+
+    async fn init(&mut self, _ctx: &PluginContext) -> Result<(), PluginError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("{}:init", self.name));
+        Ok(())
+    }
+
+    async fn run(&mut self, _cancel: CancellationToken) -> Result<(), PluginError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("{}:run_failed", self.name));
+        Err(PluginError::Runtime {
+            message: "simulated gh_monitor crash".to_string(),
+            source: None,
+        })
+    }
+
+    async fn shutdown(&mut self) -> Result<(), PluginError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("{}:shutdown", self.name));
+        Ok(())
+    }
+}
+
 impl Plugin for MockPlugin {
     fn metadata(&self) -> PluginMetadata {
         PluginMetadata {
@@ -784,6 +837,69 @@ async fn test_multiple_plugins_run_concurrently() {
     assert!(recorded_events.contains(&"plugin1:shutdown".to_string()));
     assert!(recorded_events.contains(&"plugin2:shutdown".to_string()));
     assert!(recorded_events.contains(&"plugin3:shutdown".to_string()));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
+    let (ctx, temp_dir) = create_test_context();
+    let status_writer = create_test_status_writer(&temp_dir);
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    let mut registry = PluginRegistry::new();
+    registry.register(FailingRunPlugin::new("gh-monitor", events.clone()));
+    registry.register(MockPlugin::new("worker-adapter", events.clone()));
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let dedup_store = new_dedup_store(temp_dir.path()).unwrap();
+    let daemon_lock = create_test_daemon_lock(&temp_dir);
+
+    let daemon_task = tokio::spawn(async move {
+        daemon::run(
+            &mut registry,
+            &ctx,
+            daemon_lock,
+            cancel_clone,
+            status_writer.clone(),
+            new_state_store(),
+            new_pubsub_store(),
+            new_launch_sender(),
+            new_session_registry(),
+            dedup_store,
+            new_stream_state_store(),
+            new_stream_event_sender(),
+            new_log_event_queue(),
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    {
+        let recorded_events = events.lock().unwrap();
+        assert!(
+            recorded_events.contains(&"gh-monitor:run_failed".to_string()),
+            "failing plugin should have reported run failure"
+        );
+        assert!(
+            recorded_events.contains(&"worker-adapter:run".to_string()),
+            "sibling plugin should continue running despite failing plugin"
+        );
+    }
+
+    cancel.cancel();
+    let result = daemon_task.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "daemon should continue and shutdown cleanly despite plugin run failure"
+    );
+
+    let recorded_events = events.lock().unwrap();
+    assert!(
+        recorded_events.contains(&"worker-adapter:shutdown".to_string()),
+        "sibling plugin must still receive shutdown"
+    );
 }
 
 #[test]

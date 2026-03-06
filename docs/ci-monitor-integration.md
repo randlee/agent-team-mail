@@ -1,5 +1,13 @@
 # GitHub CI Monitor Integration Design (Phase 9 Proposal)
 
+> **Note**: This document is historical integration context. Canonical behavior
+> and acceptance requirements are now defined in:
+> - `docs/plugins/ci-monitor/requirements.md`
+> - `docs/requirements.md` (§4.11, §5.8-§5.10)
+>
+> Naming lock: `gh_monitor` is the concrete GitHub config key, while
+> `ci_monitor` is the shared contract/interface label.
+
 ## Scope and Goals
 This document defines how the existing GitHub CI Monitor plugin integrates into team workflows and how Phase 9 delivers required system improvements. It focuses on:
 - Configuration via `.atm.toml`
@@ -14,10 +22,10 @@ Out of scope: adding new CI providers beyond GitHub Actions (unless required for
 ---
 
 ## 1. Configuration (.atm.toml)
-The GitHub CI Monitor plugin is configured under `[plugins.ci_monitor]`. Current fields (per `crates/atm-daemon/src/plugins/ci_monitor/config.rs`):
+The GitHub CI Monitor plugin is configured under `[plugins.gh_monitor]`. Current fields (per `crates/atm-daemon/src/plugins/ci_monitor/config.rs`):
 
 ```toml
-[plugins.ci_monitor]
+[plugins.gh_monitor]
 enabled = true
 provider = "github"              # built-in provider (gh CLI)
 poll_interval_secs = 60           # minimum 10
@@ -241,7 +249,7 @@ Note: if needed, Sprint 9.0 + 9.1 can be merged into a single “CI Stabilizatio
 ## Appendix: Config Example for This Repo
 
 ```toml
-[plugins.ci_monitor]
+[plugins.gh_monitor]
 enabled = true
 provider = "github"
 poll_interval_secs = 60
