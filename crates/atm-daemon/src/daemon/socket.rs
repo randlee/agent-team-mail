@@ -1895,6 +1895,70 @@ struct GhMonitorStateFile {
     records: Vec<GhMonitorStatus>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRunView {
+    database_id: u64,
+    name: String,
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+    head_branch: String,
+    head_sha: String,
+    url: String,
+    #[serde(default)]
+    jobs: Vec<GhRunJob>,
+    #[serde(default)]
+    attempt: Option<u64>,
+    #[serde(default)]
+    pull_requests: Vec<GhPullRequest>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRunJob {
+    database_id: u64,
+    name: String,
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    completed_at: Option<String>,
+    #[serde(default)]
+    steps: Vec<GhRunStep>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRunStep {
+    name: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPullRequest {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhRunTerminalState {
+    Success,
+    Failure,
+    TimedOut,
+    Cancelled,
+    ActionRequired,
+    Other,
+}
+
 #[cfg(unix)]
 async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) -> SocketResponse {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
@@ -1968,7 +2032,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         team: gh_request.team.clone(),
         target_kind: gh_request.target_kind,
         target: gh_request.target.clone(),
-        state: "tracking".to_string(),
+        state: "monitoring".to_string(),
         run_id: None,
         reference: gh_request.reference.clone(),
         updated_at: now,
@@ -2040,6 +2104,21 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
 
     if status.state == "ci_not_started" {
         emit_ci_not_started_alert(home, &status);
+    } else if let Some(run_id) = status.run_id {
+        let home = home.to_path_buf();
+        let status_seed = status.clone();
+        let gh_request = gh_request.clone();
+        tokio::spawn(async move {
+            if let Err(e) = monitor_gh_run(home.as_path(), &status_seed, &gh_request, run_id).await
+            {
+                warn!(
+                    team = %status_seed.team,
+                    target = %status_seed.target,
+                    run_id = run_id,
+                    "gh monitor background task failed: {e}"
+                );
+            }
+        });
     }
 
     make_ok_response(
@@ -2230,6 +2309,474 @@ async fn run_gh_command(args: &[&str]) -> Result<String> {
         anyhow::bail!("gh {} failed: {}", args.join(" "), stderr.trim());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(unix)]
+async fn monitor_gh_run(
+    home: &std::path::Path,
+    status_seed: &GhMonitorStatus,
+    gh_request: &GhMonitorRequest,
+    run_id: u64,
+) -> Result<()> {
+    let (from_agent, targets) = resolve_ci_alert_routing(home, &status_seed.team);
+    let mut seen_completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut pending_completed: Vec<GhRunJob> = Vec::new();
+    let mut last_progress_emit: Option<std::time::Instant> = None;
+    let mut first_poll = true;
+
+    loop {
+        let run = fetch_run_view(run_id).await?;
+        let completed_jobs: Vec<GhRunJob> = run
+            .jobs
+            .iter()
+            .filter(|job| is_job_completed(job))
+            .cloned()
+            .collect();
+        for job in completed_jobs {
+            if seen_completed.insert(job.database_id) {
+                pending_completed.push(job);
+            }
+        }
+
+        let terminal = classify_terminal_state(&run);
+        if terminal.is_none() {
+            let now = std::time::Instant::now();
+            if should_emit_progress(last_progress_emit, now) && !pending_completed.is_empty() {
+                let message = format_progress_message(&run, &pending_completed);
+                let summary = format!(
+                    "ci progress: run {} ({}/{})",
+                    run.database_id,
+                    count_completed_jobs(&run),
+                    run.jobs.len()
+                );
+                emit_ci_monitor_message(
+                    home,
+                    &from_agent,
+                    &targets,
+                    &summary,
+                    &message,
+                    Some(format!(
+                        "ci-progress-{}-{}",
+                        run.database_id,
+                        uuid::Uuid::new_v4()
+                    )),
+                );
+                pending_completed.clear();
+                last_progress_emit = Some(now);
+            }
+
+            let mut state = status_seed.clone();
+            state.run_id = Some(run.database_id);
+            state.state = "monitoring".to_string();
+            state.updated_at = chrono::Utc::now().to_rfc3339();
+            state.message = Some(format!(
+                "Run {} still in progress ({}/{})",
+                run.database_id,
+                count_completed_jobs(&run),
+                run.jobs.len()
+            ));
+            upsert_gh_monitor_status(home, state)?;
+
+            // Send first update quickly to make monitor state visible, then settle
+            // into a lighter poll cadence.
+            let sleep_secs = if first_poll { 5 } else { 15 };
+            first_poll = false;
+            tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+            continue;
+        }
+
+        let terminal = terminal.unwrap_or(GhRunTerminalState::Other);
+        let summary_table = format_summary_table(&run);
+        let mut message = format!(
+            "CI monitor terminal update\nRun: {}\nWorkflow: {}\nState: {}\nURL: {}\n\n{}\n",
+            run.database_id,
+            run.name,
+            terminal_state_label(terminal),
+            run.url,
+            summary_table
+        );
+
+        if terminal != GhRunTerminalState::Success {
+            let correlation_id = format!("ci-failure-{}-{}", run.database_id, uuid::Uuid::new_v4());
+            let failure_payload =
+                build_failure_payload(&run, status_seed, gh_request, &correlation_id).await;
+            message.push_str("\nFailure details:\n");
+            message.push_str(&failure_payload);
+        }
+
+        let summary = format!(
+            "ci terminal: run {} {}",
+            run.database_id,
+            terminal_state_label(terminal)
+        );
+        emit_ci_monitor_message(
+            home,
+            &from_agent,
+            &targets,
+            &summary,
+            &message,
+            Some(format!(
+                "ci-terminal-{}-{}",
+                run.database_id,
+                uuid::Uuid::new_v4()
+            )),
+        );
+
+        let mut state = status_seed.clone();
+        state.run_id = Some(run.database_id);
+        state.state = terminal_state_label(terminal)
+            .to_lowercase()
+            .replace(' ', "_");
+        state.updated_at = chrono::Utc::now().to_rfc3339();
+        state.message = Some(format!(
+            "Terminal: {} ({}/{})",
+            terminal_state_label(terminal),
+            count_completed_jobs(&run),
+            run.jobs.len()
+        ));
+        upsert_gh_monitor_status(home, state)?;
+        return Ok(());
+    }
+}
+
+#[cfg(unix)]
+async fn fetch_run_view(run_id: u64) -> Result<GhRunView> {
+    let output = run_gh_command(&[
+        "run",
+        "view",
+        &run_id.to_string(),
+        "--json",
+        "databaseId,name,status,conclusion,headBranch,headSha,url,jobs,attempt,pullRequests",
+    ])
+    .await?;
+    let run = serde_json::from_str::<GhRunView>(&output)?;
+    Ok(run)
+}
+
+#[cfg(unix)]
+fn should_emit_progress(
+    last_progress_emit: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    match last_progress_emit {
+        None => true,
+        Some(prev) => now.duration_since(prev) >= std::time::Duration::from_secs(60),
+    }
+}
+
+#[cfg(unix)]
+fn is_job_completed(job: &GhRunJob) -> bool {
+    job.status.eq_ignore_ascii_case("completed")
+}
+
+#[cfg(unix)]
+fn count_completed_jobs(run: &GhRunView) -> usize {
+    run.jobs.iter().filter(|job| is_job_completed(job)).count()
+}
+
+#[cfg(unix)]
+fn format_progress_message(run: &GhRunView, pending_completed: &[GhRunJob]) -> String {
+    let new_jobs = pending_completed
+        .iter()
+        .map(|job| format!("{}({})", job.name, job_status_label(job)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CI monitor progress\nRun: {}\nWorkflow: {}\nCompleted: {}/{}\nNewly completed: {}\nRun URL: {}",
+        run.database_id,
+        run.name,
+        count_completed_jobs(run),
+        run.jobs.len(),
+        if new_jobs.is_empty() {
+            "(none)"
+        } else {
+            &new_jobs
+        },
+        run.url
+    )
+}
+
+#[cfg(unix)]
+fn job_status_label(job: &GhRunJob) -> &'static str {
+    match job
+        .conclusion
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "success" => "success",
+        "failure" => "failure",
+        "timedout" | "timed_out" => "timed_out",
+        "cancelled" => "cancelled",
+        "actionrequired" | "action_required" => "action_required",
+        _ => {
+            if is_job_completed(job) {
+                "completed"
+            } else {
+                "in_progress"
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn classify_terminal_state(run: &GhRunView) -> Option<GhRunTerminalState> {
+    if !run.status.eq_ignore_ascii_case("completed") && run.conclusion.is_none() {
+        return None;
+    }
+    let state = match run
+        .conclusion
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "success" => GhRunTerminalState::Success,
+        "failure" => GhRunTerminalState::Failure,
+        "timedout" | "timed_out" => GhRunTerminalState::TimedOut,
+        "cancelled" => GhRunTerminalState::Cancelled,
+        "actionrequired" | "action_required" => GhRunTerminalState::ActionRequired,
+        _ => GhRunTerminalState::Other,
+    };
+    Some(state)
+}
+
+#[cfg(unix)]
+fn terminal_state_label(state: GhRunTerminalState) -> &'static str {
+    match state {
+        GhRunTerminalState::Success => "SUCCESS",
+        GhRunTerminalState::Failure => "FAILURE",
+        GhRunTerminalState::TimedOut => "TIMED_OUT",
+        GhRunTerminalState::Cancelled => "CANCELLED",
+        GhRunTerminalState::ActionRequired => "ACTION_REQUIRED",
+        GhRunTerminalState::Other => "UNKNOWN",
+    }
+}
+
+#[cfg(unix)]
+fn format_summary_table(run: &GhRunView) -> String {
+    let mut lines = Vec::new();
+    lines.push("| Job/Test | Status | Runtime |".to_string());
+    lines.push("|---|---|---|".to_string());
+    for job in &run.jobs {
+        lines.push(format!(
+            "| {} | {} | {} |",
+            job.name,
+            job_status_label(job),
+            format_job_runtime(job)
+        ));
+    }
+    lines.join("\n")
+}
+
+#[cfg(unix)]
+fn format_job_runtime(job: &GhRunJob) -> String {
+    let Some(started) = job.started_at.as_deref() else {
+        return "-".to_string();
+    };
+    let Some(completed) = job.completed_at.as_deref() else {
+        return "-".to_string();
+    };
+    let Ok(started_dt) = chrono::DateTime::parse_from_rfc3339(started) else {
+        return "-".to_string();
+    };
+    let Ok(completed_dt) = chrono::DateTime::parse_from_rfc3339(completed) else {
+        return "-".to_string();
+    };
+    let duration = completed_dt.signed_duration_since(started_dt);
+    let secs = duration.num_seconds().max(0);
+    format!("{}m {}s", secs / 60, secs % 60)
+}
+
+#[cfg(unix)]
+fn emit_ci_monitor_message(
+    home: &std::path::Path,
+    from_agent: &str,
+    targets: &[(String, String)],
+    summary: &str,
+    text: &str,
+    message_id: Option<String>,
+) {
+    for (agent, team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        let message = InboxMessage {
+            from: from_agent.to_string(),
+            text: text.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(summary.to_string()),
+            message_id: message_id.clone(),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) =
+            agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, team, agent)
+        {
+            warn!(
+                team = %team,
+                agent = %agent,
+                "failed to emit ci monitor message: {e}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn build_failure_payload(
+    run: &GhRunView,
+    status_seed: &GhMonitorStatus,
+    gh_request: &GhMonitorRequest,
+    correlation_id: &str,
+) -> String {
+    let failed_jobs: Vec<&GhRunJob> = run
+        .jobs
+        .iter()
+        .filter(|job| matches!(job_status_label(job), "failure" | "timed_out"))
+        .collect();
+    let failed_job_names = failed_jobs
+        .iter()
+        .map(|job| job.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let failed_job_urls = failed_jobs
+        .iter()
+        .map(|job| {
+            job.url.clone().unwrap_or_else(|| {
+                format!("{}/job/{}", run.url.trim_end_matches('/'), job.database_id)
+            })
+        })
+        .collect::<Vec<_>>();
+    let first_failing_step = failed_jobs
+        .iter()
+        .flat_map(|job| job.steps.iter())
+        .find(|step| {
+            let conclusion = step
+                .conclusion
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase();
+            let status = step.status.as_deref().unwrap_or_default().to_lowercase();
+            conclusion == "failure"
+                || conclusion == "timed_out"
+                || conclusion == "timedout"
+                || status == "failed"
+        })
+        .map(|step| step.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let failed_log_excerpt = if let Some(first_job) = failed_jobs.first() {
+        fetch_failed_log_excerpt(first_job.database_id)
+            .await
+            .unwrap_or_else(|_| "(log excerpt unavailable)".to_string())
+    } else {
+        "(no failed jobs captured)".to_string()
+    };
+
+    let classification = classify_failure(run);
+    let pr_url = derive_pr_url(run, status_seed, gh_request);
+    let repo_base = derive_repo_base_from_run_url(&run.url).unwrap_or_default();
+    let next_action = if failed_jobs.is_empty() {
+        format!("atm gh status run {}", run.database_id)
+    } else {
+        format!("gh run view {} --log-failed", run.database_id)
+    };
+    format!(
+        "run_url: {run_url}\nfailed_job_urls: {failed_job_urls}\npr_url: {pr_url}\nworkflow: {workflow}\njob_names: {job_names}\nrun_id: {run_id}\nrun_attempt: {attempt}\nbranch: {branch}\ncommit_short: {sha_short}\ncommit_full: {sha_full}\nclassification: {classification}\nfirst_failing_step: {first_failing_step}\nlog_excerpt: {log_excerpt}\ncorrelation_id: {correlation_id}\nnext_action_hint: {next_action}\nrepo_base: {repo_base}",
+        run_url = run.url,
+        failed_job_urls = if failed_job_urls.is_empty() {
+            "(none)".to_string()
+        } else {
+            failed_job_urls.join(", ")
+        },
+        pr_url = pr_url.unwrap_or_else(|| "(unknown)".to_string()),
+        workflow = run.name,
+        job_names = if failed_job_names.is_empty() {
+            "(none)".to_string()
+        } else {
+            failed_job_names
+        },
+        run_id = run.database_id,
+        attempt = run.attempt.unwrap_or(1),
+        branch = run.head_branch,
+        sha_short = short_sha(&run.head_sha),
+        sha_full = run.head_sha,
+        classification = classification,
+        first_failing_step = first_failing_step,
+        log_excerpt = failed_log_excerpt
+            .replace('\n', " ")
+            .chars()
+            .take(240)
+            .collect::<String>(),
+        correlation_id = correlation_id,
+        next_action = next_action,
+        repo_base = repo_base,
+    )
+}
+
+#[cfg(unix)]
+async fn fetch_failed_log_excerpt(job_id: u64) -> Result<String> {
+    let output = run_gh_command(&["run", "view", "--job", &job_id.to_string(), "--log"]).await?;
+    let excerpt = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    Ok(excerpt)
+}
+
+#[cfg(unix)]
+fn classify_failure(run: &GhRunView) -> &'static str {
+    match run
+        .conclusion
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "timedout" | "timed_out" => "timeout",
+        "cancelled" => "cancelled",
+        "actionrequired" | "action_required" => "action_required",
+        "failure" => "test_fail",
+        _ => "unknown",
+    }
+}
+
+#[cfg(unix)]
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(8).collect::<String>()
+}
+
+#[cfg(unix)]
+fn derive_repo_base_from_run_url(run_url: &str) -> Option<String> {
+    let parts = run_url.split('/').collect::<Vec<_>>();
+    if parts.len() < 5 {
+        return None;
+    }
+    Some(format!(
+        "{}//{}/{}/{}",
+        parts[0], parts[2], parts[3], parts[4]
+    ))
+}
+
+#[cfg(unix)]
+fn derive_pr_url(
+    run: &GhRunView,
+    status_seed: &GhMonitorStatus,
+    gh_request: &GhMonitorRequest,
+) -> Option<String> {
+    if let Some(url) = run.pull_requests.iter().find_map(|pr| pr.url.clone()) {
+        return Some(url);
+    }
+    if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
+        && let Some(repo_base) = derive_repo_base_from_run_url(&run.url)
+    {
+        return Some(format!("{}/pull/{}", repo_base, status_seed.target.trim()));
+    }
+    None
 }
 
 #[cfg(unix)]
@@ -4616,6 +5163,140 @@ mod tests {
         let err = resp.error.unwrap();
         assert_eq!(err.code, "MISSING_PARAMETER");
         assert!(err.message.contains("reference"));
+    }
+
+    #[test]
+    fn test_should_emit_progress_rate_limited_to_one_minute() {
+        let now = std::time::Instant::now();
+        assert!(should_emit_progress(None, now));
+        assert!(!should_emit_progress(
+            Some(now - std::time::Duration::from_secs(59)),
+            now
+        ));
+        assert!(should_emit_progress(
+            Some(now - std::time::Duration::from_secs(60)),
+            now
+        ));
+    }
+
+    #[test]
+    fn test_format_summary_table_contains_required_columns() {
+        let run = GhRunView {
+            database_id: 42,
+            name: "ci".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("success".to_string()),
+            head_branch: "develop".to_string(),
+            head_sha: "abcdef1234567890".to_string(),
+            url: "https://github.com/o/r/actions/runs/42".to_string(),
+            jobs: vec![GhRunJob {
+                database_id: 1,
+                name: "clippy".to_string(),
+                status: "completed".to_string(),
+                conclusion: Some("success".to_string()),
+                started_at: Some("2026-03-06T00:00:00Z".to_string()),
+                completed_at: Some("2026-03-06T00:00:10Z".to_string()),
+                steps: Vec::new(),
+                url: Some("https://github.com/o/r/actions/runs/42/job/1".to_string()),
+            }],
+            attempt: Some(1),
+            pull_requests: Vec::new(),
+        };
+
+        let table = format_summary_table(&run);
+        assert!(table.contains("| Job/Test | Status | Runtime |"));
+        assert!(table.contains("| clippy | success |"));
+    }
+
+    #[test]
+    fn test_derive_pr_url_prefers_pr_target_fallback() {
+        let run = GhRunView {
+            database_id: 42,
+            name: "ci".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            head_branch: "feature/x".to_string(),
+            head_sha: "abcdef1234567890".to_string(),
+            url: "https://github.com/o/r/actions/runs/42".to_string(),
+            jobs: Vec::new(),
+            attempt: Some(1),
+            pull_requests: Vec::new(),
+        };
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(42),
+            reference: None,
+            updated_at: "2026-03-06T00:00:00Z".to_string(),
+            message: None,
+        };
+        let request = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            reference: None,
+            start_timeout_secs: Some(120),
+        };
+        let pr_url = derive_pr_url(&run, &status_seed, &request);
+        assert_eq!(pr_url.as_deref(), Some("https://github.com/o/r/pull/123"));
+    }
+
+    #[tokio::test]
+    async fn test_build_failure_payload_contains_required_fields() {
+        let run = GhRunView {
+            database_id: 42,
+            name: "ci".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            head_branch: "feature/x".to_string(),
+            head_sha: "abcdef1234567890".to_string(),
+            url: "https://github.com/o/r/actions/runs/42".to_string(),
+            jobs: Vec::new(),
+            attempt: Some(2),
+            pull_requests: Vec::new(),
+        };
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(42),
+            reference: None,
+            updated_at: "2026-03-06T00:00:00Z".to_string(),
+            message: None,
+        };
+        let request = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            reference: None,
+            start_timeout_secs: Some(120),
+        };
+        let payload = build_failure_payload(&run, &status_seed, &request, "corr-1").await;
+        for required in [
+            "run_url:",
+            "failed_job_urls:",
+            "pr_url:",
+            "workflow:",
+            "job_names:",
+            "run_id:",
+            "run_attempt:",
+            "branch:",
+            "commit_short:",
+            "commit_full:",
+            "classification:",
+            "first_failing_step:",
+            "log_excerpt:",
+            "correlation_id:",
+            "next_action_hint:",
+        ] {
+            assert!(
+                payload.contains(required),
+                "failure payload missing field marker: {required}"
+            );
+        }
     }
 
     #[test]
