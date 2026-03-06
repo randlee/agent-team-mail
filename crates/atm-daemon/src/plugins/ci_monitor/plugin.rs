@@ -48,6 +48,20 @@ struct GhMonitorHealthFile {
     records: Vec<GhMonitorHealthRecord>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct GhMonitorStateRecord {
+    team: String,
+    state: String,
+    run_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct GhMonitorStateFile {
+    records: Vec<GhMonitorStateRecord>,
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeDriftEvent {
     alert_key: String,
@@ -712,6 +726,44 @@ impl CiMonitorPlugin {
         sent_count > 0
     }
 
+    fn gh_monitor_state_path(ctx: &PluginContext) -> PathBuf {
+        ctx.system
+            .claude_root
+            .join("daemon")
+            .join("gh-monitor-state.json")
+    }
+
+    fn is_terminal_monitor_state(state: &str) -> bool {
+        matches!(
+            state.to_ascii_lowercase().as_str(),
+            "success" | "failure" | "timed_out" | "cancelled" | "action_required" | "unknown"
+        )
+    }
+
+    fn was_terminal_notified_by_command_path(&self, ctx: &PluginContext, run_id: u64) -> bool {
+        let path = Self::gh_monitor_state_path(ctx);
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(_) => return false,
+        };
+        let state_file = match serde_json::from_str::<GhMonitorStateFile>(&raw) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                warn!(
+                    "CI Monitor: Failed to parse gh monitor state {}: {}",
+                    path.display(),
+                    e
+                );
+                return false;
+            }
+        };
+        state_file.records.iter().any(|record| {
+            record.team == self.config.team
+                && record.run_id == Some(run_id)
+                && Self::is_terminal_monitor_state(&record.state)
+        })
+    }
+
     fn team_for_config_error(
         table: Option<&agent_team_mail_core::toml::Table>,
         ctx: &PluginContext,
@@ -1136,6 +1188,19 @@ impl Plugin for CiMonitorPlugin {
 
                                     // Skip if we've already seen this run+conclusion
                                     if self.seen_runs.contains_key(&key) {
+                                        continue;
+                                    }
+
+                                    // Command-path terminal notifications (atm gh monitor) are
+                                    // authoritative for that run_id. Avoid duplicate alerts
+                                    // from polling path when terminal state is already recorded.
+                                    if self.was_terminal_notified_by_command_path(&ctx, full_run.id)
+                                    {
+                                        debug!(
+                                            "CI Monitor: Skipping duplicate polling notification for run #{} (command-path terminal state present)",
+                                            full_run.id
+                                        );
+                                        self.seen_runs.insert(key, Utc::now());
                                         continue;
                                     }
 
@@ -1706,7 +1771,7 @@ notify_target = "team-lead"
         let system = SystemContext::new(
             "test-host".to_string(),
             Platform::Linux,
-            std::env::temp_dir().join(".claude"),
+            teams_root.join(".claude"),
             "2.1.39".to_string(),
             "default-team".to_string(),
         )
@@ -1879,6 +1944,107 @@ notify_target = "team-lead"
             eprintln!("Init failed: {}", e);
         }
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_polling_notification_suppressed_when_command_path_already_terminal() {
+        use crate::plugins::ci_monitor::{
+            CiRunConclusion, CiRunStatus, MockCiProvider, create_test_run,
+        };
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().join("teams");
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+        std::fs::write(inboxes_dir.join("team-lead.json"), "[]").unwrap();
+
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "team-lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![AgentMember {
+                agent_id: "team-lead@dev-team".to_string(),
+                name: "team-lead".to_string(),
+                agent_type: "general-purpose".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                prompt: None,
+                color: None,
+                plan_mode_required: None,
+                joined_at: 1234567890,
+                tmux_pane_id: None,
+                cwd: ".".to_string(),
+                subscriptions: Vec::new(),
+                backend_type: None,
+                is_active: None,
+                last_active: None,
+                session_id: None,
+                external_backend_type: None,
+                external_model: None,
+                unknown_fields: std::collections::HashMap::new(),
+            }],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let run = create_test_run(
+            42,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        let provider = MockCiProvider::with_runs(vec![run]);
+
+        let table: toml::Table = toml::from_str(
+            r#"
+team = "dev-team"
+agent = "ci-monitor"
+notify_target = "team-lead"
+poll_interval_secs = 10
+"#,
+        )
+        .unwrap();
+        let ctx = create_mock_context_with_config(teams_root.clone(), Some(table));
+
+        let state_path = ctx
+            .system
+            .claude_root
+            .join("daemon")
+            .join("gh-monitor-state.json");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &state_path,
+            r#"{"records":[{"team":"dev-team","state":"failure","run_id":42}]}"#,
+        )
+        .unwrap();
+
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(provider));
+        plugin.init(&ctx).await.unwrap();
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel_clone.cancel();
+        });
+
+        plugin.run(cancel).await.unwrap();
+
+        let inbox = ctx.mail.read_inbox("dev-team", "team-lead").unwrap();
+        assert!(
+            inbox.is_empty(),
+            "polling path should suppress duplicate failure notification when command path already recorded terminal run"
+        );
     }
 
     #[test]

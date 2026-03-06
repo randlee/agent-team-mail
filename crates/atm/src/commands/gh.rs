@@ -122,6 +122,10 @@ struct StatusArgs {
 
     /// Monitor target value (PR number, workflow name, or run id)
     target: String,
+
+    /// Optional workflow ref to disambiguate parallel branch monitors
+    #[arg(long = "ref")]
+    reference: Option<String>,
 }
 
 pub fn execute(args: GhArgs) -> Result<()> {
@@ -226,6 +230,7 @@ pub fn execute(args: GhArgs) -> Result<()> {
                 team: team.to_string(),
                 target_kind: status_kind_to_wire(status.target_kind),
                 target: status.target,
+                reference: status.reference,
             };
             GhOutput::MonitorStatus(gh_status(&request)?.ok_or_else(|| {
                 anyhow::anyhow!("daemon is not reachable for atm gh status command")

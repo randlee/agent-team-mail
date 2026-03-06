@@ -2173,6 +2173,28 @@ struct GhPullRequest {
     url: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPrLookupView {
+    #[serde(default)]
+    head_ref_name: Option<String>,
+    #[serde(default)]
+    head_ref_oid: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRunListEntry {
+    #[serde(default)]
+    database_id: Option<u64>,
+    #[serde(default)]
+    head_sha: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GhRunTerminalState {
     Success,
@@ -2764,7 +2786,7 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         &gh_request.team,
         gh_request.target_kind,
         &gh_request.target,
-        None,
+        gh_request.reference.as_deref(),
     );
     if let Some(status) = state.get(&key) {
         return make_ok_response(
@@ -2780,6 +2802,10 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
                 record.team == gh_request.team
                     && record.target_kind == GhMonitorTargetKind::Workflow
                     && record.target == gh_request.target
+                    && gh_request
+                        .reference
+                        .as_deref()
+                        .is_none_or(|reference| record.reference.as_deref() == Some(reference))
             })
             .collect();
         candidates.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
@@ -2841,12 +2867,25 @@ async fn try_find_pr_run_id(pr_number: u64) -> Result<Option<u64>> {
         "view",
         &pr_number.to_string(),
         "--json",
-        "headRefName",
+        "headRefName,headRefOid,createdAt",
     ])
     .await?;
-    let branch = serde_json::from_str::<serde_json::Value>(&output)?
-        .get("headRefName")
-        .and_then(|v| v.as_str())
+    let pr_view = serde_json::from_str::<GhPrLookupView>(&output)?;
+    let branch = pr_view
+        .head_ref_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let pr_head_sha = pr_view
+        .head_ref_oid
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let pr_created_at = pr_view
+        .created_at
+        .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
@@ -2861,16 +2900,56 @@ async fn try_find_pr_run_id(pr_number: u64) -> Result<Option<u64>> {
         "--branch",
         &branch,
         "--limit",
-        "1",
+        "20",
         "--json",
-        "databaseId",
+        "databaseId,headSha,createdAt",
     ])
     .await?;
-    let runs = serde_json::from_str::<Vec<serde_json::Value>>(&output)?;
-    Ok(runs
-        .first()
-        .and_then(|run| run.get("databaseId"))
-        .and_then(|v| v.as_u64()))
+    let runs = serde_json::from_str::<Vec<GhRunListEntry>>(&output)?;
+    for run in runs {
+        let Some(run_id) = run.database_id else {
+            continue;
+        };
+
+        if let Some(expected_head_sha) = pr_head_sha.as_deref()
+            && run
+                .head_sha
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                != Some(expected_head_sha)
+        {
+            continue;
+        }
+
+        if !run_passes_pr_recency_gate(run.created_at.as_deref(), pr_created_at.as_deref()) {
+            continue;
+        }
+
+        return Ok(Some(run_id));
+    }
+
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn run_passes_pr_recency_gate(run_created_at: Option<&str>, pr_created_at: Option<&str>) -> bool {
+    let Some(pr_created_at) = pr_created_at else {
+        return true;
+    };
+    let Some(run_created_at) = run_created_at else {
+        return true;
+    };
+
+    let parse_ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok();
+    let Some(pr_ts) = parse_ts(pr_created_at) else {
+        return true;
+    };
+    let Some(run_ts) = parse_ts(run_created_at) else {
+        return true;
+    };
+
+    run_ts >= pr_ts
 }
 
 #[cfg(unix)]
@@ -3343,9 +3422,44 @@ fn classify_failure(run: &GhRunView) -> &'static str {
         "timedout" | "timed_out" => "timeout",
         "cancelled" => "cancelled",
         "actionrequired" | "action_required" => "action_required",
-        "failure" => "test_fail",
+        "failure" => {
+            if is_infra_failure(run) {
+                "infra"
+            } else {
+                "test_fail"
+            }
+        }
         _ => "unknown",
     }
+}
+
+#[cfg(unix)]
+fn is_infra_failure(run: &GhRunView) -> bool {
+    const INFRA_HINTS: &[&str] = &[
+        "runner",
+        "infrastructure",
+        "resource exhausted",
+        "no space",
+        "disk",
+        "network",
+        "connection",
+        "service unavailable",
+        "timed out waiting",
+        "oom",
+        "out of memory",
+    ];
+
+    let contains_infra_hint = |value: &str| {
+        let lowered = value.to_lowercase();
+        INFRA_HINTS.iter().any(|hint| lowered.contains(hint))
+    };
+
+    run.jobs.iter().any(|job| {
+        let failed = matches!(job_status_label(job), "failure" | "timed_out");
+        failed
+            && (contains_infra_hint(&job.name)
+                || job.steps.iter().any(|step| contains_infra_hint(&step.name)))
+    })
 }
 
 #[cfg(unix)]
@@ -6008,11 +6122,11 @@ exit 1
             &temp,
             r#"#!/bin/sh
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  echo '{"headRefName":"feature/mock"}'
+  echo '{"headRefName":"feature/mock","headRefOid":"sha-pr-123","createdAt":"2026-03-06T00:00:00Z"}'
   exit 0
 fi
 if [ "$1" = "run" ] && [ "$2" = "list" ]; then
-  echo '[{"databaseId":424242}]'
+  echo '[{"databaseId":111111,"headSha":"sha-older","createdAt":"2026-03-05T23:59:59Z"},{"databaseId":222222,"headSha":"sha-pr-123","createdAt":"2026-03-06T00:05:00Z"},{"databaseId":333333,"headSha":"sha-pr-123","createdAt":"2026-03-05T23:00:00Z"}]'
   exit 0
 fi
 echo "unexpected gh args: $*" >&2
@@ -6020,7 +6134,7 @@ exit 1
 "#,
         );
         let run_id = wait_for_pr_run_start(123, 1).await.unwrap();
-        assert_eq!(run_id, Some(424242));
+        assert_eq!(run_id, Some(222222));
     }
 
     #[tokio::test]
@@ -6078,6 +6192,38 @@ exit 1
                 "failure payload missing field marker: {required}"
             );
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_classify_failure_infra_when_runner_failure_detected() {
+        let run = GhRunView {
+            database_id: 88,
+            name: "ci".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            head_branch: "main".to_string(),
+            head_sha: "abcdef1234567890".to_string(),
+            url: "https://github.com/o/r/actions/runs/88".to_string(),
+            jobs: vec![GhRunJob {
+                database_id: 101,
+                name: "Runner provisioning failed".to_string(),
+                status: "completed".to_string(),
+                conclusion: Some("failure".to_string()),
+                started_at: None,
+                completed_at: None,
+                steps: vec![GhRunStep {
+                    name: "Set up runner".to_string(),
+                    status: Some("completed".to_string()),
+                    conclusion: Some("failure".to_string()),
+                }],
+                url: None,
+            }],
+            attempt: Some(1),
+            pull_requests: Vec::new(),
+        };
+
+        assert_eq!(classify_failure(&run), "infra");
     }
 
     #[tokio::test]
@@ -6139,6 +6285,41 @@ exit 1
         assert_eq!(status["reference"].as_str(), Some("develop"));
         assert_eq!(status["run_id"].as_u64(), Some(987654));
         assert_eq!(status["state"].as_str(), Some("monitoring"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
+        let temp = TempDir::new().unwrap();
+        let status_a = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Workflow,
+            target: "ci".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(111),
+            reference: Some("develop".to_string()),
+            updated_at: "2026-03-06T00:00:10Z".to_string(),
+            message: None,
+        };
+        let status_b = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Workflow,
+            target: "ci".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(222),
+            reference: Some("release/v1".to_string()),
+            updated_at: "2026-03-06T00:00:11Z".to_string(),
+            message: None,
+        };
+        upsert_gh_monitor_status(temp.path(), status_a).unwrap();
+        upsert_gh_monitor_status(temp.path(), status_b).unwrap();
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-workflow-ref","command":"gh-status","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci","reference":"release/v1"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["reference"].as_str(), Some("release/v1"));
+        assert_eq!(status["run_id"].as_u64(), Some(222));
     }
 
     #[tokio::test]

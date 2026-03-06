@@ -732,6 +732,8 @@ pub struct GhStatusRequest {
     pub team: String,
     pub target_kind: GhMonitorTargetKind,
     pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
 }
 
 /// Lifecycle action for the GitHub monitor plugin.
