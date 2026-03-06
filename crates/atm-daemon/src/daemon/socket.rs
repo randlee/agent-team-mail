@@ -6068,6 +6068,7 @@ poll_interval_secs = 1
     async fn test_preflight_dirty_pr_skips_polling() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
         write_hook_auth_team_config(temp.path(), "atm-dev", "team-lead", &["team-lead"]);
         std::fs::create_dir_all(temp.path().join(".claude/teams/atm-dev/inboxes")).unwrap();
         let run_list_marker = temp.path().join("run-list-marker.txt");
@@ -6128,6 +6129,7 @@ exit 1
     async fn test_clean_pr_proceeds_to_polling() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
         write_hook_auth_team_config(temp.path(), "atm-dev", "team-lead", &["team-lead"]);
         std::fs::create_dir_all(temp.path().join(".claude/teams/atm-dev/inboxes")).unwrap();
         let _path_guard = install_fake_gh_script(
