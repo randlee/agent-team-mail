@@ -2196,7 +2196,7 @@ Detailed GitHub CI monitor requirements are defined in:
 
 Core command contract:
 - `atm gh monitor pr <number>` starts PR-oriented monitoring.
-- `atm gh monitor workflow <name> --ref <branch|sha|pr>` starts workflow-oriented monitoring.
+- `atm gh monitor workflow <name> --ref <branch|sha|pr>` starts workflow-oriented monitoring (`--ref` is required for deterministic target selection).
 - `atm gh monitor run <run-id>` starts run-oriented monitoring.
 - `atm gh status <pr|run|workflow> <value>` returns current monitor state.
 
@@ -2211,6 +2211,8 @@ Core behavior contract:
   job/test name, status, and runtime.
 - Failure notifications must include at minimum run URL, failed job URL(s)
   when available, and PR URL for PR-monitoring mode.
+- Full required failure payload fields are defined in
+  `docs/plugins/ci-monitor/requirements.md` GH-CI-FR-12.
 
 Connectivity and availability contract:
 - Invalid plugin configuration disables monitoring (`disabled_config_error`)
@@ -2380,6 +2382,9 @@ remote_host = "192.168.1.100"
 remote_port = 9876
 ```
 
+Note: `gh_monitor` is the GitHub concrete plugin key; `ci_monitor` is the
+shared contract/interface name (see §5.10).
+
 ### 5.7 Temporary File Storage
 
 Plugins that cache data use a conventional pattern:
@@ -2406,7 +2411,7 @@ temp/atm/<plugin-name>/
 - Plugin init failures must not crash daemon startup.
 - Plugin runtime failures must not terminate daemon process or unrelated plugins.
 - Plugin status must be visible as `healthy`, `degraded`, or
-  `disabled_config_error` in daemon status surfaces.
+  `disabled_config_error` in daemon status surfaces (`atm status`, `atm doctor`).
 - If a plugin enters `disabled_config_error`, daemon must not keep a live
   polling loop for that plugin.
 

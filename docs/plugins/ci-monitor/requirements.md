@@ -43,7 +43,7 @@ Minimum valid configuration must include:
 - target `team`
 - synthetic sender `agent`
 - provider (`github` default allowed)
-- designated monitor recipient(s) (explicit or documented default behavior)
+- designated monitor recipient(s); when omitted, default is `team-lead@<team>`
 
 ### GH-CI-FR-3 Invalid configuration behavior
 
@@ -91,7 +91,7 @@ GitHub CI monitor exclusively owns:
 
 Required commands:
 - `atm gh monitor pr <number>`
-- `atm gh monitor workflow <name> --ref <branch|sha|pr>`
+- `atm gh monitor workflow <name> --ref <branch|sha|pr>` (`--ref` required)
 - `atm gh monitor run <run-id>`
 - `atm gh status <pr|run|workflow> <value>`
 
