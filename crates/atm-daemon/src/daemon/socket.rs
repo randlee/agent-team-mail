@@ -5489,6 +5489,13 @@ exit 1
             }),
             "team lead should receive merge_conflict alert with required fields"
         );
+        assert!(
+            !inbox.iter().any(|msg| {
+                msg.text.contains("classification: ci_not_started")
+                    || msg.text.contains("[ci_not_started]")
+            }),
+            "DIRTY preflight must suppress ci_not_started alerts"
+        );
     }
 
     #[tokio::test]
@@ -5595,6 +5602,61 @@ exit 1
                     && msg.text.contains("run_conclusion: success")
             }),
             "post-terminal DIRTY check must emit merge_conflict alert with run_conclusion"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_post_completion_clean_check_emits_no_merge_conflict_alert() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), "atm-dev", "team-lead", &["team-lead"]);
+        std::fs::create_dir_all(temp.path().join(".claude/teams/atm-dev/inboxes")).unwrap();
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+  echo '{"databaseId":42,"name":"ci","status":"completed","conclusion":"success","headBranch":"feature/mock","headSha":"abcdef1234567890","url":"https://github.com/o/r/actions/runs/42","jobs":[{"databaseId":1,"name":"tests","status":"completed","conclusion":"success","startedAt":"2026-03-06T00:00:00Z","completedAt":"2026-03-06T00:00:10Z","steps":[],"url":"https://github.com/o/r/actions/runs/42/job/1"}],"attempt":1,"pullRequests":[]}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$5" = "mergeStateStatus,url" ]; then
+  echo '{"mergeStateStatus":"CLEAN","url":"https://github.com/o/r/pull/123"}'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(42),
+            reference: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            message: None,
+        };
+        let gh_request = GhMonitorRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            reference: None,
+            start_timeout_secs: Some(120),
+        };
+
+        monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
+            .await
+            .expect("monitor_gh_run should complete");
+
+        let inbox = read_team_inbox_messages(temp.path(), "atm-dev", "team-lead");
+        assert!(
+            !inbox
+                .iter()
+                .any(|msg| msg.text.contains("classification: merge_conflict")),
+            "post-terminal CLEAN check must not emit merge_conflict alert"
         );
     }
 
