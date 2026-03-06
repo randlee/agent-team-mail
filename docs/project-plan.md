@@ -1416,6 +1416,9 @@ the current tranche focused on onboarding contract closure.
 | **Z** | Z.6 | Cross-folder Spawn + QA Blocker Closure | COMPLETE | [#431](https://github.com/randlee/agent-team-mail/pull/431) |
 | **Z** | Z.7 | Review Findings Hardening | COMPLETE (d1–7 shipped; d8–12 deferred) | [#432](https://github.com/randlee/agent-team-mail/pull/432), [#433](https://github.com/randlee/agent-team-mail/pull/433), [#435](https://github.com/randlee/agent-team-mail/pull/435) |
 | **AA** | AA.1 | Session-End Correctness Hardening | COMPLETE | #453 |
+| | AA.2 | Spawn Authorization Gate Alignment | COMPLETE | #455 |
+| | AA.3 | CI/Release Reliability Closure | COMPLETE | #454 |
+| | AA.4 | Cleanup + Spawn Help UX Polish | COMPLETE | #457 |
 | **AB** | AB.1 | GitHub CI Monitor Requirements Lock + Core Contracts | PLANNED | — |
 | **AB** | AB.2 | `atm gh monitor` Command Surface | PLANNED | — |
 | **AB** | AB.3 | Progress + Final Reporting Payloads | PLANNED | — |
