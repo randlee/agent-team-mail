@@ -69,6 +69,7 @@ home = Path(os.environ["ATM_HOME"])
 daemon_dir = home / ".claude" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 state_path = daemon_dir / "gh-state.json"
+health_path = daemon_dir / "gh-health.json"
 
 sock_path = daemon_dir / "atm-daemon.sock"
 pid_path = daemon_dir / "atm-daemon.pid"
@@ -140,6 +141,50 @@ while running:
                     "message": None,
                 }
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": status_payload}
+        elif command == "gh-monitor-control":
+            action = payload.get("action", "start")
+            if action == "stop":
+                health_payload = {
+                    "team": payload.get("team", "test-team"),
+                    "lifecycle_state": "stopped",
+                    "availability_state": "healthy",
+                    "in_flight": 0,
+                    "updated_at": "2026-03-06T03:00:00Z",
+                    "message": "stopped",
+                }
+            elif action == "restart":
+                health_payload = {
+                    "team": payload.get("team", "test-team"),
+                    "lifecycle_state": "running",
+                    "availability_state": "healthy",
+                    "in_flight": 0,
+                    "updated_at": "2026-03-06T03:00:00Z",
+                    "message": "restarted",
+                }
+            else:
+                health_payload = {
+                    "team": payload.get("team", "test-team"),
+                    "lifecycle_state": "running",
+                    "availability_state": "healthy",
+                    "in_flight": 0,
+                    "updated_at": "2026-03-06T03:00:00Z",
+                    "message": "started",
+                }
+            health_path.write_text(json.dumps(health_payload))
+            resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": health_payload}
+        elif command == "gh-monitor-health":
+            if health_path.exists():
+                health_payload = json.loads(health_path.read_text())
+            else:
+                health_payload = {
+                    "team": payload.get("team", "test-team"),
+                    "lifecycle_state": "running",
+                    "availability_state": "healthy",
+                    "in_flight": 0,
+                    "updated_at": "2026-03-06T03:00:00Z",
+                    "message": None,
+                }
+            resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": health_payload}
         elif command == "status":
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": {"state":"running"}}
         else:
@@ -256,4 +301,55 @@ fn test_gh_monitor_workflow_roundtrip_json() {
 fn test_gh_command_surface_compiles_on_windows() {
     let _ = agent_team_mail_core::daemon_client::gh_monitor;
     let _ = agent_team_mail_core::daemon_client::gh_status;
+    let _ = agent_team_mail_core::daemon_client::gh_monitor_control;
+    let _ = agent_team_mail_core::daemon_client::gh_monitor_health;
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_lifecycle_status_roundtrip_json() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut start = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut start, &temp_dir);
+    let start_output = start
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("start")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let start_json: serde_json::Value = serde_json::from_slice(&start_output).unwrap();
+    assert_eq!(start_json["team"].as_str(), Some("test-team"));
+    assert_eq!(start_json["lifecycle_state"].as_str(), Some("running"));
+
+    let mut health = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut health, &temp_dir);
+    let health_output = health
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let health_json: serde_json::Value = serde_json::from_slice(&health_output).unwrap();
+    assert_eq!(health_json["team"].as_str(), Some("test-team"));
+    assert_eq!(health_json["availability_state"].as_str(), Some("healthy"));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }
