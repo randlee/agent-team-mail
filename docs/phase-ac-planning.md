@@ -27,6 +27,7 @@ Additionally, the spawn UX prototype (`scripts/spawn-demo.sh`) was built and val
 | AC.1b | Daemon | Fix Codex PPID detection in send.rs (arch-ctm `[-]` bug) | **DONE** (da6cae5) | — |
 | AC.2 | Daemon | `atm cleanup` external agent guard + fix `validate_gh_monitor_config` repo check (#471) | Planned | AC.1 |
 | AC.3 | CLI | `atm spawn` interactive review-panel UX | Planned | — |
+| AC.4 | Daemon | Daemon logging + startup observability + plugin init isolation (#472, #473, #474) | Planned | — |
 
 AC.2 and AC.3 are independent and can run in parallel.
 
@@ -157,6 +158,46 @@ After all sprints merge to `integrate/phase-AC`: one final PR to `develop`.
 | AC.2 `atm register` called before daemon starts | Medium | Low | Daemon auto-starts on first CLI call; register retries once |
 | AC.3 `crossterm` raw mode breaks on some terminals | Low | Medium | Test on iTerm2 + Terminal.app; add `--no-interactive` fallback |
 | arch-ctm does not call `atm register` automatically | Medium | High | AC.2b cleanup guard provides safety net until AC.2a is confirmed working |
+
+---
+
+---
+
+## Sprint AC.4 — Daemon Logging & Startup Observability
+
+**Goal**: Fix three root causes identified during gh-monitor testing that make daemon failures silent and non-recoverable.
+
+**Source**: arch-ctm investigation, 2026-03-06. Issues #472, #473, #474.
+
+### AC.4a — DaemonWriter PRODUCER_TX fix (issue #472)
+
+`setup_daemon_writer` in `crates/atm-core/src/logging.rs` never sets `PRODUCER_TX`. All `emit_event_best_effort` calls on the daemon side are silently dropped — no structured events are persisted to `atm logs`.
+
+**Fix**: Initialize `PRODUCER_TX` in `setup_daemon_writer` to route daemon-side events to the unified fan-in sink.
+
+### AC.4b — Autostart startup observability (issue #473)
+
+`ensure_daemon_running_unix` spawns daemon with `stdout/stderr=null`. Startup failures are silent — no context surfaced to caller or structured logs.
+
+**Fix**: Capture daemon stderr tail on startup failure; include in returned error and `daemon_autostart_failure` structured event.
+
+### AC.4c — Plugin init failure isolation (issue #474)
+
+`init_all` in `crates/atm-daemon/src/plugin/registry.rs` is fail-fast (`?`). One bad plugin init kills entire daemon startup.
+
+**Fix**: Change `init_all` to mark failed plugins as `disabled_init_error` and continue. Surface via `PLUGIN_INIT_FAILED` finding in `atm doctor`. This implements the plugin failure isolation contract in §5.9 of `requirements.md`.
+
+**Files**:
+- `crates/atm-core/src/logging.rs` — PRODUCER_TX init in setup_daemon_writer
+- `crates/atm-core/src/daemon_client.rs` — stderr capture on autostart failure
+- `crates/atm-daemon/src/plugin/registry.rs` — per-plugin error isolation in init_all
+
+**Acceptance criteria**:
+- `atm logs` surfaces daemon-side `emit_event_best_effort` events
+- `atm doctor` shows `PLUGIN_INIT_FAILED` when a plugin fails init, daemon otherwise healthy
+- Autostart failure returns actionable error including stderr tail
+- `cargo test -p agent-team-mail-daemon` green
+- `cargo clippy` clean
 
 ---
 
