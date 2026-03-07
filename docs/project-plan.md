@@ -1432,7 +1432,7 @@ the current tranche focused on onboarding contract closure.
 | | AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | IN PROGRESS | `feature/pAC-s7-hook-lifecycle-coverage` |
 | | AC.8 | Init Install Matrix QA Blocker Closure | IN PROGRESS | `feature/pAC-s8-init-install-matrix` |
 | | AC.9 | Multi-Team Recovery Determinism | IN PROGRESS | `feature/pAC-s9-multiteam-recovery` |
-| | AC.10 | Final AC Verification + Release Readiness | PLANNED | `feature/pAC-s10-final-verification` |
+| | AC.10 | Final AC Verification + Release Readiness | COMPLETE | `feature/pAC-s10-release-confidence` |
 
 **Completed**: 113+ sprints across 26 phases (CI green)
 **Current version**: v0.37.0
@@ -1814,7 +1814,7 @@ Branch numbering note:
 | AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | TBD | `feature/pAC-s7-hook-lifecycle-coverage` | AC lifecycle/restart hardening closure | IN PROGRESS |
 | AC.8 | Init Install Matrix QA Blocker Closure | TBD | `feature/pAC-s8-init-install-matrix` | ATM-QA-001..004 (init onboarding contract) | IN PROGRESS |
 | AC.9 | Multi-Team Recovery Determinism | TBD | `feature/pAC-s9-multiteam-recovery` | Team-scoped reload + partial lifecycle restart determinism | IN PROGRESS |
-| AC.10 | Final AC Verification + Release Readiness | TBD | `feature/pAC-s10-final-verification` | Final QA pass + release-closeout checklist | PLANNED |
+| AC.10 | Final AC Verification + Release Readiness | #489 | `feature/pAC-s10-release-confidence` | Final QA pass + release-closeout checklist | COMPLETE |
 
 ### AC.5 — Daemon Status Convergence + Lifecycle State Validation
 **Deliverables**
@@ -1849,6 +1849,23 @@ Branch numbering note:
 1. Hook tests validate behavior from both script roots (local and embedded/global materialization source).
 2. `atm init` hook installs are idempotent and route correctly in both scopes.
 3. Daemon restart/recovery does not introduce cross-team bleed or status regressions.
+
+### AC.10 — Final AC Verification + Release Readiness
+**Deliverables**
+1. Confirm `atm doctor` reports `DAEMON_NOT_RUNNING` with exit code 2 and `liveness: null`
+   when daemon is unreachable, regardless of member `isActive` state.
+2. Validate `docs/test-plan-phase-AC.md` Sprint Mapping covers AC.7–AC.10 with
+   all AC.5 §1 acceptance cases audited.
+3. Full AC regression guardrail: `atm doctor`, `atm status`, and `atm members`
+   remain consistent under daemon-unreachable conditions.
+
+**Acceptance Criteria**
+1. `test_doctor_status_members_consistent_unknown_when_daemon_unreachable` passes
+   on all platforms with `DAEMON_NOT_RUNNING` finding, exit code 2, and
+   `liveness: null` for all members regardless of `isActive`.
+2. `docs/test-plan-phase-AC.md` Sprint Mapping rows AC.7–AC.10 are present and
+   reference the correct branches and deliverables.
+3. `cargo test` and `cargo clippy -- -D warnings` clean across all crates.
 
 ---
 
