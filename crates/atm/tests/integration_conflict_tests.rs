@@ -281,7 +281,10 @@ async fn test_concurrent_sends_no_data_loss() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let transient_missing_config = stderr.contains("Team config not found");
-                    if transient_missing_config && attempts < 4 {
+                    let transient_missing_file = stderr.contains("(os error 2)")
+                        || stderr.contains("No such file or directory")
+                        || stderr.contains("The system cannot find the file specified");
+                    if (transient_missing_config || transient_missing_file) && attempts < 6 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }

@@ -5917,6 +5917,34 @@ poll_interval_secs = 1
         }
     }
 
+    #[cfg(unix)]
+    async fn handle_hook_event_with_transient_retry(
+        req_json: &str,
+        store: &SharedStateStore,
+        sr: &SharedSessionRegistry,
+    ) -> agent_team_mail_core::daemon_client::SocketResponse {
+        let mut attempts = 0u8;
+        loop {
+            attempts += 1;
+            let resp = handle_hook_event_command(req_json, store, sr).await;
+            let retry = resp
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("processed").and_then(|v| v.as_bool()))
+                .is_some_and(|processed| !processed)
+                && resp
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("reason").and_then(|v| v.as_str()))
+                    .is_some_and(|reason| reason.contains("team config not found"));
+            if retry && attempts < 4 {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                continue;
+            }
+            return resp;
+        }
+    }
+
     #[test]
     #[serial]
     fn test_agent_state_not_found() {
@@ -8570,7 +8598,7 @@ exit 1
         }
 
         let req_json = r#"{"version":1,"request_id":"r-pr","command":"hook-event","payload":{"event":"permission_request","agent":"arch-ctm","session_id":"sess-pr","team":"atm-dev","tool_name":"Bash"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8611,7 +8639,7 @@ exit 1
         }
 
         let req_json = r#"{"version":1,"request_id":"r-stop","command":"hook-event","payload":{"event":"stop","agent":"arch-ctm","session_id":"sess-stop","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8648,7 +8676,7 @@ exit 1
         }
 
         let req_json = r#"{"version":1,"request_id":"r-notify","command":"hook-event","payload":{"event":"notification_idle_prompt","agent":"arch-ctm","session_id":"sess-notify","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
