@@ -660,6 +660,23 @@ fn process_matches_rule(rule: BackendRule, comm: &str, args: &str) -> bool {
 
 fn detect_sender_process_pid(member: &AgentMember) -> Option<u32> {
     use sysinfo::{Pid, System};
+
+    // If identity is already explicit, skip process-table probing.
+    // This avoids transient sysinfo failures under concurrent Windows load.
+    // Prefer hook PID when available; otherwise return this process PID so the
+    // register-hint path still has a concrete process hint.
+    if let Ok(identity) = std::env::var("ATM_IDENTITY")
+        && !identity.trim().is_empty()
+    {
+        if let Ok(Some(hook)) = read_hook_file()
+            && hook.pid > 1
+        {
+            return Some(hook.pid);
+        }
+        let pid = std::process::id();
+        return (pid > 1).then_some(pid);
+    }
+
     let expected_rule = backend_expected_rule(member)?;
 
     let sys = System::new_all();
@@ -813,6 +830,31 @@ mod tests {
             "gemini",
             "gemini --model 2.5-pro"
         ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_detect_sender_process_pid_skips_scan_when_identity_set() {
+        let old_identity = std::env::var("ATM_IDENTITY").ok();
+        unsafe { std::env::set_var("ATM_IDENTITY", "arch-ctm") };
+
+        let member = make_member(
+            "team-lead",
+            "general-purpose",
+            Some(BackendType::ClaudeCode),
+        );
+        let detected = detect_sender_process_pid(&member);
+        assert!(
+            detected.is_some(),
+            "identity-set path should avoid process scan but still provide a PID hint"
+        );
+
+        unsafe {
+            match old_identity {
+                Some(v) => std::env::set_var("ATM_IDENTITY", v),
+                None => std::env::remove_var("ATM_IDENTITY"),
+            }
+        }
     }
 
     #[test]
