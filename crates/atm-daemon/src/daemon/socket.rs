@@ -2123,7 +2123,7 @@ fn validate_gh_monitor_config(
         .unwrap_or("")
         .is_empty()
     {
-        return Err("gh_monitor repo is required in configuration".to_string());
+        return Err("gh_monitor configuration missing required field: repo".to_string());
     }
     Ok(())
 }

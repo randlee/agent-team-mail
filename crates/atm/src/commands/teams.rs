@@ -1636,6 +1636,7 @@ enum CleanupActionKind {
     RosterRemove,
     MailboxDelete,
     SessionPrune,
+    Skip,
 }
 
 impl CleanupActionKind {
@@ -1644,6 +1645,7 @@ impl CleanupActionKind {
             Self::RosterRemove => "roster-remove",
             Self::MailboxDelete => "mailbox-delete",
             Self::SessionPrune => "session-prune",
+            Self::Skip => "skip",
         }
     }
 }
@@ -1713,11 +1715,16 @@ fn print_cleanup_preview(team: &str, rows: &[CleanupPreviewRow]) {
         .iter()
         .filter(|row| row.action == CleanupActionKind::SessionPrune)
         .count();
+    let skipped = rows
+        .iter()
+        .filter(|row| row.action == CleanupActionKind::Skip)
+        .count();
     println!();
     println!("Totals:");
     println!("  roster-remove: {roster_remove}");
     println!("  mailbox-delete: {mailbox_delete}");
     println!("  session-prune: {session_prune}");
+    println!("  skip: {skipped}");
 }
 
 /// Implement `atm teams cleanup <team> [agent]`
@@ -1792,6 +1799,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 Some(sid) => sid.clone(),
                 None => {
                     // No session_id → cannot confirm liveness; keep the member.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "external agent missing session_id (unknown liveness)"
+                                .to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: external agent '{}' has no session_id, skipping (unknown liveness)",
                         member.name
@@ -1808,6 +1823,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 }
                 Ok(_) => {
                     // Daemon unreachable, session alive, or no record → keep the agent.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "external agent liveness unknown (daemon did not confirm dead)"
+                                .to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: external agent '{}' liveness unknown, skipping — use --force to override",
                         member.name
@@ -1817,6 +1840,13 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 }
                 Err(_) => {
                     // I/O error → keep the agent to be safe.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "external agent daemon query error".to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: daemon query error for external agent '{}', skipping",
                         member.name
@@ -2625,15 +2655,26 @@ mod tests {
 
             let request_json: serde_json::Value =
                 serde_json::from_str(request_line.trim()).unwrap();
-            assert_eq!(request_json["command"], "session-query-team");
-            assert_eq!(
-                request_json["payload"]["team"].as_str(),
-                Some(expected_team.as_str())
-            );
-            assert_eq!(
-                request_json["payload"]["name"].as_str(),
-                Some(expected_name.as_str())
-            );
+            let command = request_json["command"].as_str().unwrap_or_default();
+            match command {
+                "session-query-team" => {
+                    assert_eq!(
+                        request_json["payload"]["team"].as_str(),
+                        Some(expected_team.as_str())
+                    );
+                    assert_eq!(
+                        request_json["payload"]["name"].as_str(),
+                        Some(expected_name.as_str())
+                    );
+                }
+                "session-query" => {
+                    assert_eq!(
+                        request_json["payload"]["name"].as_str(),
+                        Some(expected_name.as_str())
+                    );
+                }
+                other => panic!("unexpected daemon command in mock server: {other}"),
+            }
 
             let response = serde_json::json!({
                 "version": 1,
@@ -3058,6 +3099,19 @@ mod tests {
         let inbox = team_dir.join("inboxes/publisher.json");
         fs::write(&inbox, "[]").unwrap();
 
+        // Ensure this test exercises the external-agent branch.
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = Some("publisher-session".to_string());
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
         let original = std::env::var("ATM_HOME").ok();
         let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
@@ -3065,8 +3119,12 @@ mod tests {
             std::env::set_var("ATM_HOME", &home_env);
         }
 
-        let server =
-            spawn_mock_session_query_team_server(temp_dir.path(), "atm-dev", "publisher", false);
+        let server = spawn_mock_session_query_team_server(
+            temp_dir.path(),
+            "atm-dev",
+            "publisher-session",
+            false,
+        );
 
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
