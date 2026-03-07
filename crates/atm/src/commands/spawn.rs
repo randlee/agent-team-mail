@@ -183,26 +183,35 @@ fn validate_draft(draft: &SpawnDraft) -> Result<()> {
 }
 
 fn run_interactive_panel(draft: &mut SpawnDraft, runtime: &RuntimeKind) -> Result<()> {
+    let mut inline_error: Option<String> = None;
     loop {
-        render_panel(draft, runtime);
+        render_panel(draft, runtime, inline_error.as_deref());
         print!("> ");
         io::stdout().flush()?;
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
         let input = line.trim();
         if input.is_empty() {
-            validate_draft(draft)?;
-            return Ok(());
+            match validate_draft(draft) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    inline_error = Some(err.to_string());
+                    continue;
+                }
+            }
         }
         if input.eq_ignore_ascii_case("q") || input == "\u{1b}" {
             anyhow::bail!("spawn cancelled");
         }
-        apply_edits(draft, input)?;
-        validate_draft(draft)?;
+        if let Err(err) = apply_edits(draft, input) {
+            inline_error = Some(err.to_string());
+            continue;
+        }
+        inline_error = validate_draft(draft).err().map(|err| err.to_string());
     }
 }
 
-fn render_panel(draft: &SpawnDraft, runtime: &RuntimeKind) {
+fn render_panel(draft: &SpawnDraft, runtime: &RuntimeKind, inline_error: Option<&str>) {
     println!();
     println!("atm spawn — interactive mode");
     println!("Spawning runtime: {}", runtime_name(runtime));
@@ -217,6 +226,10 @@ fn render_panel(draft: &SpawnDraft, runtime: &RuntimeKind) {
         draft.worktree.as_deref().unwrap_or("(none)")
     );
     println!();
+    if let Some(err) = inline_error {
+        println!("  [error] {err}");
+        println!();
+    }
     println!("Enter to confirm · q to cancel");
     println!("Change items with n=value or n=value,m=value2");
 }
