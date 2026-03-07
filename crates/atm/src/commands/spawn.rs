@@ -508,13 +508,9 @@ fn apply_panel_edits(
 }
 
 fn detect_tmux_context() -> Option<TmuxContext> {
-    if std::env::var("TMUX")
+    std::env::var("TMUX")
         .ok()
-        .filter(|v| !v.trim().is_empty())
-        .is_none()
-    {
-        return None;
-    }
+        .filter(|v| !v.trim().is_empty())?;
     let output = Command::new("tmux")
         .arg("display-message")
         .arg("-p")
