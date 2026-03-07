@@ -21,8 +21,8 @@ hook rollout.
 
 | Sprint | Focus | Notes |
 |---|---|---|
-| AC.5 | Daemon status convergence + lifecycle validation | Complete |
-| AC.6 | Hook install confidence + multi-team recovery matrix | In progress |
+| AC.5 | Daemon status convergence + lifecycle validation | Current branch work |
+| AC.6 | Hook install confidence + multi-team recovery matrix | Next sprint |
 
 ## AC.5 Test Matrix
 
@@ -37,8 +37,9 @@ Targets:
 Cases:
 1. Same daemon state produces consistent liveness/activity render in all three commands.
 2. `isActive=false` does not imply offline/dead in command output.
-3. Team-scoped run (`--team`) excludes agents from other teams.
-4. Daemon-unreachable path renders `Unknown` (not offline/dead) with actionable finding.
+3. `isActive=true` without a daemon-backed live session does not imply online; render `Unknown` until liveness is confirmed.
+4. Team-scoped run (`--team`) excludes agents from other teams.
+5. Daemon-unreachable path renders `Unknown` (not offline/dead) with actionable finding.
 
 ### 2) Lifecycle Transition Coverage
 
@@ -51,6 +52,11 @@ Cases:
 2. `permission_request` marks activity as blocked-permission (busy-equivalent state).
 3. `stop` and `notification_idle_prompt` transition activity back to idle without changing liveness incorrectly.
 4. `teammate_idle` remains supported and transitions activity to idle.
+5. `session_end` for the active tracked session transitions the member to dead/offline on the canonical path.
+
+Scope note:
+- `hook.pre_compact` and `hook.compact_complete` remain covered by Phase Z.5
+  lifecycle logging tests (PR #430) and are not redefined by AC.5.
 
 ### 3) Session-End Replay and Mismatch Behavior
 
@@ -72,13 +78,15 @@ Targets:
 - `tests/hook-scripts/*`
 
 Cases:
-1. Relay scripts (`permission-request`, `stop`, `notification-idle`) produce equivalent payloads from both roots.
-2. Session scripts (`session-start`, `session-end`) enforce same routing/guard behavior from both roots.
-3. Shared helper (`atm_hook_lib.py`) behavior matches across both roots.
+1. `permission-request-relay.py` produces equivalent payload semantics from both roots.
+2. `stop-relay.py` produces equivalent payload semantics from both roots.
+3. `notification-idle-relay.py` produces equivalent payload semantics from both roots.
+4. Session scripts (`session-start`, `session-end`) enforce same routing/guard behavior from both roots.
+5. Shared helper (`atm_hook_lib.py`) behavior matches across both roots.
 
 Project-only note:
-- `gate-named-teammate.py` is intentionally project-local under `.claude/scripts/` and is **not**
-  embedded under `crates/atm/scripts/`; parity checks must not require a crate copy.
+- `gate-named-teammate.py` is intentionally project-local under `.claude/scripts/` and is
+  not embedded under `crates/atm/scripts/`; parity checks must not require a crate copy.
 
 ### 5) `atm init` Install Matrix
 
@@ -87,8 +95,8 @@ Targets:
 - `crates/atm/tests/integration_init_onboarding.rs`
 
 Cases:
-1. Global install writes absolute script paths and required hook commands.
-2. Local install writes `$CLAUDE_PROJECT_DIR` script paths and required hook commands.
+1. Global install writes absolute script paths in hook commands (no `$CLAUDE_PROJECT_DIR` tokens in global-mode command strings).
+2. Local install writes `$CLAUDE_PROJECT_DIR` script paths in hook commands (no absolute per-user script paths in local-mode command strings).
 3. Re-running init is idempotent (no duplicate hook entries).
 4. Existing non-ATM hooks are preserved.
 
@@ -97,6 +105,10 @@ Cases:
 Targets:
 - daemon integration tests (`crates/atm-daemon/tests/`)
 - CLI integration tests (`crates/atm/tests/`)
+
+Extension note:
+- This section extends AC.5 section 1 with restart/recovery regressions and
+  multi-team stress behavior; it is not a duplicate of the baseline consistency checks.
 
 Cases:
 1. Multiple teams active concurrently: no cross-team member/finding bleed.
