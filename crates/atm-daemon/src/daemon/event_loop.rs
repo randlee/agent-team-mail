@@ -100,10 +100,10 @@ pub async fn run(
 
     // Initialize all plugins
     info!("Initializing {} plugin(s)", registry.len());
-    registry
-        .init_all(ctx)
-        .await
-        .context("Failed to initialize plugins")?;
+    // `init_all` is fail-open by contract: plugin init failures are recorded in
+    // registry state and surfaced via status/doctor, not propagated as daemon
+    // startup errors.
+    let _ = registry.init_all(ctx).await;
     let init_failed_plugins = registry.failed_init_plugins();
     for failed in &init_failed_plugins {
         warn!(

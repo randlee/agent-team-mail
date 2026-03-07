@@ -2314,7 +2314,7 @@ Operator status UX contract:
 - Both commands must explicitly report whether `gh_monitor` is:
   - configured,
   - enabled/disabled,
-  - currently available (`healthy` / `degraded` / `disabled_config_error`).
+  - currently available (`healthy` / `degraded` / `disabled_config_error` / `disabled_init_error`).
 - When not enabled, human output must clearly state that monitoring is disabled
   and include next-step guidance to enable/configure `[plugins.gh_monitor]`.
 - JSON output must expose the same status fields without lossy conversion.
@@ -2557,8 +2557,12 @@ temp/atm/<plugin-name>/
 
 - Plugin init failures must not crash daemon startup.
 - Plugin runtime failures must not terminate daemon process or unrelated plugins.
-- Plugin status must be visible as `healthy`, `degraded`, or
-  `disabled_config_error` in daemon status surfaces (`atm status`, `atm doctor`).
+- Plugin status must be visible as `healthy`, `degraded`,
+  `disabled_config_error`, or `disabled_init_error` in daemon status surfaces
+  (`atm status`, `atm doctor`).
+- `disabled_init_error` means plugin code/config failed during plugin init for
+  the current daemon run; daemon continues with other plugins and surfaces the
+  init error details for remediation.
 - If a plugin enters `disabled_config_error`, daemon must not keep a live
   polling loop for that plugin.
 - Plugin failures must be handled as state transitions (with structured error
