@@ -1163,6 +1163,9 @@ fn session_identity_change_flags(
 fn hook_action_name(event_type: &str) -> Option<&'static str> {
     match event_type {
         "session_start" => Some("hook.session_start"),
+        "permission_request" => Some("hook.permission_request"),
+        "stop" => Some("hook.stop"),
+        "notification_idle_prompt" => Some("hook.notification_idle_prompt"),
         "pre_compact" => Some("hook.pre_compact"),
         "compact_complete" => Some("hook.compact_complete"),
         "session_end" => Some("hook.session_end"),
@@ -1628,6 +1631,108 @@ async fn handle_hook_event_command_with_dedup(
                 "hook_event {}",
                 event_type
             );
+        }
+        "permission_request" => {
+            let (old_state, new_state) = {
+                let mut tracker = state_store.lock().unwrap();
+                let current = tracker.get_state(&agent);
+                if current.is_some() {
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Active,
+                        "permission_request lifecycle (blocked-permission)",
+                        "hook_event",
+                    );
+                } else {
+                    tracker.register_agent(&agent);
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Active,
+                        "permission_request lifecycle (blocked-permission, auto-register)",
+                        "hook_event",
+                    );
+                }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.permission_request",
+                Some(session_id.as_str()),
+                process_id,
+            );
+            info!(agent = %agent, agent_pid = agent_pid, "hook_event permission_request");
+        }
+        "stop" => {
+            let (old_state, new_state) = {
+                let mut tracker = state_store.lock().unwrap();
+                let current = tracker.get_state(&agent);
+                if current.is_some() {
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Idle,
+                        "stop lifecycle",
+                        "hook_event",
+                    );
+                } else {
+                    tracker.register_agent(&agent);
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Idle,
+                        "stop lifecycle (auto-register)",
+                        "hook_event",
+                    );
+                }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.stop",
+                Some(session_id.as_str()),
+                process_id,
+            );
+            info!(agent = %agent, agent_pid = agent_pid, "hook_event stop");
+        }
+        "notification_idle_prompt" => {
+            let (old_state, new_state) = {
+                let mut tracker = state_store.lock().unwrap();
+                let current = tracker.get_state(&agent);
+                if current.is_some() {
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Idle,
+                        "notification_idle_prompt lifecycle",
+                        "hook_event",
+                    );
+                } else {
+                    tracker.register_agent(&agent);
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Idle,
+                        "notification_idle_prompt lifecycle (auto-register)",
+                        "hook_event",
+                    );
+                }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.notification_idle_prompt",
+                Some(session_id.as_str()),
+                process_id,
+            );
+            info!(agent = %agent, agent_pid = agent_pid, "hook_event notification_idle_prompt");
         }
         "teammate_idle" => {
             let (old_state, new_state) = {
@@ -2098,13 +2203,12 @@ fn validate_gh_monitor_config(
     home: &std::path::Path,
     team: &str,
 ) -> std::result::Result<(), String> {
-    let current_dir = std::env::current_dir().map_err(|e| e.to_string())?;
     let config = agent_team_mail_core::config::resolve_config(
         &agent_team_mail_core::config::ConfigOverrides {
             team: Some(team.to_string()),
             ..Default::default()
         },
-        &current_dir,
+        home,
         home,
     )
     .map_err(|e| e.to_string())?;
@@ -2115,6 +2219,15 @@ fn validate_gh_monitor_config(
         crate::plugins::ci_monitor::CiMonitorConfig::from_toml(table).map_err(|e| e.to_string())?;
     if !parsed.enabled {
         return Err("gh_monitor plugin disabled in configuration".to_string());
+    }
+    if parsed
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        return Err("gh_monitor configuration missing required field: repo".to_string());
     }
     Ok(())
 }
@@ -5575,6 +5688,7 @@ identity = "daemon-test"
 enabled = true
 team = "{team}"
 agent = "gh-monitor"
+repo = "agent-team-mail"
 poll_interval_secs = 60
 "#
         );
@@ -5800,6 +5914,34 @@ poll_interval_secs = 1
         HookAuthFixture {
             _temp: temp,
             _atm_home_guard: atm_home_guard,
+        }
+    }
+
+    #[cfg(unix)]
+    async fn handle_hook_event_with_transient_retry(
+        req_json: &str,
+        store: &SharedStateStore,
+        sr: &SharedSessionRegistry,
+    ) -> agent_team_mail_core::daemon_client::SocketResponse {
+        let mut attempts = 0u8;
+        loop {
+            attempts += 1;
+            let resp = handle_hook_event_command(req_json, store, sr).await;
+            let retry = resp
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("processed").and_then(|v| v.as_bool()))
+                .is_some_and(|processed| !processed)
+                && resp
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("reason").and_then(|v| v.as_str()))
+                    .is_some_and(|reason| reason.contains("team config not found"));
+            if retry && attempts < 4 {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                continue;
+            }
+            return resp;
         }
     }
 
@@ -6072,6 +6214,107 @@ poll_interval_secs = 1
     }
 
     #[test]
+    #[serial]
+    fn test_team_scoped_list_agents_isolated_after_registry_reload() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), "team-a", "team-lead-a", &["team-lead-a", "a1"]);
+        write_hook_auth_team_config(temp.path(), "team-b", "team-lead-b", &["team-lead-b", "b1"]);
+        // Avoid test-process backend mismatch (cargo test != claude) so this
+        // test exercises team scoping/reload behavior only.
+        set_member_backend(temp.path(), "team-a", "a1", "external");
+        set_member_backend(temp.path(), "team-b", "b1", "external");
+
+        let persist_path = temp.path().join(".claude/daemon/session-registry.json");
+        {
+            let mut seeded = crate::daemon::session_registry::SessionRegistry::with_persist_path(
+                persist_path.clone(),
+            );
+            seeded.upsert_for_team("team-a", "a1", "sess-a", std::process::id());
+            seeded.upsert_for_team("team-b", "b1", "sess-b", std::process::id());
+        }
+
+        let store = make_store();
+        let sr = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::daemon::session_registry::SessionRegistry::load_or_new(persist_path),
+        ));
+
+        let req_a = make_request("list-agents", serde_json::json!({"team": "team-a"}));
+        let resp_a = handle_list_agents(&req_a, &store, &sr);
+        assert_eq!(resp_a.status, "ok");
+        let arr_a = resp_a.payload.unwrap().as_array().unwrap().clone();
+        let a1 = arr_a
+            .iter()
+            .find(|v| v["agent"].as_str() == Some("a1"))
+            .expect("a1 should be listed for team-a after restart load");
+        assert_eq!(a1["state"].as_str(), Some("active"));
+        assert_eq!(a1["session_id"].as_str(), Some("sess-a"));
+        assert!(!arr_a.iter().any(|v| v["agent"].as_str() == Some("b1")));
+
+        let req_b = make_request("list-agents", serde_json::json!({"team": "team-b"}));
+        let resp_b = handle_list_agents(&req_b, &store, &sr);
+        assert_eq!(resp_b.status, "ok");
+        let arr_b = resp_b.payload.unwrap().as_array().unwrap().clone();
+        let b1 = arr_b
+            .iter()
+            .find(|v| v["agent"].as_str() == Some("b1"))
+            .expect("b1 should be listed for team-b after restart load");
+        assert_eq!(b1["state"].as_str(), Some("active"));
+        assert_eq!(b1["session_id"].as_str(), Some("sess-b"));
+        assert!(!arr_b.iter().any(|v| v["agent"].as_str() == Some("a1")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_restart_partial_lifecycle_teammate_idle_converges_deterministically() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(
+            temp.path(),
+            "atm-dev",
+            "team-lead",
+            &["team-lead", "arch-ctm"],
+        );
+        // Keep this restart test focused on lifecycle convergence by avoiding
+        // backend validation against the cargo test process.
+        set_member_backend(temp.path(), "atm-dev", "arch-ctm", "external");
+
+        let persist_path = temp.path().join(".claude/daemon/session-registry.json");
+        {
+            let mut seeded = crate::daemon::session_registry::SessionRegistry::with_persist_path(
+                persist_path.clone(),
+            );
+            seeded.upsert_for_team("atm-dev", "arch-ctm", "sess-partial", std::process::id());
+        }
+
+        // Simulate daemon restart: rebuild registry from persisted state while
+        // state tracker starts empty.
+        let store = make_store();
+        let sr = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::daemon::session_registry::SessionRegistry::load_or_new(persist_path),
+        ));
+
+        let req_json = r#"{"version":1,"request_id":"r-restart-idle","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-partial","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let list_resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(list_resp.status, "ok");
+        let arr = list_resp.payload.unwrap().as_array().unwrap().clone();
+        let arch = arr
+            .iter()
+            .find(|v| v["agent"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm should be listed");
+        assert_eq!(arch["state"].as_str(), Some("idle"));
+        assert_eq!(arch["activity"].as_str(), Some("idle"));
+        assert_eq!(arch["session_id"].as_str(), Some("sess-partial"));
+    }
+
+    #[test]
     fn test_launch_command_missing_agent() {
         // parse_and_dispatch receives a "launch" command — it should return INTERNAL_ERROR
         // because the async path should have handled it, but the payload may be inspected.
@@ -6144,6 +6387,7 @@ poll_interval_secs = 1
     #[cfg(unix)]
     async fn test_gh_monitor_pr_timeout_zero_returns_ci_not_started_and_status_roundtrip() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let req_json = r#"{"version":1,"request_id":"r-gh-1","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":0}}"#;
         let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
@@ -6165,6 +6409,7 @@ poll_interval_secs = 1
     #[cfg(unix)]
     async fn test_gh_monitor_workflow_requires_reference() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let req_json = r#"{"version":1,"request_id":"r-gh-3","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci"}}"#;
         let resp = handle_gh_monitor_command(req_json, temp.path()).await;
@@ -6668,6 +6913,7 @@ exit 1
     #[cfg(unix)]
     async fn test_gh_monitor_run_target_success_status_roundtrip() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let req_json = r#"{"version":1,"request_id":"r-gh-run","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"456789"}}"#;
         let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
@@ -6692,6 +6938,7 @@ exit 1
     #[serial]
     async fn test_gh_monitor_workflow_success_status_roundtrip() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let _path_guard = install_fake_gh_script(
             &temp,
@@ -6764,6 +7011,7 @@ exit 1
     #[cfg(unix)]
     async fn test_gh_monitor_control_start_stop_restart_and_health() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
 
         let start_req = r#"{"version":1,"request_id":"r-gh-start","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"start"}}"#;
@@ -6796,6 +7044,7 @@ exit 1
     #[cfg(unix)]
     async fn test_gh_monitor_command_rejected_when_lifecycle_stopped() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let _ = set_gh_monitor_health_state(
             temp.path(),
@@ -8144,6 +8393,15 @@ exit 1
             hook_action_name("session_start"),
             Some("hook.session_start")
         );
+        assert_eq!(
+            hook_action_name("permission_request"),
+            Some("hook.permission_request")
+        );
+        assert_eq!(hook_action_name("stop"), Some("hook.stop"));
+        assert_eq!(
+            hook_action_name("notification_idle_prompt"),
+            Some("hook.notification_idle_prompt")
+        );
         assert_eq!(hook_action_name("pre_compact"), Some("hook.pre_compact"));
         assert_eq!(
             hook_action_name("compact_complete"),
@@ -8323,6 +8581,125 @@ exit 1
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
+    async fn test_hook_event_permission_request_marks_blocked_permission_context_without_liveness_drift()
+     {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-pr", 1111);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r-pr","command":"hook-event","payload":{"event":"permission_request","agent":"arch-ctm","session_id":"sess-pr","team":"atm-dev","tool_name":"Bash"}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "permission_request");
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Active));
+        let meta = tracker
+            .transition_meta("arch-ctm")
+            .expect("transition metadata should exist");
+        assert!(meta.reason.contains("blocked-permission"));
+
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Active
+        );
+        assert_eq!(record.session_id, "sess-pr");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_stop_transitions_to_idle_without_liveness_drift() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Active);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-stop", 2222);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r-stop","command":"hook-event","payload":{"event":"stop","agent":"arch-ctm","session_id":"sess-stop","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "stop");
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
+
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Active
+        );
+        assert_eq!(record.session_id, "sess-stop");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_notification_idle_prompt_transitions_to_idle_without_liveness_drift() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Active);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-notify", 3333);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r-notify","command":"hook-event","payload":{"event":"notification_idle_prompt","agent":"arch-ctm","session_id":"sess-notify","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(
+            payload["event"].as_str().unwrap(),
+            "notification_idle_prompt"
+        );
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
+
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Active
+        );
+        assert_eq!(record.session_id, "sess-notify");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
     async fn test_hook_event_session_end_marks_dead() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
@@ -8384,6 +8761,57 @@ exit 1
         );
         let tracker = store.lock().unwrap();
         assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_unknown_team_is_strict_noop() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r5-unknown-team","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-unknown","team":"unknown-team"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert!(
+            payload["reason"]
+                .as_str()
+                .unwrap()
+                .contains("team config not found")
+        );
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("unknown-team", "team-lead")
+                .is_none()
+        );
+        let tracker = store.lock().unwrap();
+        assert!(tracker.get_state("team-lead").is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_unknown_agent_is_strict_noop() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r5-unknown-agent","command":"hook-event","payload":{"event":"session_end","agent":"arch-ctm","session_id":"sess-unknown-agent","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none()
+        );
+        let tracker = store.lock().unwrap();
+        assert!(tracker.get_state("arch-ctm").is_none());
     }
 
     #[cfg(unix)]

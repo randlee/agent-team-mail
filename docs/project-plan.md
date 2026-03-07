@@ -165,8 +165,9 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
 | X | Team Onboarding + TUI/Doctor Stability | `/team-join`, spawn path normalization, `atm init` one-command setup, and carry-forward bug-debt mapping | PLANNED |
 | Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency (Z.1–Z.7 COMPLETE) | COMPLETE |
-| AA | Session Correctness + Spawn Authorization + Reliability UX | Session-end correctness, spawn authorization, cleanup/help reliability hardening | PLANNED |
-| AB | GitHub CI Monitor Command + Availability Hardening | Complete `atm gh` plugin requirements and deliver monitor/state/reporting contracts | PLANNED |
+| AA | Session Correctness + Spawn Authorization + Reliability UX | Session-end correctness, spawn authorization, cleanup/help reliability hardening | COMPLETE |
+| AB | GitHub CI Monitor Command + Availability Hardening | Complete `atm gh` plugin requirements and deliver monitor/state/reporting contracts | COMPLETE |
+| AC | Daemon Status Convergence + Hook Install Confidence | Finalize daemon status/lifecycle consistency and pre-release hook install confidence for local/global paths | IN PROGRESS |
 
 ---
 
@@ -1426,11 +1427,22 @@ the current tranche focused on onboarding contract closure.
 | | AB.5 | Runtime Drift Baselines (Optional Enhancement) | COMPLETE | [#466](https://github.com/randlee/agent-team-mail/pull/466) |
 | | AB.6 | PR Merge-Conflict + CI Gap Detection | COMPLETE | [#467](https://github.com/randlee/agent-team-mail/pull/467) |
 | | AB.7 | Architecture Review Findings Hardening | COMPLETE | [#468](https://github.com/randlee/agent-team-mail/pull/468) |
+| **AC** | AC.1 | ReconcileCycleState Per-Test Injection | COMPLETE | `41053cf` (integrate/phase-AC) |
+| | AC.1b | Codex PPID Detection + Stable Session Key | COMPLETE | `da6cae5` (integrate/phase-AC) |
+| | AC.2 | Cleanup Guard Tests + gh Monitor Repo Validation | COMPLETE | [#476](https://github.com/randlee/agent-team-mail/pull/476), [#484](https://github.com/randlee/agent-team-mail/pull/484) |
+| | AC.3 | atm spawn Interactive UX | COMPLETE | [#477](https://github.com/randlee/agent-team-mail/pull/477) |
+| | AC.4 | Daemon Logging Observability | COMPLETE | [#479](https://github.com/randlee/agent-team-mail/pull/479) |
+| | AC.5 | Daemon Status Convergence + Lifecycle State Validation | COMPLETE | [#481](https://github.com/randlee/agent-team-mail/pull/481) |
+| | AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | COMPLETE | [#485](https://github.com/randlee/agent-team-mail/pull/485) |
+| | AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | COMPLETE | [#486](https://github.com/randlee/agent-team-mail/pull/486) |
+| | AC.8 | Init Install Matrix QA Blocker Closure | COMPLETE | [#487](https://github.com/randlee/agent-team-mail/pull/487) |
+| | AC.9 | Multi-Team Recovery Determinism | COMPLETE | [#488](https://github.com/randlee/agent-team-mail/pull/488) |
+| | AC.10 | Final AC Verification + Release Readiness | COMPLETE | [#489](https://github.com/randlee/agent-team-mail/pull/489) |
 
-**Completed**: 113+ sprints across 25 phases (CI green)
-**Current version**: v0.37.0
-**Current phase**: Phase AB COMPLETE — integration PR [#469](https://github.com/randlee/agent-team-mail/pull/469) pending merge
-**Next planned phase**: Phase AB (GitHub CI monitor command + availability hardening)
+**Completed**: 123+ sprints across 27 phases (CI green)
+**Current version**: v0.38.0
+**Current phase**: Phase AC COMPLETE
+**Next planned phase**: Phase AD (TBD)
 
 ---
 
@@ -1772,6 +1784,94 @@ progress/failure observability.
 3. `classify_failure` returns `infra` for infra-category failures. Test: infra error input → `infra` classification.
 4. No double alert when both code paths fire for same run. Test: terminal command-path fires → polling-path suppressed.
 5. All tests: isolated temp dirs, process_id=0 pattern.
+
+---
+
+## 17.14 Phase AC: Daemon Status Convergence + Hook Install Confidence
+
+**Goal**: close remaining daemon status/lifecycle edge cases and validate hook behavior
+for both project-local and global-install paths before Homebrew/global hook rollout.
+
+**Requirements references**:
+- `docs/requirements.md` §4.3.3c (daemon canonical member-state contract)
+- `docs/requirements.md` §4.5 (hook lifecycle/event contracts)
+- `docs/requirements.md` §4.7 (daemon autostart/single-instance guarantees)
+
+**Integration branch**: `integrate/phase-AC`
+
+**Dependency graph**:
+- AC.5 established baseline daemon state/lifecycle correctness.
+- AC.6 extends AC.5 with hook install confidence and parity coverage.
+- AC.7 hardens lifecycle + restart convergence behavior.
+- AC.8 closes init matrix QA blockers.
+- AC.9 validates multi-team recovery determinism after merge-forward.
+- AC.10 performs final AC verification and release-readiness closeout.
+
+### Sprint Summary
+| Sprint | Name | PR | Branch | Issues | Status |
+|--------|------|----|--------|--------|--------|
+| AC.1 | ReconcileCycleState Per-Test Injection | `41053cf` | integrate/phase-AC | daemon test isolation | COMPLETE |
+| AC.1b | Codex PPID Detection + Stable Session Key | `da6cae5` | integrate/phase-AC | stable session key | COMPLETE |
+| AC.2 | Cleanup Guard Tests + gh Monitor Repo Validation | [#476](https://github.com/randlee/agent-team-mail/pull/476), [#484](https://github.com/randlee/agent-team-mail/pull/484) | `feature/pAC-s2-cleanup-guard` | cleanup guard, gh_monitor config | COMPLETE |
+| AC.3 | atm spawn Interactive UX | [#477](https://github.com/randlee/agent-team-mail/pull/477) | `feature/pAC-s3-spawn-ux` | spawn interactive panel, pane modes | COMPLETE |
+| AC.4 | Daemon Logging Observability | [#479](https://github.com/randlee/agent-team-mail/pull/479) | `feature/pAC-s4-daemon-logging` | PRODUCER_TX, autostart stderr, plugin isolation | COMPLETE |
+| AC.5 | Daemon Status Convergence + Lifecycle State Validation | [#481](https://github.com/randlee/agent-team-mail/pull/481) | `feature/pAC-s5-status-convergence` | #330, #331, #333, #334, #336 | COMPLETE |
+| AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | [#485](https://github.com/randlee/agent-team-mail/pull/485) | `feature/pAC-s6-hook-install-confidence` | #357 follow-on hardening | COMPLETE |
+| AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | [#486](https://github.com/randlee/agent-team-mail/pull/486) | `feature/pAC-s7-hook-lifecycle-coverage` | lifecycle/restart hardening closure | COMPLETE |
+| AC.8 | Init Install Matrix QA Blocker Closure | [#487](https://github.com/randlee/agent-team-mail/pull/487) | `feature/pAC-s8-init-install-matrix` | init onboarding contract | COMPLETE |
+| AC.9 | Multi-Team Recovery Determinism | [#488](https://github.com/randlee/agent-team-mail/pull/488) | `feature/pAC-s9-multiteam-recovery` | team-scoped reload + restart determinism | COMPLETE |
+| AC.10 | Final AC Verification + Release Readiness | [#489](https://github.com/randlee/agent-team-mail/pull/489) | `feature/pAC-s10-release-confidence` | final QA pass + release-closeout checklist | COMPLETE |
+
+### AC.5 — Daemon Status Convergence + Lifecycle State Validation
+**Deliverables**
+1. Ensure `atm doctor`, `atm status`, and `atm members` consume one daemon canonical snapshot path per invocation; no command-specific liveness derivation drift.
+2. Validate lifecycle transition handling across hook/event signals:
+   `session_start`, `permission_request`, `stop`, `notification_idle_prompt`,
+   `teammate_idle`, `session_end`.
+3. Enforce no-op/idempotent behavior for invalid lifecycle replay paths
+   (unknown `session_end`, duplicate dead `session_end`, mismatched-session `session_end`).
+4. Re-verify that `isActive` remains activity-only and cannot be interpreted as liveness in diagnostics/status surfaces.
+5. Preserve prior Z.5 hook lifecycle coverage for `hook.pre_compact` and
+   `hook.compact_complete`; AC.5 does not redefine or regress those contracts.
+
+**Acceptance Criteria**
+1. The same member state is rendered consistently in `atm doctor`, `atm status`, and `atm members`.
+2. Activity transitions (`Busy/Idle/Blocked`) do not flip liveness (`Online/Offline`) incorrectly.
+3. Team-scoped diagnostics do not report cross-team tracked-agent drift.
+4. Lifecycle replay/error paths are deterministic and produce actionable diagnostics/logs.
+
+### AC.6 — Hook Install Confidence + Multi-Team Recovery Matrix
+**Deliverables**
+1. Hook artifact parity validation between repo-local scripts (`.claude/scripts`) and embedded install scripts (`crates/atm/scripts`) for:
+   `session-start.py`, `session-end.py`, `permission-request-relay.py`,
+   `stop-relay.py`, `notification-idle-relay.py`, `atm_hook_lib.py`.
+2. `atm init` local/global hook installation confidence matrix:
+   fresh install, idempotent re-run, command-path correctness, and absolute-path
+   global script wiring.
+3. Multi-team + daemon-restart recovery validation:
+   team isolation, restart state rebuild, and no status drift after recovery.
+
+**Acceptance Criteria**
+1. Hook tests validate behavior from both script roots (local and embedded/global materialization source).
+2. `atm init` hook installs are idempotent and route correctly in both scopes.
+3. Daemon restart/recovery does not introduce cross-team bleed or status regressions.
+
+### AC.10 — Final AC Verification + Release Readiness
+**Deliverables**
+1. Confirm `atm doctor` reports `DAEMON_NOT_RUNNING` with exit code 2 and `liveness: null`
+   when daemon is unreachable, regardless of member `isActive` state.
+2. Validate `docs/test-plan-phase-AC.md` Sprint Mapping covers AC.7–AC.10 with
+   all AC.5 §1 acceptance cases audited.
+3. Full AC regression guardrail: `atm doctor`, `atm status`, and `atm members`
+   remain consistent under daemon-unreachable conditions.
+
+**Acceptance Criteria**
+1. `test_doctor_status_members_consistent_unknown_when_daemon_unreachable` passes
+   on all platforms with `DAEMON_NOT_RUNNING` finding, exit code 2, and
+   `liveness: null` for all members regardless of `isActive`.
+2. `docs/test-plan-phase-AC.md` Sprint Mapping rows AC.7–AC.10 are present and
+   reference the correct branches and deliverables.
+3. `cargo test` and `cargo clippy -- -D warnings` clean across all crates.
 
 ---
 

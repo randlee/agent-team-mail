@@ -28,6 +28,12 @@ Additionally, the spawn UX prototype (`scripts/spawn-demo.sh`) was built and val
 | AC.2 | Daemon | Cleanup guard tests (guard already in Phase AB) + fix `validate_gh_monitor_config` repo check (#471) | Planned | AC.1 |
 | AC.3 | CLI | `atm spawn` interactive review-panel UX | Planned | — |
 | AC.4 | Daemon | Daemon logging + startup observability + plugin init isolation (#472, #473, #474) | Planned | — |
+| AC.5 | QA/Compliance | Spawn command alignment + compliance/test-plan updates | Complete | AC.2, AC.3, AC.4 |
+| AC.6 | QA/Hardening | Hook install confidence + parity coverage + init matrix validation | In progress | AC.5 |
+| AC.7 | Daemon/QA | Hook lifecycle coverage + restart recovery convergence hardening | In progress | AC.6 |
+| AC.8 | QA | Init install matrix QA blocker closure | In progress | AC.7 |
+| AC.9 | Daemon/Recovery | Multi-team registry reload + restart convergence determinism | In progress | AC.8 |
+| AC.10 | QA/Release | Final AC verification + release-readiness closeout | Complete | AC.9 |
 
 AC.2 and AC.3 are independent and can run in parallel.
 
@@ -207,6 +213,35 @@ After all sprints merge to `integrate/phase-AC`: one final PR to `develop`.
 - `cargo clippy` clean
 
 ---
+
+---
+
+## AC.10 — Final AC Verification + Release Readiness
+
+**Branch**: `feature/pAC-s10-release-confidence`
+**PR**: #489
+**Status**: COMPLETE
+
+**Goal**: Confirm daemon-unreachable snapshot consistency and validate full AC test
+coverage matrix before release closeout.
+
+**Deliverables**:
+1. `test_doctor_status_members_consistent_unknown_when_daemon_unreachable`
+   — asserts `DAEMON_NOT_RUNNING` finding, exit code 2, and `liveness: null`
+   for all members regardless of `isActive` state.
+2. `docs/test-plan-phase-AC.md` Sprint Mapping covers AC.7–AC.10.
+3. CI fix: spawn fake daemon scripts via python interpreter to avoid `ETXTBSY`
+   on Linux.
+
+**Files**:
+- `crates/atm/tests/integration_conflict_tests.rs` — snapshot consistency guardrail test
+- `crates/atm/tests/integration_send.rs` — ETXTBSY harness fix
+- `docs/test-plan-phase-AC.md` — Sprint Mapping updated
+
+**Acceptance criteria**:
+- `test_doctor_status_members_consistent_unknown_when_daemon_unreachable` passes on all platforms
+- `cargo test` and `cargo clippy` clean
+- Sprint Mapping rows AC.7–AC.10 present in test-plan-phase-AC.md
 
 ## Open Questions
 

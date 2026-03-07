@@ -34,6 +34,9 @@ use std::path::{Path, PathBuf};
 const SESSION_START_PY: &str = include_str!("../../scripts/session-start.py");
 const SESSION_END_PY: &str = include_str!("../../scripts/session-end.py");
 const TEAMMATE_IDLE_RELAY_PY: &str = include_str!("../../scripts/teammate-idle-relay.py");
+const PERMISSION_REQUEST_RELAY_PY: &str = include_str!("../../scripts/permission-request-relay.py");
+const STOP_RELAY_PY: &str = include_str!("../../scripts/stop-relay.py");
+const NOTIFICATION_IDLE_RELAY_PY: &str = include_str!("../../scripts/notification-idle-relay.py");
 const ATM_IDENTITY_WRITE_PY: &str = include_str!("../../scripts/atm-identity-write.py");
 const ATM_IDENTITY_CLEANUP_PY: &str = include_str!("../../scripts/atm-identity-cleanup.py");
 const GATE_AGENT_SPAWNS_PY: &str = include_str!("../../scripts/gate-agent-spawns.py");
@@ -45,6 +48,9 @@ const ATM_HOOK_LIB_PY: &str = include_str!("../../scripts/atm_hook_lib.py");
 
 // Hooks installed by `atm init`:
 // - SessionStart: announce session ID and optionally notify daemon
+// - PermissionRequest: transition daemon activity to blocked-permission
+// - Stop: transition daemon activity to idle
+// - Notification(idle_prompt): periodic idle heartbeat to daemon
 // - PreToolUse(Bash): write PID-based identity file before `atm` commands
 // - PreToolUse(Task): gate agent spawning pattern enforcement
 // - PostToolUse(Bash): clean up PID identity file after `atm` commands
@@ -63,6 +69,30 @@ fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
 /// Return the SessionEnd hook command string for local or global install.
 fn session_end_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "session-end.py");
+    format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+    )
+}
+
+/// Return the PermissionRequest hook command string for local or global install.
+fn permission_request_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "permission-request-relay.py");
+    format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+    )
+}
+
+/// Return the Stop hook command string for local or global install.
+fn stop_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "stop-relay.py");
+    format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
+    )
+}
+
+/// Return the Notification(idle_prompt) hook command string for local/global install.
+fn notification_idle_prompt_cmd(global_scripts_dir: Option<&Path>) -> String {
+    let script = hook_script_path(global_scripts_dir, "notification-idle-relay.py");
     format!(
         "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
     )
@@ -355,6 +385,9 @@ fn materialize_scripts(scripts_dir: &Path) -> Result<()> {
         ("session-start.py", SESSION_START_PY),
         ("session-end.py", SESSION_END_PY),
         ("teammate-idle-relay.py", TEAMMATE_IDLE_RELAY_PY),
+        ("permission-request-relay.py", PERMISSION_REQUEST_RELAY_PY),
+        ("stop-relay.py", STOP_RELAY_PY),
+        ("notification-idle-relay.py", NOTIFICATION_IDLE_RELAY_PY),
         ("atm-identity-write.py", ATM_IDENTITY_WRITE_PY),
         ("atm-identity-cleanup.py", ATM_IDENTITY_CLEANUP_PY),
         ("gate-agent-spawns.py", GATE_AGENT_SPAWNS_PY),
@@ -477,6 +510,9 @@ enum HookStatus {
 struct MergeReport {
     session_start: HookStatus,
     session_end: HookStatus,
+    permission_request: HookStatus,
+    stop: HookStatus,
+    notification_idle_prompt: HookStatus,
     pre_tool_use_bash: HookStatus,
     pre_tool_use_task: HookStatus,
     post_tool_use_bash: HookStatus,
@@ -486,6 +522,9 @@ impl MergeReport {
     fn all_present(&self) -> bool {
         self.session_start == HookStatus::AlreadyPresent
             && self.session_end == HookStatus::AlreadyPresent
+            && self.permission_request == HookStatus::AlreadyPresent
+            && self.stop == HookStatus::AlreadyPresent
+            && self.notification_idle_prompt == HookStatus::AlreadyPresent
             && self.pre_tool_use_bash == HookStatus::AlreadyPresent
             && self.pre_tool_use_task == HookStatus::AlreadyPresent
             && self.post_tool_use_bash == HookStatus::AlreadyPresent
@@ -494,6 +533,9 @@ impl MergeReport {
     fn any_added(&self) -> bool {
         self.session_start == HookStatus::Added
             || self.session_end == HookStatus::Added
+            || self.permission_request == HookStatus::Added
+            || self.stop == HookStatus::Added
+            || self.notification_idle_prompt == HookStatus::Added
             || self.pre_tool_use_bash == HookStatus::Added
             || self.pre_tool_use_task == HookStatus::Added
             || self.post_tool_use_bash == HookStatus::Added
@@ -502,13 +544,16 @@ impl MergeReport {
     fn all_added(&self) -> bool {
         self.session_start == HookStatus::Added
             && self.session_end == HookStatus::Added
+            && self.permission_request == HookStatus::Added
+            && self.stop == HookStatus::Added
+            && self.notification_idle_prompt == HookStatus::Added
             && self.pre_tool_use_bash == HookStatus::Added
             && self.pre_tool_use_task == HookStatus::Added
             && self.post_tool_use_bash == HookStatus::Added
     }
 }
 
-/// Merge all four ATM hooks into `settings` and return a report.
+/// Merge ATM hooks into `settings` and return a report.
 ///
 /// Uses idempotency checks by matching on the exact command string so that
 /// re-running `atm init` never duplicates entries.
@@ -538,15 +583,24 @@ fn merge_hooks(
     // nested hook schema when present.
     normalize_catch_all_hook_category_if_present(settings, "SessionStart")?;
     normalize_catch_all_hook_category_if_present(settings, "SessionEnd")?;
+    normalize_catch_all_hook_category_if_present(settings, "PermissionRequest")?;
+    normalize_catch_all_hook_category_if_present(settings, "Stop")?;
 
     let ss_cmd = session_start_cmd(global_scripts_dir);
     let se_cmd = session_end_cmd(global_scripts_dir);
+    let pr_cmd = permission_request_cmd(global_scripts_dir);
+    let stop = stop_cmd(global_scripts_dir);
+    let notify_idle = notification_idle_prompt_cmd(global_scripts_dir);
     let ptu_bash = pre_tool_use_bash_cmd(global_scripts_dir);
     let ptu_task = pre_tool_use_task_cmd(global_scripts_dir);
     let post_bash = post_tool_use_bash_cmd(global_scripts_dir);
 
     let session_start = merge_session_hook(settings, "SessionStart", &ss_cmd)?;
     let session_end = merge_session_hook(settings, "SessionEnd", &se_cmd)?;
+    let permission_request = merge_session_hook(settings, "PermissionRequest", &pr_cmd)?;
+    let stop = merge_session_hook(settings, "Stop", &stop)?;
+    let notification_idle_prompt =
+        merge_matcher_hook(settings, "Notification", "idle_prompt", &notify_idle)?;
     let pre_tool_use_bash = merge_matcher_hook(settings, "PreToolUse", "Bash", &ptu_bash)?;
     let pre_tool_use_task = merge_matcher_hook(settings, "PreToolUse", "Task", &ptu_task)?;
     let post_tool_use_bash = merge_matcher_hook(settings, "PostToolUse", "Bash", &post_bash)?;
@@ -554,6 +608,9 @@ fn merge_hooks(
     Ok(MergeReport {
         session_start,
         session_end,
+        permission_request,
+        stop,
+        notification_idle_prompt,
         pre_tool_use_bash,
         pre_tool_use_task,
         post_tool_use_bash,
@@ -800,6 +857,9 @@ fn print_report(
         );
         println!("  \u{2713} SessionStart hook present");
         println!("  \u{2713} SessionEnd hook present");
+        println!("  \u{2713} PermissionRequest hook present");
+        println!("  \u{2713} Stop hook present");
+        println!("  \u{2713} Notification(idle_prompt) hook present");
         println!("  \u{2713} PreToolUse(Bash) hook present");
         println!("  \u{2713} PreToolUse(Task) hook present");
         println!("  \u{2713} PostToolUse(Bash) hook present");
@@ -811,6 +871,12 @@ fn print_report(
         );
         print_hook_line("SessionStart hook", &report.session_start);
         print_hook_line("SessionEnd hook", &report.session_end);
+        print_hook_line("PermissionRequest hook", &report.permission_request);
+        print_hook_line("Stop hook", &report.stop);
+        print_hook_line(
+            "Notification(idle_prompt) hook",
+            &report.notification_idle_prompt,
+        );
         print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash);
         print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
         print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
@@ -822,6 +888,12 @@ fn print_report(
         );
         print_hook_line("SessionStart hook", &report.session_start);
         print_hook_line("SessionEnd hook", &report.session_end);
+        print_hook_line("PermissionRequest hook", &report.permission_request);
+        print_hook_line("Stop hook", &report.stop);
+        print_hook_line(
+            "Notification(idle_prompt) hook",
+            &report.notification_idle_prompt,
+        );
         print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash);
         print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
         print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
@@ -874,7 +946,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Installing into a nonexistent settings.json creates the file with
-    /// all four ATM hooks correctly structured.
+    /// core ATM hooks correctly structured.
     #[test]
     fn test_fresh_file_install() {
         let dir = TempDir::new().expect("tempdir");
@@ -889,6 +961,9 @@ mod tests {
 
         assert!(path.exists());
         assert_eq!(report.session_start, HookStatus::Added);
+        assert_eq!(report.permission_request, HookStatus::Added);
+        assert_eq!(report.stop, HookStatus::Added);
+        assert_eq!(report.notification_idle_prompt, HookStatus::Added);
         assert_eq!(report.pre_tool_use_bash, HookStatus::Added);
         assert_eq!(report.pre_tool_use_task, HookStatus::Added);
         assert_eq!(report.post_tool_use_bash, HookStatus::Added);
@@ -969,6 +1044,9 @@ mod tests {
 
         // All hooks must be reported as already present
         assert_eq!(report.session_start, HookStatus::AlreadyPresent);
+        assert_eq!(report.permission_request, HookStatus::AlreadyPresent);
+        assert_eq!(report.stop, HookStatus::AlreadyPresent);
+        assert_eq!(report.notification_idle_prompt, HookStatus::AlreadyPresent);
         assert_eq!(report.pre_tool_use_bash, HookStatus::AlreadyPresent);
         assert_eq!(report.pre_tool_use_task, HookStatus::AlreadyPresent);
         assert_eq!(report.post_tool_use_bash, HookStatus::AlreadyPresent);
@@ -1214,6 +1292,11 @@ mod tests {
         let scripts_dir = dir.path().join("scripts with spaces");
         let expected_session =
             normalize_for_bash_quoted_path(&scripts_dir.join("session-start.py"));
+        let expected_permission =
+            normalize_for_bash_quoted_path(&scripts_dir.join("permission-request-relay.py"));
+        let expected_stop = normalize_for_bash_quoted_path(&scripts_dir.join("stop-relay.py"));
+        let expected_notification =
+            normalize_for_bash_quoted_path(&scripts_dir.join("notification-idle-relay.py"));
         let expected_write =
             normalize_for_bash_quoted_path(&scripts_dir.join("atm-identity-write.py"));
         let expected_gate =
@@ -1222,16 +1305,25 @@ mod tests {
             normalize_for_bash_quoted_path(&scripts_dir.join("atm-identity-cleanup.py"));
 
         let session = session_start_cmd(Some(&scripts_dir));
+        let permission = permission_request_cmd(Some(&scripts_dir));
+        let stop = stop_cmd(Some(&scripts_dir));
+        let notification = notification_idle_prompt_cmd(Some(&scripts_dir));
         let write = pre_tool_use_bash_cmd(Some(&scripts_dir));
         let gate = pre_tool_use_task_cmd(Some(&scripts_dir));
         let cleanup = post_tool_use_bash_cmd(Some(&scripts_dir));
 
         assert!(session.contains(&expected_session));
+        assert!(permission.contains(&expected_permission));
+        assert!(stop.contains(&expected_stop));
+        assert!(notification.contains(&expected_notification));
         assert!(write.contains(&expected_write));
         assert!(gate.contains(&expected_gate));
         assert!(cleanup.contains(&expected_cleanup));
 
         assert!(!session.contains("${HOME}"));
+        assert!(!permission.contains("${HOME}"));
+        assert!(!stop.contains("${HOME}"));
+        assert!(!notification.contains("${HOME}"));
         assert!(!write.contains("${HOME}"));
         assert!(!gate.contains("${HOME}"));
         assert!(!cleanup.contains("${HOME}"));
@@ -1307,6 +1399,9 @@ mod tests {
             "session-start.py",
             "session-end.py",
             "teammate-idle-relay.py",
+            "permission-request-relay.py",
+            "stop-relay.py",
+            "notification-idle-relay.py",
             "atm-identity-write.py",
             "atm-identity-cleanup.py",
             "gate-agent-spawns.py",
@@ -1392,6 +1487,9 @@ mod tests {
         let report = MergeReport {
             session_start: HookStatus::Added,
             session_end: HookStatus::Added,
+            permission_request: HookStatus::Added,
+            stop: HookStatus::Added,
+            notification_idle_prompt: HookStatus::Added,
             pre_tool_use_bash: HookStatus::Added,
             pre_tool_use_task: HookStatus::Added,
             post_tool_use_bash: HookStatus::Added,
@@ -1407,6 +1505,9 @@ mod tests {
         let report = MergeReport {
             session_start: HookStatus::Added,
             session_end: HookStatus::AlreadyPresent,
+            permission_request: HookStatus::AlreadyPresent,
+            stop: HookStatus::AlreadyPresent,
+            notification_idle_prompt: HookStatus::AlreadyPresent,
             pre_tool_use_bash: HookStatus::AlreadyPresent,
             pre_tool_use_task: HookStatus::AlreadyPresent,
             post_tool_use_bash: HookStatus::AlreadyPresent,

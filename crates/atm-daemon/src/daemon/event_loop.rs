@@ -7,7 +7,7 @@ use crate::daemon::{
     SharedSessionRegistry, SharedStateStore, SharedStreamEventSender, graceful_shutdown,
     spool_drain_loop, start_socket_server, watch_inboxes,
 };
-use crate::plugin::{Capability, PluginContext, PluginRegistry};
+use crate::plugin::{Capability, FailedPluginInit, PluginContext, PluginRegistry};
 use crate::plugins::worker_adapter::AgentState;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
@@ -100,10 +100,18 @@ pub async fn run(
 
     // Initialize all plugins
     info!("Initializing {} plugin(s)", registry.len());
-    registry
-        .init_all(ctx)
-        .await
-        .context("Failed to initialize plugins")?;
+    // `init_all` is fail-open by contract: plugin init failures are recorded in
+    // registry state and surfaced via status/doctor, not propagated as daemon
+    // startup errors.
+    let _ = registry.init_all(ctx).await;
+    let init_failed_plugins = registry.failed_init_plugins();
+    for failed in &init_failed_plugins {
+        warn!(
+            plugin = %failed.name,
+            error = %failed.error,
+            "Plugin init failed; plugin will remain disabled for this daemon run"
+        );
+    }
 
     // Take plugins out of the registry for task spawning
     let plugins = registry.take_plugins();
@@ -378,11 +386,13 @@ pub async fn run(
     let status_cancel = cancel.clone();
     let status_writer_clone = status_writer.clone();
     let status_plugins = plugins.clone();
+    let status_failed_plugins = init_failed_plugins.clone();
     let status_ctx = ctx.clone();
     let status_task = tokio::spawn(async move {
         status_writer_loop(
             status_writer_clone,
             status_plugins,
+            status_failed_plugins,
             status_ctx,
             status_cancel,
         )
@@ -1316,13 +1326,14 @@ fn retention_work(
 async fn status_writer_loop(
     status_writer: Arc<StatusWriter>,
     plugins: Vec<(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)>,
+    init_failed_plugins: Vec<FailedPluginInit>,
     ctx: PluginContext,
     cancel: CancellationToken,
 ) {
     info!("Status writer loop started (interval: 30s)");
 
     // Write initial status at startup
-    let plugin_statuses = build_plugin_statuses(&plugins, &ctx).await;
+    let plugin_statuses = build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
     let teams = get_active_teams(&ctx).await;
     if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone()) {
         error!("Failed to write initial daemon status: {}", e);
@@ -1340,7 +1351,8 @@ async fn status_writer_loop(
             _ = interval.tick() => {
                 debug!("Writing daemon status");
 
-                let plugin_statuses = build_plugin_statuses(&plugins, &ctx).await;
+                let plugin_statuses =
+                    build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
                 let teams = get_active_teams(&ctx).await;
 
                 if let Err(e) = status_writer.write_status(plugin_statuses, teams) {
@@ -1356,6 +1368,7 @@ async fn status_writer_loop(
 /// Build plugin status list from running plugins
 async fn build_plugin_statuses(
     plugins: &[(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)],
+    init_failed_plugins: &[FailedPluginInit],
     ctx: &PluginContext,
 ) -> Vec<PluginStatus> {
     let mut statuses = Vec::new();
@@ -1375,7 +1388,10 @@ async fn build_plugin_statuses(
             status_kind = kind;
             last_error = error;
             last_updated = updated.or_else(|| Some(format_timestamp(SystemTime::now())));
-            enabled = !matches!(status_kind, PluginStatusKind::Disabled);
+            enabled = !matches!(
+                status_kind,
+                PluginStatusKind::Disabled | PluginStatusKind::DisabledInitError
+            );
         }
 
         statuses.push(PluginStatus {
@@ -1384,6 +1400,16 @@ async fn build_plugin_statuses(
             status: status_kind,
             last_error,
             last_updated,
+        });
+    }
+
+    for failed in init_failed_plugins {
+        statuses.push(PluginStatus {
+            name: failed.name.clone(),
+            enabled: false,
+            status: PluginStatusKind::DisabledInitError,
+            last_error: Some(failed.error.clone()),
+            last_updated: Some(format_timestamp(SystemTime::now())),
         });
     }
 

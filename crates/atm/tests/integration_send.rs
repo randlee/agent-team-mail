@@ -149,9 +149,19 @@ fn wait_for_daemon_socket(home: &Path) {
 }
 
 #[cfg(unix)]
+fn spawn_python_script(script: &Path, home: &Path) -> Child {
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string());
+    Command::new(python)
+        .arg(script)
+        .env("ATM_HOME", home)
+        .spawn()
+        .unwrap()
+}
+
+#[cfg(unix)]
 fn start_fake_dead_session_daemon(home: &Path) -> Child {
     let script = write_fake_daemon_script(home);
-    let child = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    let child = spawn_python_script(&script, home);
     wait_for_daemon_socket(home);
     child
 }
@@ -263,7 +273,7 @@ finally:
 #[cfg(unix)]
 fn start_fake_unknown_register_hint_daemon(home: &Path) -> Child {
     let script = write_fake_unknown_register_hint_daemon_script(home);
-    let child = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    let child = spawn_python_script(&script, home);
     wait_for_daemon_socket(home);
     child
 }
