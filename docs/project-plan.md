@@ -1430,11 +1430,14 @@ the current tranche focused on onboarding contract closure.
 | **AC** | AC.5 | Daemon Status Convergence + Lifecycle State Validation | IN PROGRESS | `feature/pAC-s2-cleanup-guard` |
 | | AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | PLANNED | `feature/pAC-s6-hook-install-confidence` |
 | | AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | IN PROGRESS | `feature/pAC-s7-hook-lifecycle-coverage` |
+| | AC.8 | Init Install Matrix QA Blocker Closure | IN PROGRESS | `feature/pAC-s8-init-install-matrix` |
+| | AC.9 | Multi-Team Recovery Determinism | IN PROGRESS | `feature/pAC-s9-multiteam-recovery` |
+| | AC.10 | Final AC Verification + Release Readiness | PLANNED | `feature/pAC-s10-final-verification` |
 
 **Completed**: 113+ sprints across 26 phases (CI green)
 **Current version**: v0.37.0
-**Current phase**: Phase AC.5 IN PROGRESS (daemon status convergence + lifecycle validation)
-**Next planned phase**: Phase AC.6 (hook install confidence + multi-team recovery matrix)
+**Current phase**: Phase AC.8 IN PROGRESS (init install matrix QA blocker closure)
+**Next planned phase**: Phase AC.9 (multi-team recovery determinism)
 
 ---
 
@@ -1792,12 +1795,16 @@ for both project-local and global-install paths before Homebrew/global hook roll
 **Integration branch**: `integrate/phase-AC`
 
 **Dependency graph**:
-- AC.5 is the current branch focus and must land first.
-- AC.6 depends on AC.5 and finalizes release-confidence checks.
+- AC.5 established baseline daemon state/lifecycle correctness.
+- AC.6 extends AC.5 with hook install confidence and parity coverage.
+- AC.7 hardens lifecycle + restart convergence behavior.
+- AC.8 closes init matrix QA blockers.
+- AC.9 validates multi-team recovery determinism after merge-forward.
+- AC.10 performs final AC verification and release-readiness closeout.
 
 Branch numbering note:
 - AC.5 currently uses branch `feature/pAC-s2-cleanup-guard` due branch-lineage carry-forward from earlier AC sprint setup.
-- AC sprint numbering in this plan is authoritative (`AC.5`, then `AC.6` next).
+- AC sprint numbering in this plan is authoritative (`AC.5` through `AC.10`).
 
 ### Sprint Summary
 | Sprint | Name | PR | Branch | Issues | Status |
@@ -1805,6 +1812,9 @@ Branch numbering note:
 | AC.5 | Daemon Status Convergence + Lifecycle State Validation | TBD | `feature/pAC-s2-cleanup-guard` | #330, #331, #333, #334, #336 (carry-forward validation) | IN PROGRESS |
 | AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | TBD | `feature/pAC-s6-hook-install-confidence` | #357 follow-on hardening, release-readiness validation | PLANNED |
 | AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | TBD | `feature/pAC-s7-hook-lifecycle-coverage` | AC lifecycle/restart hardening closure | IN PROGRESS |
+| AC.8 | Init Install Matrix QA Blocker Closure | TBD | `feature/pAC-s8-init-install-matrix` | ATM-QA-001..004 (init onboarding contract) | IN PROGRESS |
+| AC.9 | Multi-Team Recovery Determinism | TBD | `feature/pAC-s9-multiteam-recovery` | Team-scoped reload + partial lifecycle restart determinism | IN PROGRESS |
+| AC.10 | Final AC Verification + Release Readiness | TBD | `feature/pAC-s10-final-verification` | Final QA pass + release-closeout checklist | PLANNED |
 
 ### AC.5 — Daemon Status Convergence + Lifecycle State Validation
 **Deliverables**
