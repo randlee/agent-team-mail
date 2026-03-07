@@ -84,6 +84,10 @@ Cases:
 4. Session scripts (`session-start`, `session-end`) enforce same routing/guard behavior from both roots.
 5. Shared helper (`atm_hook_lib.py`) behavior matches across both roots.
 
+Project-only note:
+- `gate-named-teammate.py` is intentionally project-local under `.claude/scripts/` and is
+  not embedded under `crates/atm/scripts/`; parity checks must not require a crate copy.
+
 ### 5) `atm init` Install Matrix
 
 Targets:

@@ -73,7 +73,7 @@ pub enum TeamsCommand {
 /// Spawn a team member (runtime-aware daemon launch)
 #[derive(Args, Debug)]
 #[command(
-    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nGenerated launch command:\n  (when .atm.toml is absent, substitute placeholders)\n\n  claude:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --resume\n\n  codex:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    codex --dangerously-bypass-approvals-and-sandbox\n\n  gemini:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    gemini --model <model_name>\n\n  opencode:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    opencode\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn team-lead --runtime claude --folder /path/to/repo --team atm-dev\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
+    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nLaunch command output:\n  This command always prints the exact copy/paste launch command\n  before launch is attempted (success or failure).\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn test-member-3 --runtime claude --folder /path/to/repo --team atm-dev --color cyan --model haiku\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
 )]
 pub struct SpawnArgs {
     /// Agent name
@@ -90,6 +90,10 @@ pub struct SpawnArgs {
     /// Optional model override
     #[arg(long)]
     model: Option<String>,
+
+    /// Optional runtime color hint (currently used by Claude launch args)
+    #[arg(long)]
+    color: Option<String>,
 
     /// Optional sandbox mode override (`true` or `false`)
     #[arg(long)]
@@ -493,6 +497,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let spec = SpawnSpec {
         team: team_name.clone(),
         agent: args.agent.clone(),
+        color: args.color.clone(),
         cwd: launch_dir.clone(),
         model: args.model.clone(),
         sandbox: args.sandbox,
@@ -662,20 +667,8 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
 }
 
 fn format_spawn_launch_command(runtime: &RuntimeKind, spec: &SpawnSpec, command: &str) -> String {
-    match runtime {
-        RuntimeKind::Claude => {
-            let agent_id = format!("{}@{}", spec.agent, spec.team);
-            format!(
-                "env ATM_TEAM={} ATM_IDENTITY={} \\\nCLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude \\\n  --agent-id {} \\\n  --agent-name {} \\\n  --team-name {} \\\n  --dangerously-skip-permissions",
-                shell_quote(&spec.team),
-                shell_quote(&spec.agent),
-                agent_id,
-                spec.agent,
-                spec.team
-            )
-        }
-        _ => command.to_string(),
-    }
+    let _ = (runtime, spec);
+    command.to_string()
 }
 
 fn print_launch_command_preview(preview: &str, json_mode: bool) {
@@ -1810,8 +1803,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                         dry_run_rows.push(CleanupPreviewRow {
                             agent: member.name.clone(),
                             action: CleanupActionKind::Skip,
-                            reason: "external agent missing session_id (unknown liveness)"
-                                .to_string(),
+                            reason: "external-agent-no-state".to_string(),
                         });
                     }
                     warn!(
@@ -4494,6 +4486,7 @@ mod tests {
         let spec = SpawnSpec {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
+            color: Some("cyan".to_string()),
             cwd: test_cwd,
             model: None,
             sandbox: None,
@@ -4502,14 +4495,9 @@ mod tests {
             resume_session_id: None,
             system_prompt: None,
         };
-
-        let rendered = format_spawn_launch_command(&RuntimeKind::Claude, &spec, "ignored");
-        assert!(rendered.contains("env ATM_TEAM='atm-dev' ATM_IDENTITY='arch-ctm'"));
-        assert!(rendered.contains("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude"));
-        assert!(rendered.contains("--agent-id arch-ctm@atm-dev"));
-        assert!(rendered.contains("--agent-name arch-ctm"));
-        assert!(rendered.contains("--team-name atm-dev"));
-        assert!(rendered.contains("--dangerously-skip-permissions"));
+        let command = "cd '/tmp/repo' && env CLAUDECODE=1 ATM_TEAM='atm-dev' ATM_IDENTITY='arch-ctm' CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --agent-id 'arch-ctm@atm-dev' --agent-name 'arch-ctm' --team-name 'atm-dev' --agent-color 'cyan' --dangerously-skip-permissions";
+        let rendered = format_spawn_launch_command(&RuntimeKind::Claude, &spec, command);
+        assert_eq!(rendered, command);
     }
 
     #[test]
@@ -4518,6 +4506,7 @@ mod tests {
         let spec = SpawnSpec {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
+            color: None,
             cwd: test_cwd.clone(),
             model: None,
             sandbox: None,

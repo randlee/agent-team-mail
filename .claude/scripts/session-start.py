@@ -109,7 +109,6 @@ def main() -> int:
             f"'{identity}' using reserved leadSessionId '{session_id}' (lead='{lead_name}')\n"
         )
         return 0
-
     # Send hook event to daemon socket when we have complete routing context.
     # Use parent PID (Claude session process), not this short-lived hook PID.
     if session_id and default_team and identity:

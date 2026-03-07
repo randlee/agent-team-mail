@@ -59,6 +59,40 @@ fn count_flat_command_entries(settings_path: &Path, hook_category: &str, command
         .unwrap_or(0)
 }
 
+fn count_matcher_command_entries(
+    settings_path: &Path,
+    hook_category: &str,
+    matcher: &str,
+    command: &str,
+) -> usize {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+
+    parsed["hooks"][hook_category]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.get("matcher").and_then(|m| m.as_str()) == Some(matcher))
+                .map(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|hooks| {
+                            hooks
+                                .iter()
+                                .filter(|h| {
+                                    h.get("command").and_then(|c| c.as_str()) == Some(command)
+                                })
+                                .count()
+                        })
+                        .unwrap_or(0)
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 #[test]
 fn test_init_fresh_repo_creates_atm_toml_team_and_global_hooks() {
     let home = TempDir::new().unwrap();
@@ -97,7 +131,8 @@ fn test_init_is_idempotent_on_rerun() {
     init_cmd(&home, &repo)
         .args(["init", "my-team"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("already configured"));
 
     let second = fs::read_to_string(&settings_path).unwrap();
     assert_eq!(first, second, "settings should be unchanged on rerun");
@@ -325,4 +360,102 @@ fn test_init_identity_flag_writes_identity_to_atm_toml() {
     let atm_toml = fs::read_to_string(repo.join(".atm.toml")).unwrap();
     assert!(atm_toml.contains("default_team = \"my-team\""));
     assert!(atm_toml.contains("identity = \"arch-ctm\""));
+}
+
+#[test]
+fn test_init_global_relay_hook_paths_are_absolute() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success();
+
+    let settings_path = home.path().join(".claude/settings.json");
+    let scripts_dir = home.path().join(".claude/scripts");
+    let permission_py = scripts_dir
+        .join("permission-request-relay.py")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let stop_py = scripts_dir
+        .join("stop-relay.py")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let notify_py = scripts_dir
+        .join("notification-idle-relay.py")
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let permission_cmd = format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{permission_py}\" || true'"
+    );
+    let stop_cmd = format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{stop_py}\" || true'"
+    );
+    let notify_cmd = format!(
+        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{notify_py}\" || true'"
+    );
+
+    assert_eq!(
+        count_nested_command_in_hooks(&settings_path, "PermissionRequest", &permission_cmd),
+        1
+    );
+    assert_eq!(
+        count_nested_command_in_hooks(&settings_path, "Stop", &stop_cmd),
+        1
+    );
+    assert_eq!(
+        count_matcher_command_entries(&settings_path, "Notification", "idle_prompt", &notify_cmd),
+        1
+    );
+
+    assert!(!permission_cmd.contains("${CLAUDE_PROJECT_DIR}/.claude/scripts/"));
+    assert!(!stop_cmd.contains("${CLAUDE_PROJECT_DIR}/.claude/scripts/"));
+    assert!(!notify_cmd.contains("${CLAUDE_PROJECT_DIR}/.claude/scripts/"));
+}
+
+#[test]
+fn test_init_local_relay_hook_paths_use_claude_project_dir() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team", "--local"])
+        .assert()
+        .success();
+
+    let settings_path = repo.join(".claude/settings.json");
+    let permission_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/permission-request-relay.py\" || true'";
+    let stop_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/stop-relay.py\" || true'";
+    let notify_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/notification-idle-relay.py\" || true'";
+
+    assert_eq!(
+        count_nested_command_in_hooks(&settings_path, "PermissionRequest", permission_cmd),
+        1
+    );
+    assert_eq!(
+        count_nested_command_in_hooks(&settings_path, "Stop", stop_cmd),
+        1
+    );
+    assert_eq!(
+        count_matcher_command_entries(&settings_path, "Notification", "idle_prompt", notify_cmd),
+        1
+    );
+
+    let settings = fs::read_to_string(&settings_path).unwrap();
+    assert!(settings.contains("${CLAUDE_PROJECT_DIR}/.claude/scripts/permission-request-relay.py"));
+    assert!(settings.contains("${CLAUDE_PROJECT_DIR}/.claude/scripts/stop-relay.py"));
+    assert!(settings.contains("${CLAUDE_PROJECT_DIR}/.claude/scripts/notification-idle-relay.py"));
+    assert!(
+        !settings.contains(
+            home.path()
+                .join(".claude/scripts")
+                .to_string_lossy()
+                .as_ref()
+        ),
+        "local install must not embed absolute per-user script paths"
+    );
 }

@@ -23,6 +23,21 @@ from atm_hook_lib import first_str, send_hook_event, read_atm_toml, atm_home  # 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def load_team_lead_context(team: str) -> tuple[str, str]:
+    """Return (lead_name, lead_session_id) from team config, best-effort."""
+    if not team:
+        return "", ""
+    try:
+        cfg_path = atm_home() / ".claude" / "teams" / team / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        lead_agent_id = str(cfg.get("leadAgentId", "") or "")
+        lead_session_id = str(cfg.get("leadSessionId", "") or "")
+        lead_name = lead_agent_id.split("@", 1)[0].strip() if lead_agent_id else ""
+        return lead_name, lead_session_id.strip()
+    except Exception:
+        return "", ""
+
+
 def main() -> int:
     # Parse stdin JSON payload (best-effort)
     try:
@@ -76,6 +91,24 @@ def main() -> int:
     if welcome_message:
         print(f"Welcome: {welcome_message}")
 
+    # Prevent cross-identity corruption: non-lead sessions must not claim the
+    # configured leadSessionId for this team.
+    lead_name, lead_session_id = load_team_lead_context(default_team)
+    lead_session_collision = (
+        bool(session_id)
+        and bool(default_team)
+        and bool(identity)
+        and bool(lead_name)
+        and bool(lead_session_id)
+        and session_id == lead_session_id
+        and identity != lead_name
+    )
+    if lead_session_collision:
+        sys.stderr.write(
+            f"[atm-hook] WARNING: refusing session_start relay for non-lead identity "
+            f"'{identity}' using reserved leadSessionId '{session_id}' (lead='{lead_name}')\n"
+        )
+        return 0
     # Send hook event to daemon socket when we have complete routing context.
     # Use parent PID (Claude session process), not this short-lived hook PID.
     if session_id and default_team and identity:

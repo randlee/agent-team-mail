@@ -26,6 +26,14 @@ _RELAYS = [
     ("notification-idle-relay.py", "notification_idle_prompt"),
 ]
 
+_PARITY_SET = [
+    "session-start.py",
+    "session-end.py",
+    "permission-request-relay.py",
+    "stop-relay.py",
+    "notification-idle-relay.py",
+    "atm_hook_lib.py",
+]
 
 
 def _load_module(script_path: Path):
@@ -164,3 +172,22 @@ def test_relay_scripts_env_only_context_supported(
     assert hook_payload["team"] == "env-team"
     assert hook_payload["agent"] == "env-agent"
     assert hook_payload["session_id"] == "sess-3"
+
+
+def test_parity_set_exists_in_both_script_roots():
+    """All required AC.6 parity scripts exist in both local and embedded roots."""
+    for script_name in _PARITY_SET:
+        for scripts_dir in _SCRIPT_ROOTS:
+            script_path = scripts_dir / script_name
+            assert script_path.exists(), f"missing parity script: {script_path}"
+
+
+@pytest.mark.parametrize("script_name", _PARITY_SET)
+def test_parity_set_is_byte_identical_between_roots(script_name: str):
+    """Required parity scripts must be byte-identical across both install roots."""
+    local_path = _SCRIPT_ROOTS[0] / script_name
+    embedded_path = _SCRIPT_ROOTS[1] / script_name
+    assert local_path.read_bytes() == embedded_path.read_bytes(), (
+        f"script mismatch between roots for {script_name}: "
+        f"{local_path} != {embedded_path}"
+    )
