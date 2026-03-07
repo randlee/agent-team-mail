@@ -1,5 +1,7 @@
 //! Multi-team CLI isolation and daemon restart state preservation tests.
 
+#![cfg(unix)]
+
 use agent_team_mail_core::daemon_client::{RegisterHintOutcome, register_hint};
 use assert_cmd::cargo;
 use serde_json::Value;
