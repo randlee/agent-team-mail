@@ -1775,7 +1775,7 @@ progress/failure observability.
 
 ---
 
-## 17.14 Phase AC: Flaky Test Fix + PPID Detection + Cleanup Guard + Spawn UX + Daemon Logging
+## 17.14 Phase AC: Flaky Test Fix + PPID Detection + Cleanup Guard + Spawn UX + Daemon Logging + Hook Install Confidence
 
 **Goal**: Stabilize ReconcileCycleState test, improve Codex PPID detection and log format, add external agent cleanup guard, interactive `atm spawn` UX, and daemon logging observability.
 
@@ -1790,6 +1790,7 @@ progress/failure observability.
 | AC.4 | Daemon logging observability | [#479](https://github.com/randlee/agent-team-mail/pull/479) | `feature/pAC-s4-daemon-logging` | COMPLETE |
 | AC.Windows | Windows send PID fix | [#478](https://github.com/randlee/agent-team-mail/pull/478) | `feature/pAC-windows-send-pid` | COMPLETE |
 | AC.5 | Spawn command alignment + compliance fixes | [#481](https://github.com/randlee/agent-team-mail/pull/481) | `feature/pAC-s5-bug-investigation` | COMPLETE |
+| AC.6 | Hook install confidence + lifecycle parity hardening | [#485](https://github.com/randlee/agent-team-mail/pull/485) | `feature/pAC-s6-hook-install-confidence` | IN PROGRESS |
 
 **Phase integration PR**: [#480](https://github.com/randlee/agent-team-mail/pull/480) → `develop` (v0.38.0)
 
