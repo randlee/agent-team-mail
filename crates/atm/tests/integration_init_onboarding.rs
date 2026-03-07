@@ -131,7 +131,8 @@ fn test_init_is_idempotent_on_rerun() {
     init_cmd(&home, &repo)
         .args(["init", "my-team"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("already configured"));
 
     let second = fs::read_to_string(&settings_path).unwrap();
     assert_eq!(first, second, "settings should be unchanged on rerun");
