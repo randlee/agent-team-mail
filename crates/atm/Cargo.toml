@@ -30,6 +30,7 @@ thiserror = "2"
 notify = "7"
 tracing.workspace = true
 sysinfo = { version = "0.31", default-features = false, features = ["system"] }
+crossterm = "0.28"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
