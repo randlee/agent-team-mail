@@ -36,7 +36,6 @@ _PARITY_SET = [
 ]
 
 
-
 def _load_module(script_path: Path):
     module_name = f"{script_path.stem.replace('-', '_')}_{abs(hash(str(script_path)))}"
     spec = importlib.util.spec_from_file_location(module_name, script_path)
