@@ -1520,6 +1520,17 @@ Expected producer coverage:
 AuthZ and validation should be source-aware in one handler, not split across
 multiple transport packet types.
 
+Lifecycle event semantics:
+- `permission_request`: indicates the agent is blocked waiting for user/tool
+  approval and must transition activity to busy-equivalent state with explicit
+  blocked-permission reason metadata.
+- `notification_idle_prompt`: periodic idle heartbeat emitted after an idle
+  prompt threshold and must converge activity to idle without changing liveness.
+- `stop`: turn-complete lifecycle signal and must converge activity to idle
+  without changing liveness.
+- `teammate_idle`: compatibility idle signal and must remain supported as an
+  idle transition event.
+
 #### Hook Artifact Parity and Install-Path Contract
 
 `atm init` installs hook scripts from embedded crate assets. Repo-local hook

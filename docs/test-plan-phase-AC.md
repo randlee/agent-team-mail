@@ -23,6 +23,7 @@ hook rollout.
 |---|---|---|
 | AC.5 | Daemon status convergence + lifecycle validation | Current branch work |
 | AC.6 | Hook install confidence + multi-team recovery matrix | Next sprint |
+| AC.7 | Hook lifecycle + restart convergence hardening | Branch `feature/pAC-s7-hook-lifecycle-coverage` |
 
 ## AC.5 Test Matrix
 
