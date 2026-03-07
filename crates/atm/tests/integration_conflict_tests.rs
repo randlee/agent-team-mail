@@ -1126,3 +1126,142 @@ fn test_status_command_shows_correct_labels() {
     assert!(!stdout.contains("Online"), "Should not show Online label");
     assert!(!stdout.contains("Offline"), "Should not show Offline label");
 }
+
+#[test]
+fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = temp_dir.path().join(".claude/teams/test-team");
+    fs::create_dir_all(team_dir.join("inboxes")).unwrap();
+
+    // `isActive` is an activity hint only and must never be treated as liveness.
+    let config = serde_json::json!({
+        "name": "test-team",
+        "description": "Canonical consistency test",
+        "createdAt": 1739284800000i64,
+        "leadAgentId": "lead@test-team",
+        "leadSessionId": "test",
+        "members": [
+            {
+                "agentId": "online@test-team",
+                "name": "online-agent",
+                "agentType": "general-purpose",
+                "model": "claude-opus-4-6",
+                "joinedAt": 1739284800000i64,
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": [],
+                "isActive": true
+            },
+            {
+                "agentId": "offline@test-team",
+                "name": "offline-agent",
+                "agentType": "general-purpose",
+                "model": "claude-sonnet-4-5-20250929",
+                "joinedAt": 1739284800000i64,
+                "cwd": temp_dir.path().to_str().unwrap(),
+                "subscriptions": [],
+                "isActive": false
+            }
+        ]
+    });
+    fs::write(
+        team_dir.join("config.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    let mut members_cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut members_cmd, &temp_dir);
+    let members_output = members_cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("members")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let members_json: serde_json::Value = serde_json::from_slice(&members_output).unwrap();
+
+    let mut status_cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut status_cmd, &temp_dir);
+    let status_output = status_cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("status")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: serde_json::Value = serde_json::from_slice(&status_output).unwrap();
+
+    let members_liveness: std::collections::HashMap<String, serde_json::Value> = members_json
+        .get("members")
+        .and_then(|v| v.as_array())
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m.get("name").and_then(|v| v.as_str()).unwrap().to_string(),
+                m.get("liveness")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect();
+
+    let status_liveness: std::collections::HashMap<String, serde_json::Value> = status_json
+        .get("members")
+        .and_then(|v| v.as_array())
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m.get("name").and_then(|v| v.as_str()).unwrap().to_string(),
+                m.get("liveness")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        members_liveness, status_liveness,
+        "members/status should render the same daemon-derived liveness"
+    );
+    assert_eq!(
+        members_liveness.get("online-agent"),
+        Some(&serde_json::Value::Null),
+        "daemon unavailable should map to Unknown/null, not Online"
+    );
+    assert_eq!(
+        members_liveness.get("offline-agent"),
+        Some(&serde_json::Value::Null),
+        "isActive=false must not be interpreted as Offline/dead"
+    );
+
+    let mut doctor_cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut doctor_cmd, &temp_dir);
+    let doctor_output = doctor_cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("doctor")
+        .arg("--team")
+        .arg("test-team")
+        .output()
+        .unwrap();
+    assert_eq!(
+        doctor_output.status.code(),
+        Some(2),
+        "doctor should exit non-zero when critical findings exist"
+    );
+    let doctor_stdout = String::from_utf8(doctor_output.stdout).unwrap();
+
+    assert!(doctor_stdout.contains("offline-agent"));
+    assert!(doctor_stdout.contains("online-agent"));
+    assert!(doctor_stdout.contains("Unknown"));
+    assert!(doctor_stdout.contains("DAEMON_NOT_RUNNING"));
+    assert!(
+        doctor_stdout.contains("atm-daemon"),
+        "doctor output should include actionable daemon-start recommendation"
+    );
+}
