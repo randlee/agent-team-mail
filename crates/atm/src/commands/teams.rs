@@ -1651,9 +1651,12 @@ struct CleanupPreviewRow {
 }
 
 fn print_cleanup_preview(team: &str, rows: &[CleanupPreviewRow]) {
+    print!("{}", cleanup_preview_output(team, rows));
+}
+
+fn cleanup_preview_output(team: &str, rows: &[CleanupPreviewRow]) -> String {
     if rows.is_empty() {
-        println!("Nothing to clean up for team {team}.");
-        return;
+        return format!("Nothing to clean up for team {team}.\n");
     }
 
     let action_width = rows
@@ -1668,32 +1671,36 @@ fn print_cleanup_preview(team: &str, rows: &[CleanupPreviewRow]) {
         .max()
         .unwrap_or(5)
         .max("Agent".len());
+    let mut output = String::new();
 
-    println!("Cleanup preview for team {team}:");
-    println!(
+    output.push_str(&format!("Cleanup preview for team {team}:\n"));
+    output.push_str(&format!(
         "{:<agent_width$}  {:<action_width$}  Reason",
         "Agent",
         "Action",
         agent_width = agent_width,
         action_width = action_width
-    );
-    println!(
+    ));
+    output.push('\n');
+    output.push_str(&format!(
         "{:-<agent_width$}  {:-<action_width$}  {:-<6}",
         "",
         "",
         "",
         agent_width = agent_width,
         action_width = action_width
-    );
+    ));
+    output.push('\n');
     for row in rows {
-        println!(
+        output.push_str(&format!(
             "{:<agent_width$}  {:<action_width$}  {}",
             row.agent,
             row.action.as_str(),
             row.reason,
             agent_width = agent_width,
             action_width = action_width
-        );
+        ));
+        output.push('\n');
     }
 
     let roster_remove = rows
@@ -1712,12 +1719,13 @@ fn print_cleanup_preview(team: &str, rows: &[CleanupPreviewRow]) {
         .iter()
         .filter(|row| row.action == CleanupActionKind::Skip)
         .count();
-    println!();
-    println!("Totals:");
-    println!("  roster-remove: {roster_remove}");
-    println!("  mailbox-delete: {mailbox_delete}");
-    println!("  session-prune: {session_prune}");
-    println!("  skip: {skipped}");
+    output.push('\n');
+    output.push_str("Totals:\n");
+    output.push_str(&format!("  roster-remove: {roster_remove}\n"));
+    output.push_str(&format!("  mailbox-delete: {mailbox_delete}\n"));
+    output.push_str(&format!("  session-prune: {session_prune}\n"));
+    output.push_str(&format!("  skip: {skipped}\n"));
+    output
 }
 
 /// Implement `atm teams cleanup <team> [agent]`
@@ -3084,6 +3092,20 @@ mod tests {
             }
         }
         restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    fn test_cleanup_preview_output_includes_external_agent_no_state_reason() {
+        let rows = vec![CleanupPreviewRow {
+            agent: "publisher".to_string(),
+            action: CleanupActionKind::Skip,
+            reason: "external-agent-no-state".to_string(),
+        }];
+        let output = cleanup_preview_output("atm-dev", &rows);
+        assert!(output.contains("Cleanup preview for team atm-dev:"));
+        assert!(output.contains("publisher"));
+        assert!(output.contains("skip"));
+        assert!(output.contains("external-agent-no-state"));
     }
 
     #[test]
