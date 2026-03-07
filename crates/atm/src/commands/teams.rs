@@ -1636,6 +1636,7 @@ enum CleanupActionKind {
     RosterRemove,
     MailboxDelete,
     SessionPrune,
+    Skip,
 }
 
 impl CleanupActionKind {
@@ -1644,6 +1645,7 @@ impl CleanupActionKind {
             Self::RosterRemove => "roster-remove",
             Self::MailboxDelete => "mailbox-delete",
             Self::SessionPrune => "session-prune",
+            Self::Skip => "skip",
         }
     }
 }
@@ -1713,11 +1715,16 @@ fn print_cleanup_preview(team: &str, rows: &[CleanupPreviewRow]) {
         .iter()
         .filter(|row| row.action == CleanupActionKind::SessionPrune)
         .count();
+    let skipped = rows
+        .iter()
+        .filter(|row| row.action == CleanupActionKind::Skip)
+        .count();
     println!();
     println!("Totals:");
     println!("  roster-remove: {roster_remove}");
     println!("  mailbox-delete: {mailbox_delete}");
     println!("  session-prune: {session_prune}");
+    println!("  skip: {skipped}");
 }
 
 /// Implement `atm teams cleanup <team> [agent]`
@@ -1781,7 +1788,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         //   2. The daemon explicitly confirms that session is dead (`alive == false`).
         // Any other outcome (no session_id, daemon unreachable, no daemon record)
         // is treated as "unknown liveness" → the external agent is kept.
-        let is_external = member.external_backend_type.is_some();
+        // Legacy compatibility: older rosters may only encode external runtime
+        // in `agentType` (e.g. "codex"/"gemini") without externalBackendType.
+        // Treat those as external for cleanup safety semantics.
+        let is_external = member.external_backend_type.is_some()
+            || matches!(
+                member.agent_type.trim().to_ascii_lowercase().as_str(),
+                "codex" | "gemini" | "external"
+            );
 
         let (is_dead, dead_reason): (bool, Option<String>) = if args.force {
             // Force mode intentionally bypasses daemon liveness checks.
@@ -1792,6 +1806,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 Some(sid) => sid.clone(),
                 None => {
                     // No session_id → cannot confirm liveness; keep the member.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "external agent missing session_id (unknown liveness)"
+                                .to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: external agent '{}' has no session_id, skipping (unknown liveness)",
                         member.name
@@ -1808,6 +1830,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 }
                 Ok(_) => {
                     // Daemon unreachable, session alive, or no record → keep the agent.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "external agent liveness unknown (daemon did not confirm dead)"
+                                .to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: external agent '{}' liveness unknown, skipping — use --force to override",
                         member.name
@@ -1817,6 +1847,13 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 }
                 Err(_) => {
                     // I/O error → keep the agent to be safe.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "external agent daemon query error".to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: daemon query error for external agent '{}', skipping",
                         member.name
@@ -2595,6 +2632,81 @@ mod tests {
         team_dir
     }
 
+    #[cfg(unix)]
+    fn spawn_mock_session_query_team_server(
+        home: &std::path::Path,
+        expected_team: &str,
+        expected_name: &str,
+        alive: bool,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let expected_team = expected_team.to_string();
+        let expected_name = expected_name.to_string();
+
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let stream_clone = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream_clone);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+
+            let request_json: serde_json::Value =
+                serde_json::from_str(request_line.trim()).unwrap();
+            let command = request_json["command"].as_str().unwrap_or_default();
+            match command {
+                "session-query-team" => {
+                    assert_eq!(
+                        request_json["payload"]["team"].as_str(),
+                        Some(expected_team.as_str())
+                    );
+                    assert_eq!(
+                        request_json["payload"]["name"].as_str(),
+                        Some(expected_name.as_str())
+                    );
+                }
+                "session-query" => {
+                    assert_eq!(
+                        request_json["payload"]["name"].as_str(),
+                        Some(expected_name.as_str())
+                    );
+                }
+                other => panic!("unexpected daemon command in mock server: {other}"),
+            }
+
+            let response = serde_json::json!({
+                "version": 1,
+                "request_id": request_json["request_id"].as_str().unwrap_or("req-test"),
+                "status": "ok",
+                "payload": {
+                    "session_id": format!("{expected_name}-session"),
+                    "process_id": 12345,
+                    "alive": alive
+                },
+                "error": serde_json::Value::Null
+            });
+
+            let mut writer = std::io::BufWriter::new(&stream);
+            writer
+                .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                .unwrap();
+            writer.write_all(b"\n").unwrap();
+            writer.flush().unwrap();
+
+            drop(writer);
+            let _ = fs::remove_file(&socket_path);
+        })
+    }
+
     #[test]
     fn test_format_age() {
         // Test with a timestamp from 1 day ago
@@ -2908,6 +3020,141 @@ mod tests {
         let config: TeamConfig =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert!(config.members.iter().any(|m| m.name == "publisher"));
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cleanup_does_not_remove_external_agent_without_state() {
+        // External members without session_id must be kept (unknown liveness).
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = None;
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            dry_run: false,
+            force: false,
+        };
+
+        let result = cleanup(args);
+        assert!(result.is_err(), "cleanup should report incomplete state");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cleanup incomplete"),
+            "error should indicate incomplete cleanup: {err}"
+        );
+
+        assert!(inbox.exists(), "external agent inbox should remain");
+        let reloaded: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            reloaded.members.iter().any(|m| m.name == "publisher"),
+            "external member must remain in roster"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn test_cleanup_removes_member_when_daemon_reports_dead() {
+        // If daemon explicitly reports alive=false, cleanup removes the member
+        // without requiring --force.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        // Ensure this test exercises the external-agent branch.
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = Some("publisher-session".to_string());
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let server = spawn_mock_session_query_team_server(
+            temp_dir.path(),
+            "atm-dev",
+            "publisher-session",
+            false,
+        );
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            dry_run: false,
+            force: false,
+        };
+        let result = cleanup(args);
+        let server_result = server.join();
+        assert!(
+            server_result.is_ok(),
+            "mock daemon server thread failed: {server_result:?}"
+        );
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+
+        assert!(!inbox.exists(), "dead member inbox should be removed");
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            !config.members.iter().any(|m| m.name == "publisher"),
+            "dead member should be removed from roster"
+        );
 
         // SAFETY: test-only cleanup
         unsafe {
