@@ -1112,6 +1112,9 @@ Canonical team member-state snapshot (daemon -> CLI) must include:
 Required behavior:
 - `atm doctor`, `atm status`, and `atm members` must read liveness/status from
   this snapshot.
+- For a single command invocation, member-state rendering must use one daemon
+  snapshot result (no mixed-source or per-row fallback derivation within the
+  same output path).
 - `atm status` and `atm members` must iterate the union of:
   1) team `config.json` members and 2) daemon-tracked sessions for the same team.
   Daemon-only rows must be rendered as unregistered/ghost entries.
@@ -1495,7 +1498,8 @@ Lifecycle tracking must use one daemon command path (`hook-event`) with a single
 extensible payload shape, not separate packet types per integration.
 
 Required baseline fields:
-- `event`: `session_start` | `teammate_idle` | `session_end`
+- `event`: `session_start` | `permission_request` | `stop` |
+  `notification_idle_prompt` | `teammate_idle` | `session_end`
 - `team`
 - `agent` (or canonical `agent_id` where available)
 - `source`: source-kind enum
@@ -1507,13 +1511,36 @@ Required baseline fields:
 - `unknown` — reserved fallback
 
 Expected producer coverage:
-- Claude hooks emit `session_start`, `teammate_idle`, `session_end`
+- Claude hooks emit `session_start`, `permission_request`, `stop`,
+  `notification_idle_prompt`, `teammate_idle`, `session_end`
 - `atm-agent-mcp` should emit equivalent lifecycle events for MCP-managed agents
 - Future adapters should map provider lifecycle callbacks into the same envelope
   and daemon command path
 
 AuthZ and validation should be source-aware in one handler, not split across
 multiple transport packet types.
+
+#### Hook Artifact Parity and Install-Path Contract
+
+`atm init` installs hook scripts from embedded crate assets. Repo-local hook
+scripts are used during development and local tests. These two sources must stay
+behaviorally identical for all lifecycle-critical scripts.
+
+Required parity set:
+- `session-start.py`
+- `session-end.py`
+- `permission-request-relay.py`
+- `stop-relay.py`
+- `notification-idle-relay.py`
+- `atm_hook_lib.py`
+
+Required behavior:
+- Local script execution and installed/global script execution must produce
+  equivalent hook-event payload semantics.
+- Hook tests must validate both script roots (`.claude/scripts` and
+  `crates/atm/scripts`) for the parity set.
+- `atm init` idempotency and hook command-path correctness must hold for both
+  local and global install scopes.
 
 #### `TaskCompleted`
 
@@ -1926,6 +1953,9 @@ Acceptance checks:
 
 Acceptance checks:
 - `session_start` drives `unknown/offline -> active`.
+- `permission_request` marks activity busy with explicit blocked-permission reason.
+- `stop` and `notification_idle_prompt` drive activity back to idle without
+  incorrectly forcing liveness offline.
 - `teammate_idle` drives `active -> idle`.
 - PID death drives `active/idle -> offline` when lifecycle end is missing.
 - Conflicting signals resolve deterministically (latest valid event with liveness guard).

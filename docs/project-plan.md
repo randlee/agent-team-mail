@@ -167,6 +167,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency (Z.1–Z.7 COMPLETE) | COMPLETE |
 | AA | Session Correctness + Spawn Authorization + Reliability UX | Session-end correctness, spawn authorization, cleanup/help reliability hardening | PLANNED |
 | AB | GitHub CI Monitor Command + Availability Hardening | Complete `atm gh` plugin requirements and deliver monitor/state/reporting contracts | PLANNED |
+| AC | Daemon Status Convergence + Hook Install Confidence | Finalize daemon status/lifecycle consistency and pre-release hook install confidence for local/global paths | IN PROGRESS |
 
 ---
 
@@ -1426,11 +1427,13 @@ the current tranche focused on onboarding contract closure.
 | | AB.5 | Runtime Drift Baselines (Optional Enhancement) | COMPLETE | [#466](https://github.com/randlee/agent-team-mail/pull/466) |
 | | AB.6 | PR Merge-Conflict + CI Gap Detection | COMPLETE | [#467](https://github.com/randlee/agent-team-mail/pull/467) |
 | | AB.7 | Architecture Review Findings Hardening | COMPLETE | [#468](https://github.com/randlee/agent-team-mail/pull/468) |
+| **AC** | AC.5 | Daemon Status Convergence + Lifecycle State Validation | IN PROGRESS | `feature/pAC-s2-cleanup-guard` |
+| | AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | PLANNED | `feature/pAC-s6-hook-install-confidence` |
 
-**Completed**: 113+ sprints across 25 phases (CI green)
+**Completed**: 113+ sprints across 26 phases (CI green)
 **Current version**: v0.37.0
-**Current phase**: Phase AB COMPLETE — integration PR [#469](https://github.com/randlee/agent-team-mail/pull/469) pending merge
-**Next planned phase**: Phase AB (GitHub CI monitor command + availability hardening)
+**Current phase**: Phase AC.5 IN PROGRESS (daemon status convergence + lifecycle validation)
+**Next planned phase**: Phase AC.6 (hook install confidence + multi-team recovery matrix)
 
 ---
 
@@ -1772,6 +1775,62 @@ progress/failure observability.
 3. `classify_failure` returns `infra` for infra-category failures. Test: infra error input → `infra` classification.
 4. No double alert when both code paths fire for same run. Test: terminal command-path fires → polling-path suppressed.
 5. All tests: isolated temp dirs, process_id=0 pattern.
+
+---
+
+## 17.14 Phase AC: Daemon Status Convergence + Hook Install Confidence
+
+**Goal**: close remaining daemon status/lifecycle edge cases and validate hook behavior
+for both project-local and global-install paths before Homebrew/global hook rollout.
+
+**Requirements references**:
+- `docs/requirements.md` §4.3.3c (daemon canonical member-state contract)
+- `docs/requirements.md` §4.5 (hook lifecycle/event contracts)
+- `docs/requirements.md` §4.7 (daemon autostart/single-instance guarantees)
+
+**Integration branch**: `integrate/phase-AC`
+
+**Dependency graph**:
+- AC.5 is the current branch focus and must land first.
+- AC.6 depends on AC.5 and finalizes release-confidence checks.
+
+### Sprint Summary
+| Sprint | Name | PR | Branch | Issues | Status |
+|--------|------|----|--------|--------|--------|
+| AC.5 | Daemon Status Convergence + Lifecycle State Validation | TBD | `feature/pAC-s2-cleanup-guard` | #330, #331, #333, #334, #336 (carry-forward validation) | IN PROGRESS |
+| AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | TBD | `feature/pAC-s6-hook-install-confidence` | #357 follow-on hardening, release-readiness validation | PLANNED |
+
+### AC.5 — Daemon Status Convergence + Lifecycle State Validation
+**Deliverables**
+1. Ensure `atm doctor`, `atm status`, and `atm members` consume one daemon canonical snapshot path per invocation; no command-specific liveness derivation drift.
+2. Validate lifecycle transition handling across hook/event signals:
+   `session_start`, `permission_request`, `stop`, `notification_idle_prompt`,
+   `teammate_idle`, `session_end`.
+3. Enforce no-op/idempotent behavior for invalid lifecycle replay paths
+   (unknown `session_end`, duplicate dead `session_end`, mismatched-session `session_end`).
+4. Re-verify that `isActive` remains activity-only and cannot be interpreted as liveness in diagnostics/status surfaces.
+
+**Acceptance Criteria**
+1. The same member state is rendered consistently in `atm doctor`, `atm status`, and `atm members`.
+2. Activity transitions (`Busy/Idle/Blocked`) do not flip liveness (`Online/Offline`) incorrectly.
+3. Team-scoped diagnostics do not report cross-team tracked-agent drift.
+4. Lifecycle replay/error paths are deterministic and produce actionable diagnostics/logs.
+
+### AC.6 — Hook Install Confidence + Multi-Team Recovery Matrix
+**Deliverables**
+1. Hook artifact parity validation between repo-local scripts (`.claude/scripts`) and embedded install scripts (`crates/atm/scripts`) for:
+   `session-start.py`, `session-end.py`, `permission-request-relay.py`,
+   `stop-relay.py`, `notification-idle-relay.py`, `atm_hook_lib.py`.
+2. `atm init` local/global hook installation confidence matrix:
+   fresh install, idempotent re-run, command-path correctness, and absolute-path
+   global script wiring.
+3. Multi-team + daemon-restart recovery validation:
+   team isolation, restart state rebuild, and no status drift after recovery.
+
+**Acceptance Criteria**
+1. Hook tests validate behavior from both script roots (local and embedded/global materialization source).
+2. `atm init` hook installs are idempotent and route correctly in both scopes.
+3. Daemon restart/recovery does not introduce cross-team bleed or status regressions.
 
 ---
 
