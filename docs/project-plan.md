@@ -1427,17 +1427,22 @@ the current tranche focused on onboarding contract closure.
 | | AB.5 | Runtime Drift Baselines (Optional Enhancement) | COMPLETE | [#466](https://github.com/randlee/agent-team-mail/pull/466) |
 | | AB.6 | PR Merge-Conflict + CI Gap Detection | COMPLETE | [#467](https://github.com/randlee/agent-team-mail/pull/467) |
 | | AB.7 | Architecture Review Findings Hardening | COMPLETE | [#468](https://github.com/randlee/agent-team-mail/pull/468) |
-| **AC** | AC.5 | Daemon Status Convergence + Lifecycle State Validation | IN PROGRESS | `feature/pAC-s2-cleanup-guard` |
-| | AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | PLANNED | `feature/pAC-s6-hook-install-confidence` |
-| | AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | IN PROGRESS | `feature/pAC-s7-hook-lifecycle-coverage` |
-| | AC.8 | Init Install Matrix QA Blocker Closure | IN PROGRESS | `feature/pAC-s8-init-install-matrix` |
-| | AC.9 | Multi-Team Recovery Determinism | IN PROGRESS | `feature/pAC-s9-multiteam-recovery` |
-| | AC.10 | Final AC Verification + Release Readiness | COMPLETE | `feature/pAC-s10-release-confidence` |
+| **AC** | AC.1 | ReconcileCycleState Per-Test Injection | COMPLETE | `41053cf` (integrate/phase-AC) |
+| | AC.1b | Codex PPID Detection + Stable Session Key | COMPLETE | `da6cae5` (integrate/phase-AC) |
+| | AC.2 | Cleanup Guard Tests + gh Monitor Repo Validation | COMPLETE | [#476](https://github.com/randlee/agent-team-mail/pull/476), [#484](https://github.com/randlee/agent-team-mail/pull/484) |
+| | AC.3 | atm spawn Interactive UX | COMPLETE | [#477](https://github.com/randlee/agent-team-mail/pull/477) |
+| | AC.4 | Daemon Logging Observability | COMPLETE | [#479](https://github.com/randlee/agent-team-mail/pull/479) |
+| | AC.5 | Daemon Status Convergence + Lifecycle State Validation | COMPLETE | [#481](https://github.com/randlee/agent-team-mail/pull/481) |
+| | AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | COMPLETE | [#485](https://github.com/randlee/agent-team-mail/pull/485) |
+| | AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | COMPLETE | [#486](https://github.com/randlee/agent-team-mail/pull/486) |
+| | AC.8 | Init Install Matrix QA Blocker Closure | COMPLETE | [#487](https://github.com/randlee/agent-team-mail/pull/487) |
+| | AC.9 | Multi-Team Recovery Determinism | COMPLETE | [#488](https://github.com/randlee/agent-team-mail/pull/488) |
+| | AC.10 | Final AC Verification + Release Readiness | COMPLETE | [#489](https://github.com/randlee/agent-team-mail/pull/489) |
 
-**Completed**: 113+ sprints across 26 phases (CI green)
-**Current version**: v0.37.0
-**Current phase**: Phase AC.8 IN PROGRESS (init install matrix QA blocker closure)
-**Next planned phase**: Phase AC.9 (multi-team recovery determinism)
+**Completed**: 123+ sprints across 27 phases (CI green)
+**Current version**: v0.38.0
+**Current phase**: Phase AC COMPLETE
+**Next planned phase**: Phase AD (TBD)
 
 ---
 
@@ -1802,19 +1807,20 @@ for both project-local and global-install paths before Homebrew/global hook roll
 - AC.9 validates multi-team recovery determinism after merge-forward.
 - AC.10 performs final AC verification and release-readiness closeout.
 
-Branch numbering note:
-- AC.5 currently uses branch `feature/pAC-s2-cleanup-guard` due branch-lineage carry-forward from earlier AC sprint setup.
-- AC sprint numbering in this plan is authoritative (`AC.5` through `AC.10`).
-
 ### Sprint Summary
 | Sprint | Name | PR | Branch | Issues | Status |
 |--------|------|----|--------|--------|--------|
-| AC.5 | Daemon Status Convergence + Lifecycle State Validation | TBD | `feature/pAC-s2-cleanup-guard` | #330, #331, #333, #334, #336 (carry-forward validation) | IN PROGRESS |
-| AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | TBD | `feature/pAC-s6-hook-install-confidence` | #357 follow-on hardening, release-readiness validation | PLANNED |
-| AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | TBD | `feature/pAC-s7-hook-lifecycle-coverage` | AC lifecycle/restart hardening closure | IN PROGRESS |
-| AC.8 | Init Install Matrix QA Blocker Closure | TBD | `feature/pAC-s8-init-install-matrix` | ATM-QA-001..004 (init onboarding contract) | IN PROGRESS |
-| AC.9 | Multi-Team Recovery Determinism | TBD | `feature/pAC-s9-multiteam-recovery` | Team-scoped reload + partial lifecycle restart determinism | IN PROGRESS |
-| AC.10 | Final AC Verification + Release Readiness | #489 | `feature/pAC-s10-release-confidence` | Final QA pass + release-closeout checklist | COMPLETE |
+| AC.1 | ReconcileCycleState Per-Test Injection | `41053cf` | integrate/phase-AC | daemon test isolation | COMPLETE |
+| AC.1b | Codex PPID Detection + Stable Session Key | `da6cae5` | integrate/phase-AC | stable session key | COMPLETE |
+| AC.2 | Cleanup Guard Tests + gh Monitor Repo Validation | [#476](https://github.com/randlee/agent-team-mail/pull/476), [#484](https://github.com/randlee/agent-team-mail/pull/484) | `feature/pAC-s2-cleanup-guard` | cleanup guard, gh_monitor config | COMPLETE |
+| AC.3 | atm spawn Interactive UX | [#477](https://github.com/randlee/agent-team-mail/pull/477) | `feature/pAC-s3-spawn-ux` | spawn interactive panel, pane modes | COMPLETE |
+| AC.4 | Daemon Logging Observability | [#479](https://github.com/randlee/agent-team-mail/pull/479) | `feature/pAC-s4-daemon-logging` | PRODUCER_TX, autostart stderr, plugin isolation | COMPLETE |
+| AC.5 | Daemon Status Convergence + Lifecycle State Validation | [#481](https://github.com/randlee/agent-team-mail/pull/481) | `feature/pAC-s5-status-convergence` | #330, #331, #333, #334, #336 | COMPLETE |
+| AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | [#485](https://github.com/randlee/agent-team-mail/pull/485) | `feature/pAC-s6-hook-install-confidence` | #357 follow-on hardening | COMPLETE |
+| AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | [#486](https://github.com/randlee/agent-team-mail/pull/486) | `feature/pAC-s7-hook-lifecycle-coverage` | lifecycle/restart hardening closure | COMPLETE |
+| AC.8 | Init Install Matrix QA Blocker Closure | [#487](https://github.com/randlee/agent-team-mail/pull/487) | `feature/pAC-s8-init-install-matrix` | init onboarding contract | COMPLETE |
+| AC.9 | Multi-Team Recovery Determinism | [#488](https://github.com/randlee/agent-team-mail/pull/488) | `feature/pAC-s9-multiteam-recovery` | team-scoped reload + restart determinism | COMPLETE |
+| AC.10 | Final AC Verification + Release Readiness | [#489](https://github.com/randlee/agent-team-mail/pull/489) | `feature/pAC-s10-release-confidence` | final QA pass + release-closeout checklist | COMPLETE |
 
 ### AC.5 — Daemon Status Convergence + Lifecycle State Validation
 **Deliverables**

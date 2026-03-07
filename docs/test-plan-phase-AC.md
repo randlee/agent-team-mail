@@ -135,6 +135,32 @@ Cases:
 2. Daemon restart preserves/restores canonical state expected by doctor/status/members.
 3. Restart after partial lifecycle signals converges deterministically.
 
+## AC.10 Audit Mapping — AC.6 Hook Artifact Parity
+
+AC.6 parity test implementations (section 4 cases → concrete test paths):
+
+| Case | Description | Test File | Test Function |
+|------|-------------|-----------|---------------|
+| AC.6-4/5 | Relay scripts exist in both roots (byte-identical) | `tests/hook-scripts/test_state_relay_hooks.py` | `test_parity_set_exists_in_both_script_roots`, `test_parity_set_is_byte_identical_between_roots` |
+| AC.6-1/2/3 | Relay scripts send expected event with context | `tests/hook-scripts/test_state_relay_hooks.py` | `test_relay_scripts_send_expected_event_with_toml`, `test_relay_scripts_env_only_context_supported` |
+| AC.6-noop | Relay scripts no-op without context | `tests/hook-scripts/test_state_relay_hooks.py` | `test_relay_scripts_no_context_noop` |
+
+Note: `gate-named-teammate.py` is intentionally project-local (`.claude/scripts/`) and is NOT embedded under `crates/atm/scripts/`; parity checks exclude it per the AC.6 scope note.
+
+Run: `python3 -m pytest tests/hook-scripts/ -q`
+
+## AC.10 Audit Mapping — AC.9 Multi-Team Recovery
+
+AC.9 test implementations (section 6 cases → concrete test paths):
+
+| Case | Description | Test File | Test Function |
+|------|-------------|-----------|---------------|
+| AC.9-1 | No cross-team member/finding bleed | `crates/atm/tests/integration_multiteam_isolation.rs` | `test_cli_team_scoped_commands_do_not_bleed_members_across_teams` |
+| AC.9-2 | Daemon restart preserves canonical state | `crates/atm/tests/integration_multiteam_isolation.rs` | `test_status_and_members_preserve_registered_member_state_after_daemon_restart` |
+| AC.9-3 | Restart after partial signals converges | Not yet implemented — tracked as known gap (Unix daemon socket required) |
+
+Note: AC.9 tests are gated `#![cfg(unix)]` — daemon socket IPC is Unix-only. Windows coverage gap is a known limitation (issue #372).
+
 ## Baseline Commands
 
 ```bash
