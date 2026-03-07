@@ -908,6 +908,27 @@ mod tests {
         assert!(!is_self_send(sender, sender_team, agent_name, target_team));
     }
 
+    // Issue #482: cross-team self-send false positive — same agent name on different
+    // teams must NOT trigger the self-send warning.
+
+    #[test]
+    fn test_is_self_send_same_name_different_teams_no_warning() {
+        // team-lead@schook sending to team-lead@scmux — different teams, must NOT warn.
+        assert!(!is_self_send("team-lead", "schook", "team-lead", "scmux"));
+    }
+
+    #[test]
+    fn test_is_self_send_same_name_same_team_warns() {
+        // team-lead@atm-dev sending to team-lead@atm-dev — same identity, MUST warn.
+        assert!(is_self_send("team-lead", "atm-dev", "team-lead", "atm-dev"));
+    }
+
+    #[test]
+    fn test_is_self_send_different_name_same_team_no_warning() {
+        // team-lead@atm-dev sending to arch-ctm@atm-dev — different agent, must NOT warn.
+        assert!(!is_self_send("team-lead", "atm-dev", "arch-ctm", "atm-dev"));
+    }
+
     #[test]
     fn test_recipient_has_dead_session_true_for_dead_session() {
         let is_offline = recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| {

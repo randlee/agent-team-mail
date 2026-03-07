@@ -3,14 +3,14 @@ use agent_team_mail_core::logging_event::new_log_event;
 
 #[test]
 fn new_log_event_sets_pid() {
-    let event = new_log_event("atm", "send", "atm::send", "info");
+    let event = new_log_event("atm", "read", "atm::read", "info");
     assert!(event.pid > 0, "pid must be present and non-zero");
 }
 
 #[cfg(unix)]
 #[test]
 fn new_log_event_sets_ppid_field_on_unix() {
-    let event = new_log_event("atm", "send", "atm::send", "info");
+    let event = new_log_event("atm", "read", "atm::read", "info");
     assert!(
         event.fields.get("ppid").and_then(|v| v.as_u64()).is_some(),
         "ppid should be emitted in fields on unix"
@@ -19,14 +19,14 @@ fn new_log_event_sets_ppid_field_on_unix() {
 
 #[test]
 fn format_event_human_renders_pid() {
-    let event = new_log_event("atm", "send", "atm::send", "info");
+    let event = new_log_event("atm", "read", "atm::read", "info");
     let rendered = format_event_human(&event);
     assert!(rendered.contains("pid="), "human logs should render pid");
 }
 
 #[test]
 fn format_event_human_renders_ppid_when_present() {
-    let mut event = new_log_event("atm", "send", "atm::send", "info");
+    let mut event = new_log_event("atm", "read", "atm::read", "info");
     event
         .fields
         .insert("ppid".to_string(), serde_json::Value::Number(321u64.into()));
@@ -39,7 +39,7 @@ fn format_event_human_renders_ppid_when_present() {
 
 #[test]
 fn format_event_human_omits_ppid_when_absent() {
-    let mut event = new_log_event("atm", "send", "atm::send", "info");
+    let mut event = new_log_event("atm", "read", "atm::read", "info");
     event.fields.remove("ppid");
     let rendered = format_event_human(&event);
     assert!(
@@ -50,7 +50,7 @@ fn format_event_human_omits_ppid_when_absent() {
 
 #[test]
 fn send_actions_use_agent_at_team_target_contract() {
-    let mut send_event = new_log_event("atm", "send", "atm::send", "info");
+    let mut send_event = new_log_event("atm", "read", "atm::read", "info");
     send_event.target = "team-lead@atm-dev".to_string();
     let send_rendered = format_event_human(&send_event);
     assert!(
