@@ -204,3 +204,45 @@ fn test_teams_cleanup_dry_run_lists_skipped_external_agent_without_session_id() 
     assert!(stdout.contains("skip"));
     assert!(stdout.contains("external agent missing session_id"));
 }
+
+#[test]
+fn test_teams_cleanup_dry_run_treats_codex_agent_type_as_external_for_skip_preview() {
+    let temp_dir = TempDir::new().unwrap();
+    write_team_config(&temp_dir, "atm-dev", true);
+
+    // Simulate legacy roster entry: codex agentType + sessionId, but no externalBackendType.
+    let config_path = temp_dir.path().join(".claude/teams/atm-dev/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    if let Some(members) = config
+        .get_mut("members")
+        .and_then(serde_json::Value::as_array_mut)
+        && let Some(publisher) = members
+            .iter_mut()
+            .find(|m| m.get("name").and_then(serde_json::Value::as_str) == Some("publisher"))
+        && let Some(obj) = publisher.as_object_mut()
+    {
+        obj.insert(
+            "agentType".to_string(),
+            serde_json::Value::String("codex".to_string()),
+        );
+        obj.insert(
+            "sessionId".to_string(),
+            serde_json::Value::String("publisher-session".to_string()),
+        );
+        obj.remove("externalBackendType");
+    }
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .args(["teams", "cleanup", "atm-dev", "--dry-run"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("publisher"));
+    assert!(stdout.contains("skip"));
+    assert!(stdout.contains("external agent liveness unknown"));
+}

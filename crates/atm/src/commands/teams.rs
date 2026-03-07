@@ -1788,7 +1788,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         //   2. The daemon explicitly confirms that session is dead (`alive == false`).
         // Any other outcome (no session_id, daemon unreachable, no daemon record)
         // is treated as "unknown liveness" → the external agent is kept.
-        let is_external = member.external_backend_type.is_some();
+        // Legacy compatibility: older rosters may only encode external runtime
+        // in `agentType` (e.g. "codex"/"gemini") without externalBackendType.
+        // Treat those as external for cleanup safety semantics.
+        let is_external = member.external_backend_type.is_some()
+            || matches!(
+                member.agent_type.trim().to_ascii_lowercase().as_str(),
+                "codex" | "gemini" | "external"
+            );
 
         let (is_dead, dead_reason): (bool, Option<String>) = if args.force {
             // Force mode intentionally bypasses daemon liveness checks.
