@@ -1429,6 +1429,7 @@ the current tranche focused on onboarding contract closure.
 | | AB.7 | Architecture Review Findings Hardening | COMPLETE | [#468](https://github.com/randlee/agent-team-mail/pull/468) |
 | **AC** | AC.5 | Daemon Status Convergence + Lifecycle State Validation | IN PROGRESS | `feature/pAC-s2-cleanup-guard` |
 | | AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | PLANNED | `feature/pAC-s6-hook-install-confidence` |
+| | AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | IN PROGRESS | `feature/pAC-s7-hook-lifecycle-coverage` |
 
 **Completed**: 113+ sprints across 26 phases (CI green)
 **Current version**: v0.37.0
@@ -1803,6 +1804,7 @@ Branch numbering note:
 |--------|------|----|--------|--------|--------|
 | AC.5 | Daemon Status Convergence + Lifecycle State Validation | TBD | `feature/pAC-s2-cleanup-guard` | #330, #331, #333, #334, #336 (carry-forward validation) | IN PROGRESS |
 | AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | TBD | `feature/pAC-s6-hook-install-confidence` | #357 follow-on hardening, release-readiness validation | PLANNED |
+| AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | TBD | `feature/pAC-s7-hook-lifecycle-coverage` | AC lifecycle/restart hardening closure | IN PROGRESS |
 
 ### AC.5 — Daemon Status Convergence + Lifecycle State Validation
 **Deliverables**
