@@ -2203,13 +2203,12 @@ fn validate_gh_monitor_config(
     home: &std::path::Path,
     team: &str,
 ) -> std::result::Result<(), String> {
-    let current_dir = std::env::current_dir().map_err(|e| e.to_string())?;
     let config = agent_team_mail_core::config::resolve_config(
         &agent_team_mail_core::config::ConfigOverrides {
             team: Some(team.to_string()),
             ..Default::default()
         },
-        &current_dir,
+        home,
         home,
     )
     .map_err(|e| e.to_string())?;
@@ -6360,6 +6359,7 @@ poll_interval_secs = 1
     #[cfg(unix)]
     async fn test_gh_monitor_pr_timeout_zero_returns_ci_not_started_and_status_roundtrip() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let req_json = r#"{"version":1,"request_id":"r-gh-1","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":0}}"#;
         let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
@@ -6381,6 +6381,7 @@ poll_interval_secs = 1
     #[cfg(unix)]
     async fn test_gh_monitor_workflow_requires_reference() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let req_json = r#"{"version":1,"request_id":"r-gh-3","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci"}}"#;
         let resp = handle_gh_monitor_command(req_json, temp.path()).await;
@@ -6884,6 +6885,7 @@ exit 1
     #[cfg(unix)]
     async fn test_gh_monitor_run_target_success_status_roundtrip() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let req_json = r#"{"version":1,"request_id":"r-gh-run","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"456789"}}"#;
         let monitor_resp = handle_gh_monitor_command(req_json, temp.path()).await;
@@ -6908,6 +6910,7 @@ exit 1
     #[serial]
     async fn test_gh_monitor_workflow_success_status_roundtrip() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let _path_guard = install_fake_gh_script(
             &temp,
@@ -6980,6 +6983,7 @@ exit 1
     #[cfg(unix)]
     async fn test_gh_monitor_control_start_stop_restart_and_health() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
 
         let start_req = r#"{"version":1,"request_id":"r-gh-start","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"start"}}"#;
@@ -7012,6 +7016,7 @@ exit 1
     #[cfg(unix)]
     async fn test_gh_monitor_command_rejected_when_lifecycle_stopped() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let _ = set_gh_monitor_health_state(
             temp.path(),
