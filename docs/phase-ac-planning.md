@@ -28,6 +28,8 @@ Additionally, the spawn UX prototype (`scripts/spawn-demo.sh`) was built and val
 | AC.2 | Daemon | Cleanup guard tests (guard already in Phase AB) + fix `validate_gh_monitor_config` repo check (#471) | Planned | AC.1 |
 | AC.3 | CLI | `atm spawn` interactive review-panel UX | Planned | — |
 | AC.4 | Daemon | Daemon logging + startup observability + plugin init isolation (#472, #473, #474) | Planned | — |
+| AC.5 | QA/Compliance | Spawn command alignment + compliance/test-plan updates | Complete | AC.2, AC.3, AC.4 |
+| AC.6 | QA/Hardening | Hook install confidence + parity coverage + init matrix validation | In progress | AC.5 |
 
 AC.2 and AC.3 are independent and can run in parallel.
 
