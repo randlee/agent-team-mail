@@ -19,14 +19,14 @@ fn new_log_event_sets_ppid_field_on_unix() {
 
 #[test]
 fn format_event_human_renders_pid() {
-    let event = new_log_event("atm", "send", "atm::send", "info");
+    let event = new_log_event("atm", "read", "atm::read", "info");
     let rendered = format_event_human(&event);
     assert!(rendered.contains("pid="), "human logs should render pid");
 }
 
 #[test]
 fn format_event_human_renders_ppid_when_present() {
-    let mut event = new_log_event("atm", "send", "atm::send", "info");
+    let mut event = new_log_event("atm", "read", "atm::read", "info");
     event
         .fields
         .insert("ppid".to_string(), serde_json::Value::Number(321u64.into()));
