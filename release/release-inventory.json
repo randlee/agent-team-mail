@@ -1,63 +1,63 @@
 {
-  "releaseVersion": "0.37.0",
-  "releaseTag": "v0.37.0",
-  "releaseCommit": "837e421",
-  "generatedAt": "2026-03-06T12:00:00Z",
-  "items": [
-    {
-      "artifact": "agent-team-mail-core",
-      "version": "0.37.0",
-      "sourceRef": "crates/atm-core",
-      "publishTarget": "crates.io",
-      "verifyCommands": [
-        "cargo search agent-team-mail-core --limit 1"
-      ],
-      "required": true,
-      "publish": true
-    },
-    {
-      "artifact": "agent-team-mail",
-      "version": "0.37.0",
-      "sourceRef": "crates/atm",
-      "publishTarget": "crates.io",
-      "verifyCommands": [
-        "cargo search agent-team-mail --limit 1"
-      ],
-      "required": true,
-      "publish": true
-    },
-    {
-      "artifact": "agent-team-mail-daemon",
-      "version": "0.37.0",
-      "sourceRef": "crates/atm-daemon",
-      "publishTarget": "crates.io",
-      "verifyCommands": [
-        "cargo search agent-team-mail-daemon --limit 1"
-      ],
-      "required": true,
-      "publish": true
-    },
-    {
-      "artifact": "agent-team-mail-tui",
-      "version": "0.37.0",
-      "sourceRef": "crates/atm-tui",
-      "publishTarget": "crates.io",
-      "verifyCommands": [
-        "cargo search agent-team-mail-tui --limit 1"
-      ],
-      "required": true,
-      "publish": true
-    },
-    {
-      "artifact": "agent-team-mail-mcp",
-      "version": "0.37.0",
-      "sourceRef": "crates/atm-agent-mcp",
-      "publishTarget": "crates.io",
-      "verifyCommands": [
-        "cargo search agent-team-mail-mcp --limit 1"
-      ],
-      "required": true,
-      "publish": true
-    }
-  ]
+    "releaseVersion": "0.38.0",
+    "releaseTag": "v0.38.0",
+    "releaseCommit": "43db296",
+    "generatedAt": "2026-03-07T21:00:00Z",
+    "items": [
+        {
+            "artifact": "agent-team-mail-core",
+            "version": "0.38.0",
+            "sourceRef": "crates/atm-core",
+            "publishTarget": "crates.io",
+            "verifyCommands": [
+                "cargo search agent-team-mail-core --limit 1"
+            ],
+            "required": true,
+            "publish": true
+        },
+        {
+            "artifact": "agent-team-mail",
+            "version": "0.38.0",
+            "sourceRef": "crates/atm",
+            "publishTarget": "crates.io",
+            "verifyCommands": [
+                "cargo search agent-team-mail --limit 1"
+            ],
+            "required": true,
+            "publish": true
+        },
+        {
+            "artifact": "agent-team-mail-daemon",
+            "version": "0.38.0",
+            "sourceRef": "crates/atm-daemon",
+            "publishTarget": "crates.io",
+            "verifyCommands": [
+                "cargo search agent-team-mail-daemon --limit 1"
+            ],
+            "required": true,
+            "publish": true
+        },
+        {
+            "artifact": "agent-team-mail-tui",
+            "version": "0.38.0",
+            "sourceRef": "crates/atm-tui",
+            "publishTarget": "crates.io",
+            "verifyCommands": [
+                "cargo search agent-team-mail-tui --limit 1"
+            ],
+            "required": true,
+            "publish": true
+        },
+        {
+            "artifact": "agent-team-mail-mcp",
+            "version": "0.38.0",
+            "sourceRef": "crates/atm-agent-mcp",
+            "publishTarget": "crates.io",
+            "verifyCommands": [
+                "cargo search agent-team-mail-mcp --limit 1"
+            ],
+            "required": true,
+            "publish": true
+        }
+    ]
 }
