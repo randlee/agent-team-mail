@@ -5825,11 +5825,16 @@ poll_interval_secs = 1
             "leadSessionId": "test-lead-session",
             "members": member_values,
         });
-        std::fs::write(
-            team_dir.join("config.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        {
+            use std::io::Write;
+            let config_path = team_dir.join("config.json");
+            let config_bytes = serde_json::to_string_pretty(&config).unwrap();
+            let file = std::fs::File::create(&config_path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(config_bytes.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -5870,7 +5875,15 @@ poll_interval_secs = 1
             .find(|m| m["name"].as_str() == Some(member_name))
             .expect("member exists in team config");
         member["externalBackendType"] = serde_json::json!(backend);
-        std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let cfg_bytes = serde_json::to_string_pretty(&cfg).unwrap();
+            let file = std::fs::File::create(&cfg_path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(cfg_bytes.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
     }
 
     fn test_member(name: &str, backend: &str) -> agent_team_mail_core::schema::AgentMember {
@@ -5910,6 +5923,26 @@ poll_interval_secs = 1
         let temp = TempDir::new().unwrap();
         let atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_hook_auth_team_config(temp.path(), team, lead, members);
+
+        // Spin-wait until config is readable — macOS APFS directory entry visibility
+        // is not guaranteed immediately after write+sync without this verification.
+        let config_path = temp
+            .path()
+            .join(".claude/teams")
+            .join(team)
+            .join("config.json");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            if std::fs::read_to_string(&config_path).is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture config not readable after 500ms: {}",
+                config_path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         HookAuthFixture {
             _temp: temp,
@@ -6155,7 +6188,15 @@ poll_interval_secs = 1
         target["processId"] = serde_json::json!(std::process::id());
         target["sessionId"] = serde_json::json!("hint-session-1");
         target["externalBackendType"] = serde_json::json!("external");
-        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&cfg).unwrap();
+            let file = std::fs::File::create(&config_path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
@@ -7190,11 +7231,16 @@ exit 1
                 "externalBackendType": "external"
             }]
         });
-        std::fs::write(
-            team_dir.join("config.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&config).unwrap();
+            let path = team_dir.join("config.json");
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
@@ -7375,11 +7421,16 @@ exit 1
                 "externalBackendType": "external"
             }]
         });
-        std::fs::write(
-            team_dir.join("config.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&config).unwrap();
+            let path = team_dir.join("config.json");
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
@@ -9008,7 +9059,15 @@ exit 1
             .find(|m| m["name"].as_str() == Some("arch-ctm"))
             .unwrap();
         arch["externalBackendType"] = serde_json::json!("codex");
-        std::fs::write(&team_cfg, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&cfg).unwrap();
+            let file = std::fs::File::create(&team_cfg).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
