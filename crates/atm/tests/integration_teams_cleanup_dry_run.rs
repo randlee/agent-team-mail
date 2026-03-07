@@ -202,7 +202,7 @@ fn test_teams_cleanup_dry_run_lists_skipped_external_agent_without_session_id() 
     assert!(stdout.contains("Cleanup preview for team atm-dev:"));
     assert!(stdout.contains("publisher"));
     assert!(stdout.contains("skip"));
-    assert!(stdout.contains("external agent missing session_id"));
+    assert!(stdout.contains("external-agent-no-state"));
 }
 
 #[test]

@@ -2,8 +2,10 @@
 """Global SessionStart hook for Claude Code.
 
 Reads the hook payload from stdin JSON, announces the session ID to stdout
-(always), and sends hook_event/session_start when an effective team+identity
-can be resolved (env vars take precedence over .atm.toml values).
+(always), and optionally sends a hook_event/session_start message to the
+ATM daemon socket when routing context is available from either:
+- `.atm.toml` in the current working directory, or
+- `ATM_TEAM` / `ATM_IDENTITY` environment variables.
 
 Exit codes:
 - 0: always (success or soft failure — fail-open)
@@ -12,51 +14,11 @@ Exit codes:
 import json
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from atm_hook_lib import atm_home, read_atm_toml, send_hook_event  # noqa: E402
-
-
-def write_session_file(session_id: str, team: str, identity: str) -> None:
-    """Best-effort write/update of session file for team+identity lifecycle tracking.
-
-    Fail-open: errors are intentionally swallowed so the hook never blocks Claude.
-    """
-    if not session_id or not team or not identity:
-        return
-
-    try:
-        sessions_dir = atm_home() / ".claude" / "teams" / team / "sessions"
-        sessions_dir.mkdir(parents=True, exist_ok=True)
-        session_path = sessions_dir / f"{session_id}.json"
-
-        now = time.time()
-        created_at = now
-
-        if session_path.exists():
-            try:
-                existing = json.loads(session_path.read_text(encoding="utf-8"))
-                existing_created = existing.get("created_at")
-                if isinstance(existing_created, (int, float)) and existing_created > 0:
-                    created_at = float(existing_created)
-            except Exception:
-                pass
-
-        payload = {
-            "session_id": session_id,
-            "team": team,
-            "identity": identity,
-            "pid": os.getppid(),
-            "created_at": created_at,
-            "updated_at": now,
-        }
-        session_path.write_text(json.dumps(payload), encoding="utf-8")
-    except Exception:
-        # Hook scripts are fail-open by design.
-        pass
+from atm_hook_lib import first_str, send_hook_event, read_atm_toml, atm_home  # noqa: E402
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -81,31 +43,40 @@ def main() -> int:
         else:
             print(f"SESSION_ID={session_id} (starting fresh)")
 
-    # Resolve project/env context. Env vars take precedence; .atm.toml is fallback.
+    # Resolve routing context from .atm.toml (repo) or env (spawned teammates).
+    # This keeps hooks fail-open for non-ATM sessions while still supporting
+    # cross-folder spawned teammates that rely on env-only context.
     atm_config = read_atm_toml()
-    core = atm_config.get("core", {}) if isinstance(atm_config, dict) and isinstance(atm_config.get("core"), dict) else {}
-    toml_team: str = core.get("default_team", "") or ""
-    toml_identity: str = core.get("identity", "") or ""
-    env_team: str = os.environ.get("ATM_TEAM", "").strip()
-    env_identity: str = os.environ.get("ATM_IDENTITY", "").strip()
-    default_team: str = env_team or toml_team
-    identity: str = env_identity or toml_identity
+    core: dict[str, Any] = {}
+    if isinstance(atm_config, dict):
+        maybe_core = atm_config.get("core")
+        if isinstance(maybe_core, dict):
+            core = maybe_core
+    default_team: str = first_str(os.environ.get("ATM_TEAM"), core.get("default_team")) or ""
+    identity: str = first_str(os.environ.get("ATM_IDENTITY"), core.get("identity")) or ""
     welcome_message: str = core.get("welcome-message", "") or ""
 
-    if env_team and toml_team and env_team != toml_team:
-        sys.stderr.write(
-            f"[atm-hook] WARNING: ATM_TEAM='{env_team}' overrides .atm.toml default_team='{toml_team}'\n"
+    if atm_config is None and not default_team and not identity:
+        return 0  # Not an ATM project session and no env fallback — do nothing further
+
+    if isinstance(atm_config, dict):
+        toml_team: str = (
+            core.get("default_team", "")
+            if isinstance(core.get("default_team", ""), str)
+            else ""
         )
+        env_team = (os.environ.get("ATM_TEAM") or "").strip()
+        if env_team and toml_team and env_team != toml_team:
+            sys.stderr.write(
+                f"[atm-hook] WARNING: ATM_TEAM='{env_team}' overrides .atm.toml default_team='{toml_team}'\n"
+            )
 
     if default_team:
         print(f"ATM team: {default_team}")
     if welcome_message:
         print(f"Welcome: {welcome_message}")
 
-    # Maintain session file for fallback session-id discovery in CLI sends.
-    write_session_file(session_id, default_team, identity)
-
-    # Send hook event to daemon socket when effective routing identity is known.
+    # Send hook event to daemon socket when we have complete routing context.
     # Use parent PID (Claude session process), not this short-lived hook PID.
     if session_id and default_team and identity:
         payload: dict[str, Any] = {
@@ -117,6 +88,43 @@ def main() -> int:
             "process_id": os.getppid(),
         }
         send_hook_event(payload)
+
+    # Write session file for CLI identity resolution fallback.
+    # Only written when we have full routing context (session_id + team + identity).
+    # Uses os.getppid() — the long-lived Claude session process PID, not this
+    # short-lived hook subprocess.
+    #
+    # Intentionally non-atomic: session files are transient/rewritable and the
+    # 24-hour TTL in read_session_file() handles stale or partially-written files.
+    # The hook is short-lived and crash probability is negligible.
+    if session_id and default_team and identity:
+        try:
+            import time
+            sessions_dir = atm_home() / ".claude" / "teams" / default_team / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            session_file = sessions_dir / f"{session_id}.json"
+            # Preserve created_at on re-fires (compact/resume) for the same session_id.
+            # Only created_at is preserved; updated_at is always refreshed.
+            existing_created_at: float | None = None
+            if session_file.exists():
+                try:
+                    existing = json.loads(session_file.read_text())
+                    if existing.get("session_id") == session_id:
+                        existing_created_at = existing.get("created_at")
+                except Exception:
+                    pass
+            now = time.time()
+            session_data = {
+                "session_id": session_id,
+                "team": default_team,
+                "identity": identity,
+                "pid": os.getppid(),
+                "created_at": existing_created_at if existing_created_at else now,
+                "updated_at": now,
+            }
+            session_file.write_text(json.dumps(session_data))
+        except Exception as exc:
+            sys.stderr.write(f"[atm-hook] Failed to write session file: {exc}\n")
 
     return 0
 
