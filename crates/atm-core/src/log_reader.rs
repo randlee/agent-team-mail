@@ -789,6 +789,7 @@ mod tests {
     #[test]
     fn test_follow_mode() {
         use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
         use std::sync::{Arc, Mutex};
 
@@ -810,24 +811,28 @@ mod tests {
         let collected: Arc<Mutex<Vec<LogEventV1>>> = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = collected.clone();
         let log_path_clone = log_path.clone();
+        let stop_writer = Arc::new(AtomicBool::new(false));
+        let stop_writer_clone = Arc::clone(&stop_writer);
 
-        // Spawn a thread that appends 3 events after a short delay.
-        // 700ms initial delay gives the follow thread time to open the file and
-        // seek to the end before any events are written.  Events are written
-        // 150ms apart so all 3 arrive well within the 10s test timeout below.
+        // Spawn a writer that keeps appending events until follow reports that
+        // it has consumed enough. This avoids CI timing races where the follow
+        // thread starts late and misses a short fixed burst.
         let writer_thread = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(700));
             let mut file = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&log_path_clone)
                 .expect("open for appending");
-            for i in 0..3u32 {
+            for i in 0..200u32 {
+                if stop_writer_clone.load(Ordering::Relaxed) {
+                    break;
+                }
                 let mut ev =
                     new_log_event("atm", &format!("follow_event_{i}"), "atm::test", "info");
                 ev.action = format!("follow_event_{i}");
                 writeln!(file, "{}", serde_json::to_string(&ev).unwrap()).unwrap();
                 file.flush().unwrap();
-                std::thread::sleep(Duration::from_millis(150));
+                std::thread::sleep(Duration::from_millis(50));
             }
         });
 
@@ -845,23 +850,28 @@ mod tests {
                     let mut guard = collected_clone.lock().unwrap();
                     guard.push(event.clone());
                     // Stop after 3 new events.
-                    guard.len() < 3
+                    if guard.len() >= 3 {
+                        stop_writer.store(true, Ordering::Relaxed);
+                        false
+                    } else {
+                        true
+                    }
                 })
                 .expect("follow should succeed");
             // Signal the main thread that follow completed.
             let _ = done_tx.send(());
         });
 
-        writer_thread.join().expect("writer thread joined");
-
         // Wait for the follow thread to finish with a generous timeout.
-        // 10 seconds is far more than needed (total expected time ≈ 700 + 3*150 + 1*500 = ~1.7s)
-        // but still prevents an infinite hang on pathological CI runners.
+        // 10 seconds is far more than needed (writer starts after 700ms and
+        // emits every 50ms) but still prevents an infinite hang on
+        // pathological CI runners.
         done_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("follow thread did not finish within 10s — possible deadlock");
 
         follow_thread.join().expect("follow thread joined");
+        writer_thread.join().expect("writer thread joined");
 
         let guard = collected.lock().unwrap();
         assert_eq!(

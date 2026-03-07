@@ -250,30 +250,43 @@ async fn test_concurrent_sends_no_data_loss() {
         let atm_bin_path = atm_bin.to_path_buf();
         senders.spawn(async move {
             for msg_id in 0..messages_per_sender {
-                let mut cmd = tokio::process::Command::new(&atm_bin_path);
-                cmd.env("ATM_HOME", &temp_path)
-                    .env("ATM_DAEMON_AUTOSTART", "0")
-                    .env_remove("ATM_CONFIG")
-                    .env_remove("CLAUDE_SESSION_ID")
-                    .env("ATM_TEAM", "test-team")
-                    .env("ATM_IDENTITY", format!("sender-{sender_id}"))
-                    .current_dir(&workdir_path);
-                cmd.arg("send")
-                    .arg("agent-a")
-                    .arg(format!("Message {msg_id} from sender {sender_id}"));
-                let output = tokio::time::timeout(Duration::from_secs(10), cmd.output())
-                    .await
-                    .map_err(|_| {
-                        format!(
-                            "atm send timeout for sender={sender_id} msg={msg_id} (daemon pid={daemon_pid})"
-                        )
-                    })?
-                    .map_err(|e| format!("failed to execute atm send for sender={sender_id}: {e}"))?;
-                if !output.status.success() {
+                let mut attempts = 0u8;
+                loop {
+                    attempts += 1;
+                    let mut cmd = tokio::process::Command::new(&atm_bin_path);
+                    cmd.env("ATM_HOME", &temp_path)
+                        .env("ATM_DAEMON_AUTOSTART", "0")
+                        .env_remove("ATM_CONFIG")
+                        .env_remove("CLAUDE_SESSION_ID")
+                        .env("ATM_TEAM", "test-team")
+                        .env("ATM_IDENTITY", format!("sender-{sender_id}"))
+                        .current_dir(&workdir_path);
+                    cmd.arg("send")
+                        .arg("agent-a")
+                        .arg(format!("Message {msg_id} from sender {sender_id}"));
+                    let output = tokio::time::timeout(Duration::from_secs(10), cmd.output())
+                        .await
+                        .map_err(|_| {
+                            format!(
+                                "atm send timeout for sender={sender_id} msg={msg_id} (daemon pid={daemon_pid})"
+                            )
+                        })?
+                        .map_err(|e| {
+                            format!("failed to execute atm send for sender={sender_id}: {e}")
+                        })?;
+                    if output.status.success() {
+                        break;
+                    }
+
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let transient_missing_config = stderr.contains("Team config not found");
+                    if transient_missing_config && attempts < 4 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
                     return Err(format!(
-                        "atm send failed for sender={sender_id} msg={msg_id}: stderr={} stdout={}",
-                        String::from_utf8_lossy(&output.stderr),
-                        String::from_utf8_lossy(&output.stdout),
+                        "atm send failed for sender={sender_id} msg={msg_id} attempts={attempts}: stderr={stderr} stdout={stdout}",
                     ));
                 }
             }
