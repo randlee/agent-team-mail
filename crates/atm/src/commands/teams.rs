@@ -73,7 +73,7 @@ pub enum TeamsCommand {
 /// Spawn a team member (runtime-aware daemon launch)
 #[derive(Args, Debug)]
 #[command(
-    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nGenerated launch command:\n  (when .atm.toml is absent, substitute placeholders)\n\n  claude:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --resume\n\n  codex:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    codex --dangerously-bypass-approvals-and-sandbox\n\n  gemini:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    gemini --model <model_name>\n\n  opencode:\n    cd <folder_path> && env ATM_TEAM=<team_name> ATM_IDENTITY=<agent_name> \\\n    opencode\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn team-lead --runtime claude --folder /path/to/repo --team atm-dev\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
+    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nLaunch command output:\n  This command always prints the exact copy/paste launch command\n  before launch is attempted (success or failure).\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn test-member-3 --runtime claude --folder /path/to/repo --team atm-dev --color cyan --model haiku\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
 )]
 pub struct SpawnArgs {
     /// Agent name
@@ -90,6 +90,10 @@ pub struct SpawnArgs {
     /// Optional model override
     #[arg(long)]
     model: Option<String>,
+
+    /// Optional runtime color hint (currently used by Claude launch args)
+    #[arg(long)]
+    color: Option<String>,
 
     /// Optional sandbox mode override (`true` or `false`)
     #[arg(long)]
@@ -493,6 +497,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let spec = SpawnSpec {
         team: team_name.clone(),
         agent: args.agent.clone(),
+        color: args.color.clone(),
         cwd: launch_dir.clone(),
         model: args.model.clone(),
         sandbox: args.sandbox,
@@ -662,20 +667,8 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
 }
 
 fn format_spawn_launch_command(runtime: &RuntimeKind, spec: &SpawnSpec, command: &str) -> String {
-    match runtime {
-        RuntimeKind::Claude => {
-            let agent_id = format!("{}@{}", spec.agent, spec.team);
-            format!(
-                "env ATM_TEAM={} ATM_IDENTITY={} \\\nCLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude \\\n  --agent-id {} \\\n  --agent-name {} \\\n  --team-name {} \\\n  --dangerously-skip-permissions",
-                shell_quote(&spec.team),
-                shell_quote(&spec.agent),
-                agent_id,
-                spec.agent,
-                spec.team
-            )
-        }
-        _ => command.to_string(),
-    }
+    let _ = (runtime, spec);
+    command.to_string()
 }
 
 fn print_launch_command_preview(preview: &str, json_mode: bool) {
@@ -1636,6 +1629,7 @@ enum CleanupActionKind {
     RosterRemove,
     MailboxDelete,
     SessionPrune,
+    Skip,
 }
 
 impl CleanupActionKind {
@@ -1644,6 +1638,7 @@ impl CleanupActionKind {
             Self::RosterRemove => "roster-remove",
             Self::MailboxDelete => "mailbox-delete",
             Self::SessionPrune => "session-prune",
+            Self::Skip => "skip",
         }
     }
 }
@@ -1656,9 +1651,12 @@ struct CleanupPreviewRow {
 }
 
 fn print_cleanup_preview(team: &str, rows: &[CleanupPreviewRow]) {
+    print!("{}", cleanup_preview_output(team, rows));
+}
+
+fn cleanup_preview_output(team: &str, rows: &[CleanupPreviewRow]) -> String {
     if rows.is_empty() {
-        println!("Nothing to clean up for team {team}.");
-        return;
+        return format!("Nothing to clean up for team {team}.\n");
     }
 
     let action_width = rows
@@ -1673,32 +1671,36 @@ fn print_cleanup_preview(team: &str, rows: &[CleanupPreviewRow]) {
         .max()
         .unwrap_or(5)
         .max("Agent".len());
+    let mut output = String::new();
 
-    println!("Cleanup preview for team {team}:");
-    println!(
+    output.push_str(&format!("Cleanup preview for team {team}:\n"));
+    output.push_str(&format!(
         "{:<agent_width$}  {:<action_width$}  Reason",
         "Agent",
         "Action",
         agent_width = agent_width,
         action_width = action_width
-    );
-    println!(
+    ));
+    output.push('\n');
+    output.push_str(&format!(
         "{:-<agent_width$}  {:-<action_width$}  {:-<6}",
         "",
         "",
         "",
         agent_width = agent_width,
         action_width = action_width
-    );
+    ));
+    output.push('\n');
     for row in rows {
-        println!(
+        output.push_str(&format!(
             "{:<agent_width$}  {:<action_width$}  {}",
             row.agent,
             row.action.as_str(),
             row.reason,
             agent_width = agent_width,
             action_width = action_width
-        );
+        ));
+        output.push('\n');
     }
 
     let roster_remove = rows
@@ -1713,11 +1715,17 @@ fn print_cleanup_preview(team: &str, rows: &[CleanupPreviewRow]) {
         .iter()
         .filter(|row| row.action == CleanupActionKind::SessionPrune)
         .count();
-    println!();
-    println!("Totals:");
-    println!("  roster-remove: {roster_remove}");
-    println!("  mailbox-delete: {mailbox_delete}");
-    println!("  session-prune: {session_prune}");
+    let skipped = rows
+        .iter()
+        .filter(|row| row.action == CleanupActionKind::Skip)
+        .count();
+    output.push('\n');
+    output.push_str("Totals:\n");
+    output.push_str(&format!("  roster-remove: {roster_remove}\n"));
+    output.push_str(&format!("  mailbox-delete: {mailbox_delete}\n"));
+    output.push_str(&format!("  session-prune: {session_prune}\n"));
+    output.push_str(&format!("  skip: {skipped}\n"));
+    output
 }
 
 /// Implement `atm teams cleanup <team> [agent]`
@@ -1781,7 +1789,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         //   2. The daemon explicitly confirms that session is dead (`alive == false`).
         // Any other outcome (no session_id, daemon unreachable, no daemon record)
         // is treated as "unknown liveness" → the external agent is kept.
-        let is_external = member.external_backend_type.is_some();
+        // Legacy compatibility: older rosters may only encode external runtime
+        // in `agentType` (e.g. "codex"/"gemini") without externalBackendType.
+        // Treat those as external for cleanup safety semantics.
+        let is_external = member.external_backend_type.is_some()
+            || matches!(
+                member.agent_type.trim().to_ascii_lowercase().as_str(),
+                "codex" | "gemini" | "external"
+            );
 
         let (is_dead, dead_reason): (bool, Option<String>) = if args.force {
             // Force mode intentionally bypasses daemon liveness checks.
@@ -1792,6 +1807,13 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 Some(sid) => sid.clone(),
                 None => {
                     // No session_id → cannot confirm liveness; keep the member.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "external-agent-no-state".to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: external agent '{}' has no session_id, skipping (unknown liveness)",
                         member.name
@@ -1808,6 +1830,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 }
                 Ok(_) => {
                     // Daemon unreachable, session alive, or no record → keep the agent.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "external agent liveness unknown (daemon did not confirm dead)"
+                                .to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: external agent '{}' liveness unknown, skipping — use --force to override",
                         member.name
@@ -1817,6 +1847,13 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 }
                 Err(_) => {
                     // I/O error → keep the agent to be safe.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "external agent daemon query error".to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: daemon query error for external agent '{}', skipping",
                         member.name
@@ -2595,6 +2632,81 @@ mod tests {
         team_dir
     }
 
+    #[cfg(unix)]
+    fn spawn_mock_session_query_team_server(
+        home: &std::path::Path,
+        expected_team: &str,
+        expected_name: &str,
+        alive: bool,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let expected_team = expected_team.to_string();
+        let expected_name = expected_name.to_string();
+
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let stream_clone = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream_clone);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+
+            let request_json: serde_json::Value =
+                serde_json::from_str(request_line.trim()).unwrap();
+            let command = request_json["command"].as_str().unwrap_or_default();
+            match command {
+                "session-query-team" => {
+                    assert_eq!(
+                        request_json["payload"]["team"].as_str(),
+                        Some(expected_team.as_str())
+                    );
+                    assert_eq!(
+                        request_json["payload"]["name"].as_str(),
+                        Some(expected_name.as_str())
+                    );
+                }
+                "session-query" => {
+                    assert_eq!(
+                        request_json["payload"]["name"].as_str(),
+                        Some(expected_name.as_str())
+                    );
+                }
+                other => panic!("unexpected daemon command in mock server: {other}"),
+            }
+
+            let response = serde_json::json!({
+                "version": 1,
+                "request_id": request_json["request_id"].as_str().unwrap_or("req-test"),
+                "status": "ok",
+                "payload": {
+                    "session_id": format!("{expected_name}-session"),
+                    "process_id": 12345,
+                    "alive": alive
+                },
+                "error": serde_json::Value::Null
+            });
+
+            let mut writer = std::io::BufWriter::new(&stream);
+            writer
+                .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                .unwrap();
+            writer.write_all(b"\n").unwrap();
+            writer.flush().unwrap();
+
+            drop(writer);
+            let _ = fs::remove_file(&socket_path);
+        })
+    }
+
     #[test]
     fn test_format_age() {
         // Test with a timestamp from 1 day ago
@@ -2908,6 +3020,155 @@ mod tests {
         let config: TeamConfig =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert!(config.members.iter().any(|m| m.name == "publisher"));
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cleanup_does_not_remove_external_agent_without_state() {
+        // External members without session_id must be kept (unknown liveness).
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = None;
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            dry_run: false,
+            force: false,
+        };
+
+        let result = cleanup(args);
+        assert!(result.is_err(), "cleanup should report incomplete state");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cleanup incomplete"),
+            "error should indicate incomplete cleanup: {err}"
+        );
+
+        assert!(inbox.exists(), "external agent inbox should remain");
+        let reloaded: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            reloaded.members.iter().any(|m| m.name == "publisher"),
+            "external member must remain in roster"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    fn test_cleanup_preview_output_includes_external_agent_no_state_reason() {
+        let rows = vec![CleanupPreviewRow {
+            agent: "publisher".to_string(),
+            action: CleanupActionKind::Skip,
+            reason: "external-agent-no-state".to_string(),
+        }];
+        let output = cleanup_preview_output("atm-dev", &rows);
+        assert!(output.contains("Cleanup preview for team atm-dev:"));
+        assert!(output.contains("publisher"));
+        assert!(output.contains("skip"));
+        assert!(output.contains("external-agent-no-state"));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn test_cleanup_removes_member_when_daemon_reports_dead() {
+        // If daemon explicitly reports alive=false, cleanup removes the member
+        // without requiring --force.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        // Ensure this test exercises the external-agent branch.
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = Some("publisher-session".to_string());
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let server = spawn_mock_session_query_team_server(
+            temp_dir.path(),
+            "atm-dev",
+            "publisher-session",
+            false,
+        );
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            dry_run: false,
+            force: false,
+        };
+        let result = cleanup(args);
+        let server_result = server.join();
+        assert!(
+            server_result.is_ok(),
+            "mock daemon server thread failed: {server_result:?}"
+        );
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+
+        assert!(!inbox.exists(), "dead member inbox should be removed");
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            !config.members.iter().any(|m| m.name == "publisher"),
+            "dead member should be removed from roster"
+        );
 
         // SAFETY: test-only cleanup
         unsafe {
@@ -4247,6 +4508,7 @@ mod tests {
         let spec = SpawnSpec {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
+            color: Some("cyan".to_string()),
             cwd: test_cwd,
             model: None,
             sandbox: None,
@@ -4255,14 +4517,9 @@ mod tests {
             resume_session_id: None,
             system_prompt: None,
         };
-
-        let rendered = format_spawn_launch_command(&RuntimeKind::Claude, &spec, "ignored");
-        assert!(rendered.contains("env ATM_TEAM='atm-dev' ATM_IDENTITY='arch-ctm'"));
-        assert!(rendered.contains("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude"));
-        assert!(rendered.contains("--agent-id arch-ctm@atm-dev"));
-        assert!(rendered.contains("--agent-name arch-ctm"));
-        assert!(rendered.contains("--team-name atm-dev"));
-        assert!(rendered.contains("--dangerously-skip-permissions"));
+        let command = "cd '/tmp/repo' && env CLAUDECODE=1 ATM_TEAM='atm-dev' ATM_IDENTITY='arch-ctm' CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --agent-id 'arch-ctm@atm-dev' --agent-name 'arch-ctm' --team-name 'atm-dev' --agent-color 'cyan' --dangerously-skip-permissions";
+        let rendered = format_spawn_launch_command(&RuntimeKind::Claude, &spec, command);
+        assert_eq!(rendered, command);
     }
 
     #[test]
@@ -4271,6 +4528,7 @@ mod tests {
         let spec = SpawnSpec {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
+            color: None,
             cwd: test_cwd.clone(),
             model: None,
             sandbox: None,

@@ -50,6 +50,9 @@ pub enum PluginStatusKind {
     Error,
     /// Plugin is disabled in config
     Disabled,
+    /// Plugin failed to initialize and is disabled for this daemon run
+    #[serde(rename = "disabled_init_error")]
+    DisabledInitError,
 }
 
 /// Status file writer that tracks daemon state

@@ -306,34 +306,38 @@ pub fn format_event_human(event: &LogEventV1) -> String {
         String::new()
     };
 
-    let ppid_suffix = event
-        .fields
-        .get("ppid")
-        .and_then(|v| v.as_u64())
-        .map(|ppid| format!("/ppid={ppid}"))
-        .unwrap_or_default();
-
-    let target_suffix = if event.target.is_empty() {
-        String::new()
-    } else {
-        format!(" -> {}", event.target)
-    };
-
     let action_text = if event.action == "send" {
         format_send_action(event)
     } else {
-        format!("{}{}{}", event.action, msg_suffix, target_suffix)
+        let ppid_suffix = event
+            .fields
+            .get("ppid")
+            .and_then(|v| v.as_u64())
+            .map(|ppid| format!("/ppid={ppid}"))
+            .unwrap_or_default();
+        let target_suffix = if event.target.is_empty() {
+            String::new()
+        } else {
+            format!(" -> {}", event.target)
+        };
+        let action_text = format!("{}{}{}", event.action, msg_suffix, target_suffix);
+        return format!(
+            "{}  {}  [{}{} pid={}{}] {}",
+            event.ts,
+            colored_level,
+            event.source_binary,
+            agent_suffix,
+            event.pid,
+            ppid_suffix,
+            action_text,
+        );
     };
 
+    // For send events, avoid duplicate/competing PID semantics in the prefix.
+    // The send body already renders canonical sender/recipient PIDs.
     format!(
-        "{}  {}  [{}{} pid={}{}] {}",
-        event.ts,
-        colored_level,
-        event.source_binary,
-        agent_suffix,
-        event.pid,
-        ppid_suffix,
-        action_text,
+        "{}  {}  [{}{}] {}",
+        event.ts, colored_level, event.source_binary, agent_suffix, action_text
     )
 }
 
@@ -733,6 +737,9 @@ mod tests {
     #[test]
     fn test_format_human_send_uses_dash_for_missing_pids() {
         let mut ev = new_log_event("atm", "send", "atm::send", "info");
+        ev.agent = Some("arch-ctm".to_string());
+        ev.fields
+            .insert("ppid".to_string(), serde_json::Value::Number(123u64.into()));
         ev.fields.insert(
             "sender_agent".to_string(),
             serde_json::Value::String("team-lead".to_string()),
@@ -751,6 +758,14 @@ mod tests {
         );
         let rendered = format_event_human(&ev);
         assert!(rendered.contains("send team-lead@atm-dev [-] -> arch-ctm@atm-dev [-]"));
+        assert!(
+            !rendered.contains("pid="),
+            "send lines should only show sender/recipient PID slots"
+        );
+        assert!(
+            !rendered.contains("ppid="),
+            "send lines should not include emitter ppid in prefix"
+        );
     }
 
     // ── test_nonexistent_file_returns_empty ───────────────────────────────────
@@ -774,6 +789,7 @@ mod tests {
     #[test]
     fn test_follow_mode() {
         use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
         use std::sync::{Arc, Mutex};
 
@@ -795,24 +811,28 @@ mod tests {
         let collected: Arc<Mutex<Vec<LogEventV1>>> = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = collected.clone();
         let log_path_clone = log_path.clone();
+        let stop_writer = Arc::new(AtomicBool::new(false));
+        let stop_writer_clone = Arc::clone(&stop_writer);
 
-        // Spawn a thread that appends 3 events after a short delay.
-        // 700ms initial delay gives the follow thread time to open the file and
-        // seek to the end before any events are written.  Events are written
-        // 150ms apart so all 3 arrive well within the 10s test timeout below.
+        // Spawn a writer that keeps appending events until follow reports that
+        // it has consumed enough. This avoids CI timing races where the follow
+        // thread starts late and misses a short fixed burst.
         let writer_thread = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(700));
             let mut file = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&log_path_clone)
                 .expect("open for appending");
-            for i in 0..3u32 {
+            for i in 0..200u32 {
+                if stop_writer_clone.load(Ordering::Relaxed) {
+                    break;
+                }
                 let mut ev =
                     new_log_event("atm", &format!("follow_event_{i}"), "atm::test", "info");
                 ev.action = format!("follow_event_{i}");
                 writeln!(file, "{}", serde_json::to_string(&ev).unwrap()).unwrap();
                 file.flush().unwrap();
-                std::thread::sleep(Duration::from_millis(150));
+                std::thread::sleep(Duration::from_millis(50));
             }
         });
 
@@ -830,23 +850,28 @@ mod tests {
                     let mut guard = collected_clone.lock().unwrap();
                     guard.push(event.clone());
                     // Stop after 3 new events.
-                    guard.len() < 3
+                    if guard.len() >= 3 {
+                        stop_writer.store(true, Ordering::Relaxed);
+                        false
+                    } else {
+                        true
+                    }
                 })
                 .expect("follow should succeed");
             // Signal the main thread that follow completed.
             let _ = done_tx.send(());
         });
 
-        writer_thread.join().expect("writer thread joined");
-
         // Wait for the follow thread to finish with a generous timeout.
-        // 10 seconds is far more than needed (total expected time ≈ 700 + 3*150 + 1*500 = ~1.7s)
-        // but still prevents an infinite hang on pathological CI runners.
+        // 10 seconds is far more than needed (writer starts after 700ms and
+        // emits every 50ms) but still prevents an infinite hang on
+        // pathological CI runners.
         done_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("follow thread did not finish within 10s — possible deadlock");
 
         follow_thread.join().expect("follow thread joined");
+        writer_thread.join().expect("writer thread joined");
 
         let guard = collected.lock().unwrap();
         assert_eq!(

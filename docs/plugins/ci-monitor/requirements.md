@@ -90,10 +90,31 @@ GitHub CI monitor exclusively owns:
 ### GH-CI-FR-8 Command set
 
 Required commands:
+- `atm gh` (namespace status summary; no subcommand required)
+- `atm gh init` (configure/enable plugin prerequisites)
 - `atm gh monitor pr <number>`
 - `atm gh monitor workflow <name> --ref <branch|sha|pr>` (`--ref` required)
 - `atm gh monitor run <run-id>`
-- `atm gh status <pr|run|workflow> <value>`
+- `atm gh status` (team/plugin health status; no target required)
+- `atm gh status <pr|run|workflow> <value>` (target-specific monitor state)
+
+No-target status requirements:
+- `atm gh` and `atm gh status` must report the same canonical enablement and
+  availability surface for `gh_monitor`.
+- If plugin is unconfigured/disabled, commands must return actionable status
+  output (not argument errors), including explicit disabled state and setup hint.
+- JSON mode must include machine-readable `configured`, `enabled`, and
+  `availability_state` fields.
+- If plugin is unconfigured/disabled, command availability is restricted to:
+  - `atm gh`
+  - `atm gh init`
+  - help output under `atm gh`
+  All other `atm gh ...` operations must fail with explicit guidance to run
+  `atm gh init`.
+- When plugin is enabled, `atm gh` must include configuration summary, runtime
+  availability summary, and current issue note (when present).
+- This behavior must conform to the global plugin namespace gating contract in
+  `docs/requirements.md` §5.8.
 
 ---
 
@@ -236,6 +257,12 @@ Test:
 - `monitor pr` start-timeout/no-run alert
 - `monitor workflow` by name/ref
 - `monitor run` by run-id
+- `atm gh` and `atm gh status` (no target) return non-error health output and
+  explicitly surface configured/enabled/availability state
+- when plugin is disabled/unconfigured:
+  - `atm gh monitor ...` fails with actionable init guidance
+  - `atm gh status <target>` fails with actionable init guidance
+  - `atm gh init` remains available and succeeds/fails deterministically
 - `status` output coherence during active and terminal runs
 
 ### GH-CI-TR-3 Reporting payload

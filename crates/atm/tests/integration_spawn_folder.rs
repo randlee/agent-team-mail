@@ -277,11 +277,13 @@ fn test_spawn_claude_echoes_full_launch_command_on_failure() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stdout.contains("Launch command:"));
-    assert!(stdout.contains("env ATM_TEAM='atm-dev' ATM_IDENTITY='my-agent'"));
+    assert!(stdout.contains("cd "));
+    assert!(stdout.contains("&& env CLAUDECODE=1"));
+    assert!(stdout.contains("env CLAUDECODE=1 ATM_TEAM='atm-dev' ATM_IDENTITY='my-agent'"));
     assert!(stdout.contains("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude"));
-    assert!(stdout.contains("--agent-id my-agent@atm-dev"));
-    assert!(stdout.contains("--agent-name my-agent"));
-    assert!(stdout.contains("--team-name atm-dev"));
+    assert!(stdout.contains("--agent-id 'my-agent@atm-dev'"));
+    assert!(stdout.contains("--agent-name 'my-agent'"));
+    assert!(stdout.contains("--team-name 'atm-dev'"));
     assert!(stdout.contains("--dangerously-skip-permissions"));
     assert!(
         stderr.contains("Daemon is not running"),
@@ -419,13 +421,10 @@ fn test_spawn_help_without_atm_toml_includes_generated_launch_reference() {
     let assert = cmd.args(["teams", "spawn", "--help"]).assert().success();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("Generated launch command:"));
-    assert!(stdout.contains("<team_name>"));
-    assert!(stdout.contains("<agent_name>"));
-    assert!(stdout.contains("claude"));
-    assert!(stdout.contains("codex"));
-    assert!(stdout.contains("gemini"));
-    assert!(stdout.contains("opencode"));
+    assert!(stdout.contains("Launch command output:"));
+    assert!(stdout.contains("exact copy/paste launch command"));
+    assert!(stdout.contains("atm teams spawn test-member-3 --runtime claude"));
+    assert!(stdout.contains("--color cyan --model haiku"));
 }
 
 #[test]

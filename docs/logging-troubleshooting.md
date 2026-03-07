@@ -99,6 +99,12 @@ is the **registered agent session PID** — the long-lived process running the a
 (for example the `claude` or `codex` process). This is the PID stored in the daemon
 session registry and shown in `atm doctor` output.
 
+For human-readable `atm logs` output on `send` events:
+- the line shows only sender/recipient session PID slots
+  (`send <from>@<team> [<sender_pid>] -> <to>@<team> [<recipient_pid>]`).
+- emitter process `pid/ppid` are intentionally omitted from the `send` line to
+  avoid mixed PID semantics in one view.
+
 ### Subprocess pid/ppid at DEBUG level
 
 The subprocess PID of each hook invocation and the hook's parent PID (ppid) are logged
@@ -114,6 +120,12 @@ ATM_LOG=debug atm doctor
 
 This enables the full structured fields including `hook_pid`, `hook_ppid`, and
 `agent_pid` for each daemon lifecycle event.
+
+To inspect emitter/runtime PID fields directly, use JSON log output:
+
+```bash
+atm logs --json --limit 50
+```
 
 ### PID Mismatch Warnings
 

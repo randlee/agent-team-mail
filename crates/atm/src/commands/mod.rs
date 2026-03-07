@@ -22,6 +22,7 @@ mod register;
 mod request;
 mod runtime_adapter;
 mod send;
+mod spawn;
 mod status;
 mod subscribe;
 mod tail;
@@ -66,6 +67,9 @@ enum Commands {
 
     /// Show team status overview
     Status(status::StatusArgs),
+
+    /// Interactive wrapper for spawning a new runtime teammate
+    Spawn(spawn::SpawnArgs),
 
     /// Run daemon/team health diagnostics
     Doctor(doctor::DoctorArgs),
@@ -125,6 +129,7 @@ impl Cli {
             Commands::Teams(args) => teams::execute(args),
             Commands::Members(args) => members::execute(args),
             Commands::Status(args) => status::execute(args),
+            Commands::Spawn(args) => spawn::execute(args),
             Commands::Doctor(args) => doctor::execute(args),
             Commands::Gh(args) => gh::execute(args),
             Commands::Monitor(args) => monitor::execute(args),

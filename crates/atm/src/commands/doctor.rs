@@ -134,6 +134,20 @@ struct DoctorState {
     last_call_by_team: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct DaemonStatusSnapshot {
+    #[serde(default)]
+    plugins: Vec<PluginStatusSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PluginStatusSnapshot {
+    name: String,
+    status: String,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
 pub fn execute(args: DoctorArgs) -> Result<()> {
     // Prime daemon connectivity early so doctor reflects post-autostart health.
     // Must be best-effort: doctor should still produce a report when daemon is
@@ -241,6 +255,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
 
     // Check 1: daemon health (lock/socket/PID/status coherence)
     findings.extend(check_daemon_health(home_dir));
+    findings.extend(check_plugin_init_failures(home_dir));
 
     // Check 2 + 3 + 4: session/roster/mailbox integrity
     if let Some(cfg) = &team_config {
@@ -480,6 +495,39 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
         ));
     }
 
+    findings
+}
+
+fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
+    let status_path = home_dir.join(".claude/daemon/status.json");
+    let raw = match fs::read_to_string(&status_path) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+
+    let snapshot: DaemonStatusSnapshot = match serde_json::from_str(&raw) {
+        Ok(parsed) => parsed,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut findings = Vec::new();
+    for plugin in snapshot.plugins {
+        if plugin.status != "disabled_init_error" {
+            continue;
+        }
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "PLUGIN_INIT_FAILED",
+            format!(
+                "Plugin '{}' failed initialization and is disabled: {}",
+                plugin.name,
+                plugin
+                    .last_error
+                    .unwrap_or_else(|| "plugin init failed".to_string())
+            ),
+        ));
+    }
     findings
 }
 
@@ -1975,6 +2023,29 @@ mod tests {
         let findings = check_log_diagnostics(tmp.path(), start, end, false);
 
         assert!(findings.iter().any(|f| f.code == "NO_EVENTS_IN_WINDOW"));
+    }
+
+    #[test]
+    fn check_plugin_init_failures_reports_disabled_init_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = tmp.path().join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::write(
+            daemon_dir.join("status.json"),
+            r#"{
+  "plugins": [
+    {"name": "gh_monitor", "status": "running"},
+    {"name": "issues", "status": "disabled_init_error", "last_error": "plugin init failed: bad token"}
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let findings = check_plugin_init_failures(tmp.path());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "PLUGIN_INIT_FAILED");
+        assert!(findings[0].message.contains("issues"));
+        assert!(findings[0].message.contains("bad token"));
     }
 
     #[test]

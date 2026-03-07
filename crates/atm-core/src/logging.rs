@@ -366,24 +366,36 @@ fn setup_daemon_writer(
 ) -> anyhow::Result<LoggingGuards> {
     // `DaemonWriter` mode is used exclusively by `atm-daemon`.
     //
-    // In this mode the daemon's structured events flow directly to its internal
-    // `log_writer` async task (not via socket).  Because `PRODUCER_TX` is never
-    // set in `DaemonWriter` mode, [`producer_sender()`] returns `None`, which
-    // ensures the daemon does NOT attempt to forward events to itself via the
-    // Unix socket (which would create a feedback loop).
+    // Keep PRODUCER_TX wired so daemon-side emit_event_best_effort calls route
+    // through the same unified fan-in path as CLI producers.
     //
-    // This function's only responsibility is to ensure the log directory exists
-    // so the `log_writer` task can open its JSONL file on the first write.
+    // The socket target is the daemon's own Unix socket. This is safe because
+    // "log-event" socket requests enqueue directly into the bounded log-writer
+    // queue and do not recursively emit log events.
     if let Some(parent) = file_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+
+    let mut guards = Vec::<Box<dyn std::any::Any + Send>>::new();
+    if let Ok(home_dir) = crate::home::get_home_dir() {
+        let daemon_socket = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let fallback_spool_dir = crate::logging_event::spool_dir(&home_dir);
+
+        match setup_producer_fan_in("atm-daemon", daemon_socket, fallback_spool_dir) {
+            Ok(forwarder_guards) => guards.extend(forwarder_guards._guards),
+            Err(err) => tracing::warn!("DaemonWriter: failed to initialize producer fan-in: {err}"),
+        }
+    } else {
+        tracing::warn!("DaemonWriter: failed to resolve ATM home for producer fan-in setup");
+    }
+
     tracing::debug!(
         path = %file_path.display(),
         max_bytes = rotation.max_bytes,
         max_files = rotation.max_files,
         "DaemonWriter logging initialized"
     );
-    Ok(LoggingGuards::empty())
+    Ok(LoggingGuards { _guards: guards })
 }
 
 #[cfg(test)]

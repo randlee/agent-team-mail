@@ -1312,6 +1312,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use crate::event_log::{EventFields, emit_event_best_effort};
     use crate::io::InboxError;
     use std::io::ErrorKind;
+    use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -1368,24 +1369,37 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
         ..Default::default()
     });
-    let mut child = Command::new(&daemon_bin)
+    let mut child = match Command::new(&daemon_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| {
-            if e.kind() == ErrorKind::NotFound {
-                anyhow::anyhow!(
+    {
+        Ok(child) => child,
+        Err(e) => {
+            let error = if e.kind() == ErrorKind::NotFound {
+                format!(
                     "failed to auto-start daemon: binary '{}' not found in PATH (or ATM_DAEMON_BIN override)",
                     std::path::PathBuf::from(&daemon_bin).display()
                 )
             } else {
-                anyhow::anyhow!(
+                format!(
                     "failed to auto-start daemon via '{}': {e}",
                     std::path::PathBuf::from(&daemon_bin).display()
                 )
-            }
-        })?;
+            };
+            emit_event_best_effort(EventFields {
+                level: "error",
+                source: "atm",
+                action: "daemon_autostart_failure",
+                result: Some("spawn_error".to_string()),
+                target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+                error: Some(error.clone()),
+                ..Default::default()
+            });
+            anyhow::bail!("{error}");
+        }
+    };
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -1401,7 +1415,38 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
-            anyhow::bail!("daemon process exited during startup with status {status}");
+            let stderr_tail = child.stderr.take().and_then(|mut stderr| {
+                let mut buf = Vec::new();
+                stderr.read_to_end(&mut buf).ok()?;
+                if buf.is_empty() {
+                    return None;
+                }
+                let trimmed = if buf.len() > 4096 {
+                    &buf[buf.len() - 4096..]
+                } else {
+                    &buf
+                };
+                let text = String::from_utf8_lossy(trimmed).trim().to_string();
+                if text.is_empty() { None } else { Some(text) }
+            });
+            let error = match stderr_tail {
+                Some(tail) => {
+                    format!(
+                        "daemon process exited during startup with status {status}; stderr_tail={tail}"
+                    )
+                }
+                None => format!("daemon process exited during startup with status {status}"),
+            };
+            emit_event_best_effort(EventFields {
+                level: "error",
+                source: "atm",
+                action: "daemon_autostart_failure",
+                result: Some("process_exit".to_string()),
+                target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+                error: Some(error.clone()),
+                ..Default::default()
+            });
+            anyhow::bail!("{error}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -1419,6 +1464,15 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         level: "warn",
         source: "atm",
         action: "daemon_autostart_timeout",
+        result: Some("timeout".to_string()),
+        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        error: Some(timeout_error.clone()),
+        ..Default::default()
+    });
+    emit_event_best_effort(EventFields {
+        level: "error",
+        source: "atm",
+        action: "daemon_autostart_failure",
         result: Some("timeout".to_string()),
         target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
         error: Some(timeout_error.clone()),
@@ -1836,6 +1890,62 @@ mod tests {
         let mut restore = fs::metadata(&pid_path).unwrap().permissions();
         restore.set_mode(0o600);
         fs::set_permissions(&pid_path, restore).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_includes_stderr_tail_on_startup_exit() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let script_path = home.join("fake-daemon-fail.sh");
+        let script = r#"#!/bin/sh
+set -eu
+echo "fatal: invalid plugin config" >&2
+exit 42
+"#;
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_BIN", &script_path);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+
+        let err = ensure_daemon_running_unix().expect_err("startup should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stderr_tail="),
+            "error must include captured stderr tail: {msg}"
+        );
+        assert!(
+            msg.contains("invalid plugin config"),
+            "stderr tail should include daemon stderr content: {msg}"
+        );
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
     }
 
     #[cfg(unix)]

@@ -298,6 +298,7 @@ fn execute_status(args: StatusArgs) -> Result<()> {
                     PluginStatusKind::Running => "running",
                     PluginStatusKind::Error => "error",
                     PluginStatusKind::Disabled => "disabled",
+                    PluginStatusKind::DisabledInitError => "disabled_init_error",
                 };
 
                 let enabled_str = if plugin.enabled {
@@ -394,6 +395,8 @@ enum PluginStatusKind {
     Running,
     Error,
     Disabled,
+    #[serde(rename = "disabled_init_error")]
+    DisabledInitError,
 }
 
 #[cfg(test)]

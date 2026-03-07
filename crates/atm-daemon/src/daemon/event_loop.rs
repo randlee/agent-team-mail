@@ -7,7 +7,7 @@ use crate::daemon::{
     SharedSessionRegistry, SharedStateStore, SharedStreamEventSender, graceful_shutdown,
     spool_drain_loop, start_socket_server, watch_inboxes,
 };
-use crate::plugin::{Capability, PluginContext, PluginRegistry};
+use crate::plugin::{Capability, FailedPluginInit, PluginContext, PluginRegistry};
 use crate::plugins::worker_adapter::AgentState;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
@@ -22,19 +22,17 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-/// Tracks how many consecutive reconcile cycles a dead session has been absent
-/// from team config before stale-prune is allowed. This guards against
-/// remove+re-add watcher races and prevents deleting legitimate members mid-update.
-static ABSENT_REGISTRY_CYCLES: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, u8>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+#[derive(Debug, Default)]
+struct ReconcileCycleState {
+    absent_registry_cycles: std::collections::HashMap<String, u8>,
+    dead_member_cycles: std::collections::HashMap<String, u8>,
+}
 
-/// Tracks consecutive reconcile cycles where a non-lead member is present in
-/// team config with a dead daemon session. Terminal cleanup fires only after
-/// two full cycles, giving re-added members a grace period to re-register.
-static DEAD_MEMBER_CYCLES: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, u8>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+type SharedCycleState = Arc<std::sync::Mutex<ReconcileCycleState>>;
+
+fn new_reconcile_cycle_state() -> SharedCycleState {
+    Arc::new(std::sync::Mutex::new(ReconcileCycleState::default()))
+}
 
 /// Run the main daemon event loop.
 ///
@@ -102,10 +100,18 @@ pub async fn run(
 
     // Initialize all plugins
     info!("Initializing {} plugin(s)", registry.len());
-    registry
-        .init_all(ctx)
-        .await
-        .context("Failed to initialize plugins")?;
+    // `init_all` is fail-open by contract: plugin init failures are recorded in
+    // registry state and surfaced via status/doctor, not propagated as daemon
+    // startup errors.
+    let _ = registry.init_all(ctx).await;
+    let init_failed_plugins = registry.failed_init_plugins();
+    for failed in &init_failed_plugins {
+        warn!(
+            plugin = %failed.name,
+            error = %failed.error,
+            "Plugin init failed; plugin will remain disabled for this daemon run"
+        );
+    }
 
     // Take plugins out of the registry for task spawning
     let plugins = registry.take_plugins();
@@ -113,6 +119,7 @@ pub async fn run(
 
     // Spawn a task for each plugin's run() method
     let mut plugin_tasks: Vec<JoinHandle<()>> = Vec::new();
+    let reconcile_cycle_state = new_reconcile_cycle_state();
 
     for (metadata, plugin_arc) in plugins.clone() {
         let plugin_name = metadata.name.to_string();
@@ -222,6 +229,7 @@ pub async fn run(
     let dispatch_reconcile_ctx = ctx.clone();
     let dispatch_reconcile_registry = session_registry.clone();
     let dispatch_reconcile_state_store = state_store.clone();
+    let dispatch_reconcile_cycle_state = reconcile_cycle_state.clone();
     let dispatch_task = tokio::spawn(async move {
         info!("Starting event dispatch loop");
         let mut cursors: std::collections::HashMap<std::path::PathBuf, InboxCursor> =
@@ -249,11 +257,13 @@ pub async fn run(
                         let claude_root = dispatch_reconcile_ctx.system.claude_root.clone();
                         let session_registry = dispatch_reconcile_registry.clone();
                         let state_store = dispatch_reconcile_state_store.clone();
+                        let cycle_state = dispatch_reconcile_cycle_state.clone();
                         let result = tokio::task::spawn_blocking(move || {
                             reconcile_team_member_activity_with_mode(
                                 &claude_root,
                                 &session_registry,
                                 &state_store,
+                                &cycle_state,
                                 false,
                             )
                         })
@@ -376,11 +386,13 @@ pub async fn run(
     let status_cancel = cancel.clone();
     let status_writer_clone = status_writer.clone();
     let status_plugins = plugins.clone();
+    let status_failed_plugins = init_failed_plugins.clone();
     let status_ctx = ctx.clone();
     let status_task = tokio::spawn(async move {
         status_writer_loop(
             status_writer_clone,
             status_plugins,
+            status_failed_plugins,
             status_ctx,
             status_cancel,
         )
@@ -391,6 +403,7 @@ pub async fn run(
     let reconcile_ctx = ctx.clone();
     let reconcile_registry = session_registry.clone();
     let reconcile_state_store = state_store.clone();
+    let reconcile_cycle_state_for_loop = reconcile_cycle_state.clone();
 
     // Run one startup reconcile immediately so roster/state is available
     // without waiting for the periodic interval tick.
@@ -398,8 +411,14 @@ pub async fn run(
         let claude_root = ctx.system.claude_root.clone();
         let startup_registry = session_registry.clone();
         let startup_state_store = state_store.clone();
+        let startup_cycle_state = reconcile_cycle_state.clone();
         let startup_result = tokio::task::spawn_blocking(move || {
-            reconcile_team_member_activity(&claude_root, &startup_registry, &startup_state_store)
+            reconcile_team_member_activity(
+                &claude_root,
+                &startup_registry,
+                &startup_state_store,
+                &startup_cycle_state,
+            )
         })
         .await;
         match startup_result {
@@ -414,6 +433,7 @@ pub async fn run(
             reconcile_ctx,
             reconcile_registry,
             reconcile_state_store,
+            reconcile_cycle_state_for_loop,
             reconcile_cancel,
         )
         .await;
@@ -471,6 +491,7 @@ async fn reconcile_loop(
     ctx: PluginContext,
     session_registry: SharedSessionRegistry,
     state_store: SharedStateStore,
+    cycle_state: SharedCycleState,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -483,8 +504,14 @@ async fn reconcile_loop(
                 let claude_root = ctx.system.claude_root.clone();
                 let session_registry = session_registry.clone();
                 let state_store = state_store.clone();
+                let cycle_state = cycle_state.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    reconcile_team_member_activity(&claude_root, &session_registry, &state_store)
+                    reconcile_team_member_activity(
+                        &claude_root,
+                        &session_registry,
+                        &state_store,
+                        &cycle_state,
+                    )
                 }).await;
 
                 match result {
@@ -501,14 +528,22 @@ fn reconcile_team_member_activity(
     claude_root: &std::path::Path,
     session_registry: &SharedSessionRegistry,
     state_store: &SharedStateStore,
+    cycle_state: &SharedCycleState,
 ) -> Result<()> {
-    reconcile_team_member_activity_with_mode(claude_root, session_registry, state_store, true)
+    reconcile_team_member_activity_with_mode(
+        claude_root,
+        session_registry,
+        state_store,
+        cycle_state,
+        true,
+    )
 }
 
 fn reconcile_team_member_activity_with_mode(
     claude_root: &std::path::Path,
     session_registry: &SharedSessionRegistry,
     state_store: &SharedStateStore,
+    cycle_state: &SharedCycleState,
     advance_absent_prune_cycles: bool,
 ) -> Result<()> {
     let teams_root = claude_root.join("teams");
@@ -721,24 +756,29 @@ fn reconcile_team_member_activity_with_mode(
                 // counter and skip this cycle entirely — terminal cleanup may only
                 // fire after two consecutive cycles where the member is present in
                 // config with a dead session starting from a clean counter.
-                let was_absent = ABSENT_REGISTRY_CYCLES.lock().unwrap().contains_key(&key);
+                let was_absent = cycle_state
+                    .lock()
+                    .unwrap()
+                    .absent_registry_cycles
+                    .contains_key(&key);
                 if was_absent {
-                    DEAD_MEMBER_CYCLES.lock().unwrap().remove(&key);
+                    cycle_state.lock().unwrap().dead_member_cycles.remove(&key);
                 } else {
-                    let mut dead_cycles = DEAD_MEMBER_CYCLES.lock().unwrap();
-                    let cycles = dead_cycles
+                    let mut state = cycle_state.lock().unwrap();
+                    let cycles = state
+                        .dead_member_cycles
                         .entry(key.clone())
                         .and_modify(|c| *c = c.saturating_add(1))
                         .or_insert(1);
                     if *cycles >= 2 {
                         terminal_non_lead_members.push(member.name.clone());
-                        dead_cycles.remove(&key);
+                        state.dead_member_cycles.remove(&key);
                     }
                 }
             } else {
                 // Member is alive, has no session, or is team-lead: reset counter.
                 let key = format!("{team_name}:{}", member.name);
-                DEAD_MEMBER_CYCLES.lock().unwrap().remove(&key);
+                cycle_state.lock().unwrap().dead_member_cycles.remove(&key);
             }
         }
 
@@ -767,7 +807,8 @@ fn reconcile_team_member_activity_with_mode(
                 config.members.iter().map(|m| m.name.clone()).collect();
             let mut reg = session_registry.lock().unwrap();
             let tracked_for_team = reg.sessions_for_team(&team_name);
-            let mut absent_cycles = ABSENT_REGISTRY_CYCLES.lock().unwrap();
+            let mut reconcile_state = cycle_state.lock().unwrap();
+            let absent_cycles = &mut reconcile_state.absent_registry_cycles;
 
             for tracked in tracked_for_team {
                 let key = format!("{team_name}:{}", tracked.agent_name);
@@ -1285,13 +1326,14 @@ fn retention_work(
 async fn status_writer_loop(
     status_writer: Arc<StatusWriter>,
     plugins: Vec<(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)>,
+    init_failed_plugins: Vec<FailedPluginInit>,
     ctx: PluginContext,
     cancel: CancellationToken,
 ) {
     info!("Status writer loop started (interval: 30s)");
 
     // Write initial status at startup
-    let plugin_statuses = build_plugin_statuses(&plugins, &ctx).await;
+    let plugin_statuses = build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
     let teams = get_active_teams(&ctx).await;
     if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone()) {
         error!("Failed to write initial daemon status: {}", e);
@@ -1309,7 +1351,8 @@ async fn status_writer_loop(
             _ = interval.tick() => {
                 debug!("Writing daemon status");
 
-                let plugin_statuses = build_plugin_statuses(&plugins, &ctx).await;
+                let plugin_statuses =
+                    build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
                 let teams = get_active_teams(&ctx).await;
 
                 if let Err(e) = status_writer.write_status(plugin_statuses, teams) {
@@ -1325,6 +1368,7 @@ async fn status_writer_loop(
 /// Build plugin status list from running plugins
 async fn build_plugin_statuses(
     plugins: &[(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)],
+    init_failed_plugins: &[FailedPluginInit],
     ctx: &PluginContext,
 ) -> Vec<PluginStatus> {
     let mut statuses = Vec::new();
@@ -1344,7 +1388,10 @@ async fn build_plugin_statuses(
             status_kind = kind;
             last_error = error;
             last_updated = updated.or_else(|| Some(format_timestamp(SystemTime::now())));
-            enabled = !matches!(status_kind, PluginStatusKind::Disabled);
+            enabled = !matches!(
+                status_kind,
+                PluginStatusKind::Disabled | PluginStatusKind::DisabledInitError
+            );
         }
 
         statuses.push(PluginStatus {
@@ -1353,6 +1400,16 @@ async fn build_plugin_statuses(
             status: status_kind,
             last_error,
             last_updated,
+        });
+    }
+
+    for failed in init_failed_plugins {
+        statuses.push(PluginStatus {
+            name: failed.name.clone(),
+            enabled: false,
+            status: PluginStatusKind::DisabledInitError,
+            last_error: Some(failed.error.clone()),
+            last_updated: Some(format_timestamp(SystemTime::now())),
         });
     }
 
@@ -1435,12 +1492,11 @@ fn format_timestamp(time: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{InboxCursor, read_new_inbox_messages, reconcile_team_member_activity};
+    use super::{InboxCursor, read_new_inbox_messages};
     use crate::daemon::session_registry::new_session_registry;
     use crate::daemon::socket::new_state_store;
     use crate::plugins::worker_adapter::AgentState;
     use agent_team_mail_core::schema::InboxMessage;
-    use serial_test::serial;
     use std::collections::HashMap;
     use std::fs as stdfs;
     use tempfile::TempDir;
@@ -1598,7 +1654,14 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
 
         let tracker = state_store.lock().unwrap();
         assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Offline));
@@ -1638,7 +1701,14 @@ mod tests {
         );
         let sr = new_session_registry();
         let state_store = new_state_store();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert!(state_store.lock().unwrap().get_state("worker").is_some());
 
         // Remove worker from config and reconcile again.
@@ -1658,7 +1728,13 @@ mod tests {
                 }
             ]),
         );
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert!(state_store.lock().unwrap().get_state("worker").is_none());
     }
 
@@ -1696,7 +1772,14 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
 
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
             &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
@@ -1752,7 +1835,14 @@ mod tests {
             reg.upsert_for_team("atm-dev", "arch-ctm", "stale-session", live_pid);
         }
         let state_store = new_state_store();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
 
         let tracker = state_store.lock().unwrap();
         assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Offline));
@@ -1774,7 +1864,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_reconcile_does_not_auto_promote_dead_session_with_live_pid() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
@@ -1816,7 +1905,14 @@ mod tests {
         }
 
         let state_store = new_state_store();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
 
         let tracker = state_store.lock().unwrap();
         assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Offline));
@@ -1916,12 +2012,10 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_session_end_converges_to_remove_dead_member_from_roster_and_mailbox() {
-        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
-        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team(&team_name, "arch-ctm", "sess-session-end", i32::MAX as u32);
@@ -1929,8 +2023,20 @@ mod tests {
             reg.mark_dead_for_team(&team_name, "arch-ctm");
         }
         // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
@@ -1942,12 +2048,10 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_sigterm_escalation_converges_to_remove_dead_member_from_roster_and_mailbox() {
-        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
-        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team(&team_name, "arch-ctm", "sess-sigterm", i32::MAX as u32);
@@ -1955,8 +2059,20 @@ mod tests {
             reg.mark_dead_for_team(&team_name, "arch-ctm");
         }
         // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
@@ -1968,12 +2084,10 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_kill_timeout_fallback_converges_to_remove_dead_member_from_roster_and_mailbox() {
-        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
-        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team(&team_name, "arch-ctm", "sess-kill-timeout", i32::MAX as u32);
@@ -1981,8 +2095,20 @@ mod tests {
             reg.mark_dead_for_team(&team_name, "arch-ctm");
         }
         // Two cycles required: first cycle increments dead counter; second fires terminal cleanup.
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
@@ -1994,11 +2120,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_reconcile_prunes_stale_absent_dead_members_only_after_two_full_extra_cycles() {
-        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
-        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
-
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -2022,13 +2144,20 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team("atm-dev", "arch-ctm", "stale-sess", i32::MAX as u32);
             reg.mark_dead_for_team("atm-dev", "arch-ctm");
         }
 
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert!(
             sr.lock()
                 .unwrap()
@@ -2037,7 +2166,13 @@ mod tests {
             "first absent cycle should not prune dead member yet"
         );
 
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert!(
             sr.lock()
                 .unwrap()
@@ -2046,7 +2181,13 @@ mod tests {
             "second absent cycle should still not prune dead member"
         );
 
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
         assert!(
             sr.lock()
                 .unwrap()
@@ -2057,11 +2198,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_reconcile_does_not_prune_absent_active_sessions() {
-        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
-        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
-
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -2085,13 +2222,26 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team("atm-dev", "arch-ctm", "active-sess", std::process::id());
         }
 
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
-        reconcile_team_member_activity(&home.join(".claude"), &sr, &state_store).unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
 
         assert!(
             sr.lock()
@@ -2103,11 +2253,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_reconcile_dispatch_mode_remove_then_readd_preserves_dead_session_record() {
-        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
-        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
-
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -2131,6 +2277,7 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team("atm-dev", "arch-ctm", "dead-sess", i32::MAX as u32);
@@ -2169,6 +2316,7 @@ mod tests {
             &home.join(".claude"),
             &sr,
             &state_store,
+            &cycle_state,
             true,
         )
         .unwrap();
@@ -2177,9 +2325,10 @@ mod tests {
             "member present in config should be seeded in state store"
         );
         assert!(
-            !super::ABSENT_REGISTRY_CYCLES
+            !cycle_state
                 .lock()
                 .unwrap()
+                .absent_registry_cycles
                 .contains_key("atm-dev:arch-ctm"),
             "presence should clear stale absent-cycle markers"
         );
@@ -2206,13 +2355,15 @@ mod tests {
             &home.join(".claude"),
             &sr,
             &state_store,
+            &cycle_state,
             true,
         )
         .unwrap();
         assert_eq!(
-            super::ABSENT_REGISTRY_CYCLES
+            cycle_state
                 .lock()
                 .unwrap()
+                .absent_registry_cycles
                 .get("atm-dev:arch-ctm")
                 .copied(),
             Some(1),
@@ -2259,6 +2410,7 @@ mod tests {
             &home.join(".claude"),
             &sr,
             &state_store,
+            &cycle_state,
             true,
         )
         .unwrap();
@@ -2275,20 +2427,17 @@ mod tests {
             "re-added member must remain registered in state store"
         );
         assert!(
-            !super::ABSENT_REGISTRY_CYCLES
+            !cycle_state
                 .lock()
                 .unwrap()
+                .absent_registry_cycles
                 .contains_key("atm-dev:arch-ctm"),
             "re-added member should clear absent-cycle marker"
         );
     }
 
     #[test]
-    #[serial]
     fn test_reconcile_config_dispatch_mode_does_not_advance_absent_prune_cycles() {
-        super::ABSENT_REGISTRY_CYCLES.lock().unwrap().clear();
-        super::DEAD_MEMBER_CYCLES.lock().unwrap().clear();
-
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -2312,6 +2461,7 @@ mod tests {
 
         let sr = new_session_registry();
         let state_store = new_state_store();
+        let cycle_state = super::new_reconcile_cycle_state();
         {
             let mut reg = sr.lock().unwrap();
             reg.upsert_for_team("atm-dev", "arch-ctm", "dead-sess", i32::MAX as u32);
@@ -2323,6 +2473,7 @@ mod tests {
                 &home.join(".claude"),
                 &sr,
                 &state_store,
+                &cycle_state,
                 false,
             )
             .unwrap();
