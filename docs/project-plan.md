@@ -165,8 +165,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | T | Daemon Reliability + Bug Debt | Fix daemon auto-start, config sync, TUI bugs, deferred S work | COMPLETE |
 | X | Team Onboarding + TUI/Doctor Stability | `/team-join`, spawn path normalization, `atm init` one-command setup, and carry-forward bug-debt mapping | PLANNED |
 | Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency (Z.1–Z.7 COMPLETE) | COMPLETE |
-| AA | Session Correctness + Spawn Authorization + Reliability UX | Session-end correctness, spawn authorization, cleanup/help reliability hardening | PLANNED |
-| AB | GitHub CI Monitor Command + Availability Hardening | Complete `atm gh` plugin requirements and deliver monitor/state/reporting contracts | PLANNED |
+| AA | Session Correctness + Spawn Authorization + Reliability UX | Session-end correctness, spawn authorization, cleanup/help reliability hardening | COMPLETE |
+| AB | GitHub CI Monitor Command + Availability Hardening | Complete `atm gh` plugin requirements and deliver monitor/state/reporting contracts | COMPLETE |
 | AC | Daemon Status Convergence + Hook Install Confidence | Finalize daemon status/lifecycle consistency and pre-release hook install confidence for local/global paths | IN PROGRESS |
 
 ---
@@ -1794,6 +1794,10 @@ for both project-local and global-install paths before Homebrew/global hook roll
 - AC.5 is the current branch focus and must land first.
 - AC.6 depends on AC.5 and finalizes release-confidence checks.
 
+Branch numbering note:
+- AC.5 currently uses branch `feature/pAC-s2-cleanup-guard` due branch-lineage carry-forward from earlier AC sprint setup.
+- AC sprint numbering in this plan is authoritative (`AC.5`, then `AC.6` next).
+
 ### Sprint Summary
 | Sprint | Name | PR | Branch | Issues | Status |
 |--------|------|----|--------|--------|--------|
@@ -1809,6 +1813,8 @@ for both project-local and global-install paths before Homebrew/global hook roll
 3. Enforce no-op/idempotent behavior for invalid lifecycle replay paths
    (unknown `session_end`, duplicate dead `session_end`, mismatched-session `session_end`).
 4. Re-verify that `isActive` remains activity-only and cannot be interpreted as liveness in diagnostics/status surfaces.
+5. Preserve prior Z.5 hook lifecycle coverage for `hook.pre_compact` and
+   `hook.compact_complete`; AC.5 does not redefine or regress those contracts.
 
 **Acceptance Criteria**
 1. The same member state is rendered consistently in `atm doctor`, `atm status`, and `atm members`.
