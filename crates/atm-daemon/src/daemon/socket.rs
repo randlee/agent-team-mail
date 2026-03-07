@@ -5721,11 +5721,16 @@ poll_interval_secs = 1
             "leadSessionId": "test-lead-session",
             "members": member_values,
         });
-        std::fs::write(
-            team_dir.join("config.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        {
+            use std::io::Write;
+            let config_path = team_dir.join("config.json");
+            let config_bytes = serde_json::to_string_pretty(&config).unwrap();
+            let file = std::fs::File::create(&config_path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(config_bytes.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -5766,7 +5771,15 @@ poll_interval_secs = 1
             .find(|m| m["name"].as_str() == Some(member_name))
             .expect("member exists in team config");
         member["externalBackendType"] = serde_json::json!(backend);
-        std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let cfg_bytes = serde_json::to_string_pretty(&cfg).unwrap();
+            let file = std::fs::File::create(&cfg_path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(cfg_bytes.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
     }
 
     fn test_member(name: &str, backend: &str) -> agent_team_mail_core::schema::AgentMember {
