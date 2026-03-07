@@ -4,9 +4,9 @@ Last updated: 2026-03-07
 
 ## Goal
 
-Define implementation-ready tests for Phase AC.5 and AC.6 so daemon state tracking,
-lifecycle handling, and hook installation behavior are provably correct before global
-hook rollout.
+Define implementation-ready tests for Phase AC.5 through AC.10 so daemon state tracking,
+lifecycle handling, hook installation behavior, and release-confidence guardrails are
+provably correct before global hook rollout.
 
 ## Scope
 
@@ -24,6 +24,9 @@ hook rollout.
 | AC.5 | Daemon status convergence + lifecycle validation | Current branch work |
 | AC.6 | Hook install confidence + multi-team recovery matrix | Next sprint |
 | AC.7 | Hook lifecycle + restart convergence hardening | Branch `feature/pAC-s7-hook-lifecycle-coverage` |
+| AC.8 | Init install matrix QA blocker closure | Branch `feature/pAC-s8-init-install-matrix` |
+| AC.9 | Multi-team recovery determinism | Branch `feature/pAC-s9-multiteam-recovery` |
+| AC.10 | Release confidence + regression guardrail pack | Branch `feature/pAC-s10-release-confidence` |
 
 ## AC.5 Test Matrix
 
@@ -41,6 +44,22 @@ Cases:
 3. `isActive=true` without a daemon-backed live session does not imply online; render `Unknown` until liveness is confirmed.
 4. Team-scoped run (`--team`) excludes agents from other teams.
 5. Daemon-unreachable path renders `Unknown` (not offline/dead) with actionable finding.
+
+AC.10 audit mapping (section 1 requirements -> tests):
+1. Case 1 covered by:
+   `crates/atm/tests/integration_conflict_tests.rs::test_doctor_status_members_consistent_unknown_when_daemon_unreachable`
+2. Case 2 covered by:
+   `crates/atm/tests/integration_conflict_tests.rs::test_doctor_status_members_consistent_unknown_when_daemon_unreachable`
+3. Case 3 covered by:
+   `crates/atm/tests/integration_conflict_tests.rs::test_doctor_status_members_consistent_unknown_when_daemon_unreachable`
+4. Case 4 covered by:
+   `crates/atm/tests/integration_external_member.rs::test_members_team_flag`
+   `crates/atm/tests/integration_external_member.rs::test_status_team_flag`
+   `crates/atm/src/commands/doctor.rs::tests::check_pid_session_reconciliation_ignores_foreign_state_entries`
+5. Case 5 covered by:
+   `crates/atm/tests/integration_conflict_tests.rs::test_doctor_status_members_consistent_unknown_when_daemon_unreachable`
+   `crates/atm/src/commands/doctor.rs::tests::check_pid_session_reconciliation_query_none_maps_to_daemon_unreachable`
+   `crates/atm/src/commands/doctor.rs::tests::build_recommendations_includes_daemon_start_for_unreachable`
 
 ### 2) Lifecycle Transition Coverage
 
