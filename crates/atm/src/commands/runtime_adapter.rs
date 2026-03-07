@@ -16,6 +16,7 @@ pub enum RuntimeKind {
 pub struct SpawnSpec {
     pub team: String,
     pub agent: String,
+    pub color: Option<String>,
     pub cwd: PathBuf,
     pub model: Option<String>,
     pub sandbox: Option<bool>,
@@ -122,14 +123,25 @@ pub struct ClaudeAdapter;
 impl RuntimeAdapter for ClaudeAdapter {
     fn build_command(&self, spec: &SpawnSpec) -> Result<String> {
         let agent_id = format!("{}@{}", spec.agent, spec.team);
-        Ok(format!(
-            "env ATM_TEAM={} ATM_IDENTITY={} CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --agent-id {} --agent-name {} --team-name {} --dangerously-skip-permissions",
+        let mut cmd = format!(
+            "cd {} && env CLAUDECODE=1 ATM_TEAM={} ATM_IDENTITY={} CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --agent-id {} --agent-name {} --team-name {}",
+            shell_quote(&spec.cwd.to_string_lossy()),
             shell_quote(&spec.team),
             shell_quote(&spec.agent),
-            agent_id,
-            spec.agent,
-            spec.team
-        ))
+            shell_quote(&agent_id),
+            shell_quote(&spec.agent),
+            shell_quote(&spec.team),
+        );
+        if let Some(color) = spec.color.as_deref().filter(|c| !c.trim().is_empty()) {
+            cmd.push_str(" --agent-color ");
+            cmd.push_str(&shell_quote(color));
+        }
+        if let Some(model) = spec.model.as_deref().filter(|m| !m.trim().is_empty()) {
+            cmd.push_str(" --model ");
+            cmd.push_str(&shell_quote(model));
+        }
+        cmd.push_str(" --dangerously-skip-permissions");
+        Ok(cmd)
     }
 
     fn build_env(&self, _spec: &SpawnSpec, _home_dir: &Path) -> Result<HashMap<String, String>> {
@@ -181,6 +193,7 @@ mod tests {
         SpawnSpec {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
+            color: None,
             cwd: expected_test_cwd(),
             model: None,
             sandbox: None,
@@ -243,20 +256,26 @@ mod tests {
     #[test]
     fn claude_build_command_includes_agent_team_flags() {
         let adapter = ClaudeAdapter;
-        let spec = base_spec();
+        let mut spec = base_spec();
+        spec.color = Some("cyan".to_string());
+        spec.model = Some("haiku".to_string());
         let cmd = adapter.build_command(&spec).unwrap();
+        let expected_cd = format!(
+            "cd {} &&",
+            shell_quote(&expected_test_cwd().to_string_lossy())
+        );
+        assert!(cmd.contains("CLAUDECODE=1"));
+        assert!(cmd.contains(&expected_cd));
         assert!(cmd.contains("ATM_TEAM='atm-dev'"));
         assert!(cmd.contains("ATM_IDENTITY='arch-ctm'"));
         assert!(cmd.contains("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"));
         assert!(cmd.contains("claude"));
-        assert!(cmd.contains("--agent-id arch-ctm@atm-dev"));
-        assert!(cmd.contains("--agent-name arch-ctm"));
-        assert!(cmd.contains("--team-name atm-dev"));
+        assert!(cmd.contains("--agent-id 'arch-ctm@atm-dev'"));
+        assert!(cmd.contains("--agent-name 'arch-ctm'"));
+        assert!(cmd.contains("--team-name 'atm-dev'"));
+        assert!(cmd.contains("--agent-color 'cyan'"));
+        assert!(cmd.contains("--model 'haiku'"));
         assert!(cmd.contains("--dangerously-skip-permissions"));
-        assert!(
-            !cmd.contains("cd "),
-            "claude adapter command should be pure launch command without cd prefix"
-        );
     }
 
     #[test]
