@@ -10,11 +10,19 @@ pub type SharedPlugin = Arc<Mutex<Box<dyn ErasedPlugin>>>;
 struct PluginEntry {
     plugin: Box<dyn ErasedPlugin>,
     state: PluginState,
+    init_error: Option<String>,
 }
 
 /// Manages plugin lifecycle and discovery
 pub struct PluginRegistry {
     plugins: Vec<PluginEntry>,
+}
+
+/// Snapshot of a plugin that failed to initialize and was disabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedPluginInit {
+    pub name: String,
+    pub error: String,
 }
 
 impl PluginRegistry {
@@ -29,16 +37,40 @@ impl PluginRegistry {
         self.plugins.push(PluginEntry {
             plugin: Box::new(plugin),
             state: PluginState::Created,
+            init_error: None,
         });
     }
 
     /// Initialize all registered plugins
     pub async fn init_all(&mut self, ctx: &PluginContext) -> Result<(), PluginError> {
         for entry in &mut self.plugins {
-            entry.plugin.init(ctx).await?;
-            entry.state = PluginState::Initialized;
+            match entry.plugin.init(ctx).await {
+                Ok(()) => {
+                    entry.state = PluginState::Initialized;
+                    entry.init_error = None;
+                }
+                Err(err) => {
+                    entry.state = PluginState::Failed;
+                    entry.init_error = Some(err.to_string());
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Get all plugins that failed init and were disabled for this daemon run.
+    pub fn failed_init_plugins(&self) -> Vec<FailedPluginInit> {
+        self.plugins
+            .iter()
+            .filter(|e| e.state == PluginState::Failed)
+            .map(|e| FailedPluginInit {
+                name: e.plugin.metadata().name.to_string(),
+                error: e
+                    .init_error
+                    .clone()
+                    .unwrap_or_else(|| "plugin init failed".to_string()),
+            })
+            .collect()
     }
 
     /// Get plugin metadata and state by name
@@ -91,21 +123,145 @@ impl PluginRegistry {
 
     /// Take all plugins out of the registry for task spawning.
     /// Each plugin is wrapped in Arc<Mutex<>> for safe concurrent access.
-    /// Transitions all plugins to Running state.
+    /// Transitions initialized plugins to Running state.
+    /// Failed-init plugins remain in the registry for status surfacing.
     pub fn take_plugins(&mut self) -> Vec<(PluginMetadata, SharedPlugin)> {
-        self.plugins
-            .drain(..)
-            .map(|mut entry| {
+        let mut running_plugins: Vec<(PluginMetadata, SharedPlugin)> = Vec::new();
+        let mut retained: Vec<PluginEntry> = Vec::new();
+
+        for mut entry in self.plugins.drain(..) {
+            if entry.state == PluginState::Initialized {
                 entry.state = PluginState::Running;
                 let metadata = entry.plugin.metadata();
-                (metadata, Arc::new(Mutex::new(entry.plugin)))
-            })
-            .collect()
+                running_plugins.push((metadata, Arc::new(Mutex::new(entry.plugin))));
+            } else {
+                retained.push(entry);
+            }
+        }
+
+        self.plugins = retained;
+        running_plugins
     }
 }
 
 impl Default for PluginRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::MailService;
+    use crate::roster::RosterService;
+    use agent_team_mail_core::config::Config;
+    use agent_team_mail_core::context::{Platform, SystemContext};
+    use std::sync::Arc;
+
+    struct OkPlugin;
+    struct FailPlugin;
+
+    impl Plugin for OkPlugin {
+        fn metadata(&self) -> PluginMetadata {
+            PluginMetadata {
+                name: "ok_plugin",
+                version: "0.1.0",
+                description: "ok",
+                capabilities: vec![],
+            }
+        }
+
+        async fn init(&mut self, _ctx: &PluginContext) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        async fn run(
+            &mut self,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
+    impl Plugin for FailPlugin {
+        fn metadata(&self) -> PluginMetadata {
+            PluginMetadata {
+                name: "fail_plugin",
+                version: "0.1.0",
+                description: "fail",
+                capabilities: vec![],
+            }
+        }
+
+        async fn init(&mut self, _ctx: &PluginContext) -> Result<(), PluginError> {
+            Err(PluginError::Init {
+                message: "bad config".to_string(),
+                source: None,
+            })
+        }
+
+        async fn run(
+            &mut self,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
+    fn test_context() -> PluginContext {
+        let tmp = tempfile::tempdir().unwrap();
+        let teams_root = tmp.path().to_path_buf();
+        let system = SystemContext::new(
+            "test-host".to_string(),
+            Platform::Linux,
+            std::env::temp_dir().join(".claude"),
+            "0.1.0".to_string(),
+            "atm-dev".to_string(),
+        );
+        let config: Config = toml::from_str(
+            r#"
+[core]
+default_team = "atm-dev"
+identity = "team-lead"
+            "#,
+        )
+        .unwrap();
+        let mail = MailService::new(teams_root.clone());
+        let roster = RosterService::new(teams_root);
+        PluginContext::new(
+            Arc::new(system),
+            Arc::new(mail),
+            Arc::new(config),
+            Arc::new(roster),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_init_all_isolates_failed_plugins() {
+        let mut registry = PluginRegistry::new();
+        registry.register(FailPlugin);
+        registry.register(OkPlugin);
+        let ctx = test_context();
+
+        let result = registry.init_all(&ctx).await;
+        assert!(result.is_ok(), "init_all must not fail-fast");
+
+        let failed = registry.failed_init_plugins();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].name, "fail_plugin");
+        assert!(failed[0].error.contains("bad config"));
+
+        let runnable = registry.take_plugins();
+        assert_eq!(runnable.len(), 1, "only healthy plugins should run");
+        assert_eq!(runnable[0].0.name, "ok_plugin");
     }
 }
