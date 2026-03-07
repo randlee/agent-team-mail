@@ -6,6 +6,6 @@ pub mod types;
 
 pub use context::PluginContext;
 pub use mail_service::MailService;
-pub use registry::{PluginRegistry, SharedPlugin};
+pub use registry::{FailedPluginInit, PluginRegistry, SharedPlugin};
 pub use traits::{ErasedPlugin, Plugin};
 pub use types::{Capability, PluginError, PluginMetadata, PluginState};
