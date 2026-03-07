@@ -2273,6 +2273,15 @@ atm init <team> --skip-team
   MUST re-run `atm init <team>` to materialize updated hook scripts on disk.** The binary
   holds the authoritative script content; on-disk scripts from prior versions are stale
   until overwritten by `atm init`.
+- Runtime-aware install requirements:
+  - `atm init` MUST detect installed runtimes and install ATM lifecycle hook wiring
+    for each detected runtime automatically.
+  - Initial runtime set: Claude Code, Codex CLI, Gemini CLI.
+  - Runtime detection MUST be fail-open per runtime:
+    - If one runtime is not installed, `atm init` still succeeds for detected runtimes.
+    - If one runtime install step fails, the result must clearly report per-runtime
+      status without masking which runtime failed.
+  - Re-running `atm init` MUST be idempotent per runtime (no duplicate hooks/config entries).
 
 **Required test scenarios** (each must be independently tested):
 
@@ -2293,6 +2302,18 @@ atm init <team> --skip-team
 - Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` for project-local scripts and absolute per-user script paths for global installs; do not use `${CLAUDE_PLUGIN_ROOT}`.
 - `atm init` success output must include whether hooks were installed globally or locally.
 
+#### 4.9.3a Script Runtime Portability Policy
+
+- Product/runtime scripts MUST be Python-based and cross-platform.
+- ATM product behavior MUST NOT require `bash`, `sh`, `zsh`, or `pwsh` for core
+  functionality.
+- Shell scripts may exist only as development/CI helpers and MUST be explicitly
+  documented as non-product exceptions.
+- Any exception requiring shell for product behavior requires explicit
+  requirements approval and a documented cross-platform mitigation path.
+- Hook wiring installed by `atm init` MUST invoke Python entrypoints directly for
+  product paths.
+
 #### 4.9.4 Exit and Result Semantics
 
 - Exit `0` for `installed`, `updated`, and `already-configured`.
@@ -2300,6 +2321,15 @@ atm init <team> --skip-team
 - Exit `1` for malformed config, unsupported environment, or write/permission failures.
 - Idempotent no-op cases (`.atm.toml` exists, team exists, hooks already configured)
   are success states and must be explicitly reported in human output.
+
+#### 4.9.5 Test and CI Coverage (Hook/Script Portability)
+
+- Python hook/script behavior required by `atm init` MUST be covered by pytest
+  tests under `tests/hook-scripts/`.
+- These pytest tests MUST run in CI as a required check.
+- Cross-runtime install behavior (Claude/Codex/Gemini detection + per-runtime
+  idempotency) MUST have deterministic tests and must not rely on interactive
+  shell state.
 
 ### 4.10 Install/Upgrade Daemon Freshness
 

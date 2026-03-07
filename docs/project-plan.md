@@ -1442,7 +1442,34 @@ the current tranche focused on onboarding contract closure.
 **Completed**: 123+ sprints across 27 phases (CI green)
 **Current version**: v0.38.0
 **Current phase**: Phase AC COMPLETE
-**Next planned phase**: Phase AD (TBD)
+**Next planned phase**: Phase AD (cross-platform script standardization)
+
+---
+
+## 17.15 Phase AD: Cross-Platform Script Standardization
+
+**Goal**: remove product/runtime shell-script dependencies and standardize runtime
+script behavior on Python across macOS/Linux/Windows.
+
+**Planning doc**: `docs/phase-ad-planning.md`
+
+### Sprint Summary
+| Sprint | Name | PR | Branch | Issues | Status |
+|--------|------|----|--------|--------|--------|
+| AD.1 | Python Runtime Policy + `atm init` Runtime Auto-Install Contract | — | `planning/phase-AD` | cross-platform shell dependency elimination | PLANNED |
+
+### AD.1 — Python Runtime Policy + `atm init` Runtime Auto-Install Contract
+**Deliverables**
+1. Lock requirements: product/runtime scripts are Python-only; shell is dev/CI exception only.
+2. Define `atm init` runtime detection + auto-install contract for Claude/Codex/Gemini.
+3. Build violation inventory and map conversion work to follow-on AD sprints.
+4. Add deterministic test-plan coverage requirements (including pytest CI lane for hook/script behavior).
+
+**Acceptance Criteria**
+1. Requirements explicitly prohibit shell-required product runtime paths.
+2. `atm init` runtime auto-install behavior is specified and idempotent per runtime.
+3. Known shell violations are inventoried and scheduled.
+4. CI test expectations include pytest coverage for affected Python hook/script paths.
 
 ---
 
