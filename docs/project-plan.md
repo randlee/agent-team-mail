@@ -1775,6 +1775,24 @@ progress/failure observability.
 
 ---
 
+## 17.14 Phase AC: Flaky Test Fix + PPID Detection + Cleanup Guard + Spawn UX + Daemon Logging
+
+**Goal**: Stabilize ReconcileCycleState test, improve Codex PPID detection and log format, add external agent cleanup guard, interactive `atm spawn` UX, and daemon logging observability.
+
+**Integration branch**: `integrate/phase-AC`
+
+### Sprint Summary
+| Sprint | Name | PR | Branch | Status |
+|--------|------|----|--------|--------|
+| AC.1 | ReconcileCycleState test fix + PPID detection | baked into integrate/phase-AC | — | COMPLETE |
+| AC.2 | External agent cleanup guard | [#476](https://github.com/randlee/agent-team-mail/pull/476) | `feature/pAC-s2-cleanup-guard` | COMPLETE |
+| AC.3 | `atm spawn` interactive UX | [#477](https://github.com/randlee/agent-team-mail/pull/477) | `feature/pAC-s3-spawn-interactive` | COMPLETE |
+| AC.4 | Daemon logging observability | [#479](https://github.com/randlee/agent-team-mail/pull/479) | `feature/pAC-s4-daemon-logging` | COMPLETE |
+| AC.Windows | Windows send PID fix | [#478](https://github.com/randlee/agent-team-mail/pull/478) | `feature/pAC-windows-send-pid` | COMPLETE |
+| AC.5 | Spawn command alignment + compliance fixes | [#481](https://github.com/randlee/agent-team-mail/pull/481) | `feature/pAC-s5-bug-investigation` | COMPLETE |
+
+**Phase integration PR**: [#480](https://github.com/randlee/agent-team-mail/pull/480) → `develop` (v0.38.0)
+
 ## 20. Phase Integration PRs
 
 | Phase | Integration PR | Status |
