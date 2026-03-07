@@ -157,11 +157,11 @@ Option D (registry persistence) deferred until A+C are stable.
 ### AC.2a — Option B fixes (arch-ctm, already implemented)
 | File | Change |
 |------|--------|
-| `crates/atm-daemon/src/daemon/send.rs` | Fix `backend_expected_rule` for legacy agentType codex/gemini |
-| `crates/atm-daemon/src/daemon/send.rs` | Normalize basename in process matcher |
-| `crates/atm-daemon/src/daemon/send.rs` | PPID traversal depth 8→16 |
-| `crates/atm-daemon/src/daemon/send.rs` | Synthetic session ID `local:<agent>:pid:<pid>` |
-| `crates/atm-daemon/src/daemon/send.rs` | Log format: remove pid/ppid noise from send lines |
+| `crates/atm/src/commands/send.rs` | Fix `backend_expected_rule` for legacy agentType codex/gemini |
+| `crates/atm/src/commands/send.rs` | Normalize basename in process matcher |
+| `crates/atm/src/commands/send.rs` | PPID traversal depth 8→16 |
+| `crates/atm/src/commands/send.rs` | Synthetic session ID `local:<agent>:pid:<pid>` |
+| `crates/atm-core/src/log_reader.rs` | Log format: remove pid/ppid noise from send lines |
 
 ### AC.2b — Option C cleanup guard
 | File | Change |

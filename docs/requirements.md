@@ -338,7 +338,11 @@ Commands:
   cleanup     Apply retention policies
   mcp         MCP server setup and management
   init        Install/check ATM hook wiring for Claude Code
+  spawn       Launch a new agent interactively with a review panel (human-facing wrapper)
   gh          GitHub CI monitor operations (plugin-owned namespace)
+
+Spawn subcommands:
+  spawn <agent-type> [--team <name>] [--member <name>] [--model <name>] [--pane-mode new-pane|existing-pane|current-pane] [--worktree <path>] [--dry-run] [--yes]
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
@@ -704,14 +708,31 @@ Non-goal:
 - Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
   baseline parity is the immediate requirement.
 
-### 4.3.2b `atm teams spawn` — Interactive Review-Panel Mode
+### 4.3.2b External Agent Cleanup Guard
 
-When `atm teams spawn` is invoked in a terminal (stdin is a tty) without `--yes`,
+`atm teams cleanup` MUST NOT remove members with `external_backend_type` set (Codex, Gemini,
+or external agents) unless daemon explicitly confirms the session is dead.
+
+Required behavior:
+- If the member has **no `session_id`**: cleanup must skip the member with a warning indicating
+  liveness is unknown; the member is kept.
+- If the member has a `session_id`: cleanup queries daemon; only removes if daemon reports
+  `alive == false`.
+- If daemon is unreachable and no `--force` flag: external agent is skipped with warning.
+- `--force` bypasses liveness checks and removes unconditionally.
+- `--dry-run` must list skipped external agents with reason.
+
+Rationale: External agents (Codex, Gemini) do not fire Claude Code lifecycle hooks; the daemon
+may have no session record for them even when they are actively running.
+
+### 4.3.2c `atm spawn` — Interactive Review-Panel Mode
+
+When `atm spawn` is invoked in a terminal (stdin is a tty) without `--yes`,
 it MUST enter interactive review-panel mode before executing any spawn side effects.
 
 **Terminal detection (REQUIRED)**:
 - Interactive mode MUST only activate when `stdin_is_tty()` returns true.
-- When stdin is not a tty, `atm teams spawn` MUST print to stderr:
+- When stdin is not a tty, `atm spawn` MUST print to stderr:
   `error: interactive mode requires a terminal (stdin is not a tty)`
   followed by a hint showing the non-interactive invocation, then exit 1.
 - `--yes` flag bypasses tty check and executes spawn immediately without prompting.
@@ -2540,6 +2561,28 @@ temp/atm/<plugin-name>/
   `disabled_config_error` in daemon status surfaces (`atm status`, `atm doctor`).
 - If a plugin enters `disabled_config_error`, daemon must not keep a live
   polling loop for that plugin.
+- Plugin failures must be handled as state transitions (with structured error
+  reporting), not as fatal daemon startup/runtime errors.
+- Daemon plugin initialization must be per-plugin isolated: one plugin failing
+  init must not short-circuit initialization of remaining enabled plugins.
+- Plugin task panics must be contained to the plugin task boundary (mark
+  plugin degraded, continue daemon + other plugins).
+- Plugin handlers must use bounded internal queues and timeout/cancellation
+  guards so plugin stalls cannot block daemon control loop progress.
+
+### 5.9.1 Plugin Safety Test Criteria
+
+Required acceptance tests:
+- Daemon startup with one intentionally broken plugin config keeps daemon
+  running and initializes other healthy plugins.
+- Daemon startup surfaces failed plugin state and actionable error text in
+  `atm doctor` and `atm status`.
+- Simulated plugin runtime error/panic transitions only that plugin to
+  degraded/failed state; daemon process and unrelated plugins remain healthy.
+- Repeated plugin faults do not crash daemon (multi-fault soak case) and do
+  not produce unbounded queue growth.
+- Recovery path validation: correcting plugin config and reloading/restarting
+  daemon returns plugin to healthy state with explicit recovery log/findings.
 
 ### 5.10 Plugin Config Key Canonicalization
 

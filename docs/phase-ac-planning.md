@@ -25,7 +25,7 @@ Additionally, the spawn UX prototype (`scripts/spawn-demo.sh`) was built and val
 |--------|-------|-------------|--------|------------|
 | AC.1 | Test | Fix flaky ReconcileCycleState test (event_loop.rs) | **DONE** (41053cf) | — |
 | AC.1b | Daemon | Fix Codex PPID detection in send.rs (arch-ctm `[-]` bug) | **DONE** (da6cae5) | — |
-| AC.2 | Daemon | `atm cleanup` external agent guard + fix `validate_gh_monitor_config` repo check (#471) | Planned | AC.1 |
+| AC.2 | Daemon | Cleanup guard tests (guard already in Phase AB) + fix `validate_gh_monitor_config` repo check (#471) | Planned | AC.1 |
 | AC.3 | CLI | `atm spawn` interactive review-panel UX | Planned | — |
 | AC.4 | Daemon | Daemon logging + startup observability + plugin init isolation (#472, #473, #474) | Planned | — |
 
@@ -66,25 +66,34 @@ AC.2 and AC.3 are independent and can run in parallel.
 - Stable session ID `local:{sender}:pid:{process_id}` for non-hook processes
 - Log format: emitter `pid/ppid` prefix removed from send lines; only sender/recipient PID slots shown
 
-**Remaining gap**: `atm doctor` still shows `ACTIVE_WITHOUT_SESSION` because the send path does not write to `session_registry`. Tracked in AC.2.
+**Remaining gap**: `atm doctor` still shows `ACTIVE_WITHOUT_SESSION` because the send path does not write to `session_registry`. Tracked as part of AC.4 daemon state work.
 
 ---
 
-## Sprint AC.2 — Cleanup Guard + gh-monitor Config Fix
+## Sprint AC.2 — Cleanup Guard Tests + gh-monitor Config Fix
 
-**Goal**: Prevent `atm cleanup` from removing active Codex agents; fix `validate_gh_monitor_config` to require `repo` (issue #471).
+**Goal**: Add test coverage for the external agent cleanup guard (already implemented in Phase AB); fix `validate_gh_monitor_config` to require `repo` (issue #471).
 
 **Root cause references**: `docs/codex-agent-registration.md`, issue #471.
 
-### AC.2a — `atm cleanup` external agent guard
+### AC.2a — `atm cleanup` external agent guard (guard already implemented)
 
-In cleanup logic: members with `agentType` in `{"codex", "gemini", "external"}` MUST NOT be removed unless `last_seen` is absent or older than 7 days (configurable).
+**Status**: The guard is already in `crates/atm/src/commands/teams.rs` (Phase AB, commit 837e421). Implementation:
+- `is_external = member.external_backend_type.is_some()` — detects codex/gemini/external agents
+- No session_id → agent skipped with "unknown liveness" warning (kept, not removed)
+- session_id present → daemon queried; only removed if daemon explicitly reports session dead
+- `--dry-run` lists skipped external agents in a `Skipped N member(s)` footer line
 
-- `--dry-run` output must show retained external agents with reason `external-agent-no-state`
+**Remaining work**: Add the two tests specified in `docs/codex-agent-registration.md`:
+- `test_cleanup_does_not_remove_external_agent_without_state` — verifies no-session_id external agent is kept
+- `test_cleanup_removes_external_agent_after_long_absence` (can be renamed to reflect daemon-dead path)
+
+**File**: `crates/atm/src/commands/teams.rs` (tests only — production code already correct)
 
 ### AC.2b — Fix `validate_gh_monitor_config` repo check (issue #471)
 
-In `crates/atm-daemon/src/daemon/socket.rs`, after parsing `CiMonitorConfig`, add:
+In `crates/atm-daemon/src/daemon/socket.rs`, locate `validate_gh_monitor_config` (line ~2097).
+After parsing `CiMonitorConfig`, add a `repo` presence check:
 ```rust
 if parsed.repo.as_deref().map(str::trim).unwrap_or("").is_empty() {
     return Err("gh_monitor configuration missing required field: repo".to_string());
@@ -92,16 +101,14 @@ if parsed.repo.as_deref().map(str::trim).unwrap_or("").is_empty() {
 ```
 This fixes `test_gh_monitor_invalid_config_transitions_to_disabled_config_error`.
 
-**Files**:
-- `crates/atm-daemon/src/daemon/cleanup.rs` — external agent guard
-- `crates/atm-daemon/src/daemon/socket.rs` — repo validation fix
+**File**: `crates/atm-daemon/src/daemon/socket.rs`
 
 **Acceptance criteria**:
-- `atm teams cleanup atm-dev` does not remove arch-ctm when it has no daemon state record
-- `--dry-run` shows retained external agents with correct reason
+- `atm teams cleanup atm-dev` does not remove arch-ctm when it has no daemon state record (test coverage added)
 - `test_gh_monitor_invalid_config_transitions_to_disabled_config_error` passes
 - `cargo test -p agent-team-mail-daemon` fully green
-- `cargo clippy -p agent-team-mail-daemon` clean
+- `cargo test -p agent-team-mail` fully green
+- `cargo clippy` clean
 
 ---
 

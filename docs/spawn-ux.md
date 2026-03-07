@@ -172,6 +172,7 @@ The prototype (`scripts/spawn-demo.sh`) validates the UX. The Rust implementatio
 | `crates/atm/src/commands/spawn.rs` | New file — full spawn command implementation |
 | `crates/atm/src/main.rs` | Wire spawn subcommand |
 | `crates/atm-core/src/spawn.rs` | Shared spawn logic (pane modes, validation) |
+| `crates/atm/Cargo.toml` | Add `crossterm` dependency if not present |
 
 ### Test coverage needed
 
