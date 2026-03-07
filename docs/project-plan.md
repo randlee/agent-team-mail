@@ -1687,7 +1687,8 @@ progress/failure observability.
 1. Lock naming split: shared `ci_monitor` contract + concrete `gh_monitor` plugin key + namespace ownership (`atm gh`).
 2. Lock plugin failure-isolation contract (plugin failure must not crash daemon).
 3. Lock availability-state contract (`healthy`, `degraded`, `disabled_config_error`).
-4. Publish finalized requirements references for implementation/QA traceability.
+4. Lock global plugin command-gating contract (`<namespace>`, `<namespace> init`, help only when plugin is not configured/enabled for current team).
+5. Publish finalized requirements references for implementation/QA traceability.
 
 **Acceptance Criteria**
 1. Core requirements and plugin requirements are internally consistent.
@@ -1697,13 +1698,18 @@ progress/failure observability.
 ### AB.2 — `atm gh monitor` Command Surface
 **Deliverables**
 1. Implement command forms for PR/workflow/run monitoring and status checks.
-2. Implement PR start-timeout behavior (`2m` default, override allowed).
-3. Emit actionable no-run-started alerts to designated monitor recipients.
+2. Implement no-target status UX for plugin health:
+   - `atm gh` (namespace status)
+   - `atm gh status` (health/availability status)
+   with explicit configured/enabled/availability output.
+3. Implement PR start-timeout behavior (`2m` default, override allowed).
+4. Emit actionable no-run-started alerts to designated monitor recipients.
 
 **Acceptance Criteria**
 1. `atm gh monitor pr <n>` reports `ci_not_started` when timeout expires with no run.
 2. Workflow and run monitor commands resolve and track expected run targets.
-3. Coverage maps to `GH-CI-TR-2` in `docs/plugins/ci-monitor/requirements.md`.
+3. `atm gh` and `atm gh status` (no target) provide actionable non-error plugin status output.
+4. Coverage maps to `GH-CI-TR-2` in `docs/plugins/ci-monitor/requirements.md`.
 
 ### AB.3 — Progress + Final Reporting Payloads
 **Deliverables**

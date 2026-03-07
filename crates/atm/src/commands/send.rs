@@ -458,13 +458,9 @@ fn register_sender_hint(team: &str, sender: &str, cfg: &TeamConfig) -> Result<()
     }
 
     let session_id = detect_sender_session_id_with_context(Some(team), Some(sender))
-        .unwrap_or_else(|| {
-            let now_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            format!("local:{sender}:{now_ms}:{process_id}")
-        });
+        // Non-hook shells (Codex/Gemini CLI) still need a stable daemon session
+        // key. Keep this stable for the life of the detected PID.
+        .unwrap_or_else(|| format!("local:{sender}:pid:{process_id}"));
 
     let runtime = member.effective_backend_type().and_then(|bt| match bt {
         BackendType::ClaudeCode => Some("claude"),
@@ -627,15 +623,13 @@ fn backend_expected_rule(member: &AgentMember) -> Option<BackendRule> {
         Some(BackendType::Gemini) => Some(BackendRule::Gemini),
         Some(BackendType::External) | Some(BackendType::Human(_)) => None,
         None => {
-            if member.name == "team-lead"
-                || matches!(
-                    member.agent_type.as_str(),
-                    "general-purpose" | "Explore" | "Plan"
-                )
-            {
-                Some(BackendRule::Claude)
-            } else {
-                None
+            let agent_type = member.agent_type.to_ascii_lowercase();
+            match agent_type.as_str() {
+                "codex" => Some(BackendRule::Codex),
+                "gemini" => Some(BackendRule::Gemini),
+                "general-purpose" | "explore" | "plan" => Some(BackendRule::Claude),
+                _ if member.name == "team-lead" => Some(BackendRule::Claude),
+                _ => None,
             }
         }
     }
@@ -655,10 +649,12 @@ fn process_observation(sys: &sysinfo::System, pid: sysinfo::Pid) -> Option<(Stri
 }
 
 fn process_matches_rule(rule: BackendRule, comm: &str, args: &str) -> bool {
+    let comm_basename = comm.rsplit('/').next().unwrap_or(comm);
     match rule {
-        BackendRule::Claude => comm == "claude",
-        BackendRule::Codex => comm == "codex",
-        BackendRule::Gemini => comm == "node" && args.contains("gemini"),
+        // sysinfo may return the full executable path; normalize to basename.
+        BackendRule::Claude => comm_basename == "claude",
+        BackendRule::Codex => comm_basename == "codex",
+        BackendRule::Gemini => comm_basename == "node" && args.contains("gemini"),
     }
 }
 
@@ -677,7 +673,7 @@ fn detect_sender_process_pid(member: &AgentMember) -> Option<u32> {
 
     let mut cursor = Pid::from_u32(std::process::id());
 
-    for _ in 0..8 {
+    for _ in 0..16 {
         let Some(proc_info) = sys.process(cursor) else {
             break;
         };
@@ -779,13 +775,37 @@ mod tests {
     }
 
     #[test]
-    fn test_process_matches_rule_uses_daemon_strict_semantics() {
+    fn test_backend_expected_rule_uses_legacy_agent_type_for_codex() {
+        let codex_member = make_member("arch-ctm", "codex", None);
+        assert_eq!(
+            backend_expected_rule(&codex_member),
+            Some(BackendRule::Codex)
+        );
+    }
+
+    #[test]
+    fn test_process_matches_rule_matches_basename_for_path_commands() {
         assert!(process_matches_rule(BackendRule::Claude, "claude", ""));
         assert!(!process_matches_rule(BackendRule::Claude, "node", "claude"));
+        assert!(process_matches_rule(
+            BackendRule::Claude,
+            "/usr/local/bin/claude",
+            ""
+        ));
         assert!(process_matches_rule(BackendRule::Codex, "codex", ""));
+        assert!(process_matches_rule(
+            BackendRule::Codex,
+            "/Users/randlee/.npm-global/bin/codex",
+            ""
+        ));
         assert!(process_matches_rule(
             BackendRule::Gemini,
             "node",
+            "gemini --model 2.5-pro"
+        ));
+        assert!(process_matches_rule(
+            BackendRule::Gemini,
+            "/opt/homebrew/bin/node",
             "gemini --model 2.5-pro"
         ));
         assert!(!process_matches_rule(

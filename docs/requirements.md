@@ -338,7 +338,11 @@ Commands:
   cleanup     Apply retention policies
   mcp         MCP server setup and management
   init        Install/check ATM hook wiring for Claude Code
+  spawn       Launch a new agent interactively with a review panel (human-facing wrapper)
   gh          GitHub CI monitor operations (plugin-owned namespace)
+
+Spawn subcommands:
+  spawn <agent-type> [--team <name>] [--member <name>] [--model <name>] [--pane-mode new-pane|existing-pane|current-pane] [--worktree <path>] [--dry-run] [--yes]
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
@@ -358,9 +362,12 @@ Init command:
   init <team> [--local] [--identity <name>] [--skip-team]
 
 GH subcommands (plugin-owned):
+  gh init
+  gh
   gh monitor pr <number> [--start-timeout <duration>] [--notify <agent[@team],...>]
   gh monitor workflow <name> --ref <branch|sha|pr>
   gh monitor run <run-id>
+  gh status
   gh status <pr|run|workflow> <value>
 ```
 
@@ -631,6 +638,17 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 - Daemon cleanup commands MUST NOT delete mailbox or remove roster entry for a
   PID/session-verified active agent unless the caller explicitly requested kill semantics.
 
+**External-agent cleanup guard (REQUIRED)**:
+- Members with `agentType` in `{"codex", "gemini", "external"}` that have no
+  daemon state record MUST NOT be removed during `atm teams cleanup` unless
+  their `last_seen` timestamp in `state.json` is absent or older than a
+  configurable staleness threshold (default: 7 days).
+- Absence of a daemon state record is NOT equivalent to staleness for external
+  agents; these agents do not fire Claude Code lifecycle hooks and may be active
+  without a session_registry entry.
+- When an external agent is skipped due to this guard, `--dry-run` output MUST
+  include a row noting the member was retained with reason `external-agent-no-state`.
+
 **Command expectations**:
 - `atm cleanup --agent <name>`: non-destructive for active agents; applies teardown cleanup
   only when daemon verifies dead state (or explicit kill mode is requested). In kill mode,
@@ -689,6 +707,79 @@ Hook/path compatibility requirements:
 Non-goal:
 - Runtime-agnostic spawn (`codex|gemini|opencode`) is tracked separately; Claude
   baseline parity is the immediate requirement.
+
+### 4.3.2b External Agent Cleanup Guard
+
+`atm teams cleanup` MUST NOT remove members with `external_backend_type` set (Codex, Gemini,
+or external agents) unless daemon explicitly confirms the session is dead.
+
+Required behavior:
+- If the member has **no `session_id`**: cleanup must skip the member with a warning indicating
+  liveness is unknown; the member is kept.
+- If the member has a `session_id`: cleanup queries daemon; only removes if daemon reports
+  `alive == false`.
+- If daemon is unreachable and no `--force` flag: external agent is skipped with warning.
+- `--force` bypasses liveness checks and removes unconditionally.
+- `--dry-run` must list skipped external agents with reason.
+
+Rationale: External agents (Codex, Gemini) do not fire Claude Code lifecycle hooks; the daemon
+may have no session record for them even when they are actively running.
+
+### 4.3.2c `atm spawn` — Interactive Review-Panel Mode
+
+When `atm spawn` is invoked in a terminal (stdin is a tty) without `--yes`,
+it MUST enter interactive review-panel mode before executing any spawn side effects.
+
+**Terminal detection (REQUIRED)**:
+- Interactive mode MUST only activate when `stdin_is_tty()` returns true.
+- When stdin is not a tty, `atm spawn` MUST print to stderr:
+  `error: interactive mode requires a terminal (stdin is not a tty)`
+  followed by a hint showing the non-interactive invocation, then exit 1.
+- `--yes` flag bypasses tty check and executes spawn immediately without prompting.
+
+**Review panel (REQUIRED)**:
+- The panel MUST display spawn parameters as a numbered list with current values.
+  Minimum fields: `1. team`, `2. member`, `3. model`, `4. agent-type`,
+  `5. pane-mode`, `6. worktree`.
+- Unset optional fields MUST display `(none)` rather than an empty string.
+- When inside a tmux session, the panel MUST display the current session, window
+  index, and window name.
+- If the target member is already running (daemon state active), the panel MUST
+  display an inline warning: `⚠ member appears to be running already`.
+
+**Edit syntax (REQUIRED)**:
+- The user edits fields using `n=value` or comma-separated `n=value,m=value2`.
+  Whitespace around `=` and `,` MUST be tolerated.
+- Unrecognised formats MUST display a parse error inline and remain in the loop.
+- A bare Enter with no validation errors MUST confirm the spawn.
+- `Esc`, `q`, or `Q` MUST cancel with no side effects (exit 0).
+
+**Per-field validation (REQUIRED)**:
+- Each field MUST validate on edit and show an inline error marker when invalid.
+- When errors are present, Enter MUST NOT confirm; the panel MUST remain open.
+- The valid options for each errored field MUST be displayed below the separator.
+
+**Pane placement modes (REQUIRED)**:
+- `new-pane` (default): create a new tmux pane via `tmux split-window -h`.
+- `existing-pane`: list panes in the current window; prompt user to select by
+  pane index before confirming.
+- `current-pane`: send the launch command to the current pane.
+- Outside a tmux session, `new-pane` and `existing-pane` MUST fail with an
+  actionable message; `current-pane` is permitted.
+
+**Dry-run mode (REQUIRED)**:
+- `--dry-run` renders the review panel normally; on confirmation prints the
+  resolved tmux command(s) and launch command without executing side effects.
+- Output MUST include: pane placement action, fully resolved launch command with
+  all flags, and a description of the config registration step.
+- MUST print `No changes made (dry-run).` and exit 0.
+
+**Non-goal**:
+- The interactive panel renders line-by-line to a standard terminal; full
+  ratatui/crossterm TUI widget system is out of scope for this feature.
+
+**Reference**: `scripts/spawn-demo.sh` on `develop` (commit `e8f8cf0`) demonstrates
+the complete UX. The Rust implementation MUST match this behaviour.
 
 ### 4.3.2a `/team-join` Slash Command + `atm teams join` Contract
 
@@ -899,18 +990,28 @@ actual process name, and PID.
 
 #### Self-Registration for External Agents (Codex, Gemini) (REQUIRED)
 
-Codex and Gemini agents do not have a Claude Code hook system. The daemon MUST
-support self-registration for these agents via:
-- Implicit: `atm send` writes the agent's own PID and session ID to their roster entry
-  in `config.json` and creates a daemon state record if one does not exist.
-- Explicit: `atm register <team> <name>` performs the same registration explicitly.
+Codex and Gemini agents do not have Claude lifecycle hooks on every command
+path. The daemon MUST support self-registration for these agents via:
+- Implicit: `atm send` issues best-effort daemon `register-hint` registration
+  when sender PID/session hints are discoverable.
+- Explicit: `atm register <team> <name>` performs explicit registration.
 
-Self-registration uses `os.getpid()` of the calling Codex/Gemini process as the
-registered agent session PID.
+Ownership and write semantics:
+- `atm send` MUST NOT write session/process ownership fields into team
+  `config.json`.
+- `atm send` may update activity hints (`isActive`, `lastActive`) in
+  `config.json`; session/process truth remains daemon-owned.
 
-When self-registration creates a new daemon state record where an activity hint already
-existed, the daemon MUST emit an `ACTIVE_WITHOUT_SESSION` WARN finding to surface the
-gap, and MUST then create the daemon state record to resolve it.
+External runtime PID/session acquisition:
+- Hook/session files are accepted when present.
+- For non-hook runtime paths (Codex/Gemini CLI), sender PID may be derived from
+  process ancestry scan using backend validation rules.
+- If no valid PID/session hints are available, send still succeeds but daemon
+  registration is skipped (degraded signal state).
+
+When implicit or explicit registration creates/refreshes a daemon state record
+where an activity hint already existed, diagnostics may emit
+`ACTIVE_WITHOUT_SESSION` until reconciliation completes.
 
 Any successful PID/session registration path (`session_start` lifecycle upsert,
 `register-hint`, daemon bootstrap from roster hints) MUST set `last_alive_at` to
@@ -1029,8 +1130,9 @@ Required behavior:
   when `processId` is present, alive, and backend validation does not report a
   mismatch.
 - `atm send` PID fallback detection must use the same strict backend rules as the
-  daemon validator (`claude=comm:claude`, `codex=comm:codex`,
-  `gemini=comm:node+args~gemini`) and must not stamp unmatched fallback PIDs.
+  daemon validator (`claude=basename(comm):claude`,
+  `codex=basename(comm):codex`, `gemini=basename(comm):node+args~gemini`) and
+  must not stamp unmatched fallback PIDs.
 - If registry state says `Dead` but PID/backend validation indicates the tracked
   process is alive and validation is mismatched, daemon must keep dead/offline
   status and require explicit re-registration to clear mismatch.
@@ -2195,10 +2297,41 @@ Detailed GitHub CI monitor requirements are defined in:
 - `docs/plugins/ci-monitor/requirements.md`
 
 Core command contract:
+- `atm gh init` validates prerequisites (`gh` CLI presence/auth where required),
+  writes/updates `[plugins.gh_monitor]` config, and enables the plugin.
 - `atm gh monitor pr <number>` starts PR-oriented monitoring.
 - `atm gh monitor workflow <name> --ref <branch|sha|pr>` starts workflow-oriented monitoring (`--ref` is required for deterministic target selection).
 - `atm gh monitor run <run-id>` starts run-oriented monitoring.
-- `atm gh status <pr|run|workflow> <value>` returns current monitor state.
+- `atm gh` (no subcommand) returns GitHub monitor namespace status for the team.
+- `atm gh status` (no target) returns GitHub monitor health/availability status for the team.
+- `atm gh status <pr|run|workflow> <value>` returns current monitor state for a specific target.
+
+Operator status UX contract:
+- `atm gh` must not fail argument parsing and must always return a concise status
+  summary for the namespace.
+- `atm gh --help` must present the same top-level status semantics as `atm gh`,
+  including disabled guidance.
+- Both commands must explicitly report whether `gh_monitor` is:
+  - configured,
+  - enabled/disabled,
+  - currently available (`healthy` / `degraded` / `disabled_config_error`).
+- When not enabled, human output must clearly state that monitoring is disabled
+  and include next-step guidance to enable/configure `[plugins.gh_monitor]`.
+- JSON output must expose the same status fields without lossy conversion.
+- When `gh_monitor` is disabled/unconfigured, only the following command paths
+  are allowed:
+  - `atm gh`
+  - `atm gh init`
+  - help output (`atm gh --help`, `atm gh init --help`)
+  Other `atm gh ...` operations must fail fast with an actionable message to run
+  `atm gh init`.
+- When `gh_monitor` is enabled, `atm gh` must show:
+  - current configuration summary,
+  - lifecycle/availability status,
+  - current issue/health note (if any),
+  - concise command usage for monitor/status operations.
+- This command-gating pattern follows the global plugin namespace contract in
+  §5.8 and applies to all plugin-owned namespaces.
 
 Core behavior contract:
 - `atm gh monitor pr` must enforce a start timeout (`--start-timeout`, default `2m`).
@@ -2217,6 +2350,10 @@ Core behavior contract:
 Connectivity and availability contract:
 - Invalid plugin configuration disables monitoring (`disabled_config_error`)
   and must consume zero polling CPU until configuration is corrected.
+- `validate_gh_monitor_config` MUST return `CONFIG_ERROR` when the `repo` field
+  is absent or empty in `[plugins.gh_monitor]`. A config with `enabled = true`
+  but no `repo` is invalid and MUST transition availability to
+  `disabled_config_error`. (See issue #471.)
 - Transient provider/connectivity/auth/rate-limit failures transition monitor
   state to degraded and must emit both structured logs and ATM notifications to
   designated monitor recipients.
@@ -2402,8 +2539,18 @@ temp/atm/<plugin-name>/
 
 - Each plugin may own one top-level CLI namespace.
 - The namespace owner is exclusive; no other plugin or core command may claim it.
-- Namespace dispatch must fail with a stable command error if the owning plugin
-  is unavailable or disabled.
+- Each plugin namespace must provide:
+  - `<namespace>` status entrypoint (no subcommand),
+  - `<namespace> init` setup/enable command,
+  - help output.
+- If a plugin is not configured/enabled for the current team, only the three
+  surfaces above are available. All other namespace operations must fail fast
+  with a stable, actionable init guidance error.
+- `<namespace>` status output must always make disabled/unconfigured state
+  explicit and list only currently available actions.
+- If plugin is enabled, `<namespace>` status output must include current
+  configuration summary, availability/lifecycle state, and current issue note
+  when present.
 - `atm gh` is reserved for the GitHub CI monitor plugin (`gh_monitor`).
 
 ### 5.9 Plugin Failure Isolation Contract
@@ -2414,6 +2561,28 @@ temp/atm/<plugin-name>/
   `disabled_config_error` in daemon status surfaces (`atm status`, `atm doctor`).
 - If a plugin enters `disabled_config_error`, daemon must not keep a live
   polling loop for that plugin.
+- Plugin failures must be handled as state transitions (with structured error
+  reporting), not as fatal daemon startup/runtime errors.
+- Daemon plugin initialization must be per-plugin isolated: one plugin failing
+  init must not short-circuit initialization of remaining enabled plugins.
+- Plugin task panics must be contained to the plugin task boundary (mark
+  plugin degraded, continue daemon + other plugins).
+- Plugin handlers must use bounded internal queues and timeout/cancellation
+  guards so plugin stalls cannot block daemon control loop progress.
+
+### 5.9.1 Plugin Safety Test Criteria
+
+Required acceptance tests:
+- Daemon startup with one intentionally broken plugin config keeps daemon
+  running and initializes other healthy plugins.
+- Daemon startup surfaces failed plugin state and actionable error text in
+  `atm doctor` and `atm status`.
+- Simulated plugin runtime error/panic transitions only that plugin to
+  degraded/failed state; daemon process and unrelated plugins remain healthy.
+- Repeated plugin faults do not crash daemon (multi-fault soak case) and do
+  not produce unbounded queue growth.
+- Recovery path validation: correcting plugin config and reloading/restarting
+  daemon returns plugin to healthy state with explicit recovery log/findings.
 
 ### 5.10 Plugin Config Key Canonicalization
 
