@@ -1811,7 +1811,7 @@ Branch numbering note:
 |--------|------|----|--------|--------|--------|
 | AC.5 | Daemon Status Convergence + Lifecycle State Validation | TBD | `feature/pAC-s2-cleanup-guard` | #330, #331, #333, #334, #336 (carry-forward validation) | IN PROGRESS |
 | AC.6 | Hook Install Confidence + Multi-Team Recovery Matrix | TBD | `feature/pAC-s6-hook-install-confidence` | #357 follow-on hardening, release-readiness validation | PLANNED |
-| AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | TBD | `feature/pAC-s7-hook-lifecycle-coverage` | Lifecycle semantics + restart convergence hardening | IN PROGRESS |
+| AC.7 | Hook Lifecycle Coverage + Restart Recovery Convergence | TBD | `feature/pAC-s7-hook-lifecycle-coverage` | AC lifecycle/restart hardening closure | IN PROGRESS |
 | AC.8 | Init Install Matrix QA Blocker Closure | TBD | `feature/pAC-s8-init-install-matrix` | ATM-QA-001..004 (init onboarding contract) | IN PROGRESS |
 | AC.9 | Multi-Team Recovery Determinism | TBD | `feature/pAC-s9-multiteam-recovery` | Team-scoped reload + partial lifecycle restart determinism | IN PROGRESS |
 | AC.10 | Final AC Verification + Release Readiness | TBD | `feature/pAC-s10-final-verification` | Final QA pass + release-closeout checklist | PLANNED |
