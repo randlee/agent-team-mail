@@ -6168,7 +6168,15 @@ poll_interval_secs = 1
         target["processId"] = serde_json::json!(std::process::id());
         target["sessionId"] = serde_json::json!("hint-session-1");
         target["externalBackendType"] = serde_json::json!("external");
-        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&cfg).unwrap();
+            let file = std::fs::File::create(&config_path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
@@ -7203,11 +7211,16 @@ exit 1
                 "externalBackendType": "external"
             }]
         });
-        std::fs::write(
-            team_dir.join("config.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&config).unwrap();
+            let path = team_dir.join("config.json");
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
@@ -7388,11 +7401,16 @@ exit 1
                 "externalBackendType": "external"
             }]
         });
-        std::fs::write(
-            team_dir.join("config.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&config).unwrap();
+            let path = team_dir.join("config.json");
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
@@ -9021,7 +9039,15 @@ exit 1
             .find(|m| m["name"].as_str() == Some("arch-ctm"))
             .unwrap();
         arch["externalBackendType"] = serde_json::json!("codex");
-        std::fs::write(&team_cfg, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&cfg).unwrap();
+            let file = std::fs::File::create(&team_cfg).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
