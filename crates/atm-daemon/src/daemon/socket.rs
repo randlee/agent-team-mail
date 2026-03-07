@@ -1163,6 +1163,9 @@ fn session_identity_change_flags(
 fn hook_action_name(event_type: &str) -> Option<&'static str> {
     match event_type {
         "session_start" => Some("hook.session_start"),
+        "permission_request" => Some("hook.permission_request"),
+        "stop" => Some("hook.stop"),
+        "notification_idle_prompt" => Some("hook.notification_idle_prompt"),
         "pre_compact" => Some("hook.pre_compact"),
         "compact_complete" => Some("hook.compact_complete"),
         "session_end" => Some("hook.session_end"),
@@ -1628,6 +1631,108 @@ async fn handle_hook_event_command_with_dedup(
                 "hook_event {}",
                 event_type
             );
+        }
+        "permission_request" => {
+            let (old_state, new_state) = {
+                let mut tracker = state_store.lock().unwrap();
+                let current = tracker.get_state(&agent);
+                if current.is_some() {
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Active,
+                        "permission_request lifecycle (blocked-permission)",
+                        "hook_event",
+                    );
+                } else {
+                    tracker.register_agent(&agent);
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Active,
+                        "permission_request lifecycle (blocked-permission, auto-register)",
+                        "hook_event",
+                    );
+                }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.permission_request",
+                Some(session_id.as_str()),
+                process_id,
+            );
+            info!(agent = %agent, agent_pid = agent_pid, "hook_event permission_request");
+        }
+        "stop" => {
+            let (old_state, new_state) = {
+                let mut tracker = state_store.lock().unwrap();
+                let current = tracker.get_state(&agent);
+                if current.is_some() {
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Idle,
+                        "stop lifecycle",
+                        "hook_event",
+                    );
+                } else {
+                    tracker.register_agent(&agent);
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Idle,
+                        "stop lifecycle (auto-register)",
+                        "hook_event",
+                    );
+                }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.stop",
+                Some(session_id.as_str()),
+                process_id,
+            );
+            info!(agent = %agent, agent_pid = agent_pid, "hook_event stop");
+        }
+        "notification_idle_prompt" => {
+            let (old_state, new_state) = {
+                let mut tracker = state_store.lock().unwrap();
+                let current = tracker.get_state(&agent);
+                if current.is_some() {
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Idle,
+                        "notification_idle_prompt lifecycle",
+                        "hook_event",
+                    );
+                } else {
+                    tracker.register_agent(&agent);
+                    tracker.set_state_with_context(
+                        &agent,
+                        AgentState::Idle,
+                        "notification_idle_prompt lifecycle (auto-register)",
+                        "hook_event",
+                    );
+                }
+                let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
+                (current, updated)
+            };
+            emit_member_transition_events(
+                &team,
+                &agent,
+                old_state,
+                new_state,
+                "hook_event.notification_idle_prompt",
+                Some(session_id.as_str()),
+                process_id,
+            );
+            info!(agent = %agent, agent_pid = agent_pid, "hook_event notification_idle_prompt");
         }
         "teammate_idle" => {
             let (old_state, new_state) = {
@@ -8154,6 +8259,15 @@ exit 1
             hook_action_name("session_start"),
             Some("hook.session_start")
         );
+        assert_eq!(
+            hook_action_name("permission_request"),
+            Some("hook.permission_request")
+        );
+        assert_eq!(hook_action_name("stop"), Some("hook.stop"));
+        assert_eq!(
+            hook_action_name("notification_idle_prompt"),
+            Some("hook.notification_idle_prompt")
+        );
         assert_eq!(hook_action_name("pre_compact"), Some("hook.pre_compact"));
         assert_eq!(
             hook_action_name("compact_complete"),
@@ -8333,6 +8447,125 @@ exit 1
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
+    async fn test_hook_event_permission_request_marks_blocked_permission_context_without_liveness_drift()
+     {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-pr", 1111);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r-pr","command":"hook-event","payload":{"event":"permission_request","agent":"arch-ctm","session_id":"sess-pr","team":"atm-dev","tool_name":"Bash"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "permission_request");
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Active));
+        let meta = tracker
+            .transition_meta("arch-ctm")
+            .expect("transition metadata should exist");
+        assert!(meta.reason.contains("blocked-permission"));
+
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Active
+        );
+        assert_eq!(record.session_id, "sess-pr");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_stop_transitions_to_idle_without_liveness_drift() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Active);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-stop", 2222);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r-stop","command":"hook-event","payload":{"event":"stop","agent":"arch-ctm","session_id":"sess-stop","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["event"].as_str().unwrap(), "stop");
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
+
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Active
+        );
+        assert_eq!(record.session_id, "sess-stop");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_notification_idle_prompt_transitions_to_idle_without_liveness_drift() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Active);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-notify", 3333);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r-notify","command":"hook-event","payload":{"event":"notification_idle_prompt","agent":"arch-ctm","session_id":"sess-notify","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+        assert_eq!(
+            payload["event"].as_str().unwrap(),
+            "notification_idle_prompt"
+        );
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
+
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
+        assert_eq!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Active
+        );
+        assert_eq!(record.session_id, "sess-notify");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
     async fn test_hook_event_session_end_marks_dead() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
@@ -8394,6 +8627,57 @@ exit 1
         );
         let tracker = store.lock().unwrap();
         assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_unknown_team_is_strict_noop() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r5-unknown-team","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-unknown","team":"unknown-team"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert!(
+            payload["reason"]
+                .as_str()
+                .unwrap()
+                .contains("team config not found")
+        );
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("unknown-team", "team-lead")
+                .is_none()
+        );
+        let tracker = store.lock().unwrap();
+        assert!(tracker.get_state("team-lead").is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_unknown_agent_is_strict_noop() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r5-unknown-agent","command":"hook-event","payload":{"event":"session_end","agent":"arch-ctm","session_id":"sess-unknown-agent","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none()
+        );
+        let tracker = store.lock().unwrap();
+        assert!(tracker.get_state("arch-ctm").is_none());
     }
 
     #[cfg(unix)]
