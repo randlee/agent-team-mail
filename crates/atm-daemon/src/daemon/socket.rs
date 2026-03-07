@@ -6187,6 +6187,107 @@ poll_interval_secs = 1
     }
 
     #[test]
+    #[serial]
+    fn test_team_scoped_list_agents_isolated_after_registry_reload() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(temp.path(), "team-a", "team-lead-a", &["team-lead-a", "a1"]);
+        write_hook_auth_team_config(temp.path(), "team-b", "team-lead-b", &["team-lead-b", "b1"]);
+        // Avoid test-process backend mismatch (cargo test != claude) so this
+        // test exercises team scoping/reload behavior only.
+        set_member_backend(temp.path(), "team-a", "a1", "external");
+        set_member_backend(temp.path(), "team-b", "b1", "external");
+
+        let persist_path = temp.path().join(".claude/daemon/session-registry.json");
+        {
+            let mut seeded = crate::daemon::session_registry::SessionRegistry::with_persist_path(
+                persist_path.clone(),
+            );
+            seeded.upsert_for_team("team-a", "a1", "sess-a", std::process::id());
+            seeded.upsert_for_team("team-b", "b1", "sess-b", std::process::id());
+        }
+
+        let store = make_store();
+        let sr = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::daemon::session_registry::SessionRegistry::load_or_new(persist_path),
+        ));
+
+        let req_a = make_request("list-agents", serde_json::json!({"team": "team-a"}));
+        let resp_a = handle_list_agents(&req_a, &store, &sr);
+        assert_eq!(resp_a.status, "ok");
+        let arr_a = resp_a.payload.unwrap().as_array().unwrap().clone();
+        let a1 = arr_a
+            .iter()
+            .find(|v| v["agent"].as_str() == Some("a1"))
+            .expect("a1 should be listed for team-a after restart load");
+        assert_eq!(a1["state"].as_str(), Some("active"));
+        assert_eq!(a1["session_id"].as_str(), Some("sess-a"));
+        assert!(!arr_a.iter().any(|v| v["agent"].as_str() == Some("b1")));
+
+        let req_b = make_request("list-agents", serde_json::json!({"team": "team-b"}));
+        let resp_b = handle_list_agents(&req_b, &store, &sr);
+        assert_eq!(resp_b.status, "ok");
+        let arr_b = resp_b.payload.unwrap().as_array().unwrap().clone();
+        let b1 = arr_b
+            .iter()
+            .find(|v| v["agent"].as_str() == Some("b1"))
+            .expect("b1 should be listed for team-b after restart load");
+        assert_eq!(b1["state"].as_str(), Some("active"));
+        assert_eq!(b1["session_id"].as_str(), Some("sess-b"));
+        assert!(!arr_b.iter().any(|v| v["agent"].as_str() == Some("a1")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_restart_partial_lifecycle_teammate_idle_converges_deterministically() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_hook_auth_team_config(
+            temp.path(),
+            "atm-dev",
+            "team-lead",
+            &["team-lead", "arch-ctm"],
+        );
+        // Keep this restart test focused on lifecycle convergence by avoiding
+        // backend validation against the cargo test process.
+        set_member_backend(temp.path(), "atm-dev", "arch-ctm", "external");
+
+        let persist_path = temp.path().join(".claude/daemon/session-registry.json");
+        {
+            let mut seeded = crate::daemon::session_registry::SessionRegistry::with_persist_path(
+                persist_path.clone(),
+            );
+            seeded.upsert_for_team("atm-dev", "arch-ctm", "sess-partial", std::process::id());
+        }
+
+        // Simulate daemon restart: rebuild registry from persisted state while
+        // state tracker starts empty.
+        let store = make_store();
+        let sr = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::daemon::session_registry::SessionRegistry::load_or_new(persist_path),
+        ));
+
+        let req_json = r#"{"version":1,"request_id":"r-restart-idle","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-partial","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let list_resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(list_resp.status, "ok");
+        let arr = list_resp.payload.unwrap().as_array().unwrap().clone();
+        let arch = arr
+            .iter()
+            .find(|v| v["agent"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm should be listed");
+        assert_eq!(arch["state"].as_str(), Some("idle"));
+        assert_eq!(arch["activity"].as_str(), Some("idle"));
+        assert_eq!(arch["session_id"].as_str(), Some("sess-partial"));
+    }
+
+    #[test]
     fn test_launch_command_missing_agent() {
         // parse_and_dispatch receives a "launch" command — it should return INTERNAL_ERROR
         // because the async path should have handled it, but the payload may be inspected.
