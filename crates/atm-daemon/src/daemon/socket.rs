@@ -5924,6 +5924,26 @@ poll_interval_secs = 1
         let atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_hook_auth_team_config(temp.path(), team, lead, members);
 
+        // Spin-wait until config is readable — macOS APFS directory entry visibility
+        // is not guaranteed immediately after write+sync without this verification.
+        let config_path = temp
+            .path()
+            .join(".claude/teams")
+            .join(team)
+            .join("config.json");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            if std::fs::read_to_string(&config_path).is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture config not readable after 500ms: {}",
+                config_path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
         HookAuthFixture {
             _temp: temp,
             _atm_home_guard: atm_home_guard,
