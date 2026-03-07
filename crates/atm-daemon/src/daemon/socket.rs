@@ -2116,6 +2116,15 @@ fn validate_gh_monitor_config(
     if !parsed.enabled {
         return Err("gh_monitor plugin disabled in configuration".to_string());
     }
+    if parsed
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        return Err("gh_monitor repo is required in configuration".to_string());
+    }
     Ok(())
 }
 
@@ -5575,6 +5584,7 @@ identity = "daemon-test"
 enabled = true
 team = "{team}"
 agent = "gh-monitor"
+repo = "agent-team-mail"
 poll_interval_secs = 60
 "#
         );
