@@ -31,6 +31,9 @@ Additionally, the spawn UX prototype (`scripts/spawn-demo.sh`) was built and val
 | AC.5 | QA/Compliance | Spawn command alignment + compliance/test-plan updates | Complete | AC.2, AC.3, AC.4 |
 | AC.6 | QA/Hardening | Hook install confidence + parity coverage + init matrix validation | In progress | AC.5 |
 | AC.7 | Daemon/QA | Hook lifecycle coverage + restart recovery convergence hardening | In progress | AC.6 |
+| AC.8 | QA | Init install matrix QA blocker closure | In progress | AC.7 |
+| AC.9 | Daemon/Recovery | Multi-team registry reload + restart convergence determinism | In progress | AC.8 |
+| AC.10 | QA/Release | Final AC verification + release-readiness closeout | Planned | AC.9 |
 
 AC.2 and AC.3 are independent and can run in parallel.
 
