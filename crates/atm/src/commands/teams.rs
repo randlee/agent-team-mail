@@ -1803,8 +1803,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                         dry_run_rows.push(CleanupPreviewRow {
                             agent: member.name.clone(),
                             action: CleanupActionKind::Skip,
-                            reason: "external-agent-no-state"
-                                .to_string(),
+                            reason: "external-agent-no-state".to_string(),
                         });
                     }
                     warn!(
