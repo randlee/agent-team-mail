@@ -106,6 +106,7 @@ impl NudgeEngine {
     pub fn format_nudge_text(&self, unread_count: usize) -> String {
         self.config
             .text_template
+            .replace("{tier}", &self.config.sentinel_tier)
             .replace("{count}", &unread_count.to_string())
     }
 
@@ -338,6 +339,7 @@ mod tests {
             enabled: false,
             cooldown_secs: 30,
             text_template: "You have {count} messages.".to_string(),
+            sentinel_tier: "urgent".to_string(),
         };
         let engine = NudgeEngine::new(config);
         let entries = vec![unread_entry("msg-1")];
@@ -416,6 +418,7 @@ mod tests {
             enabled: true,
             cooldown_secs: 30,
             text_template: "Hey! {count} messages waiting.".to_string(),
+            sentinel_tier: "blocked".to_string(),
         };
         let engine = NudgeEngine::new(config);
         let text = engine.format_nudge_text(5);
@@ -426,11 +429,20 @@ mod tests {
     fn test_nudge_text_default_template() {
         let engine = make_engine();
         let text = engine.format_nudge_text(3);
-        assert!(
-            text.contains("3"),
-            "formatted text should contain the count"
-        );
-        assert!(text.contains("ATM"), "should mention ATM");
+        assert_eq!(text, "[agent-team-msg:urgent] unread=3");
+    }
+
+    #[test]
+    fn test_nudge_text_includes_custom_sentinel_tier() {
+        let config = NudgeConfig {
+            enabled: true,
+            cooldown_secs: 30,
+            text_template: "[agent-team-msg:{tier}] unread={count}".to_string(),
+            sentinel_tier: "blocked".to_string(),
+        };
+        let engine = NudgeEngine::new(config);
+        let text = engine.format_nudge_text(2);
+        assert_eq!(text, "[agent-team-msg:blocked] unread=2");
     }
 
     // ── Cooldown enforcement ──────────────────────────────────────────────
@@ -441,6 +453,7 @@ mod tests {
             enabled: true,
             cooldown_secs: 9999, // very long cooldown
             text_template: "{count}".to_string(),
+            sentinel_tier: "urgent".to_string(),
         };
         let mut engine = NudgeEngine::new(config);
 
@@ -459,6 +472,7 @@ mod tests {
             enabled: true,
             cooldown_secs: 9999,
             text_template: "{count}".to_string(),
+            sentinel_tier: "urgent".to_string(),
         };
         let mut engine = NudgeEngine::new(config);
 
@@ -490,6 +504,7 @@ mod tests {
             enabled: true,
             cooldown_secs: 0, // no cooldown
             text_template: "{count}".to_string(),
+            sentinel_tier: "urgent".to_string(),
         };
         let mut engine2 = NudgeEngine::new(config);
         engine2.record_nudge("arch-ctm", "msg-1".to_string());
@@ -506,6 +521,7 @@ mod tests {
             enabled: true,
             cooldown_secs: 0,
             text_template: "{count}".to_string(),
+            sentinel_tier: "urgent".to_string(),
         };
         let mut engine = NudgeEngine::new(config);
         engine.record_nudge("arch-ctm", "msg-1".to_string());

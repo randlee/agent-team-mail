@@ -416,6 +416,23 @@ Before writing to the inbox, `atm send` queries daemon session state (`query_ses
 - The sender receives a warning: `Warning: Agent X appears offline. Message will be queued with call-to-action.`
 - The message is still delivered (written to inbox file) — the warning is informational, not a hard block.
 
+**Same-identity concurrent-session behavior**:
+
+- For `atm send` where sender and recipient resolve to the same identity on the same team,
+  self-send warning behavior must be session-aware (not identity-only).
+- Sender session resolution order for this check:
+  1. Hook file session id (`atm-hook-<ppid>.json`)
+  2. `CLAUDE_SESSION_ID` environment variable (explicit disambiguation)
+  3. Session file fallback (`.claude/teams/<team>/sessions/*.json`)
+- If session file fallback finds multiple active sessions for the same
+  `team+identity` and no explicit session id is provided, `atm send` must fail
+  with an actionable ambiguity error (`Export CLAUDE_SESSION_ID=<session-id> ...`).
+- When daemon session query reports the identity is currently owned by a
+  different active session id than the sender session id, `atm send` must treat
+  this as cross-session same-identity routing and must not prepend the self-send warning.
+- When daemon session ownership is missing/unavailable, `atm send` may conservatively
+  keep the self-send warning behavior.
+
 **Agent activity tracking (daemon-managed)**:
 
 The daemon tracks agent activity by monitoring inbox file changes and message timestamps:
@@ -646,8 +663,12 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 - Absence of a daemon state record is NOT equivalent to staleness for external
   agents; these agents do not fire Claude Code lifecycle hooks and may be active
   without a session_registry entry.
-- When an external agent is skipped due to this guard, `--dry-run` output MUST
-  include a row noting the member was retained with reason `external-agent-no-state`.
+- When an external agent has no `session_id` but a recent heartbeat (younger
+  than staleness threshold), `--dry-run` output MUST include a retained row with
+  reason `external-agent-liveness-unknown`.
+- When an external agent has session metadata but no daemon state record and is
+  retained by the guard, `--dry-run` output MUST include reason
+  `external-agent-no-state`.
 
 **Command expectations**:
 - `atm cleanup --agent <name>`: non-destructive for active agents; applies teardown cleanup
@@ -657,11 +678,23 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
   then teardown cleanup invariant.
 - `atm teams cleanup <team> [agent] --dry-run`: non-mutating preview mode that MUST:
   1. render a table of candidate actions (roster removal, mailbox delete, session prune),
-  2. include a reason per row,
+  2. include a stable reason code per row (kebab-case),
   3. include total counts by action type, and
   4. exit `0` with no writes.
   If there are no candidates, output `Nothing to clean up for team <name>.`,
   do not print an empty table header, and still exit `0`.
+  Required reason-code vocabulary includes:
+  - `forced-cleanup`
+  - `daemon-session-dead`
+  - `daemon-no-session-record`
+  - `daemon-unreachable`
+  - `daemon-query-error`
+  - `external-agent-no-state`
+  - `external-agent-liveness-unknown`
+  - `external-agent-daemon-query-error`
+  - `stale-session-metadata`
+  - `orphan-mailbox`
+  - `team-lead-protected`
 
 ### 4.3.2 `atm teams spawn` (Claude Runtime Baseline)
 
@@ -710,20 +743,10 @@ Non-goal:
 
 ### 4.3.2b External Agent Cleanup Guard
 
-`atm teams cleanup` MUST NOT remove members with `external_backend_type` set (Codex, Gemini,
-or external agents) unless daemon explicitly confirms the session is dead.
-
-Required behavior:
-- If the member has **no `session_id`**: cleanup must skip the member with a warning indicating
-  liveness is unknown; the member is kept.
-- If the member has a `session_id`: cleanup queries daemon; only removes if daemon reports
-  `alive == false`.
-- If daemon is unreachable and no `--force` flag: external agent is skipped with warning.
-- `--force` bypasses liveness checks and removes unconditionally.
-- `--dry-run` must list skipped external agents with reason.
-
-Rationale: External agents (Codex, Gemini) do not fire Claude Code lifecycle hooks; the daemon
-may have no session record for them even when they are actively running.
+Canonical behavior for external-agent cleanup is defined in the
+**External-agent cleanup guard (REQUIRED)** section above (staleness-based
+guard with stable reason codes). This section is a reference anchor only and
+must not introduce alternate semantics.
 
 ### 4.3.2c `atm spawn` — Interactive Review-Panel Mode
 
@@ -773,6 +796,18 @@ it MUST enter interactive review-panel mode before executing any spawn side effe
 - Output MUST include: pane placement action, fully resolved launch command with
   all flags, and a description of the config registration step.
 - MUST print `No changes made (dry-run).` and exit 0.
+
+### 4.3.3 Tmux Sentinel Injection (Issue #45)
+
+When notifying tmux-based teammates about unread inbox messages, daemon nudges
+MUST inject a structured sentinel line (not the message payload itself):
+
+- Format: `[agent-team-msg:<tier>] unread=<count>`
+- Tier vocabulary: `info`, `urgent`, `blocked` (default: `urgent`)
+- Sentinel delivery MUST only occur for eligible idle-transition nudges
+  (idle-only + cooldown + watermark controls)
+- Actual message content remains mailbox-backed (`atm read`), and MUST NOT be
+  duplicated into tmux nudge payloads.
 
 **Non-goal**:
 - The interactive panel renders line-by-line to a standard terminal; full
@@ -1521,6 +1556,10 @@ AuthZ and validation should be source-aware in one handler, not split across
 multiple transport packet types.
 
 Lifecycle event semantics:
+- `session_start`: must only be accepted for known roster members of the
+  addressed team. Non-member `session_start` events must return
+  `processed=false` with reason `agent not in team` and must not mutate session
+  registry or roster-derived daemon state.
 - `permission_request`: indicates the agent is blocked waiting for user/tool
   approval and must transition activity to busy-equivalent state with explicit
   blocked-permission reason metadata.
@@ -1530,6 +1569,32 @@ Lifecycle event semantics:
   without changing liveness.
 - `teammate_idle`: compatibility idle signal and must remain supported as an
   idle transition event.
+
+#### Transient Registration Contract (Task-Tool Agents)
+
+Task-tool/background agents that are not explicit team members are transient and
+must not pollute persistent ATM roster/session state.
+
+Required behavior:
+- Team-scoped lifecycle signals (`agent-turn-complete`, `session-start`,
+  `session-end`) must be treated as **non-persistent** when `agent` is not
+  present in `config.json` for that team.
+- For non-members, daemon hook processors must ignore lifecycle updates without:
+  - creating `session_registry` rows,
+  - creating tracked state rows that surface as persistent team members, or
+  - mutating team roster/config files.
+- Existing team members must keep current behavior (state/session updates still
+  converge as before).
+- `send`/`read` operations by identities not in roster must remain fail-open for
+  messaging, but must not auto-add roster members as a side effect.
+
+Acceptance criteria:
+- Transient task-tool agents do not appear as persistent members in
+  `atm members`, `atm status`, or `atm doctor`.
+- Session/state updates for valid team members remain deterministic and
+  unchanged.
+- Regression tests cover transient non-member lifecycle events and
+  member-vs-non-member branching.
 
 #### Hook Artifact Parity and Install-Path Contract
 
@@ -2205,6 +2270,12 @@ Required constraints:
 - Every release must produce a machine-readable artifact inventory that includes,
   at minimum, artifact identifier, version, source reference, publish target,
   and verification command(s).
+- Release artifact membership/order must have a single source of truth in
+  `release/publish-artifacts.toml`. Release workflows, publisher procedures, and
+  release docs must consume this manifest and must not hardcode artifact counts
+  or crate-name lists.
+- Preflight must fail before merge/release if the candidate version is already
+  published for any manifest artifact with `publish=true`.
 - Post-publish verification must run for every required inventory item and record
   pass/fail evidence for each item.
 - Post-publish verification checks against eventually consistent registries
@@ -2222,6 +2293,10 @@ Acceptance checks:
 - Post-release install validation resolves the expected CLI version.
 - Inventory validation fails when required fields are missing, artifact entries
   are duplicated, or ordering is non-deterministic.
+- Changing `release/publish-artifacts.toml` updates release behavior without
+  requiring workflow code edits for artifact enumeration.
+- Preflight fails with explicit artifact names when target version already exists
+  on crates.io.
 - Post-publish verification failure for any required item fails the release gate
   unless a documented waiver is present.
 - Delayed-index scenarios must show retry/backoff attempts in release logs and
@@ -2273,6 +2348,15 @@ atm init <team> --skip-team
   MUST re-run `atm init <team>` to materialize updated hook scripts on disk.** The binary
   holds the authoritative script content; on-disk scripts from prior versions are stale
   until overwritten by `atm init`.
+- Runtime-aware install requirements:
+  - `atm init` MUST detect installed runtimes and install ATM lifecycle hook wiring
+    for each detected runtime automatically.
+  - Initial runtime set: Claude Code, Codex CLI, Gemini CLI.
+  - Runtime detection MUST be fail-open per runtime:
+    - If one runtime is not installed, `atm init` still succeeds for detected runtimes.
+    - If one runtime install step fails, the result must clearly report per-runtime
+      status without masking which runtime failed.
+  - Re-running `atm init` MUST be idempotent per runtime (no duplicate hooks/config entries).
 
 **Required test scenarios** (each must be independently tested):
 
@@ -2293,6 +2377,39 @@ atm init <team> --skip-team
 - Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` for project-local scripts and absolute per-user script paths for global installs; do not use `${CLAUDE_PLUGIN_ROOT}`.
 - `atm init` success output must include whether hooks were installed globally or locally.
 
+#### 4.9.3a Product Runtime Script Policy (Python-Only)
+
+Runtime scripts executed as part of ATM product behavior MUST be Python-based and
+cross-platform safe.
+
+Policy rules:
+- Product/runtime script execution paths MUST use Python (`python3`/`python`) and
+  repository-shipped `.py` scripts.
+- Shell runtime dependencies (`bash`, `sh`, `zsh`, `pwsh`, `.bat`) are prohibited
+  for product/runtime paths invoked by:
+  - installed hook commands,
+  - `atm init` generated configuration,
+  - runtime launcher/relay flows used by shipped ATM commands.
+- ATM product behavior MUST NOT require `bash`, `sh`, `zsh`, or `pwsh` for core
+  functionality.
+- Existing shell scripts may remain only as explicitly documented dev/CI-only
+  exceptions and must not be required for user runtime operation.
+- Any exception requiring shell for product behavior requires explicit
+  requirements approval and a documented cross-platform mitigation path.
+- Current approved dev/CI-only shell wrapper exceptions:
+  - `.claude/scripts/spawn-teammate.sh`
+  - `.claude/scripts/launch-worker.sh`
+  - `.claude/scripts/atm-hook-relay.sh`
+  These wrappers are test/developer tooling only, are not distributed runtime
+  dependencies, and are exempt from product runtime portability requirements.
+- Hook commands must invoke Python scripts directly; shell wrapper forms such as
+  `bash -c "python ..."` are not allowed in product hook wiring.
+
+Verification requirements:
+- Runtime script behavior must be covered by pytest in `tests/hook-scripts/`.
+- The pytest lane covering runtime scripts is required in CI for changes that
+  modify hook/launcher/relay runtime script paths.
+
 #### 4.9.4 Exit and Result Semantics
 
 - Exit `0` for `installed`, `updated`, and `already-configured`.
@@ -2300,6 +2417,57 @@ atm init <team> --skip-team
 - Exit `1` for malformed config, unsupported environment, or write/permission failures.
 - Idempotent no-op cases (`.atm.toml` exists, team exists, hooks already configured)
   are success states and must be explicitly reported in human output.
+
+#### 4.9.5 Runtime Detection + Auto-Install Contract
+
+`atm init` must detect supported runtimes and apply installation steps in a
+runtime-aware, idempotent manner.
+
+Supported runtimes:
+- Claude Code
+- Codex CLI
+- Gemini CLI
+
+Detection contract:
+- Runtime detection is true when either condition holds:
+  1. Runtime binary is reachable on PATH, or
+  2. Runtime config location exists.
+- Detection precedence and locations:
+  - Claude Code:
+    - project `.claude/settings.json`, then user `~/.claude/settings.json`
+    - binary check (if available in environment) is additive, not required
+  - Codex CLI:
+    - binary `codex` on PATH
+    - config `~/.codex/config.toml` (or equivalent configured home path)
+  - Gemini CLI:
+    - binary `gemini` on PATH
+    - config directory/file under `~/.gemini/`
+
+Install behavior:
+- `atm init` must report per-runtime outcome in human output (and JSON when
+  supported): `installed`, `updated`, `already-configured`, `skipped-not-detected`,
+  or `error`.
+- Runtimes that are not detected are skipped without failing the command.
+- Runtime install actions must be idempotent and must not create duplicate hook
+  entries on re-run.
+- Duplicate detection for hook commands must validate command content (ATM hook
+  relay invocation identity), not only hook key presence.
+- `--dry-run` mode must show per-runtime planned actions with no writes.
+
+Failure behavior:
+- A failure in one runtime install path must not abort installation/reporting for
+  other detected runtimes.
+- Final command result must summarize per-runtime outcomes and include actionable
+  remediation for each error entry.
+
+#### 4.9.5a Test and CI Coverage (Hook/Script Portability)
+
+- Python hook/script behavior required by `atm init` MUST be covered by pytest
+  tests under `tests/hook-scripts/`.
+- These pytest tests MUST run in CI as a required check.
+- Cross-runtime install behavior (Claude/Codex/Gemini detection + per-runtime
+  idempotency) MUST have deterministic tests and must not rely on interactive
+  shell state.
 
 ### 4.10 Install/Upgrade Daemon Freshness
 
@@ -2358,6 +2526,10 @@ Operator status UX contract:
   - currently available (`healthy` / `degraded` / `disabled_config_error` / `disabled_init_error`).
 - When not enabled, human output must clearly state that monitoring is disabled
   and include next-step guidance to enable/configure `[plugins.gh_monitor]`.
+- Disabled guidance must include both:
+  - the exact command to run: `atm gh init`
+  - the minimum config keys required (team/agent/repo/monitor recipients) and
+    the config file path where those keys are expected.
 - JSON output must expose the same status fields without lossy conversion.
 - When `gh_monitor` is disabled/unconfigured, only the following command paths
   are allowed:

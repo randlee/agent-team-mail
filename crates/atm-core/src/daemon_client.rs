@@ -174,6 +174,9 @@ pub struct CanonicalMemberState {
     /// Process ID from the daemon registry when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_id: Option<u32>,
+    /// Most recent liveness confirmation timestamp from daemon PID checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_alive_at: Option<String>,
     /// Human-readable derivation reason.
     #[serde(default)]
     pub reason: String,
@@ -414,7 +417,26 @@ pub fn ensure_daemon_running() -> anyhow::Result<()> {
 pub fn query_daemon(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
     #[cfg(unix)]
     {
-        query_daemon_unix(request)
+        query_daemon_unix(request, std::time::Duration::from_millis(500))
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(None)
+    }
+}
+
+/// Send a single request to the daemon with a caller-specified socket timeout.
+///
+/// Use this variant for commands that may legitimately wait on external I/O
+/// before returning (for example `gh-monitor` and `gh-monitor-control`).
+pub fn query_daemon_with_timeout(
+    request: &SocketRequest,
+    read_timeout: std::time::Duration,
+) -> anyhow::Result<Option<SocketResponse>> {
+    #[cfg(unix)]
+    {
+        query_daemon_unix(request, read_timeout)
     }
 
     #[cfg(not(unix))]
@@ -724,6 +746,8 @@ pub struct GhMonitorRequest {
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
 }
 
 /// Request payload for daemon-routed `gh-status` command.
@@ -734,6 +758,8 @@ pub struct GhStatusRequest {
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
 }
 
 /// Lifecycle action for the GitHub monitor plugin.
@@ -752,12 +778,22 @@ pub struct GhMonitorControlRequest {
     pub action: GhMonitorLifecycleAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
 }
 
 /// Daemon response payload for `gh-monitor-control` / `gh-monitor-health`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GhMonitorHealth {
     pub team: String,
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
     pub lifecycle_state: String,
     pub availability_state: String,
     pub in_flight: u64,
@@ -770,6 +806,14 @@ pub struct GhMonitorHealth {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GhMonitorStatus {
     pub team: String,
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
     pub target_kind: GhMonitorTargetKind,
     pub target: String,
     pub state: String,
@@ -1059,7 +1103,10 @@ pub fn gh_monitor(request: &GhMonitorRequest) -> anyhow::Result<Option<GhMonitor
         payload: serde_json::to_value(request)?,
     };
 
-    let response = match query_daemon(&socket_request)? {
+    // `gh-monitor` may wait for CI run discovery up to start_timeout_secs.
+    let start_timeout_secs = request.start_timeout_secs.unwrap_or(120);
+    let read_timeout = std::time::Duration::from_secs((start_timeout_secs + 30).min(600));
+    let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
         Some(r) => r,
         None => return Ok(None),
     };
@@ -1101,7 +1148,10 @@ pub fn gh_monitor_control(
         payload: serde_json::to_value(request)?,
     };
 
-    let response = match query_daemon(&socket_request)? {
+    // Stop/restart can drain in-flight monitors for drain_timeout_secs.
+    let drain_timeout_secs = request.drain_timeout_secs.unwrap_or(30);
+    let read_timeout = std::time::Duration::from_secs((drain_timeout_secs + 30).min(600));
+    let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
         Some(r) => r,
         None => return Ok(None),
     };
@@ -1112,11 +1162,22 @@ pub fn gh_monitor_control(
 /// Query daemon-routed GitHub monitor plugin health
 /// (`command: "gh-monitor-health"`).
 pub fn gh_monitor_health(team: &str) -> anyhow::Result<Option<GhMonitorHealth>> {
+    gh_monitor_health_with_context(team, None)
+}
+
+/// Query daemon-routed GitHub monitor plugin health with explicit config cwd.
+pub fn gh_monitor_health_with_context(
+    team: &str,
+    config_cwd: Option<String>,
+) -> anyhow::Result<Option<GhMonitorHealth>> {
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
         command: "gh-monitor-health".to_string(),
-        payload: serde_json::json!({ "team": team }),
+        payload: serde_json::json!({
+            "team": team,
+            "config_cwd": config_cwd,
+        }),
     };
 
     let response = match query_daemon(&socket_request)? {
@@ -1206,7 +1267,10 @@ fn new_request_id() -> String {
 // ── Unix implementation ──────────────────────────────────────────────────────
 
 #[cfg(unix)]
-fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
+fn query_daemon_unix(
+    request: &SocketRequest,
+    read_timeout: std::time::Duration,
+) -> anyhow::Result<Option<SocketResponse>> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
@@ -1242,10 +1306,12 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
         }
     };
 
-    // Set a short timeout so a stale/hung daemon does not block the CLI
-    let timeout = Duration::from_millis(500);
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(timeout)).ok();
+    // Keep writes short; allow caller-specific read timeout for long-running
+    // daemon operations such as gh monitor startup/drain paths.
+    stream.set_read_timeout(Some(read_timeout)).ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok();
 
     let request_line = serde_json::to_string(request)?;
 
@@ -2430,6 +2496,7 @@ sleep 2
             activity: "busy".to_string(),
             session_id: Some("sess-123".to_string()),
             process_id: Some(4242),
+            last_alive_at: Some("2026-03-08T00:00:00Z".to_string()),
             reason: "session active with live pid".to_string(),
             source: "session_registry".to_string(),
             in_config: true,
@@ -2441,6 +2508,10 @@ sleep 2
         assert_eq!(decoded.activity, "busy");
         assert_eq!(decoded.session_id.as_deref(), Some("sess-123"));
         assert_eq!(decoded.process_id, Some(4242));
+        assert_eq!(
+            decoded.last_alive_at.as_deref(),
+            Some("2026-03-08T00:00:00Z")
+        );
         assert!(decoded.in_config);
     }
 
@@ -2452,6 +2523,7 @@ sleep 2
             activity: "busy".to_string(),
             session_id: None,
             process_id: None,
+            last_alive_at: None,
             reason: String::new(),
             source: String::new(),
             in_config: true,

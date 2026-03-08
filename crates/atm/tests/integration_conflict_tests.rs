@@ -320,11 +320,16 @@ async fn test_concurrent_sends_no_data_loss() {
 
     // Deterministic drain convergence with bounded wall-clock timeout.
     let teams_dir = temp_dir.path().join(".claude/teams");
+    let spool_base = temp_dir.path();
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
+    let mut status =
+        agent_team_mail_core::io::spool::spool_drain_with_base(&teams_dir, Some(spool_base))
+            .unwrap();
     while status.pending > 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
-        status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
+        status =
+            agent_team_mail_core::io::spool::spool_drain_with_base(&teams_dir, Some(spool_base))
+                .unwrap();
     }
     assert_eq!(
         status.failed, 0,
@@ -343,13 +348,24 @@ async fn test_concurrent_sends_no_data_loss() {
         .join(".claude/teams/test-team/inboxes/agent-a.json");
 
     assert!(inbox_path.exists(), "Inbox file should exist after sends");
-    let content = fs::read_to_string(&inbox_path).unwrap();
-    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+    let read_messages = || -> Vec<serde_json::Value> {
+        let content = fs::read_to_string(&inbox_path).unwrap();
+        serde_json::from_str(&content).unwrap()
+    };
+    let mut messages = read_messages();
+    let delivery_deadline = Instant::now() + Duration::from_secs(15);
+    while messages.len() < expected && Instant::now() < delivery_deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        let _ =
+            agent_team_mail_core::io::spool::spool_drain_with_base(&teams_dir, Some(spool_base))
+                .unwrap();
+        messages = read_messages();
+    }
 
     assert_eq!(
         messages.len(),
         expected,
-        "Expected all messages to be delivered"
+        "Expected all messages to be delivered after bounded convergence window"
     );
 
     // Verify no duplicate message IDs

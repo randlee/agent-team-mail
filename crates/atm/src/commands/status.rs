@@ -348,6 +348,7 @@ mod tests {
                 activity: "busy".to_string(),
                 session_id: Some("sess-1".to_string()),
                 process_id: Some(1234),
+                last_alive_at: None,
                 reason: "session active".to_string(),
                 source: "session_registry".to_string(),
                 in_config: false,

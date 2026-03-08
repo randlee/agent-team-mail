@@ -1769,25 +1769,44 @@ async fn handle_hook_event_command_with_dedup(
             info!(agent = %agent, agent_pid = agent_pid, "hook_event teammate_idle");
         }
         "session_end" => {
-            if require_lead_for_session_end && !auth.is_team_lead {
-                emit_hook_failure(
-                    Some(event_type.as_str()),
-                    Some(team.as_str()),
-                    Some(agent.as_str()),
-                    Some(session_id.as_str()),
-                    process_id,
-                    "only team-lead may send session_end",
-                );
-                return make_ok_response(
-                    &request.request_id,
-                    serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
-                );
-            }
             let mark_dead_outcome = if session_id.trim().is_empty() {
                 MarkDeadForSessionOutcome::UnknownSession
             } else {
-                let mut registry = session_registry.lock().unwrap();
-                registry.mark_dead_for_team_session(&team, &agent, &session_id)
+                let current_record = {
+                    let registry = session_registry.lock().unwrap();
+                    registry.query_for_team(&team, &agent).cloned()
+                };
+                match current_record {
+                    None => MarkDeadForSessionOutcome::UnknownSession,
+                    Some(record) if record.session_id != session_id => {
+                        MarkDeadForSessionOutcome::SessionMismatch {
+                            current_session_id: record.session_id,
+                        }
+                    }
+                    Some(record)
+                        if record.state == crate::daemon::session_registry::SessionState::Dead =>
+                    {
+                        MarkDeadForSessionOutcome::AlreadyDead
+                    }
+                    Some(_) => {
+                        if require_lead_for_session_end && !auth.is_team_lead {
+                            emit_hook_failure(
+                                Some(event_type.as_str()),
+                                Some(team.as_str()),
+                                Some(agent.as_str()),
+                                Some(session_id.as_str()),
+                                process_id,
+                                "only team-lead may send session_end",
+                            );
+                            return make_ok_response(
+                                &request.request_id,
+                                serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
+                            );
+                        }
+                        let mut registry = session_registry.lock().unwrap();
+                        registry.mark_dead_for_team_session(&team, &agent, &session_id)
+                    }
+                }
             };
 
             match mark_dead_outcome {
@@ -1815,6 +1834,14 @@ async fn handle_hook_event_command_with_dedup(
                         Some(session_id.as_str()),
                         process_id,
                     );
+                    emit_hook_success(
+                        event_type.as_str(),
+                        &team,
+                        &agent,
+                        Some(session_id.as_str()),
+                        process_id,
+                    );
+                    info!(agent = %agent, agent_pid = agent_pid, "hook_event session_end");
                 }
                 MarkDeadForSessionOutcome::AlreadyDead => {
                     debug!(
@@ -1833,24 +1860,32 @@ async fn handle_hook_event_command_with_dedup(
                     );
                 }
                 MarkDeadForSessionOutcome::SessionMismatch { current_session_id } => {
+                    let msg = format!(
+                        "session_end ignored due to session mismatch (expected/current='{}', received='{}')",
+                        current_session_id, session_id
+                    );
                     warn!(
                         team = %team,
                         agent = %agent,
-                        expected_session_id = %current_session_id,
+                        active_session_id = %current_session_id,
                         current_session_id = %current_session_id,
                         received_session_id = %session_id,
                         "hook_event session_end session_id mismatch; ignoring"
                     );
+                    emit_event_best_effort(EventFields {
+                        level: "warn",
+                        source: "atm-daemon",
+                        action: "SESSION_END_SESSION_MISMATCH",
+                        team: Some(team.clone()),
+                        agent_name: Some(agent.clone()),
+                        session_id: Some(current_session_id),
+                        target: Some(format!("received:{session_id}")),
+                        result: Some("ignored".to_string()),
+                        error: Some(msg),
+                        ..Default::default()
+                    });
                 }
             }
-            emit_hook_success(
-                event_type.as_str(),
-                &team,
-                &agent,
-                Some(session_id.as_str()),
-                process_id,
-            );
-            info!(agent = %agent, agent_pid = agent_pid, "hook_event session_end");
         }
         other => {
             debug!("hook_event unknown event type: {other}");
@@ -2028,6 +2063,10 @@ struct GhMonitorHealthFile {
 fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
     GhMonitorHealth {
         team: team.to_string(),
+        configured: false,
+        enabled: false,
+        config_source: None,
+        config_path: None,
         lifecycle_state: "running".to_string(),
         availability_state: "healthy".to_string(),
         in_flight: 0,
@@ -2164,6 +2203,7 @@ fn set_gh_monitor_health_state(
     availability_state: Option<&str>,
     in_flight: Option<u64>,
     message: Option<String>,
+    config_state: Option<&GhMonitorConfigState>,
 ) -> Result<GhMonitorHealth> {
     let mut current = read_gh_monitor_health(home, team)?;
     let old_availability = current.availability_state.clone();
@@ -2176,6 +2216,12 @@ fn set_gh_monitor_health_state(
     }
     if let Some(in_flight) = in_flight {
         current.in_flight = in_flight;
+    }
+    if let Some(config_state) = config_state {
+        current.configured = config_state.configured;
+        current.enabled = config_state.enabled;
+        current.config_source = config_state.config_source.clone();
+        current.config_path = config_state.config_path.clone();
     }
     current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     current.message = message;
@@ -2199,27 +2245,78 @@ fn set_gh_monitor_health_state(
 }
 
 #[cfg(unix)]
-fn validate_gh_monitor_config(
+#[derive(Debug, Clone)]
+struct GhMonitorConfigState {
+    configured: bool,
+    enabled: bool,
+    config_source: Option<String>,
+    config_path: Option<String>,
+    error: Option<String>,
+}
+
+#[cfg(unix)]
+fn evaluate_gh_monitor_config(
     home: &std::path::Path,
     team: &str,
-) -> std::result::Result<(), String> {
+    config_cwd: Option<&str>,
+) -> GhMonitorConfigState {
+    let current_dir = config_cwd
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.to_path_buf());
+    let location = agent_team_mail_core::config::resolve_plugin_config_location(
+        "gh_monitor",
+        &current_dir,
+        home,
+    );
+
     let config = agent_team_mail_core::config::resolve_config(
         &agent_team_mail_core::config::ConfigOverrides {
             team: Some(team.to_string()),
             ..Default::default()
         },
+        &current_dir,
         home,
-        home,
-    )
-    .map_err(|e| e.to_string())?;
-    let table = config
-        .plugin_config("gh_monitor")
-        .ok_or_else(|| "missing [plugins.gh_monitor] configuration".to_string())?;
-    let parsed =
-        crate::plugins::ci_monitor::CiMonitorConfig::from_toml(table).map_err(|e| e.to_string())?;
+    );
+    let mut state = GhMonitorConfigState {
+        configured: false,
+        enabled: false,
+        config_source: location.as_ref().map(|loc| loc.source.clone()),
+        config_path: location
+            .as_ref()
+            .map(|loc| loc.path.to_string_lossy().to_string()),
+        error: None,
+    };
+
+    let config = match config {
+        Ok(config) => config,
+        Err(e) => {
+            state.error = Some(e.to_string());
+            return state;
+        }
+    };
+
+    let Some(table) = config.plugin_config("gh_monitor") else {
+        state.error = Some("missing [plugins.gh_monitor] configuration".to_string());
+        return state;
+    };
+    state.configured = true;
+
+    let parsed = match crate::plugins::ci_monitor::CiMonitorConfig::from_toml(table) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            state.error = Some(e.to_string());
+            return state;
+        }
+    };
+    state.enabled = parsed.enabled;
+
     if !parsed.enabled {
-        return Err("gh_monitor plugin disabled in configuration".to_string());
+        state.error = Some("gh_monitor plugin disabled in configuration".to_string());
+        return state;
     }
+
     if parsed
         .repo
         .as_deref()
@@ -2227,9 +2324,19 @@ fn validate_gh_monitor_config(
         .unwrap_or("")
         .is_empty()
     {
-        return Err("gh_monitor configuration missing required field: repo".to_string());
+        state.error = Some("gh_monitor configuration missing required field: repo".to_string());
+        return state;
     }
-    Ok(())
+
+    state
+}
+
+#[cfg(unix)]
+fn apply_config_state_to_status(status: &mut GhMonitorStatus, config_state: &GhMonitorConfigState) {
+    status.configured = config_state.configured;
+    status.enabled = config_state.enabled;
+    status.config_source = config_state.config_source.clone();
+    status.config_path = config_state.config_path.clone();
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2399,9 +2506,12 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         );
     }
 
+    let config_state =
+        evaluate_gh_monitor_config(home, &gh_request.team, gh_request.config_cwd.as_deref());
+
     // Config gate: invalid/disabled config moves availability into
     // disabled_config_error and blocks polling work.
-    if let Err(reason) = validate_gh_monitor_config(home, &gh_request.team) {
+    if let Some(reason) = config_state.error.clone() {
         // Intentional: command-dispatch config validation updates persisted
         // availability state but does not emit a separate "manual" inbox
         // notification path; transition alerts are emitted by the shared
@@ -2413,6 +2523,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
             Some("disabled_config_error"),
             Some(0),
             Some(reason.clone()),
+            Some(&config_state),
         );
         return make_error_response(
             &request.request_id,
@@ -2439,6 +2550,10 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
     let now = chrono::Utc::now().to_rfc3339();
     let mut status = GhMonitorStatus {
         team: gh_request.team.clone(),
+        configured: config_state.configured,
+        enabled: config_state.enabled,
+        config_source: config_state.config_source.clone(),
+        config_path: config_state.config_path.clone(),
         target_kind: gh_request.target_kind,
         target: gh_request.target.clone(),
         state: "monitoring".to_string(),
@@ -2546,6 +2661,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
             Some("degraded"),
             None,
             Some(format!("failed to persist monitor status: {e}")),
+            Some(&config_state),
         );
         return make_error_response(
             &request.request_id,
@@ -2581,6 +2697,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
             Some("degraded"),
             Some(count_in_flight_monitors(home, &gh_request.team)),
             Some(format!("transient provider/gh failure: {reason}")),
+            Some(&config_state),
         );
     } else {
         let _ = set_gh_monitor_health_state(
@@ -2590,6 +2707,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
             Some("healthy"),
             Some(count_in_flight_monitors(home, &gh_request.team)),
             Some("monitor request succeeded".to_string()),
+            Some(&config_state),
         );
     }
 
@@ -2644,6 +2762,8 @@ async fn handle_gh_monitor_control_command(
             "Missing required payload field: 'team'",
         );
     }
+    let config_state =
+        evaluate_gh_monitor_config(home, &control.team, control.config_cwd.as_deref());
 
     let health = match control.action {
         GhMonitorLifecycleAction::Start => match set_gh_monitor_health_state(
@@ -2653,6 +2773,7 @@ async fn handle_gh_monitor_control_command(
             None,
             Some(count_in_flight_monitors(home, &control.team)),
             Some("gh monitor lifecycle started".to_string()),
+            Some(&config_state),
         ) {
             Ok(health) => health,
             Err(e) => {
@@ -2675,6 +2796,7 @@ async fn handle_gh_monitor_control_command(
                     "draining in-flight monitors (timeout={}s)",
                     drain_timeout_secs
                 )),
+                Some(&config_state),
             );
 
             let deadline = std::time::Instant::now()
@@ -2700,6 +2822,7 @@ async fn handle_gh_monitor_control_command(
                 None,
                 Some(in_flight),
                 Some(message),
+                Some(&config_state),
             ) {
                 Ok(health) => health,
                 Err(e) => {
@@ -2723,6 +2846,7 @@ async fn handle_gh_monitor_control_command(
                     "draining in-flight monitors before restart (timeout={}s)",
                     drain_timeout_secs
                 )),
+                Some(&config_state),
             );
 
             let deadline = std::time::Instant::now()
@@ -2731,6 +2855,28 @@ async fn handle_gh_monitor_control_command(
             while in_flight > 0 && std::time::Instant::now() < deadline {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 in_flight = count_in_flight_monitors(home, &control.team);
+            }
+
+            // Re-evaluate config after the drain window so restart/reload picks
+            // up current on-disk config without requiring daemon restart.
+            let reloaded_config =
+                evaluate_gh_monitor_config(home, &control.team, control.config_cwd.as_deref());
+            if let Some(reason) = reloaded_config.error.as_deref() {
+                let message = format!("gh monitor restart blocked: {reason}");
+                let _ = set_gh_monitor_health_state(
+                    home,
+                    &control.team,
+                    Some("stopped"),
+                    Some("disabled_config_error"),
+                    Some(in_flight),
+                    Some(message),
+                    Some(&reloaded_config),
+                );
+                return make_error_response(
+                    &request.request_id,
+                    "CONFIG_ERROR",
+                    &format!("gh_monitor unavailable after reload: {reason}"),
+                );
             }
 
             match set_gh_monitor_health_state(
@@ -2747,6 +2893,7 @@ async fn handle_gh_monitor_control_command(
                         in_flight
                     )
                 }),
+                Some(&reloaded_config),
             ) {
                 Ok(health) => health,
                 Err(e) => {
@@ -2801,6 +2948,11 @@ async fn handle_gh_monitor_health_command(
         .unwrap_or("")
         .trim()
         .to_string();
+    let config_cwd = request
+        .payload
+        .get("config_cwd")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     if team.is_empty() {
         return make_error_response(
             &request.request_id,
@@ -2809,9 +2961,19 @@ async fn handle_gh_monitor_health_command(
         );
     }
 
+    let config_state = evaluate_gh_monitor_config(home, &team, config_cwd.as_deref());
+
     let health = match read_gh_monitor_health(home, &team) {
         Ok(mut health) => {
             health.in_flight = count_in_flight_monitors(home, &team);
+            health.configured = config_state.configured;
+            health.enabled = config_state.enabled;
+            health.config_source = config_state.config_source.clone();
+            health.config_path = config_state.config_path.clone();
+            if let Some(reason) = config_state.error.as_deref() {
+                health.availability_state = "disabled_config_error".to_string();
+                health.message = Some(reason.to_string());
+            }
             health
         }
         Err(e) => {
@@ -2925,6 +3087,16 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         }
     };
 
+    let config_state =
+        evaluate_gh_monitor_config(home, &gh_request.team, gh_request.config_cwd.as_deref());
+    if let Some(reason) = config_state.error.as_deref() {
+        return make_error_response(
+            &request.request_id,
+            "CONFIG_ERROR",
+            &format!("gh_monitor unavailable: {reason}"),
+        );
+    }
+
     let state = match load_gh_monitor_state_map(home) {
         Ok(map) => map,
         Err(e) => {
@@ -2942,7 +3114,8 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         &gh_request.target,
         gh_request.reference.as_deref(),
     );
-    if let Some(status) = state.get(&key) {
+    if let Some(mut status) = state.get(&key).cloned() {
+        apply_config_state_to_status(&mut status, &config_state);
         return make_ok_response(
             &request.request_id,
             serde_json::to_value(status).unwrap_or_default(),
@@ -2963,7 +3136,8 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
             })
             .collect();
         candidates.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
-        if let Some(status) = candidates.last() {
+        if let Some(mut status) = candidates.last().cloned().cloned() {
+            apply_config_state_to_status(&mut status, &config_state);
             return make_ok_response(
                 &request.request_id,
                 serde_json::to_value(status).unwrap_or_default(),
@@ -4109,16 +4283,14 @@ fn control_request_is_live(
     state_store: &SharedStateStore,
     session_registry: &SharedSessionRegistry,
 ) -> ControlResult {
-    let registry = session_registry.lock().unwrap();
-    let Some(record) = registry.query(&control.agent_id) else {
+    let mut registry = session_registry.lock().unwrap();
+    let Some(record) = registry.query_with_liveness(&control.agent_id) else {
         return ControlResult::NotFound;
     };
     if record.session_id != control.session_id {
         return ControlResult::NotFound;
     }
-    if record.state != crate::daemon::session_registry::SessionState::Active
-        || !record.is_process_alive()
-    {
+    if record.state != crate::daemon::session_registry::SessionState::Active {
         return ControlResult::NotLive;
     }
 
@@ -4626,16 +4798,17 @@ fn handle_session_query(
         }
     };
 
-    let registry = session_registry.lock().unwrap();
-    match registry.query(&name) {
+    let mut registry = session_registry.lock().unwrap();
+    match registry.query_with_liveness(&name) {
         Some(record) => {
-            let alive = record.is_process_alive();
+            let alive = record.state == crate::daemon::session_registry::SessionState::Active;
             make_ok_response(
                 &request.request_id,
                 serde_json::json!({
                     "session_id": record.session_id,
                     "process_id": record.process_id,
                     "alive": alive,
+                    "last_alive_at": record.last_alive_at,
                     "runtime": record.runtime,
                     "runtime_session_id": record.runtime_session_id,
                     "pane_id": record.pane_id,
@@ -4682,8 +4855,8 @@ fn handle_session_query_team(
         }
     };
 
-    let registry = session_registry.lock().unwrap();
-    let Some(record) = registry.query_for_team(&team, &name) else {
+    let mut registry = session_registry.lock().unwrap();
+    let Some(record) = registry.query_for_team_with_liveness(&team, &name) else {
         return make_error_response(
             &request.request_id,
             "AGENT_NOT_FOUND",
@@ -4734,13 +4907,14 @@ fn handle_session_query_team(
         }
     }
 
-    let alive = record.is_process_alive();
+    let alive = record.state == crate::daemon::session_registry::SessionState::Active;
     make_ok_response(
         &request.request_id,
         serde_json::json!({
             "session_id": record.session_id,
             "process_id": record.process_id,
             "alive": alive,
+            "last_alive_at": record.last_alive_at,
             "runtime": record.runtime,
             "runtime_session_id": record.runtime_session_id,
             "pane_id": record.pane_id,
@@ -5021,8 +5195,7 @@ fn handle_agent_state(
     let session = session_registry
         .lock()
         .unwrap()
-        .query_for_team(&team, &agent)
-        .cloned();
+        .query_for_team_with_liveness(&team, &agent);
     let canonical = derive_canonical_member_state(
         &team,
         &member,
@@ -5074,13 +5247,18 @@ fn handle_list_agents(
             bootstrap_session_from_member_hint(team_name, &m, &mut session_guard);
             let tracker_state = tracker.get_state(&m.name);
             let tracker_meta = tracker.transition_meta(&m.name);
-            let session = session_guard.query_for_team(team_name, &m.name);
-            let state =
-                derive_canonical_member_state(team_name, &m, tracker_state, session, tracker_meta);
+            let session = session_guard.query_for_team_with_liveness(team_name, &m.name);
+            let state = derive_canonical_member_state(
+                team_name,
+                &m,
+                tracker_state,
+                session.as_ref(),
+                tracker_meta,
+            );
             merged_states.insert(m.name.clone(), state);
         }
 
-        for session in session_guard.sessions_for_team(team_name) {
+        for session in session_guard.sessions_for_team_with_liveness(team_name) {
             if merged_states.contains_key(&session.agent_name) {
                 continue;
             }
@@ -5236,8 +5414,7 @@ fn derive_canonical_member_state(
 ) -> CanonicalMemberState {
     let agent = member.name.as_str();
     if let Some(session) = session {
-        let session_alive = session.state == crate::daemon::session_registry::SessionState::Active
-            && session.is_process_alive();
+        let session_alive = session.state == crate::daemon::session_registry::SessionState::Active;
         if !session_alive {
             return CanonicalMemberState {
                 agent: agent.to_string(),
@@ -5245,6 +5422,7 @@ fn derive_canonical_member_state(
                 activity: "unknown".to_string(),
                 session_id: Some(session.session_id.clone()),
                 process_id: Some(session.process_id),
+                last_alive_at: session.last_alive_at.clone(),
                 reason: "session inactive or pid dead".to_string(),
                 source: "session_registry".to_string(),
                 in_config: true,
@@ -5271,6 +5449,7 @@ fn derive_canonical_member_state(
                 activity: "unknown".to_string(),
                 session_id: Some(session.session_id.clone()),
                 process_id: Some(session.process_id),
+                last_alive_at: session.last_alive_at.clone(),
                 reason: mismatch_reason,
                 source: "pid_backend_validation".to_string(),
                 in_config: true,
@@ -5289,6 +5468,7 @@ fn derive_canonical_member_state(
                 activity: "idle".to_string(),
                 session_id: Some(session.session_id.clone()),
                 process_id: Some(session.process_id),
+                last_alive_at: session.last_alive_at.clone(),
                 reason,
                 source,
                 in_config: true,
@@ -5300,6 +5480,7 @@ fn derive_canonical_member_state(
             activity: "busy".to_string(),
             session_id: Some(session.session_id.clone()),
             process_id: Some(session.process_id),
+            last_alive_at: session.last_alive_at.clone(),
             reason: "session active with live pid".to_string(),
             source: "session_registry".to_string(),
             in_config: true,
@@ -5313,6 +5494,7 @@ fn derive_canonical_member_state(
             activity: "idle".to_string(),
             session_id: None,
             process_id: None,
+            last_alive_at: None,
             reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "idle tracker state".to_string()),
@@ -5327,6 +5509,7 @@ fn derive_canonical_member_state(
             activity: "busy".to_string(),
             session_id: None,
             process_id: None,
+            last_alive_at: None,
             reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "active tracker state".to_string()),
@@ -5341,6 +5524,7 @@ fn derive_canonical_member_state(
             activity: "unknown".to_string(),
             session_id: None,
             process_id: None,
+            last_alive_at: None,
             reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "offline tracker state".to_string()),
@@ -5355,6 +5539,7 @@ fn derive_canonical_member_state(
             activity: "unknown".to_string(),
             session_id: None,
             process_id: None,
+            last_alive_at: None,
             reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "no lifecycle/session evidence".to_string()),
@@ -5372,15 +5557,14 @@ fn derive_unregistered_member_state(
     tracker_state: Option<AgentState>,
     tracker_meta: Option<&crate::plugins::worker_adapter::TransitionMeta>,
 ) -> CanonicalMemberState {
-    if session.state != crate::daemon::session_registry::SessionState::Active
-        || !session.is_process_alive()
-    {
+    if session.state != crate::daemon::session_registry::SessionState::Active {
         return CanonicalMemberState {
             agent: session.agent_name.clone(),
             state: "offline".to_string(),
             activity: "unknown".to_string(),
             session_id: Some(session.session_id.clone()),
             process_id: Some(session.process_id),
+            last_alive_at: session.last_alive_at.clone(),
             reason: "session tracked but member missing from config".to_string(),
             source: "session_registry".to_string(),
             in_config: false,
@@ -5394,6 +5578,7 @@ fn derive_unregistered_member_state(
             activity: "idle".to_string(),
             session_id: Some(session.session_id.clone()),
             process_id: Some(session.process_id),
+            last_alive_at: session.last_alive_at.clone(),
             reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "idle lifecycle signal".to_string()),
@@ -5425,6 +5610,7 @@ fn derive_unregistered_member_state(
             activity: "unknown".to_string(),
             session_id: Some(session.session_id.clone()),
             process_id: Some(session.process_id),
+            last_alive_at: session.last_alive_at.clone(),
             reason: mismatch_reason,
             source: "pid_backend_validation".to_string(),
             in_config: false,
@@ -5437,6 +5623,7 @@ fn derive_unregistered_member_state(
         activity: "busy".to_string(),
         session_id: Some(session.session_id.clone()),
         process_id: Some(session.process_id),
+        last_alive_at: session.last_alive_at.clone(),
         reason: "session tracked but member missing from config".to_string(),
         source: "session_registry".to_string(),
         in_config: false,
@@ -5695,6 +5882,24 @@ poll_interval_secs = 60
         std::fs::write(cfg_dir.join("config.toml"), config).unwrap();
     }
 
+    fn write_repo_gh_monitor_config(repo_dir: &Path, team: &str) {
+        std::fs::create_dir_all(repo_dir).unwrap();
+        let config = format!(
+            r#"[core]
+default_team = "{team}"
+identity = "daemon-test"
+
+[plugins.gh_monitor]
+enabled = true
+team = "{team}"
+agent = "gh-monitor"
+repo = "agent-team-mail"
+poll_interval_secs = 60
+"#
+        );
+        std::fs::write(repo_dir.join(".atm.toml"), config).unwrap();
+    }
+
     fn write_invalid_gh_monitor_config(home: &Path, team: &str) {
         let cfg_dir = home.join(".config/atm");
         std::fs::create_dir_all(&cfg_dir).unwrap();
@@ -5825,11 +6030,16 @@ poll_interval_secs = 1
             "leadSessionId": "test-lead-session",
             "members": member_values,
         });
-        std::fs::write(
-            team_dir.join("config.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        {
+            use std::io::Write;
+            let config_path = team_dir.join("config.json");
+            let config_bytes = serde_json::to_string_pretty(&config).unwrap();
+            let file = std::fs::File::create(&config_path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(config_bytes.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -5870,7 +6080,42 @@ poll_interval_secs = 1
             .find(|m| m["name"].as_str() == Some(member_name))
             .expect("member exists in team config");
         member["externalBackendType"] = serde_json::json!(backend);
-        std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let cfg_bytes = serde_json::to_string_pretty(&cfg).unwrap();
+            let file = std::fs::File::create(&cfg_path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(cfg_bytes.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
+        // Spin-wait until the updated externalBackendType is readable — macOS APFS VFS
+        // page cache may return stale content immediately after write+sync.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            let visible = std::fs::read_to_string(&cfg_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    v["members"]
+                        .as_array()
+                        .and_then(|arr| {
+                            arr.iter().find(|m| m["name"].as_str() == Some(member_name))
+                        })
+                        .and_then(|m| m["externalBackendType"].as_str().map(str::to_string))
+                })
+                .is_some_and(|t| t == backend);
+            if visible {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "set_member_backend: externalBackendType='{}' not readable after 500ms: {}",
+                backend,
+                cfg_path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     fn test_member(name: &str, backend: &str) -> agent_team_mail_core::schema::AgentMember {
@@ -5899,6 +6144,7 @@ poll_interval_secs = 1
             process_id: std::process::id(),
             state: crate::daemon::session_registry::SessionState::Active,
             updated_at: "2026-03-05T00:00:00Z".to_string(),
+            last_alive_at: Some("2026-03-05T00:00:00Z".to_string()),
             runtime: runtime.map(str::to_string),
             runtime_session_id: None,
             pane_id: None,
@@ -5910,6 +6156,26 @@ poll_interval_secs = 1
         let temp = TempDir::new().unwrap();
         let atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_hook_auth_team_config(temp.path(), team, lead, members);
+
+        // Spin-wait until config is readable — macOS APFS directory entry visibility
+        // is not guaranteed immediately after write+sync without this verification.
+        let config_path = temp
+            .path()
+            .join(".claude/teams")
+            .join(team)
+            .join("config.json");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            if std::fs::read_to_string(&config_path).is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture config not readable after 500ms: {}",
+                config_path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         HookAuthFixture {
             _temp: temp,
@@ -5927,6 +6193,35 @@ poll_interval_secs = 1
         loop {
             attempts += 1;
             let resp = handle_hook_event_command(req_json, store, sr).await;
+            let retry = resp
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("processed").and_then(|v| v.as_bool()))
+                .is_some_and(|processed| !processed)
+                && resp
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("reason").and_then(|v| v.as_str()))
+                    .is_some_and(|reason| reason.contains("team config not found"));
+            if retry && attempts < 4 {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                continue;
+            }
+            return resp;
+        }
+    }
+
+    #[cfg(unix)]
+    async fn handle_hook_event_command_with_dedup_retry(
+        req_json: &str,
+        store: &SharedStateStore,
+        sr: &SharedSessionRegistry,
+        dd: &SharedDedupeStore,
+    ) -> agent_team_mail_core::daemon_client::SocketResponse {
+        let mut attempts = 0u8;
+        loop {
+            attempts += 1;
+            let resp = handle_hook_event_command_with_dedup(req_json, store, sr, dd).await;
             let retry = resp
                 .payload
                 .as_ref()
@@ -6155,7 +6450,15 @@ poll_interval_secs = 1
         target["processId"] = serde_json::json!(std::process::id());
         target["sessionId"] = serde_json::json!("hint-session-1");
         target["externalBackendType"] = serde_json::json!("external");
-        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&cfg).unwrap();
+            let file = std::fs::File::create(&config_path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
@@ -6296,7 +6599,7 @@ poll_interval_secs = 1
         ));
 
         let req_json = r#"{"version":1,"request_id":"r-restart-idle","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-partial","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -6385,6 +6688,7 @@ poll_interval_secs = 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
     async fn test_gh_monitor_pr_timeout_zero_returns_ci_not_started_and_status_roundtrip() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -6407,6 +6711,7 @@ poll_interval_secs = 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
     async fn test_gh_monitor_workflow_requires_reference() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -6555,6 +6860,10 @@ exit 1
 
         let status_seed = GhMonitorStatus {
             team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
             target_kind: GhMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "monitoring".to_string(),
@@ -6569,6 +6878,7 @@ exit 1
             target: "123".to_string(),
             reference: None,
             start_timeout_secs: Some(120),
+            config_cwd: None,
         };
 
         monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
@@ -6614,6 +6924,10 @@ exit 1
 
         let status_seed = GhMonitorStatus {
             team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
             target_kind: GhMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "monitoring".to_string(),
@@ -6628,6 +6942,7 @@ exit 1
             target: "123".to_string(),
             reference: None,
             start_timeout_secs: Some(120),
+            config_cwd: None,
         };
 
         monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
@@ -6680,6 +6995,10 @@ exit 1
 
         let status_seed = GhMonitorStatus {
             team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
             target_kind: GhMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "tracking".to_string(),
@@ -6694,6 +7013,7 @@ exit 1
             target: "123".to_string(),
             reference: None,
             start_timeout_secs: Some(120),
+            config_cwd: None,
         };
 
         let started = std::time::Instant::now();
@@ -6777,6 +7097,10 @@ exit 1
         };
         let status_seed = GhMonitorStatus {
             team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
             target_kind: GhMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "monitoring".to_string(),
@@ -6791,6 +7115,7 @@ exit 1
             target: "123".to_string(),
             reference: None,
             start_timeout_secs: Some(120),
+            config_cwd: None,
         };
         let pr_url = derive_pr_url(&run, &status_seed, &request);
         assert_eq!(pr_url.as_deref(), Some("https://github.com/o/r/pull/123"));
@@ -6837,6 +7162,10 @@ exit 1
         };
         let status_seed = GhMonitorStatus {
             team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
             target_kind: GhMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "monitoring".to_string(),
@@ -6851,6 +7180,7 @@ exit 1
             target: "123".to_string(),
             reference: None,
             start_timeout_secs: Some(120),
+            config_cwd: None,
         };
         let payload = build_failure_payload(&run, &status_seed, &request, "corr-1").await;
         for required in [
@@ -6974,10 +7304,110 @@ exit 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
+    async fn test_gh_monitor_uses_repo_config_source_from_payload_cwd() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let repo_dir = temp.path().join("repo");
+        write_repo_gh_monitor_config(&repo_dir, "atm-dev");
+
+        let req_json = format!(
+            r#"{{"version":1,"request_id":"r-gh-repo-src","command":"gh-monitor","payload":{{"team":"atm-dev","target_kind":"run","target":"42","config_cwd":"{}"}}}}"#,
+            repo_dir.to_string_lossy()
+        );
+        let resp = handle_gh_monitor_command(&req_json, temp.path()).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["configured"].as_bool(), Some(true));
+        assert_eq!(payload["enabled"].as_bool(), Some(true));
+        assert_eq!(payload["config_source"].as_str(), Some("repo"));
+        assert_eq!(
+            payload["config_path"].as_str(),
+            Some(repo_dir.join(".atm.toml").to_string_lossy().as_ref())
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_gh_status_uses_global_config_source_when_repo_missing() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+
+        let status_seed = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
+            target_kind: GhMonitorTargetKind::Run,
+            target: "9001".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(9001),
+            reference: None,
+            updated_at: "2026-03-06T00:00:00Z".to_string(),
+            message: None,
+        };
+        upsert_gh_monitor_status(temp.path(), status_seed).unwrap();
+
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let req_json = format!(
+            r#"{{"version":1,"request_id":"r-gh-global-src","command":"gh-status","payload":{{"team":"atm-dev","target_kind":"run","target":"9001","config_cwd":"{}"}}}}"#,
+            outside.to_string_lossy()
+        );
+        let resp = handle_gh_status_command(&req_json, temp.path()).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["configured"].as_bool(), Some(true));
+        assert_eq!(payload["enabled"].as_bool(), Some(true));
+        assert_eq!(payload["config_source"].as_str(), Some("global"));
+        assert_eq!(
+            payload["config_path"].as_str(),
+            Some(
+                temp.path()
+                    .join(".config/atm/config.toml")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_gh_monitor_health_reports_global_config_source() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+
+        let outside = temp.path().join("outside-health");
+        std::fs::create_dir_all(&outside).unwrap();
+        let req_json = format!(
+            r#"{{"version":1,"request_id":"r-gh-health-src","command":"gh-monitor-health","payload":{{"team":"atm-dev","config_cwd":"{}"}}}}"#,
+            outside.to_string_lossy()
+        );
+        let resp = handle_gh_monitor_health_command(&req_json, temp.path()).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert_eq!(payload["configured"].as_bool(), Some(true));
+        assert_eq!(payload["enabled"].as_bool(), Some(true));
+        assert_eq!(payload["config_source"].as_str(), Some("global"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
     async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
         let status_a = GhMonitorStatus {
             team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
             target_kind: GhMonitorTargetKind::Workflow,
             target: "ci".to_string(),
             state: "monitoring".to_string(),
@@ -6988,6 +7418,10 @@ exit 1
         };
         let status_b = GhMonitorStatus {
             team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
             target_kind: GhMonitorTargetKind::Workflow,
             target: "ci".to_string(),
             state: "monitoring".to_string(),
@@ -7042,6 +7476,72 @@ exit 1
 
     #[tokio::test]
     #[cfg(unix)]
+    async fn test_gh_monitor_restart_reloads_updated_config_without_daemon_restart() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+
+        let start_req = r#"{"version":1,"request_id":"r-gh-start-reload","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"start"}}"#;
+        let start_resp = handle_gh_monitor_control_command(start_req, temp.path()).await;
+        assert_eq!(start_resp.status, "ok");
+
+        // Edit config to invalid state, then ensure restart surfaces deterministic
+        // config error without requiring a daemon process restart.
+        write_invalid_gh_monitor_config(temp.path(), "atm-dev");
+        let restart_req = r#"{"version":1,"request_id":"r-gh-restart-invalid","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"restart","drain_timeout_secs":1}}"#;
+        let restart_resp = handle_gh_monitor_control_command(restart_req, temp.path()).await;
+        assert_eq!(restart_resp.status, "error");
+        let err = restart_resp
+            .error
+            .expect("restart should return config error");
+        assert_eq!(err.code, "CONFIG_ERROR");
+        assert!(
+            err.message.contains("gh_monitor unavailable after reload"),
+            "unexpected restart error: {}",
+            err.message
+        );
+
+        let health_req = r#"{"version":1,"request_id":"r-gh-health-invalid","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let health = health_resp.payload.unwrap();
+        assert_eq!(health["lifecycle_state"].as_str(), Some("stopped"));
+        assert_eq!(
+            health["availability_state"].as_str(),
+            Some("disabled_config_error")
+        );
+        assert!(
+            !health["message"].as_str().unwrap_or_default().is_empty(),
+            "expected actionable config error message in health payload"
+        );
+
+        // Repair config and restart again; health should recover to running/healthy.
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let restart_recover_req = r#"{"version":1,"request_id":"r-gh-restart-recover","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"restart","drain_timeout_secs":1}}"#;
+        let restart_recover_resp =
+            handle_gh_monitor_control_command(restart_recover_req, temp.path()).await;
+        assert_eq!(restart_recover_resp.status, "ok");
+        let restart_recover = restart_recover_resp.payload.unwrap();
+        assert_eq!(restart_recover["lifecycle_state"].as_str(), Some("running"));
+        assert_eq!(
+            restart_recover["availability_state"].as_str(),
+            Some("healthy")
+        );
+
+        let health_recover_req = r#"{"version":1,"request_id":"r-gh-health-recover","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let health_recover_resp =
+            handle_gh_monitor_health_command(health_recover_req, temp.path()).await;
+        assert_eq!(health_recover_resp.status, "ok");
+        let health_recover = health_recover_resp.payload.unwrap();
+        assert_eq!(health_recover["lifecycle_state"].as_str(), Some("running"));
+        assert_eq!(
+            health_recover["availability_state"].as_str(),
+            Some("healthy")
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
     async fn test_gh_monitor_command_rejected_when_lifecycle_stopped() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -7053,6 +7553,7 @@ exit 1
             Some("healthy"),
             Some(0),
             Some("manually stopped for test".to_string()),
+            None,
         );
 
         let req_json = r#"{"version":1,"request_id":"r-gh-stopped","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"42"}}"#;
@@ -7190,11 +7691,16 @@ exit 1
                 "externalBackendType": "external"
             }]
         });
-        std::fs::write(
-            team_dir.join("config.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&config).unwrap();
+            let path = team_dir.join("config.json");
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
@@ -7317,6 +7823,10 @@ exit 1
         set_member_backend(fixture._temp.path(), "atm-dev", "arch-ctm", "external");
         let store = make_store();
         let sr = make_sr();
+        // Must be >1 to satisfy register-hint payload validation.
+        // Use a non-live high PID to keep this test focused on mismatch-baseline
+        // recovery behavior rather than backend process identity matching.
+        let hint_pid: u32 = u32::MAX - 7;
 
         {
             let mut tracker = store.lock().unwrap();
@@ -7335,7 +7845,7 @@ exit 1
                 "team": "atm-dev",
                 "agent": "arch-ctm",
                 "session_id": "local:arch-ctm:recover:1",
-                "process_id": std::process::id(),
+                "process_id": hint_pid,
                 "runtime": "codex",
                 "runtime_session_id": "local:arch-ctm:recover:1"
             }),
@@ -7375,11 +7885,16 @@ exit 1
                 "externalBackendType": "external"
             }]
         });
-        std::fs::write(
-            team_dir.join("config.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&config).unwrap();
+            let path = team_dir.join("config.json");
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
@@ -8431,7 +8946,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-abc","process_id":0}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8463,7 +8978,7 @@ exit 1
             tracker.set_state("team-lead", AgentState::Idle);
         }
         let req_json = r#"{"version":1,"request_id":"r2","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-xyz","process_id":0}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         // State should remain Idle (not reset to Launching) — session_start only registers if not already tracked
         let tracker = store.lock().unwrap();
@@ -8480,7 +8995,7 @@ exit 1
         let (dd, _dd_dir) = make_dd();
         let req_json = r#"{"version":1,"request_id":"r-dedup-1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-dedup","process_id":0}}"#;
 
-        let first = handle_hook_event_command_with_dedup(req_json, &store, &sr, &dd).await;
+        let first = handle_hook_event_command_with_dedup_retry(req_json, &store, &sr, &dd).await;
         assert_eq!(first.status, "ok");
         let payload1 = first.payload.unwrap();
         assert!(payload1["processed"].as_bool().unwrap());
@@ -8488,7 +9003,7 @@ exit 1
 
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-        let second = handle_hook_event_command_with_dedup(req_json, &store, &sr, &dd).await;
+        let second = handle_hook_event_command_with_dedup_retry(req_json, &store, &sr, &dd).await;
         assert_eq!(second.status, "ok");
         let payload2 = second.payload.unwrap();
         assert!(payload2["processed"].as_bool().unwrap());
@@ -8513,7 +9028,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-pre","command":"hook-event","payload":{"event":"pre_compact","agent":"team-lead","team":"atm-dev","session_id":"sess-pre","process_id":4321}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8528,7 +9043,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-compact-complete","command":"hook-event","payload":{"event":"compact_complete","agent":"team-lead","team":"atm-dev","session_id":"sess-compact","process_id":4321}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8549,7 +9064,7 @@ exit 1
             tracker.set_state("arch-ctm", AgentState::Active);
         }
         let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-1","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8568,7 +9083,7 @@ exit 1
         let sr = make_sr();
         // Agent exists in payload but is not a member of the team config.
         let req_json = r#"{"version":1,"request_id":"r4","command":"hook-event","payload":{"event":"teammate_idle","agent":"new-agent","session_id":"sess-2","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -8576,6 +9091,72 @@ exit 1
 
         let tracker = store.lock().unwrap();
         assert!(tracker.get_state("new-agent").is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_permission_request_rejects_unknown_agent() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-pr-unknown","command":"hook-event","payload":{"event":"permission_request","agent":"new-agent","session_id":"sess-pr-unknown","team":"atm-dev","tool_name":"Bash"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+        assert!(store.lock().unwrap().get_state("new-agent").is_none());
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "new-agent")
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_stop_rejects_unknown_agent() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-stop-unknown","command":"hook-event","payload":{"event":"stop","agent":"new-agent","session_id":"sess-stop-unknown","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+        assert!(store.lock().unwrap().get_state("new-agent").is_none());
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "new-agent")
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_notification_idle_prompt_rejects_unknown_agent() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-notify-unknown","command":"hook-event","payload":{"event":"notification_idle_prompt","agent":"new-agent","session_id":"sess-notify-unknown","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+        assert!(store.lock().unwrap().get_state("new-agent").is_none());
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "new-agent")
+                .is_none()
+        );
     }
 
     #[cfg(unix)]
@@ -8715,7 +9296,7 @@ exit 1
                 .upsert_for_team("atm-dev", "team-lead", "sess-end", 1111);
         }
         let req_json = r#"{"version":1,"request_id":"r5","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-end","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8747,7 +9328,7 @@ exit 1
             tracker.set_state("team-lead", AgentState::Idle);
         }
         let req_json = r#"{"version":1,"request_id":"r5-unknown","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-missing","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8766,12 +9347,99 @@ exit 1
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
+    async fn test_hook_event_session_end_non_lead_unknown_session_is_debug_noop() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        let req_json = r#"{"version":1,"request_id":"r5-unknown-non-lead","command":"hook-event","payload":{"event":"session_end","agent":"arch-ctm","session_id":"sess-missing","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            payload["processed"].as_bool().unwrap(),
+            "unknown-session no-op should not be rejected by team-lead gate"
+        );
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "unknown non-lead session_end must not create session registry rows"
+        );
+        let tracker = store.lock().unwrap();
+        assert!(
+            tracker.get_state("arch-ctm").is_none(),
+            "unknown non-lead session_end must not mutate activity tracker"
+        );
+    }
+
+    /// QA-001: non-lead sending session_end for a live matching session must be rejected.
+    /// The team-lead gate in the Some(_) arm must fire before marking the session dead.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_non_lead_live_session_is_rejected() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        // Seed a live session for arch-ctm so the Some(_) arm is reached.
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-live-nolead", 2222);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r5-nolead-live","command":"hook-event","payload":{"event":"session_end","agent":"arch-ctm","session_id":"sess-live-nolead","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "non-lead session_end on live session must not be processed"
+        );
+        assert!(
+            payload["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("only team-lead"),
+            "reason must indicate team-lead restriction, got: {:?}",
+            payload["reason"]
+        );
+
+        // Session must remain live — the gate must not have marked it dead.
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
+        assert_ne!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Dead,
+            "team-lead gate must not mark the session dead"
+        );
+
+        // Activity tracker must be unchanged.
+        let tracker = store.lock().unwrap();
+        assert_eq!(
+            tracker.get_state("arch-ctm"),
+            Some(AgentState::Idle),
+            "non-lead session_end must not mutate activity tracker"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
     async fn test_hook_event_session_end_unknown_team_is_strict_noop() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r5-unknown-team","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-unknown","team":"unknown-team"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -8799,7 +9467,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r5-unknown-agent","command":"hook-event","payload":{"event":"session_end","agent":"arch-ctm","session_id":"sess-unknown-agent","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -8832,7 +9500,7 @@ exit 1
             reg.mark_dead_for_team("atm-dev", "team-lead");
         }
         let req_json = r#"{"version":1,"request_id":"r5-dead","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-dead","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8865,7 +9533,7 @@ exit 1
                 .upsert_for_team("atm-dev", "team-lead", "sess-current", 1111);
         }
         let req_json = r#"{"version":1,"request_id":"r5-mismatch","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-other","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8899,7 +9567,7 @@ exit 1
                 .upsert_for_team("atm-dev", "team-lead", "sess-current", 1111);
         }
         let req_json = r#"{"version":1,"request_id":"r5-no-session","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8922,7 +9590,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r6","command":"hook-event","payload":{"event":"some_future_event","agent":"team-lead","team":"atm-dev","session_id":"s1"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -8942,7 +9610,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r7","command":"hook-event","payload":{"event":"session_start","agent":"","team":"atm-dev","session_id":"sess-1"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -8955,7 +9623,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":99,"request_id":"r8","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"s1"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
     }
@@ -8968,7 +9636,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-missing-team","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","session_id":"s1"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -8983,10 +9651,31 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-non-lead-start","command":"hook-event","payload":{"event":"session_start","agent":"arch-ctm","team":"atm-dev","session_id":"sess-x"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_start_rejects_non_member() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-non-member-start","command":"hook-event","payload":{"event":"session_start","agent":"rogue-member","team":"atm-dev","session_id":"sess-rogue"}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query_for_team("atm-dev", "rogue-member").is_none(),
+            "non-member session_start must not register daemon session state"
+        );
     }
 
     #[cfg(unix)]
@@ -9008,7 +9697,15 @@ exit 1
             .find(|m| m["name"].as_str() == Some("arch-ctm"))
             .unwrap();
         arch["externalBackendType"] = serde_json::json!("codex");
-        std::fs::write(&team_cfg, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&cfg).unwrap();
+            let file = std::fs::File::create(&team_cfg).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
 
         let store = make_store();
         let sr = make_sr();
@@ -9016,7 +9713,7 @@ exit 1
             "{{\"version\":1,\"request_id\":\"r-backend-mismatch\",\"command\":\"hook-event\",\"payload\":{{\"event\":\"session_start\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\",\"session_id\":\"sess-mismatch\",\"process_id\":{}}}}}",
             std::process::id()
         );
-        let resp = handle_hook_event_command(&req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -9407,6 +10104,10 @@ exit 1
             std::process::id() as u64
         );
         assert!(payload["alive"].as_bool().unwrap());
+        assert!(
+            payload["last_alive_at"].as_str().is_some(),
+            "live session-query responses should expose last_alive_at"
+        );
     }
 
     #[test]
@@ -9424,6 +10125,17 @@ exit 1
         assert_eq!(payload["session_id"].as_str().unwrap(), "sess-deadbeef");
         // alive is false because the PID doesn't exist (non-unix: always false)
         assert!(!payload["alive"].as_bool().unwrap());
+        let reg = sr.lock().unwrap();
+        let state = reg
+            .query("stale-agent")
+            .expect("stale agent should remain tracked for dead-state diagnostics")
+            .state
+            .clone();
+        assert_eq!(
+            state,
+            crate::daemon::session_registry::SessionState::Dead,
+            "dead pid should converge to dead state after query"
+        );
     }
 
     #[test]
@@ -9491,7 +10203,7 @@ exit 1
         };
         let req_str = serde_json::to_string(&request).unwrap();
 
-        let resp = handle_hook_event_command(&req_str, &state_store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &state_store, &sr).await;
 
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -9540,7 +10252,7 @@ exit 1
         };
         let req_str = serde_json::to_string(&request).unwrap();
 
-        let _resp = handle_hook_event_command(&req_str, &state_store, &sr).await;
+        let _resp = handle_hook_event_with_transient_retry(&req_str, &state_store, &sr).await;
 
         // Agent must NOT appear in the tracker after an empty-session_id event
         let tracker = state_store.lock().unwrap();
@@ -9652,7 +10364,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -9686,7 +10398,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -9724,7 +10436,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -9755,7 +10467,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -9789,7 +10501,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -9821,7 +10533,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -9856,7 +10568,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(

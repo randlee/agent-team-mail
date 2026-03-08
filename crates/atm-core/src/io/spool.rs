@@ -144,7 +144,7 @@ pub fn spool_drain(inbox_base: &Path) -> Result<SpoolStatus, InboxError> {
 }
 
 /// Internal implementation that accepts an optional base directory for testing
-fn spool_drain_with_base(
+pub fn spool_drain_with_base(
     inbox_base: &Path,
     base_dir: Option<&Path>,
 ) -> Result<SpoolStatus, InboxError> {

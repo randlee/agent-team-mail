@@ -1,21 +1,43 @@
 //! Integration tests for `atm gh ...` daemon-routed commands.
 
 use assert_cmd::cargo;
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
 #[cfg(unix)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::{Child, Command};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
+fn write_repo_gh_monitor_config(workdir: &Path, team: &str) {
+    let content = format!(
+        r#"[core]
+default_team = "{team}"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+provider = "github"
+team = "{team}"
+agent = "gh-monitor"
+repo = "agent-team-mail"
+poll_interval_secs = 60
+"#
+    );
+    fs::write(workdir.join(".atm.toml"), content).unwrap();
+}
+
+fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir, team: &str, with_plugin: bool) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
+    if with_plugin {
+        write_repo_gh_monitor_config(&workdir, team);
+    }
     cmd.env("ATM_HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
@@ -63,6 +85,7 @@ import json
 import os
 import signal
 import socket
+import time
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
@@ -70,6 +93,16 @@ daemon_dir = home / ".claude" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 state_path = daemon_dir / "gh-state.json"
 health_path = daemon_dir / "gh-health.json"
+configured = os.environ.get("ATM_FAKE_GH_CONFIGURED", "1") == "1"
+enabled = os.environ.get("ATM_FAKE_GH_ENABLED", "1") == "1"
+monitor_delay_ms = int(os.environ.get("ATM_FAKE_GH_MONITOR_DELAY_MS", "0") or "0")
+control_delay_ms = int(os.environ.get("ATM_FAKE_GH_CONTROL_DELAY_MS", "0") or "0")
+availability_state = "healthy" if configured and enabled else "disabled_config_error"
+availability_message = None
+if not configured:
+    availability_message = "gh_monitor plugin is not configured"
+elif not enabled:
+    availability_message = "gh_monitor plugin is disabled in configuration"
 
 sock_path = daemon_dir / "atm-daemon.sock"
 pid_path = daemon_dir / "atm-daemon.pid"
@@ -114,11 +147,19 @@ while running:
         payload = req.get("payload", {}) or {}
 
         if command == "gh-monitor":
+            if monitor_delay_ms > 0:
+                time.sleep(monitor_delay_ms / 1000.0)
             status_payload = {
                 "team": payload.get("team", "test-team"),
+                "configured": True,
+                "enabled": True,
+                "config_source": "repo",
+                "config_path": str(home / "workdir" / ".atm.toml"),
                 "target_kind": payload.get("target_kind", "workflow"),
                 "target": payload.get("target", "ci"),
                 "state": "tracking",
+                "configured": configured,
+                "enabled": enabled,
                 "run_id": 987654,
                 "reference": payload.get("reference"),
                 "updated_at": "2026-03-06T03:00:00Z",
@@ -132,9 +173,15 @@ while running:
             else:
                 status_payload = {
                     "team": payload.get("team", "test-team"),
+                    "configured": True,
+                    "enabled": True,
+                    "config_source": "repo",
+                    "config_path": str(home / "workdir" / ".atm.toml"),
                     "target_kind": payload.get("target_kind", "workflow"),
                     "target": payload.get("target", "ci"),
                     "state": "tracking",
+                    "configured": configured,
+                    "enabled": enabled,
                     "run_id": 987654,
                     "reference": "develop",
                     "updated_at": "2026-03-06T03:00:00Z",
@@ -142,33 +189,53 @@ while running:
                 }
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": status_payload}
         elif command == "gh-monitor-control":
+            if control_delay_ms > 0:
+                time.sleep(control_delay_ms / 1000.0)
             action = payload.get("action", "start")
             if action == "stop":
                 health_payload = {
                     "team": payload.get("team", "test-team"),
+                    "configured": True,
+                    "enabled": True,
+                    "config_source": "repo",
+                    "config_path": str(home / "workdir" / ".atm.toml"),
                     "lifecycle_state": "stopped",
-                    "availability_state": "healthy",
+                    "availability_state": availability_state,
+                    "configured": configured,
+                    "enabled": enabled,
                     "in_flight": 0,
                     "updated_at": "2026-03-06T03:00:00Z",
-                    "message": "stopped",
+                    "message": availability_message or "stopped",
                 }
             elif action == "restart":
                 health_payload = {
                     "team": payload.get("team", "test-team"),
+                    "configured": True,
+                    "enabled": True,
+                    "config_source": "repo",
+                    "config_path": str(home / "workdir" / ".atm.toml"),
                     "lifecycle_state": "running",
-                    "availability_state": "healthy",
+                    "availability_state": availability_state,
+                    "configured": configured,
+                    "enabled": enabled,
                     "in_flight": 0,
                     "updated_at": "2026-03-06T03:00:00Z",
-                    "message": "restarted",
+                    "message": availability_message or "restarted",
                 }
             else:
                 health_payload = {
                     "team": payload.get("team", "test-team"),
+                    "configured": True,
+                    "enabled": True,
+                    "config_source": "repo",
+                    "config_path": str(home / "workdir" / ".atm.toml"),
                     "lifecycle_state": "running",
-                    "availability_state": "healthy",
+                    "availability_state": availability_state,
+                    "configured": configured,
+                    "enabled": enabled,
                     "in_flight": 0,
                     "updated_at": "2026-03-06T03:00:00Z",
-                    "message": "started",
+                    "message": availability_message or "started",
                 }
             health_path.write_text(json.dumps(health_payload))
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": health_payload}
@@ -178,11 +245,17 @@ while running:
             else:
                 health_payload = {
                     "team": payload.get("team", "test-team"),
+                    "configured": True,
+                    "enabled": True,
+                    "config_source": "repo",
+                    "config_path": str(home / "workdir" / ".atm.toml"),
                     "lifecycle_state": "running",
-                    "availability_state": "healthy",
+                    "availability_state": availability_state,
+                    "configured": configured,
+                    "enabled": enabled,
                     "in_flight": 0,
                     "updated_at": "2026-03-06T03:00:00Z",
-                    "message": None,
+                    "message": availability_message,
                 }
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": health_payload}
         elif command == "status":
@@ -204,10 +277,30 @@ finally:
     except FileNotFoundError:
         pass
 "#;
-    fs::write(&script, body).unwrap();
+    {
+        let mut file = fs::File::create(&script).unwrap();
+        file.write_all(body.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
     let mut perms = fs::metadata(&script).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&script, perms).unwrap();
+    // Guard against file-write races on CI where the script can be executed
+    // before write visibility/metadata updates fully settle.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if fs::read_to_string(&script)
+            .map(|content| content == body)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fake gh daemon script did not become readable in time"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     script
 }
 
@@ -229,10 +322,102 @@ fn wait_for_daemon_socket(home: &Path) {
 
 #[cfg(unix)]
 fn start_fake_gh_daemon(home: &Path) -> Child {
+    start_fake_gh_daemon_with_mode_and_delays(home, true, true, 0, 0)
+}
+
+#[cfg(unix)]
+fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) -> Child {
+    start_fake_gh_daemon_with_mode_and_delays(home, configured, enabled, 0, 0)
+}
+
+#[cfg(unix)]
+fn start_fake_gh_daemon_with_mode_and_delays(
+    home: &Path,
+    configured: bool,
+    enabled: bool,
+    monitor_delay_ms: u64,
+    control_delay_ms: u64,
+) -> Child {
     let script = write_fake_gh_daemon_script(home);
-    let child = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    // Retry on ETXTBUSY (code 26): Linux can transiently block execution of a
+    // newly-written file on CI while kernel mappings settle.
+    let child = {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match Command::new(&script)
+                .env("ATM_HOME", home)
+                .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
+                .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
+                .env("ATM_FAKE_GH_MONITOR_DELAY_MS", monitor_delay_ms.to_string())
+                .env("ATM_FAKE_GH_CONTROL_DELAY_MS", control_delay_ms.to_string())
+                .spawn()
+            {
+                Ok(child) => break child,
+                Err(e) if e.raw_os_error() == Some(26) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => panic!("failed to spawn fake gh daemon: {e}"),
+            }
+        }
+    };
     wait_for_daemon_socket(home);
     child
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_and_control_allow_daemon_responses_over_500ms() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon =
+        start_fake_gh_daemon_with_mode_and_delays(temp_dir.path(), true, true, 750, 750);
+
+    let mut monitor = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut monitor, &temp_dir, "test-team", true);
+    let monitor_output = monitor
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("workflow")
+        .arg("ci")
+        .arg("--ref")
+        .arg("develop")
+        .arg("--start-timeout")
+        .arg("30")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let monitor_json: serde_json::Value = serde_json::from_slice(&monitor_output).unwrap();
+    assert_eq!(monitor_json["state"].as_str(), Some("tracking"));
+    assert_eq!(monitor_json["target_kind"].as_str(), Some("workflow"));
+
+    let mut stop = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut stop, &temp_dir, "test-team", true);
+    let stop_output = stop
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("stop")
+        .arg("--drain-timeout")
+        .arg("1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stop_json: serde_json::Value = serde_json::from_slice(&stop_output).unwrap();
+    assert_eq!(stop_json["lifecycle_state"].as_str(), Some("stopped"));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }
 
 #[test]
@@ -243,7 +428,7 @@ fn test_gh_monitor_workflow_roundtrip_json() {
     let mut daemon = start_fake_gh_daemon(temp_dir.path());
 
     let mut monitor = cargo::cargo_bin_cmd!("atm");
-    set_home_env(&mut monitor, &temp_dir);
+    set_home_env(&mut monitor, &temp_dir, "test-team", true);
     let monitor_output = monitor
         .env("ATM_TEAM", "test-team")
         .arg("gh")
@@ -269,9 +454,11 @@ fn test_gh_monitor_workflow_roundtrip_json() {
     assert_eq!(monitor_json["reference"].as_str(), Some("develop"));
     assert_eq!(monitor_json["run_id"].as_u64(), Some(987654));
     assert_eq!(monitor_json["state"].as_str(), Some("tracking"));
+    assert_eq!(monitor_json["configured"].as_bool(), Some(true));
+    assert_eq!(monitor_json["enabled"].as_bool(), Some(true));
 
     let mut status = cargo::cargo_bin_cmd!("atm");
-    set_home_env(&mut status, &temp_dir);
+    set_home_env(&mut status, &temp_dir, "test-team", true);
     let status_output = status
         .env("ATM_TEAM", "test-team")
         .arg("gh")
@@ -291,6 +478,8 @@ fn test_gh_monitor_workflow_roundtrip_json() {
     assert_eq!(status_json["target"].as_str(), Some("ci"));
     assert_eq!(status_json["run_id"].as_u64(), Some(987654));
     assert_eq!(status_json["state"].as_str(), Some("tracking"));
+    assert_eq!(status_json["configured"].as_bool(), Some(true));
+    assert_eq!(status_json["enabled"].as_bool(), Some(true));
 
     let _ = daemon.kill();
     let _ = daemon.wait();
@@ -313,7 +502,7 @@ fn test_gh_monitor_lifecycle_status_roundtrip_json() {
     let mut daemon = start_fake_gh_daemon(temp_dir.path());
 
     let mut start = cargo::cargo_bin_cmd!("atm");
-    set_home_env(&mut start, &temp_dir);
+    set_home_env(&mut start, &temp_dir, "test-team", true);
     let start_output = start
         .env("ATM_TEAM", "test-team")
         .arg("gh")
@@ -332,7 +521,7 @@ fn test_gh_monitor_lifecycle_status_roundtrip_json() {
     assert_eq!(start_json["lifecycle_state"].as_str(), Some("running"));
 
     let mut health = cargo::cargo_bin_cmd!("atm");
-    set_home_env(&mut health, &temp_dir);
+    set_home_env(&mut health, &temp_dir, "test-team", true);
     let health_output = health
         .env("ATM_TEAM", "test-team")
         .arg("gh")
@@ -349,6 +538,385 @@ fn test_gh_monitor_lifecycle_status_roundtrip_json() {
     let health_json: serde_json::Value = serde_json::from_slice(&health_output).unwrap();
     assert_eq!(health_json["team"].as_str(), Some("test-team"));
     assert_eq!(health_json["availability_state"].as_str(), Some("healthy"));
+    assert_eq!(health_json["configured"].as_bool(), Some(true));
+    assert_eq!(health_json["enabled"].as_bool(), Some(true));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon_with_mode(temp_dir.path(), false, false);
+
+    let mut status = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut status, &temp_dir, "test-team", false);
+    let output = status
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("status")
+        .arg("workflow")
+        .arg("ci")
+        .output()
+        .expect("run atm gh status");
+
+    assert!(
+        !output.status.success(),
+        "status should fail when gh_monitor is not configured"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("gh_monitor plugin is not configured"));
+    assert!(stderr.contains("Remediation: run `atm gh init` and retry."));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_status_accepts_json_flag_after_subcommand() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut health = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut health, &temp_dir, "test-team", true);
+    let health_output = health
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("status")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let health_json: serde_json::Value = serde_json::from_slice(&health_output).unwrap();
+    assert_eq!(health_json["team"].as_str(), Some("test-team"));
+    assert_eq!(health_json["lifecycle_state"].as_str(), Some("running"));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_status_human_output_is_single_block() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut health = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut health, &temp_dir, "test-team", true);
+    let health_output = health
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(health_output).unwrap();
+    assert_eq!(stdout.matches("Team:").count(), 1);
+    assert_eq!(stdout.matches("Lifecycle:").count(), 1);
+    assert_eq!(stdout.matches("Availability:").count(), 1);
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[cfg(unix)]
+fn install_fake_gh_cli(temp_dir: &TempDir) -> PathBuf {
+    let script = temp_dir.path().join("gh");
+    let body = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "gh version 2.0.0"
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "Logged in"
+  exit 0
+fi
+echo "unsupported gh args: $*" >&2
+exit 1
+"#;
+    fs::write(&script, body).unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_namespace_status_no_subcommand_returns_json_status() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", true);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["team"].as_str(), Some("test-team"));
+    assert!(json["configured"].is_boolean());
+    assert!(json["enabled"].is_boolean());
+    assert!(json["availability_state"].is_string());
+    assert!(json["actions"].is_array());
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_fails_with_actionable_guidance_when_plugin_unconfigured() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("run")
+        .arg("123")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("atm gh init"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_json_unavailable_emits_structured_error() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("run")
+        .arg("123")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "\"error_code\": \"PLUGIN_UNAVAILABLE\"",
+        ))
+        .stderr(predicates::str::contains("\"hint\":"))
+        .stderr(predicates::str::contains("atm gh init"))
+        .stderr(predicates::str::contains("Error:").not());
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_init_dry_run_does_not_write_config() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let gh_path = install_fake_gh_cli(&temp_dir);
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("PATH", path_env)
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("init")
+        .arg("--dry-run")
+        .arg("--repo")
+        .arg("acme/agent-team-mail")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["dry_run"].as_bool(), Some(true));
+    assert_eq!(json["notify_target"].as_str(), Some("team-lead"));
+
+    let workdir = temp_dir.path().join("workdir");
+    assert!(
+        !workdir.join(".atm.toml").exists(),
+        "dry-run must not write .atm.toml"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_init_writes_plugin_config() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let gh_path = install_fake_gh_cli(&temp_dir);
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("PATH", path_env)
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("init")
+        .arg("--repo")
+        .arg("acme/agent-team-mail")
+        .assert()
+        .success();
+
+    let workdir = temp_dir.path().join("workdir");
+    let cfg = fs::read_to_string(workdir.join(".atm.toml")).unwrap();
+    assert!(cfg.contains("[plugins.gh_monitor]"));
+    assert!(cfg.contains("enabled = true"));
+    assert!(cfg.contains("team = \"test-team\""));
+    assert!(cfg.contains("repo = \"agent-team-mail\""));
+    assert!(cfg.contains("notify_target = \"team-lead\""));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_status_surfaces_consistent_when_daemon_unreachable() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    let mut ns = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut ns, &temp_dir, "test-team", true);
+    let ns_out = ns
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ns_json: serde_json::Value = serde_json::from_slice(&ns_out).unwrap();
+
+    let mut status = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut status, &temp_dir, "test-team", true);
+    let status_out = status
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: serde_json::Value = serde_json::from_slice(&status_out).unwrap();
+
+    let mut monitor_status = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut monitor_status, &temp_dir, "test-team", true);
+    let monitor_out = monitor_status
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let monitor_json: serde_json::Value = serde_json::from_slice(&monitor_out).unwrap();
+
+    assert_eq!(
+        ns_json["availability_state"].as_str(),
+        status_json["availability_state"].as_str()
+    );
+    assert_eq!(
+        status_json["availability_state"].as_str(),
+        monitor_json["availability_state"].as_str()
+    );
+    assert_eq!(ns_json["message"].as_str(), status_json["message"].as_str());
+    assert_eq!(
+        status_json["message"].as_str(),
+        monitor_json["message"].as_str()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_status_json_has_stable_schema() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", true);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    for key in [
+        "team",
+        "configured",
+        "enabled",
+        "lifecycle_state",
+        "availability_state",
+        "in_flight",
+        "updated_at",
+        "actions",
+    ] {
+        assert!(json.get(key).is_some(), "missing key: {key}");
+    }
+    assert!(json["actions"].is_array());
 
     let _ = daemon.kill();
     let _ = daemon.wait();

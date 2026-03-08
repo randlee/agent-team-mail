@@ -252,10 +252,13 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
       - name: Install pytest (hook script tests)
-        if: matrix.os == 'ubuntu-latest'
-        run: python3 -m pip install --upgrade pip pytest
+        run: python -m pip install --upgrade pip pytest
 
       - name: Run hook script Python tests
-        if: matrix.os == 'ubuntu-latest'
-        run: python3 -m pytest tests/hook-scripts/ -q
+        run: python -m pytest tests/hook-scripts/ -q
