@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-team-mail"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-core"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-daemon"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-mcp"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-tui"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "sc-composer"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "thiserror 2.0.18",
 ]
