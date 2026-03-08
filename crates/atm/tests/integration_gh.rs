@@ -136,6 +136,10 @@ while running:
         if command == "gh-monitor":
             status_payload = {
                 "team": payload.get("team", "test-team"),
+                "configured": True,
+                "enabled": True,
+                "config_source": "repo",
+                "config_path": str(home / "workdir" / ".atm.toml"),
                 "target_kind": payload.get("target_kind", "workflow"),
                 "target": payload.get("target", "ci"),
                 "state": "tracking",
@@ -152,6 +156,10 @@ while running:
             else:
                 status_payload = {
                     "team": payload.get("team", "test-team"),
+                    "configured": True,
+                    "enabled": True,
+                    "config_source": "repo",
+                    "config_path": str(home / "workdir" / ".atm.toml"),
                     "target_kind": payload.get("target_kind", "workflow"),
                     "target": payload.get("target", "ci"),
                     "state": "tracking",
@@ -166,6 +174,10 @@ while running:
             if action == "stop":
                 health_payload = {
                     "team": payload.get("team", "test-team"),
+                    "configured": True,
+                    "enabled": True,
+                    "config_source": "repo",
+                    "config_path": str(home / "workdir" / ".atm.toml"),
                     "lifecycle_state": "stopped",
                     "availability_state": "healthy",
                     "in_flight": 0,
@@ -175,6 +187,10 @@ while running:
             elif action == "restart":
                 health_payload = {
                     "team": payload.get("team", "test-team"),
+                    "configured": True,
+                    "enabled": True,
+                    "config_source": "repo",
+                    "config_path": str(home / "workdir" / ".atm.toml"),
                     "lifecycle_state": "running",
                     "availability_state": "healthy",
                     "in_flight": 0,
@@ -184,6 +200,10 @@ while running:
             else:
                 health_payload = {
                     "team": payload.get("team", "test-team"),
+                    "configured": True,
+                    "enabled": True,
+                    "config_source": "repo",
+                    "config_path": str(home / "workdir" / ".atm.toml"),
                     "lifecycle_state": "running",
                     "availability_state": "healthy",
                     "in_flight": 0,
@@ -198,6 +218,10 @@ while running:
             else:
                 health_payload = {
                     "team": payload.get("team", "test-team"),
+                    "configured": True,
+                    "enabled": True,
+                    "config_source": "repo",
+                    "config_path": str(home / "workdir" / ".atm.toml"),
                     "lifecycle_state": "running",
                     "availability_state": "healthy",
                     "in_flight": 0,
@@ -546,4 +570,114 @@ fn test_gh_init_writes_plugin_config() {
     assert!(cfg.contains("team = \"test-team\""));
     assert!(cfg.contains("repo = \"agent-team-mail\""));
     assert!(cfg.contains("notify_target = \"team-lead\""));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_status_surfaces_consistent_when_daemon_unreachable() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    let mut ns = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut ns, &temp_dir, "test-team", true);
+    let ns_out = ns
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ns_json: serde_json::Value = serde_json::from_slice(&ns_out).unwrap();
+
+    let mut status = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut status, &temp_dir, "test-team", true);
+    let status_out = status
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: serde_json::Value = serde_json::from_slice(&status_out).unwrap();
+
+    let mut monitor_status = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut monitor_status, &temp_dir, "test-team", true);
+    let monitor_out = monitor_status
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let monitor_json: serde_json::Value = serde_json::from_slice(&monitor_out).unwrap();
+
+    assert_eq!(
+        ns_json["availability_state"].as_str(),
+        status_json["availability_state"].as_str()
+    );
+    assert_eq!(
+        status_json["availability_state"].as_str(),
+        monitor_json["availability_state"].as_str()
+    );
+    assert_eq!(ns_json["message"].as_str(), status_json["message"].as_str());
+    assert_eq!(
+        status_json["message"].as_str(),
+        monitor_json["message"].as_str()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_status_json_has_stable_schema() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", true);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    for key in [
+        "team",
+        "configured",
+        "enabled",
+        "lifecycle_state",
+        "availability_state",
+        "in_flight",
+        "updated_at",
+        "actions",
+    ] {
+        assert!(json.get(key).is_some(), "missing key: {key}");
+    }
+    assert!(json["actions"].is_array());
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }
