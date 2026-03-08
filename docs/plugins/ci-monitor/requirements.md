@@ -235,6 +235,58 @@ After a monitored PR run reaches terminal state:
   - `merge_state_status`
   - `run_conclusion`
 
+### GH-CI-FR-19 Daemon/CLI config discovery parity
+
+Daemon and CLI command paths must resolve plugin config from the same effective
+config chain for a given invocation context:
+- repo-local config (`.atm.toml`) when present for the active working scope
+- global config (`$ATM_HOME/.config/atm/config.toml`) fallback
+
+Daemon startup context and CLI invocation context must not diverge on plugin
+enablement due to path-discovery differences.
+
+### GH-CI-FR-20 Guided setup command (`atm gh init`)
+
+`atm gh init` must exist and provide deterministic guided setup:
+- validate prerequisites (`gh` availability, auth prerequisites)
+- write required plugin config keys to the correct config location
+- print exact next-step commands
+- support `--dry-run` preview mode
+
+### GH-CI-FR-21 Reload semantics apply updated config
+
+`atm gh monitor restart`/reload lifecycle actions must re-read and apply latest
+plugin configuration without requiring manual daemon process kill.
+
+If config cannot be reloaded, plugin must surface explicit reload failure state
+with actionable remediation.
+
+### GH-CI-FR-22 Live status source + JSON contract
+
+`atm gh status` and `atm gh monitor status` must source runtime state from live
+daemon state (not stale cache-only files), and both must support `--json` output
+with stable fields for:
+- configured/enabled
+- availability_state
+- plugin process metadata (when applicable)
+- effective config source/path metadata
+
+### GH-CI-FR-23 Reachability consistency
+
+All `atm gh` commands must share a single daemon reachability contract and
+produce consistent outcomes for the same daemon state.
+
+`status` must not report healthy while monitor actions simultaneously report
+"daemon unreachable" for the same target context.
+
+### GH-CI-FR-24 Disabled-state guidance and single status block
+
+When plugin is disabled/unconfigured:
+- output must include explicit reason and precise remediation (`atm gh init`
+  or exact config keys/path)
+- output must not contain duplicated status blocks
+- human output and JSON output must describe the same state
+
 ---
 
 ## 11. Config Discovery and Initialization

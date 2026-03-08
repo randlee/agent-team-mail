@@ -2290,6 +2290,15 @@ atm init <team> --skip-team
   MUST re-run `atm init <team>` to materialize updated hook scripts on disk.** The binary
   holds the authoritative script content; on-disk scripts from prior versions are stale
   until overwritten by `atm init`.
+- Runtime-aware install requirements:
+  - `atm init` MUST detect installed runtimes and install ATM lifecycle hook wiring
+    for each detected runtime automatically.
+  - Initial runtime set: Claude Code, Codex CLI, Gemini CLI.
+  - Runtime detection MUST be fail-open per runtime:
+    - If one runtime is not installed, `atm init` still succeeds for detected runtimes.
+    - If one runtime install step fails, the result must clearly report per-runtime
+      status without masking which runtime failed.
+  - Re-running `atm init` MUST be idempotent per runtime (no duplicate hooks/config entries).
 
 **Required test scenarios** (each must be independently tested):
 
@@ -2310,6 +2319,39 @@ atm init <team> --skip-team
 - Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` for project-local scripts and absolute per-user script paths for global installs; do not use `${CLAUDE_PLUGIN_ROOT}`.
 - `atm init` success output must include whether hooks were installed globally or locally.
 
+#### 4.9.3a Product Runtime Script Policy (Python-Only)
+
+Runtime scripts executed as part of ATM product behavior MUST be Python-based and
+cross-platform safe.
+
+Policy rules:
+- Product/runtime script execution paths MUST use Python (`python3`/`python`) and
+  repository-shipped `.py` scripts.
+- Shell runtime dependencies (`bash`, `sh`, `zsh`, `pwsh`, `.bat`) are prohibited
+  for product/runtime paths invoked by:
+  - installed hook commands,
+  - `atm init` generated configuration,
+  - runtime launcher/relay flows used by shipped ATM commands.
+- ATM product behavior MUST NOT require `bash`, `sh`, `zsh`, or `pwsh` for core
+  functionality.
+- Existing shell scripts may remain only as explicitly documented dev/CI-only
+  exceptions and must not be required for user runtime operation.
+- Any exception requiring shell for product behavior requires explicit
+  requirements approval and a documented cross-platform mitigation path.
+- Current approved dev/CI-only shell wrapper exceptions:
+  - `.claude/scripts/spawn-teammate.sh`
+  - `.claude/scripts/launch-worker.sh`
+  - `.claude/scripts/atm-hook-relay.sh`
+  These wrappers are test/developer tooling only, are not distributed runtime
+  dependencies, and are exempt from product runtime portability requirements.
+- Hook commands must invoke Python scripts directly; shell wrapper forms such as
+  `bash -c "python ..."` are not allowed in product hook wiring.
+
+Verification requirements:
+- Runtime script behavior must be covered by pytest in `tests/hook-scripts/`.
+- The pytest lane covering runtime scripts is required in CI for changes that
+  modify hook/launcher/relay runtime script paths.
+
 #### 4.9.4 Exit and Result Semantics
 
 - Exit `0` for `installed`, `updated`, and `already-configured`.
@@ -2317,6 +2359,57 @@ atm init <team> --skip-team
 - Exit `1` for malformed config, unsupported environment, or write/permission failures.
 - Idempotent no-op cases (`.atm.toml` exists, team exists, hooks already configured)
   are success states and must be explicitly reported in human output.
+
+#### 4.9.5 Runtime Detection + Auto-Install Contract
+
+`atm init` must detect supported runtimes and apply installation steps in a
+runtime-aware, idempotent manner.
+
+Supported runtimes:
+- Claude Code
+- Codex CLI
+- Gemini CLI
+
+Detection contract:
+- Runtime detection is true when either condition holds:
+  1. Runtime binary is reachable on PATH, or
+  2. Runtime config location exists.
+- Detection precedence and locations:
+  - Claude Code:
+    - project `.claude/settings.json`, then user `~/.claude/settings.json`
+    - binary check (if available in environment) is additive, not required
+  - Codex CLI:
+    - binary `codex` on PATH
+    - config `~/.codex/config.toml` (or equivalent configured home path)
+  - Gemini CLI:
+    - binary `gemini` on PATH
+    - config directory/file under `~/.gemini/`
+
+Install behavior:
+- `atm init` must report per-runtime outcome in human output (and JSON when
+  supported): `installed`, `updated`, `already-configured`, `skipped-not-detected`,
+  or `error`.
+- Runtimes that are not detected are skipped without failing the command.
+- Runtime install actions must be idempotent and must not create duplicate hook
+  entries on re-run.
+- Duplicate detection for hook commands must validate command content (ATM hook
+  relay invocation identity), not only hook key presence.
+- `--dry-run` mode must show per-runtime planned actions with no writes.
+
+Failure behavior:
+- A failure in one runtime install path must not abort installation/reporting for
+  other detected runtimes.
+- Final command result must summarize per-runtime outcomes and include actionable
+  remediation for each error entry.
+
+#### 4.9.5a Test and CI Coverage (Hook/Script Portability)
+
+- Python hook/script behavior required by `atm init` MUST be covered by pytest
+  tests under `tests/hook-scripts/`.
+- These pytest tests MUST run in CI as a required check.
+- Cross-runtime install behavior (Claude/Codex/Gemini detection + per-runtime
+  idempotency) MUST have deterministic tests and must not rely on interactive
+  shell state.
 
 ### 4.10 Install/Upgrade Daemon Freshness
 
@@ -2375,6 +2468,10 @@ Operator status UX contract:
   - currently available (`healthy` / `degraded` / `disabled_config_error` / `disabled_init_error`).
 - When not enabled, human output must clearly state that monitoring is disabled
   and include next-step guidance to enable/configure `[plugins.gh_monitor]`.
+- Disabled guidance must include both:
+  - the exact command to run: `atm gh init`
+  - the minimum config keys required (team/agent/repo/monitor recipients) and
+    the config file path where those keys are expected.
 - JSON output must expose the same status fields without lossy conversion.
 - When `gh_monitor` is disabled/unconfigured, only the following command paths
   are allowed:

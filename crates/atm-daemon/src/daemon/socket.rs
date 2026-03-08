@@ -7349,6 +7349,7 @@ exit 1
     #[cfg(unix)]
     async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_gh_monitor_config(temp.path(), "atm-dev");
         let status_a = GhMonitorStatus {
             team: "atm-dev".to_string(),

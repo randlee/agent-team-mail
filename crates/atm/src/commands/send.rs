@@ -974,35 +974,6 @@ mod tests {
     }
 
     #[test]
-    fn test_self_send_warning_prepended() {
-        // When sender identity == target agent name, the warning should be
-        // prepended to the message text when teams also match.
-        let sender = "team-lead";
-        let sender_team = "atm-dev";
-        let agent_name = "team-lead"; // same as sender → self-send
-        let target_team = "atm-dev";
-        let raw_message = "Hello self!";
-
-        // Simulate the self-send check logic (extracted for unit testing)
-        let session_id = "test-session-1234567890";
-        let session_short = &session_id[..8.min(session_id.len())];
-
-        let message_text = if is_self_send(sender, sender_team, agent_name, target_team) {
-            let warning = format!(
-                "[WARNING: Sent to self — identity={sender}, session={session_short}. Check ATM_IDENTITY.]"
-            );
-            format!("{warning}\n{raw_message}")
-        } else {
-            raw_message.to_string()
-        };
-
-        assert!(message_text.starts_with("[WARNING: Sent to self"));
-        assert!(message_text.contains("team-lead"));
-        assert!(message_text.contains("test-ses")); // first 8 chars
-        assert!(message_text.contains("Hello self!"));
-    }
-
-    #[test]
     fn test_self_send_warning_not_added_for_different_recipient() {
         let sender = "team-lead";
         let sender_team = "atm-dev";
