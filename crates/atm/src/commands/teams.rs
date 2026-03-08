@@ -25,12 +25,15 @@ use tracing::warn;
 
 use crate::commands::runtime_adapter::{RuntimeKind, SpawnSpec, adapter_for_runtime};
 use crate::util::settings::get_home_dir;
+use crate::util::state::{SeenState, get_last_seen, load_seen_state};
 
 /// Number of backups to retain per team. Older snapshots are pruned after
 /// each backup or auto-backup-on-resume. Increase if longer rollback windows
 /// are needed.
 const BACKUP_RETENTION_COUNT: usize = 5;
 const SPAWN_UNAUTHORIZED: &str = "SPAWN_UNAUTHORIZED";
+const DEFAULT_EXTERNAL_AGENT_STALE_DAYS: i64 = 7;
+const EXTERNAL_AGENT_STALE_DAYS_ENV: &str = "ATM_EXTERNAL_AGENT_STALE_DAYS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpawnPolicy {
@@ -1728,6 +1731,54 @@ fn cleanup_preview_output(team: &str, rows: &[CleanupPreviewRow]) -> String {
     output
 }
 
+fn parse_positive_days(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok().filter(|days| *days > 0)
+}
+
+fn external_agent_stale_days(team: &str, home_dir: &Path) -> i64 {
+    if let Some(days) = std::env::var(EXTERNAL_AGENT_STALE_DAYS_ENV)
+        .ok()
+        .and_then(|v| parse_positive_days(&v))
+    {
+        return days;
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        let overrides = ConfigOverrides {
+            team: Some(team.to_string()),
+            ..Default::default()
+        };
+        if let Ok(config) = resolve_config(&overrides, &current_dir, home_dir)
+            && let Some(plugin) = config.plugin_config("cleanup")
+        {
+            for key in ["external_staleness_days", "external_agent_stale_days"] {
+                if let Some(days) = plugin
+                    .get(key)
+                    .and_then(|value| value.as_integer())
+                    .filter(|days| *days > 0)
+                {
+                    return days;
+                }
+            }
+        }
+    }
+
+    DEFAULT_EXTERNAL_AGENT_STALE_DAYS
+}
+
+fn external_agent_missing_state_is_stale(
+    seen_state: &SeenState,
+    team: &str,
+    agent: &str,
+    now: DateTime<Utc>,
+    stale_after: chrono::Duration,
+) -> bool {
+    match get_last_seen(seen_state, team, agent) {
+        None => true,
+        Some(last_seen) => now.signed_duration_since(last_seen) >= stale_after,
+    }
+}
+
 /// Implement `atm teams cleanup <team> [agent]`
 ///
 /// Removes members whose daemon session record indicates the process is dead
@@ -1765,6 +1816,10 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
 
     // Check daemon reachability once before iterating members.
     let daemon_running = agent_team_mail_core::daemon_client::daemon_is_running();
+    let seen_state = load_seen_state().unwrap_or_default();
+    let external_stale_days = external_agent_stale_days(&args.team, &home_dir);
+    let external_stale_after = chrono::Duration::days(external_stale_days);
+    let now = Utc::now();
     let mut skipped_names: Vec<String> = Vec::new();
 
     for member in &members_to_check {
@@ -1809,63 +1864,78 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             // Force mode intentionally bypasses daemon liveness checks.
             (true, Some("forced-cleanup".to_string()))
         } else if is_external {
-            // External agent: use session_id for the liveness query if available.
-            let query_key = match &member.session_id {
-                Some(sid) => sid.clone(),
-                None => {
-                    // No session_id → cannot confirm liveness; keep the member.
-                    if args.dry_run {
-                        dry_run_rows.push(CleanupPreviewRow {
-                            agent: member.name.clone(),
-                            action: CleanupActionKind::Skip,
-                            reason: "external-agent-no-state".to_string(),
-                        });
-                    }
-                    warn!(
-                        "Warning: external agent '{}' has no session_id, skipping (unknown liveness)",
-                        member.name
-                    );
-                    skipped_names.push(member.name.clone());
-                    continue;
-                }
-            };
+            let stale_without_daemon_state = external_agent_missing_state_is_stale(
+                &seen_state,
+                &args.team,
+                &member.name,
+                now,
+                external_stale_after,
+            );
 
-            match agent_team_mail_core::daemon_client::query_session(&query_key) {
-                Ok(Some(ref info)) if !info.alive => {
-                    // Daemon explicitly reports the session as dead → safe to remove.
-                    (true, Some("daemon-session-dead".to_string()))
-                }
-                Ok(_) => {
-                    // Daemon unreachable, session alive, or no record → keep the agent.
-                    if args.dry_run {
-                        dry_run_rows.push(CleanupPreviewRow {
-                            agent: member.name.clone(),
-                            action: CleanupActionKind::Skip,
-                            reason: "external-agent-liveness-unknown".to_string(),
-                        });
+            // External agent: use session_id for daemon liveness query when available.
+            // If daemon has no record, fall back to state.json last_seen staleness:
+            // absent or stale heartbeat is cleanup-eligible; recent heartbeat is retained.
+            match member.session_id.as_deref() {
+                Some(query_key) => {
+                    match agent_team_mail_core::daemon_client::query_session(query_key) {
+                        Ok(Some(ref info)) if !info.alive => {
+                            (true, Some("daemon-session-dead".to_string()))
+                        }
+                        Ok(Some(_)) => (false, None),
+                        Ok(None) => {
+                            if stale_without_daemon_state {
+                                (true, Some("daemon-no-session-record".to_string()))
+                            } else {
+                                if args.dry_run {
+                                    dry_run_rows.push(CleanupPreviewRow {
+                                        agent: member.name.clone(),
+                                        action: CleanupActionKind::Skip,
+                                        reason: "external-agent-no-state".to_string(),
+                                    });
+                                }
+                                warn!(
+                                    "Warning: external agent '{}' has no daemon state record and recent heartbeat (<{}d), skipping",
+                                    member.name, external_stale_days
+                                );
+                                skipped_names.push(member.name.clone());
+                                continue;
+                            }
+                        }
+                        Err(_) => {
+                            if args.dry_run {
+                                dry_run_rows.push(CleanupPreviewRow {
+                                    agent: member.name.clone(),
+                                    action: CleanupActionKind::Skip,
+                                    reason: "external-agent-daemon-query-error".to_string(),
+                                });
+                            }
+                            warn!(
+                                "Warning: daemon query error for external agent '{}', skipping",
+                                member.name
+                            );
+                            skipped_names.push(member.name.clone());
+                            continue;
+                        }
                     }
-                    warn!(
-                        "Warning: external agent '{}' liveness unknown, skipping — use --force to override",
-                        member.name
-                    );
-                    skipped_names.push(member.name.clone());
-                    continue;
                 }
-                Err(_) => {
-                    // I/O error → keep the agent to be safe.
-                    if args.dry_run {
-                        dry_run_rows.push(CleanupPreviewRow {
-                            agent: member.name.clone(),
-                            action: CleanupActionKind::Skip,
-                            reason: "external-agent-daemon-query-error".to_string(),
-                        });
+                None => {
+                    if stale_without_daemon_state {
+                        (true, Some("daemon-no-session-record".to_string()))
+                    } else {
+                        if args.dry_run {
+                            dry_run_rows.push(CleanupPreviewRow {
+                                agent: member.name.clone(),
+                                action: CleanupActionKind::Skip,
+                                reason: "external-agent-no-state".to_string(),
+                            });
+                        }
+                        warn!(
+                            "Warning: external agent '{}' has no session_id and recent heartbeat (<{}d), skipping",
+                            member.name, external_stale_days
+                        );
+                        skipped_names.push(member.name.clone());
+                        continue;
                     }
-                    warn!(
-                        "Warning: daemon query error for external agent '{}', skipping",
-                        member.name
-                    );
-                    skipped_names.push(member.name.clone());
-                    continue;
                 }
             }
         } else {
@@ -2164,6 +2234,16 @@ pub(crate) fn cleanup_single_agent(team: String, agent: String, force: bool) -> 
         team,
         agent: Some(agent),
         dry_run: false,
+        force,
+    })
+}
+
+/// Dry-run entry point for `atm cleanup --agent` compatibility.
+pub(crate) fn cleanup_single_agent_dry_run(team: String, agent: String, force: bool) -> Result<()> {
+    cleanup(CleanupArgs {
+        team,
+        agent: Some(agent),
+        dry_run: true,
         force,
     })
 }
@@ -2649,6 +2729,20 @@ mod tests {
         team_dir
     }
 
+    fn write_last_seen(temp_dir: &TempDir, team: &str, agent: &str, timestamp: DateTime<Utc>) {
+        let state_dir = temp_dir.path().join(".config/atm");
+        fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("state.json");
+        let payload = serde_json::json!({
+            "last_seen": {
+                team: {
+                    agent: timestamp.to_rfc3339(),
+                }
+            }
+        });
+        fs::write(state_path, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+    }
+
     #[cfg(unix)]
     fn spawn_mock_session_query_team_server(
         home: &std::path::Path,
@@ -3050,8 +3144,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_cleanup_does_not_remove_external_agent_without_state() {
-        // External members without session_id must be kept (unknown liveness).
+    fn test_cleanup_removes_external_agent_without_state_when_last_seen_missing() {
+        // External member has no daemon state and no heartbeat in state.json:
+        // this is stale by default policy (7d) and cleanup-eligible.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
@@ -3086,6 +3181,64 @@ mod tests {
         };
 
         let result = cleanup(args);
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+        assert!(!inbox.exists(), "external agent inbox should be removed");
+        let reloaded: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            !reloaded.members.iter().any(|m| m.name == "publisher"),
+            "external stale member must be removed from roster"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cleanup_keeps_external_agent_without_state_when_last_seen_recent() {
+        // External member has no daemon state but a recent heartbeat in state.json:
+        // keep member and report incomplete cleanup (unknown liveness).
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        write_last_seen(&temp_dir, "atm-dev", "publisher", Utc::now());
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = None;
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            dry_run: false,
+            force: false,
+        };
+        let result = cleanup(args);
         assert!(result.is_err(), "cleanup should report incomplete state");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -3093,12 +3246,12 @@ mod tests {
             "error should indicate incomplete cleanup: {err}"
         );
 
-        assert!(inbox.exists(), "external agent inbox should remain");
+        assert!(inbox.exists(), "recent external agent inbox should remain");
         let reloaded: TeamConfig =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert!(
             reloaded.members.iter().any(|m| m.name == "publisher"),
-            "external member must remain in roster"
+            "recent external member must remain in roster"
         );
 
         // SAFETY: test-only cleanup
