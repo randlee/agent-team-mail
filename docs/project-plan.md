@@ -1893,9 +1893,9 @@ script behavior on Python across macOS/Linux/Windows.
 |--------|------|----|--------|--------|--------|
 | AD.1 | Python Runtime Policy + atm init Auto-Install | — | `feature/pAD-s1-python-policy` | #500, #506 | PLANNED |
 | AD.2 | Runtime Config Discovery Parity | — | `feature/pAD-s2-config-parity` | #499 | PLANNED |
-| AD.3 | GH Monitor Status Hardening | — | `feature/pAD-s3-gh-status-hardening` | #503, #504, #505 | PLANNED |
-| AD.4 | Live State + Config Reload | — | `feature/pAD-s4-live-state` | #502, #506 | PLANNED |
-| AD.5 | Script Conversion + atm init Auto-Install | — | `feature/pAD-s5-script-conversion` | #500, #472, #473, #474 | PLANNED |
+| AD.3 | GH Monitor Status Hardening | — | `feature/pAD-s3-gh-status-hardening` | #504, #507 | PLANNED |
+| AD.4 | Live State + Config Reload | — | `feature/pAD-s4-live-state` | #502, #503, #505 | PLANNED |
+| AD.5 | Script Conversion + atm init Auto-Install | — | `feature/pAD-s5-script-conversion` | TBD | PLANNED |
 | AD.6 | Bash Wrapper Removal | — | `feature/pAD-s6-bash-removal` | — | CANDIDATE |
 
 ---
