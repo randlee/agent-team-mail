@@ -1576,17 +1576,31 @@ Lifecycle event semantics:
 - `teammate_idle`: compatibility idle signal and must remain supported as an
   idle transition event.
 
-### 4.3.3 Tmux Sentinel Injection (Issue #45)
+#### Transient Registration Contract (Task-Tool Agents)
 
-When notifying tmux-based teammates about unread inbox messages, daemon nudges
-MUST inject a structured sentinel line (not the message payload itself):
+Task-tool/background agents that are not explicit team members are transient and
+must not pollute persistent ATM roster/session state.
 
-- Format: `[agent-team-msg:<tier>] unread=<count>`
-- Tier vocabulary: `info`, `urgent`, `blocked` (default: `urgent`)
-- Sentinel delivery MUST only occur for eligible idle-transition nudges
-  (idle-only + cooldown + watermark controls)
-- Actual message content remains mailbox-backed (`atm read`), and MUST NOT be
-  duplicated into tmux nudge payloads.
+Required behavior:
+- Team-scoped lifecycle signals (`agent-turn-complete`, `session-start`,
+  `session-end`) must be treated as **non-persistent** when `agent` is not
+  present in `config.json` for that team.
+- For non-members, daemon hook processors must ignore lifecycle updates without:
+  - creating `session_registry` rows,
+  - creating tracked state rows that surface as persistent team members, or
+  - mutating team roster/config files.
+- Existing team members must keep current behavior (state/session updates still
+  converge as before).
+- `send`/`read` operations by identities not in roster must remain fail-open for
+  messaging, but must not auto-add roster members as a side effect.
+
+Acceptance criteria:
+- Transient task-tool agents do not appear as persistent members in
+  `atm members`, `atm status`, or `atm doctor`.
+- Session/state updates for valid team members remain deterministic and
+  unchanged.
+- Regression tests cover transient non-member lifecycle events and
+  member-vs-non-member branching.
 
 #### Hook Artifact Parity and Install-Path Contract
 

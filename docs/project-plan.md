@@ -1441,7 +1441,12 @@ the current tranche focused on onboarding contract closure.
 | | AC.8 | Init Install Matrix QA Blocker Closure | COMPLETE | [#487](https://github.com/randlee/agent-team-mail/pull/487) |
 | | AC.9 | Multi-Team Recovery Determinism | COMPLETE | [#488](https://github.com/randlee/agent-team-mail/pull/488) |
 | | AC.10 | Final AC Verification + Release Readiness | COMPLETE | [#489](https://github.com/randlee/agent-team-mail/pull/489) |
-| Phase AE | AE.1 | Config Discovery + `atm gh init` Baseline | COMPLETE | [#518](https://github.com/randlee/agent-team-mail/pull/518) |
+| **AD** | AD.1 | Python Runtime Policy + atm init Auto-Install | COMPLETE | [#513](https://github.com/randlee/agent-team-mail/pull/513) |
+| | AD.2 | Runtime Config Discovery Parity | COMPLETE | [#514](https://github.com/randlee/agent-team-mail/pull/514) |
+| | AD.3 | GH Monitor Status Hardening | COMPLETE | [#515](https://github.com/randlee/agent-team-mail/pull/515) |
+| | AD.4 | Live State + Config Reload | COMPLETE | [#516](https://github.com/randlee/agent-team-mail/pull/516) |
+| | AD.5 | Script Conversion + atm init Auto-Install | COMPLETE | [#517](https://github.com/randlee/agent-team-mail/pull/517) |
+| **AE** | AE.1 | Config Discovery + `atm gh init` Baseline | COMPLETE | [#518](https://github.com/randlee/agent-team-mail/pull/518) |
 | | AE.2 | Live Status + JSON + Output Consistency | COMPLETE | [#519](https://github.com/randlee/agent-team-mail/pull/519) |
 | | AE.3 | Monitor Reload Semantics | COMPLETE | [#521](https://github.com/randlee/agent-team-mail/pull/521) |
 | | AE.4 | Daemon Logging/Autostart/Plugin Isolation | COMPLETE | [#522](https://github.com/randlee/agent-team-mail/pull/522) |
@@ -1453,7 +1458,7 @@ the current tranche focused on onboarding contract closure.
 | | AF.5 | Reliability Regression + Documentation Closure | COMPLETE | [#529](https://github.com/randlee/agent-team-mail/pull/529) |
 
 **Completed**: 128+ sprints across 28 phases (CI green)
-**Current version**: v0.39.0
+**Current version**: v0.41.0
 **Current phase**: Phase AF (COMPLETE)
 **Next planned phase**: Phase AG (TBD)
 
