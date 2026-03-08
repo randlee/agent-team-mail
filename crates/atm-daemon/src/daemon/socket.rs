@@ -6021,6 +6021,33 @@ poll_interval_secs = 1
             writer.flush().unwrap();
             file.sync_all().unwrap();
         }
+        // Spin-wait until the updated externalBackendType is readable — macOS APFS VFS
+        // page cache may return stale content immediately after write+sync.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            let visible = std::fs::read_to_string(&cfg_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    v["members"]
+                        .as_array()
+                        .and_then(|arr| {
+                            arr.iter().find(|m| m["name"].as_str() == Some(member_name))
+                        })
+                        .and_then(|m| m["externalBackendType"].as_str().map(str::to_string))
+                })
+                .is_some_and(|t| t == backend);
+            if visible {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "set_member_backend: externalBackendType='{}' not readable after 500ms: {}",
+                backend,
+                cfg_path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     fn test_member(name: &str, backend: &str) -> agent_team_mail_core::schema::AgentMember {
