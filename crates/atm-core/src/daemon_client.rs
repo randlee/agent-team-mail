@@ -760,6 +760,10 @@ pub struct GhMonitorHealth {
     pub team: String,
     pub lifecycle_state: String,
     pub availability_state: String,
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(default)]
+    pub enabled: bool,
     pub in_flight: u64,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -777,6 +781,10 @@ pub struct GhMonitorStatus {
     pub target_kind: GhMonitorTargetKind,
     pub target: String,
     pub state: String,
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
