@@ -1461,6 +1461,9 @@ the current tranche focused on onboarding contract closure.
 **Current version**: v0.41.0
 **Current phase**: Phase AF (COMPLETE)
 **Next planned phase**: Phase AG (TBD)
+**Phase AG canonical docs**:
+- Requirements: `docs/sc-composer/requirements.md`
+- Design/architecture: `docs/sc-composer/architecture.md`
 
 ---
 

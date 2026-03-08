@@ -4,6 +4,8 @@
 **Target version:** v0.42.0
 **Integration branch:** `integrate/phase-AG`
 **Based on:** Phase AF (`integrate/phase-AF` → develop)
+**Canonical docs:** `docs/sc-composer/requirements.md` (requirements) |
+`docs/sc-composer/architecture.md` (design)
 
 ---
 
@@ -12,6 +14,9 @@
 Deliver a working `sc-composer` library and `sc-compose` CLI published to
 crates.io as v0.42.0. External projects (scmux, others) consume from crates.io
 — no path dependencies.
+
+This plan is an execution plan; detailed product semantics must be sourced from
+the dedicated sc-composer requirements/architecture docs above.
 
 The library skeleton is already in the workspace (v0.41.0) but `compose()` and
 `validate()` return `NotImplemented`. This phase makes them real.

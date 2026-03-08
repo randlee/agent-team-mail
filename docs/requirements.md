@@ -701,6 +701,16 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 `atm teams spawn` must provide a first-class CLI path equivalent to the current
 `scripts/spawn-teammate.sh` behavior for Claude teammates.
 
+`atm` spawn requirements in this section define ATM integration behavior only.
+Template composition engine behavior (resolver order, frontmatter semantics,
+include expansion, diagnostics, CLI command contracts) is specified in:
+- `docs/sc-composer/requirements.md` (normative requirements)
+- `docs/sc-composer/architecture.md` (normative design)
+
+When ATM consumes `sc-composer`, ATM must not redefine or fork those semantics
+in `docs/requirements.md`; ATM requirements here are limited to call-site
+contracts (inputs passed to composer, error propagation, and spawn fallback UX).
+
 Required baseline behavior:
 - Resolve agent runtime metadata from `.claude/agents/<agent>.md` frontmatter
   (at minimum `model`, `color`; prompt body used for initial instruction delivery).
