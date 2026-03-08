@@ -34,6 +34,7 @@ fn main() {
     let cli = Cli::parse();
 
     if let Err(e) = cli.execute() {
+        let rendered = e.to_string();
         emit_event_best_effort(EventFields {
             level: "error",
             source: "atm",
@@ -41,10 +42,14 @@ fn main() {
             team: std::env::var("ATM_TEAM").ok(),
             session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
             result: Some("error".to_string()),
-            error: Some(e.to_string()),
+            error: Some(rendered.clone()),
             ..Default::default()
         });
-        eprintln!("Error: {e}");
+        if serde_json::from_str::<serde_json::Value>(&rendered).is_ok() {
+            eprintln!("{rendered}");
+        } else {
+            eprintln!("Error: {rendered}");
+        }
         std::process::exit(1);
     }
 }
