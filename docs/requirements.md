@@ -2273,6 +2273,15 @@ atm init <team> --skip-team
   MUST re-run `atm init <team>` to materialize updated hook scripts on disk.** The binary
   holds the authoritative script content; on-disk scripts from prior versions are stale
   until overwritten by `atm init`.
+- Runtime-aware install requirements:
+  - `atm init` MUST detect installed runtimes and install ATM lifecycle hook wiring
+    for each detected runtime automatically.
+  - Initial runtime set: Claude Code, Codex CLI, Gemini CLI.
+  - Runtime detection MUST be fail-open per runtime:
+    - If one runtime is not installed, `atm init` still succeeds for detected runtimes.
+    - If one runtime install step fails, the result must clearly report per-runtime
+      status without masking which runtime failed.
+  - Re-running `atm init` MUST be idempotent per runtime (no duplicate hooks/config entries).
 
 **Required test scenarios** (each must be independently tested):
 
@@ -2306,8 +2315,12 @@ Policy rules:
   - installed hook commands,
   - `atm init` generated configuration,
   - runtime launcher/relay flows used by shipped ATM commands.
+- ATM product behavior MUST NOT require `bash`, `sh`, `zsh`, or `pwsh` for core
+  functionality.
 - Existing shell scripts may remain only as explicitly documented dev/CI-only
   exceptions and must not be required for user runtime operation.
+- Any exception requiring shell for product behavior requires explicit
+  requirements approval and a documented cross-platform mitigation path.
 - Current approved dev/CI-only shell wrapper exceptions:
   - `.claude/scripts/spawn-teammate.sh`
   - `.claude/scripts/launch-worker.sh`
@@ -2371,6 +2384,15 @@ Failure behavior:
   other detected runtimes.
 - Final command result must summarize per-runtime outcomes and include actionable
   remediation for each error entry.
+
+#### 4.9.5a Test and CI Coverage (Hook/Script Portability)
+
+- Python hook/script behavior required by `atm init` MUST be covered by pytest
+  tests under `tests/hook-scripts/`.
+- These pytest tests MUST run in CI as a required check.
+- Cross-runtime install behavior (Claude/Codex/Gemini detection + per-runtime
+  idempotency) MUST have deterministic tests and must not rely on interactive
+  shell state.
 
 ### 4.10 Install/Upgrade Daemon Freshness
 
