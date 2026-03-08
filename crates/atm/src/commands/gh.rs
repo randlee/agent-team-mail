@@ -175,6 +175,24 @@ struct GhInitPreview {
     next_steps: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct GhNamespaceStatus {
+    team: String,
+    configured: bool,
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_path: Option<String>,
+    lifecycle_state: String,
+    availability_state: String,
+    in_flight: u64,
+    updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    actions: Vec<&'static str>,
+}
+
 pub fn execute(args: GhArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -222,6 +240,11 @@ pub fn execute(args: GhArgs) -> Result<()> {
             print_target_status(&status, args.json)
         }
         Some(GhCommand::Monitor(monitor)) => {
+            if let MonitorTarget::Status(_status) = &monitor.target {
+                let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
+                return print_namespace_status(&health, args.json);
+            }
+
             enforce_plugin_ready(&plugin_state)?;
             agent_team_mail_core::daemon_client::ensure_daemon_running()
                 .context("failed to auto-start daemon for atm gh monitor command")?;
@@ -306,15 +329,7 @@ pub fn execute(args: GhArgs) -> Result<()> {
                         )
                     })?)
                 }
-                MonitorTarget::Status(_status) => GhOutput::MonitorHealth(
-                    gh_monitor_health_with_context(
-                        team,
-                        Some(current_dir.to_string_lossy().to_string()),
-                    )?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("daemon is not reachable for atm gh monitor status command")
-                    })?,
-                ),
+                MonitorTarget::Status(_status) => unreachable!("handled above"),
             };
 
             match output {
@@ -505,40 +520,52 @@ fn print_target_status(status: &GhMonitorStatus, json: bool) -> Result<()> {
 }
 
 fn print_namespace_status(health: &GhMonitorHealth, json: bool) -> Result<()> {
+    let status = namespace_status_view(health);
     if json {
-        let actions = namespace_actions(health.enabled && health.configured);
-        let mut value = serde_json::to_value(health)?;
-        if let Some(map) = value.as_object_mut() {
-            map.insert("actions".to_string(), serde_json::to_value(actions)?);
-        }
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        println!("{}", serde_json::to_string_pretty(&status)?);
         return Ok(());
     }
 
     println!("GitHub Monitor Namespace: atm gh");
-    println!("Team:              {}", health.team);
-    println!("Configured:        {}", yes_no(health.configured));
-    println!("Enabled:           {}", yes_no(health.enabled));
-    if let Some(source) = health.config_source.as_deref() {
+    println!("Team:              {}", status.team);
+    println!("Configured:        {}", yes_no(status.configured));
+    println!("Enabled:           {}", yes_no(status.enabled));
+    if let Some(source) = status.config_source.as_deref() {
         println!("Config Source:     {source}");
     }
-    if let Some(path) = health.config_path.as_deref() {
+    if let Some(path) = status.config_path.as_deref() {
         println!("Config Path:       {path}");
     }
-    println!("Lifecycle:         {}", health.lifecycle_state);
-    println!("Availability:      {}", health.availability_state);
-    println!("In Flight:         {}", health.in_flight);
-    if let Some(message) = health.message.as_deref() {
+    println!("Lifecycle:         {}", status.lifecycle_state);
+    println!("Availability:      {}", status.availability_state);
+    println!("In Flight:         {}", status.in_flight);
+    if let Some(message) = status.message.as_deref() {
         println!("Message:           {message}");
     }
-    println!("Updated At:        {}", health.updated_at);
+    println!("Updated At:        {}", status.updated_at);
     println!();
     println!("Available actions:");
-    for action in namespace_actions(health.enabled && health.configured) {
+    for action in status.actions {
         println!("  - {action}");
     }
 
     Ok(())
+}
+
+fn namespace_status_view(health: &GhMonitorHealth) -> GhNamespaceStatus {
+    GhNamespaceStatus {
+        team: health.team.clone(),
+        configured: health.configured,
+        enabled: health.enabled,
+        config_source: health.config_source.clone(),
+        config_path: health.config_path.clone(),
+        lifecycle_state: health.lifecycle_state.clone(),
+        availability_state: health.availability_state.clone(),
+        in_flight: health.in_flight,
+        updated_at: health.updated_at.clone(),
+        message: health.message.clone(),
+        actions: namespace_actions(health.enabled && health.configured),
+    }
 }
 
 fn namespace_actions(enabled: bool) -> Vec<&'static str> {
