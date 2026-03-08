@@ -17,7 +17,7 @@ verifiable tests across:
 | AF.2 | [#526](https://github.com/randlee/agent-team-mail/pull/526) | `feature/pAF-s2-spawn-auth-preview` | COMPLETE |
 | AF.3 | [#527](https://github.com/randlee/agent-team-mail/pull/527) | `feature/pAF-s3-transient-registration` | COMPLETE |
 | AF.4 | [#528](https://github.com/randlee/agent-team-mail/pull/528) | `feature/pAF-s4-cleanup-sentinel` | COMPLETE |
-| AF.5 | Pending (AF.5 PR not yet created at commit time) | `feature/pAF-s5-reliability-closeout` | COMPLETE |
+| AF.5 | [#529](https://github.com/randlee/agent-team-mail/pull/529) | `feature/pAF-s5-reliability-closeout` | COMPLETE |
 
 ## Issue Coverage Matrix
 

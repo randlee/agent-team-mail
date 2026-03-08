@@ -2,7 +2,7 @@
 
 **Version**: 0.6
 **Date**: 2026-03-05
-**Status**: Phase AA complete (v0.36.0 released, PR #459 merged).
+**Status**: Phase AF complete (v0.41.0, integration PR #530 pending).
 
 ---
 
@@ -168,6 +168,9 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AA | Session Correctness + Spawn Authorization + Reliability UX | Session-end correctness, spawn authorization, cleanup/help reliability hardening | COMPLETE |
 | AB | GitHub CI Monitor Command + Availability Hardening | Complete `atm gh` plugin requirements and deliver monitor/state/reporting contracts | COMPLETE |
 | AC | Daemon Status Convergence + Hook Install Confidence | Finalize daemon status/lifecycle consistency and pre-release hook install confidence for local/global paths | COMPLETE |
+| AD | Cross-Platform Script Standardization | Python-first script conversion and runtime policy hardening across ATM tooling | COMPLETE |
+| AE | GH Monitor Reliability + Daemon Logging | Stabilize gh-monitor status/lifecycle contracts and daemon observability behavior | COMPLETE |
+| AF | External Agent Lifecycle Hardening | Close lifecycle, cleanup, transient registration, and reliability/documentation hardening | COMPLETE |
 
 ---
 
@@ -1447,7 +1450,7 @@ the current tranche focused on onboarding contract closure.
 | | AF.2 | Spawn Authorization + Preview UX | COMPLETE | [#526](https://github.com/randlee/agent-team-mail/pull/526) |
 | | AF.3 | Transient Agent Registration Controls | COMPLETE | [#527](https://github.com/randlee/agent-team-mail/pull/527) |
 | | AF.4 | Cleanup Preview + tmux Sentinel | COMPLETE | [#528](https://github.com/randlee/agent-team-mail/pull/528) |
-| | AF.5 | Reliability Regression + Documentation Closure | COMPLETE | `feature/pAF-s5-reliability-closeout` (PR pending) |
+| | AF.5 | Reliability Regression + Documentation Closure | COMPLETE | [#529](https://github.com/randlee/agent-team-mail/pull/529) |
 
 **Completed**: 128+ sprints across 28 phases (CI green)
 **Current version**: v0.39.0
@@ -1938,6 +1941,7 @@ script behavior on Python across macOS/Linux/Windows.
 | Phase AB | `integrate/phase-AB` | [#469](https://github.com/randlee/agent-team-mail/pull/469) Pending merge |
 | Phase AD | `integrate/phase-AD` → [#520](https://github.com/randlee/agent-team-mail/pull/520) | Merged |
 | Phase AE | `integrate/phase-AE` → [#525](https://github.com/randlee/agent-team-mail/pull/525) | Merged |
+| Phase AF | `integrate/phase-AF` → [#530](https://github.com/randlee/agent-team-mail/pull/530) | Pending merge |
 
 ---
 
@@ -2031,9 +2035,9 @@ gaps before transitioning to post-AF phase work.
 |---|---|---|---|---|---|
 | AF.1 | Lifecycle Correctness (Session + PID Liveness) | [#524](https://github.com/randlee/agent-team-mail/pull/524) | `feature/pAF-s1-lifecycle-correctness` | #448, #449 | COMPLETE |
 | AF.2 | Spawn Authorization + Preview UX | [#526](https://github.com/randlee/agent-team-mail/pull/526) | `feature/pAF-s2-spawn-auth-preview` | #394, #456 | COMPLETE |
-| AF.3 | Transient Agent Registration Controls | [#527](https://github.com/randlee/agent-team-mail/pull/527) *(pending)* | `feature/pAF-s3-transient-registration` | #393 | COMPLETE |
-| AF.4 | Cleanup Preview + tmux Sentinel | [#528](https://github.com/randlee/agent-team-mail/pull/528) *(pending)* | `feature/pAF-s4-cleanup-sentinel` | #373, #45 | COMPLETE |
-| AF.5 | Reliability Regression + Documentation Closure | [#529](https://github.com/randlee/agent-team-mail/pull/529) *(pending)* | `feature/pAF-s5-reliability-closeout` | #448, #449, #393, #394, #456, #373, #45 | COMPLETE |
+| AF.3 | Transient Agent Registration Controls | [#527](https://github.com/randlee/agent-team-mail/pull/527) | `feature/pAF-s3-transient-registration` | #393 | COMPLETE |
+| AF.4 | Cleanup Preview + tmux Sentinel | [#528](https://github.com/randlee/agent-team-mail/pull/528) | `feature/pAF-s4-cleanup-sentinel` | #373, #45 | COMPLETE |
+| AF.5 | Reliability Regression + Documentation Closure | [#529](https://github.com/randlee/agent-team-mail/pull/529) | `feature/pAF-s5-reliability-closeout` | #448, #449, #393, #394, #456, #373, #45 | COMPLETE |
 
 ## 24. Scrum Master Agent Prompt
 
