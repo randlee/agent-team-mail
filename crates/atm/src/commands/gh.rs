@@ -28,7 +28,7 @@ pub struct GhArgs {
     team: Option<String>,
 
     /// Output as JSON
-    #[arg(long)]
+    #[arg(long, global = true)]
     json: bool,
 
     #[command(subcommand)]
