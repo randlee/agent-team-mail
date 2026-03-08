@@ -113,7 +113,7 @@ fn test_teams_cleanup_dry_run_preview_table_and_no_mutation() {
 }
 
 #[test]
-fn test_teams_cleanup_dry_run_empty_uses_exact_noop_message() {
+fn test_teams_cleanup_dry_run_includes_team_lead_protected_row_for_full_team() {
     let temp_dir = TempDir::new().unwrap();
     write_team_config(&temp_dir, "atm-dev", false);
 
@@ -125,11 +125,11 @@ fn test_teams_cleanup_dry_run_empty_uses_exact_noop_message() {
         .success();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("Nothing to clean up for team atm-dev."));
-    assert!(
-        !stdout.contains("Agent  Action"),
-        "no table header for empty dry-run"
-    );
+    assert!(stdout.contains("Cleanup preview for team atm-dev:"));
+    assert!(stdout.contains("team-lead"));
+    assert!(stdout.contains("skip"));
+    assert!(stdout.contains("team-lead-protected"));
+    assert!(!stdout.contains("Nothing to clean up for team atm-dev."));
 }
 
 #[test]
@@ -218,7 +218,7 @@ fn test_teams_cleanup_dry_run_lists_skipped_external_agent_without_session_id() 
     assert!(stdout.contains("Cleanup preview for team atm-dev:"));
     assert!(stdout.contains("publisher"));
     assert!(stdout.contains("skip"));
-    assert!(stdout.contains("external-agent-no-state"));
+    assert!(stdout.contains("external-agent-liveness-unknown"));
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn test_teams_cleanup_dry_run_totals_match_actual_cleanup_force() {
     assert!(dry_stdout.contains("roster-remove: 1"));
     assert!(dry_stdout.contains("mailbox-delete: 1"));
     assert!(dry_stdout.contains("session-prune: 1"));
-    assert!(dry_stdout.contains("skip: 0"));
+    assert!(dry_stdout.contains("skip: 1"));
 
     // Actual cleanup should remove that same member + inbox artifact.
     let mut apply = cargo::cargo_bin_cmd!("atm");

@@ -663,8 +663,12 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 - Absence of a daemon state record is NOT equivalent to staleness for external
   agents; these agents do not fire Claude Code lifecycle hooks and may be active
   without a session_registry entry.
-- When an external agent is skipped due to this guard, `--dry-run` output MUST
-  include a row noting the member was retained with reason `external-agent-no-state`.
+- When an external agent has no `session_id` but a recent heartbeat (younger
+  than staleness threshold), `--dry-run` output MUST include a retained row with
+  reason `external-agent-liveness-unknown`.
+- When an external agent has session metadata but no daemon state record and is
+  retained by the guard, `--dry-run` output MUST include reason
+  `external-agent-no-state`.
 
 **Command expectations**:
 - `atm cleanup --agent <name>`: non-destructive for active agents; applies teardown cleanup
@@ -739,20 +743,10 @@ Non-goal:
 
 ### 4.3.2b External Agent Cleanup Guard
 
-`atm teams cleanup` MUST NOT remove members with `external_backend_type` set (Codex, Gemini,
-or external agents) unless daemon explicitly confirms the session is dead.
-
-Required behavior:
-- If the member has **no `session_id`**: cleanup must skip the member with a warning indicating
-  liveness is unknown; the member is kept.
-- If the member has a `session_id`: cleanup queries daemon; only removes if daemon reports
-  `alive == false`.
-- If daemon is unreachable and no `--force` flag: external agent is skipped with warning.
-- `--force` bypasses liveness checks and removes unconditionally.
-- `--dry-run` must list skipped external agents with reason.
-
-Rationale: External agents (Codex, Gemini) do not fire Claude Code lifecycle hooks; the daemon
-may have no session record for them even when they are actively running.
+Canonical behavior for external-agent cleanup is defined in the
+**External-agent cleanup guard (REQUIRED)** section above (staleness-based
+guard with stable reason codes). This section is a reference anchor only and
+must not introduce alternate semantics.
 
 ### 4.3.2c `atm spawn` — Interactive Review-Panel Mode
 
