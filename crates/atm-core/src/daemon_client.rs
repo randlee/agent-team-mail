@@ -1769,6 +1769,39 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// RAII guard that sets an environment variable for the duration of a test
+    /// and restores the previous value (or removes the variable) on drop.
+    ///
+    /// All callers must be annotated with `#[serial]` to prevent concurrent
+    /// env mutations from interfering with each other.
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: test-only env mutation, guarded by #[serial] on callers.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: test-only env mutation, guarded by #[serial] on callers.
+            unsafe {
+                match &self.previous {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     fn with_autostart_disabled<T>(f: impl FnOnce() -> T) -> T {
         let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
         // SAFETY: test-only env mutation guarded by #[serial] on callers.
@@ -1942,6 +1975,7 @@ mod tests {
         fs::write(&pid_path, "999999\n").unwrap();
         assert!(pid_path.exists());
 
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
         cleanup_stale_daemon_runtime_files(home);
         assert!(
             !pid_path.exists(),
@@ -1965,6 +1999,7 @@ mod tests {
         fs::write(&pid_path, "not-a-pid\n").unwrap();
         fs::write(&socket_path, "stale").unwrap();
 
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
         cleanup_stale_daemon_runtime_files(home);
 
         assert!(
@@ -1997,6 +2032,7 @@ mod tests {
         perms.set_mode(0o000);
         fs::set_permissions(&pid_path, perms).unwrap();
 
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
         cleanup_stale_daemon_runtime_files(home);
         assert!(
             socket_path.exists(),
