@@ -2308,6 +2308,12 @@ Policy rules:
   - runtime launcher/relay flows used by shipped ATM commands.
 - Existing shell scripts may remain only as explicitly documented dev/CI-only
   exceptions and must not be required for user runtime operation.
+- Current approved dev/CI-only shell wrapper exceptions:
+  - `.claude/scripts/spawn-teammate.sh`
+  - `.claude/scripts/launch-worker.sh`
+  - `.claude/scripts/atm-hook-relay.sh`
+  These wrappers are test/developer tooling only, are not distributed runtime
+  dependencies, and are exempt from product runtime portability requirements.
 - Hook commands must invoke Python scripts directly; shell wrapper forms such as
   `bash -c "python ..."` are not allowed in product hook wiring.
 

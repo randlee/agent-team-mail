@@ -4509,7 +4509,7 @@ mod tests {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
             color: Some("cyan".to_string()),
-            cwd: test_cwd,
+            cwd: test_cwd.clone(),
             model: None,
             sandbox: None,
             approval_mode: None,
@@ -4517,8 +4517,11 @@ mod tests {
             resume_session_id: None,
             system_prompt: None,
         };
-        let command = "cd '/tmp/repo' && env CLAUDECODE=1 ATM_TEAM='atm-dev' ATM_IDENTITY='arch-ctm' CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --agent-id 'arch-ctm@atm-dev' --agent-name 'arch-ctm' --team-name 'atm-dev' --agent-color 'cyan' --dangerously-skip-permissions";
-        let rendered = format_spawn_launch_command(&RuntimeKind::Claude, &spec, command);
+        let command = format!(
+            "cd '{}' && env CLAUDECODE=1 ATM_TEAM='atm-dev' ATM_IDENTITY='arch-ctm' CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --agent-id 'arch-ctm@atm-dev' --agent-name 'arch-ctm' --team-name 'atm-dev' --agent-color 'cyan' --dangerously-skip-permissions",
+            test_cwd.to_string_lossy()
+        );
+        let rendered = format_spawn_launch_command(&RuntimeKind::Claude, &spec, &command);
         assert_eq!(rendered, command);
     }
 

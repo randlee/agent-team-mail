@@ -404,7 +404,8 @@ class TestSessionStartGuards(unittest.TestCase):
                 stdin_text = json.dumps({"session_id": "test-sid", "source": "init"})
                 captured = StringIO()
                 with patch("sys.stdin", StringIO(stdin_text)), \
-                     patch("sys.stdout", captured):
+                     patch("sys.stdout", captured), \
+                     patch.dict(os.environ, {"ATM_TEAM": "", "ATM_IDENTITY": ""}, clear=False):
                     mod = _load_module("session_start", _SESSION_START_PATH)
                     rc = mod.main()
             finally:

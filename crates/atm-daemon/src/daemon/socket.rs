@@ -6284,6 +6284,34 @@ poll_interval_secs = 60
             writer.flush().unwrap();
             file.sync_all().unwrap();
         }
+
+        // Spin-wait until patched backend is re-readable. APFS can surface stale
+        // directory entries briefly after write+sync in test fixtures.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            let readable = std::fs::read_to_string(&cfg_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|value| {
+                    value["members"].as_array().and_then(|members| {
+                        members
+                            .iter()
+                            .find(|m| m["name"].as_str() == Some(member_name))
+                            .and_then(|m| m["externalBackendType"].as_str())
+                            .map(|seen| seen == backend)
+                    })
+                })
+                .unwrap_or(false);
+            if readable {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "updated backend not readable after 500ms for {}",
+                cfg_path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     fn test_member(name: &str, backend: &str) -> agent_team_mail_core::schema::AgentMember {

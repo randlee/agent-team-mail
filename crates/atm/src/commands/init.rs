@@ -191,8 +191,13 @@ pub fn execute(args: InitArgs) -> Result<()> {
     };
 
     let mut settings = load_settings(&settings_path)?;
+    let mut dry_run_settings = if args.dry_run {
+        Some(settings.clone())
+    } else {
+        None
+    };
     let report = merge_hooks(
-        &mut settings,
+        dry_run_settings.as_mut().unwrap_or(&mut settings),
         if install_global {
             Some(&scripts_dir)
         } else {

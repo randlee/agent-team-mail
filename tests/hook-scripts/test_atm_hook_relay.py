@@ -28,8 +28,8 @@ def _run(
     env = os.environ.copy()
     env.setdefault("ATM_HOME", str(cwd))
     env["ATM_HOME"] = str(cwd)
-    env.setdefault("ATM_TEAM", "")
-    env.setdefault("ATM_IDENTITY", "")
+    env["ATM_TEAM"] = ""
+    env["ATM_IDENTITY"] = ""
     if env_overrides:
         env.update(env_overrides)
 
