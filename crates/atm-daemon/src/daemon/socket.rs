@@ -2037,6 +2037,8 @@ fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
         team: team.to_string(),
         lifecycle_state: "running".to_string(),
         availability_state: "healthy".to_string(),
+        configured: false,
+        enabled: false,
         in_flight: 0,
         updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         message: None,
@@ -2389,7 +2391,7 @@ fn validate_gh_monitor_config(
     home: &std::path::Path,
     team: &str,
     request_payload: &serde_json::Value,
-) -> (std::result::Result<(), String>, GhConfigDiagnostics) {
+) -> GhConfigValidation {
     let request_cwd = request_config_cwd(request_payload);
     let current_dir = request_cwd
         .as_deref()
@@ -2398,6 +2400,12 @@ fn validate_gh_monitor_config(
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| home.to_path_buf());
     let diagnostics = resolve_gh_config_diagnostics(home, &current_dir, "gh_monitor");
+    let mut validation = GhConfigValidation {
+        diagnostics,
+        configured: false,
+        enabled: false,
+        error: None,
+    };
 
     let config = agent_team_mail_core::config::resolve_config(
         &agent_team_mail_core::config::ConfigOverrides {
@@ -2409,26 +2417,33 @@ fn validate_gh_monitor_config(
     );
     let config = match config {
         Ok(c) => c,
-        Err(e) => return (Err(e.to_string()), diagnostics),
+        Err(e) => {
+            validation.error = Some(e.to_string());
+            return validation;
+        }
     };
-    let table = config
+    let table = match config
         .plugin_config("gh_monitor")
-        .ok_or_else(|| "missing [plugins.gh_monitor] configuration".to_string());
-    let table = match table {
+        .ok_or_else(|| "missing [plugins.gh_monitor] configuration".to_string())
+    {
         Ok(t) => t,
-        Err(e) => return (Err(e), diagnostics),
+        Err(e) => {
+            validation.error = Some(e);
+            return validation;
+        }
     };
-    let parsed =
-        crate::plugins::ci_monitor::CiMonitorConfig::from_toml(table).map_err(|e| e.to_string());
-    let parsed = match parsed {
+    let parsed = match crate::plugins::ci_monitor::CiMonitorConfig::from_toml(table) {
         Ok(p) => p,
-        Err(e) => return (Err(e), diagnostics),
+        Err(e) => {
+            validation.error = Some(e.to_string());
+            return validation;
+        }
     };
+    validation.configured = true;
+    validation.enabled = parsed.enabled;
     if !parsed.enabled {
-        return (
-            Err("gh_monitor plugin disabled in configuration".to_string()),
-            diagnostics,
-        );
+        validation.error = Some("gh_monitor plugin disabled in configuration".to_string());
+        return validation;
     }
     if parsed
         .repo
@@ -2437,42 +2452,22 @@ fn validate_gh_monitor_config(
         .unwrap_or("")
         .is_empty()
     {
-        return (
-            Err("gh_monitor configuration missing required field: repo".to_string()),
-            diagnostics,
-        );
+        validation.error =
+            Some("gh_monitor configuration missing required field: repo".to_string());
+        return validation;
     }
-    (Ok(()), diagnostics)
+    validation
 }
 
 #[cfg(unix)]
-#[derive(Debug, Clone)]
-struct GhMonitorConfigState {
-    availability_state: &'static str,
-    message: Option<String>,
+#[derive(Debug, Clone, Default)]
+struct GhConfigValidation {
     diagnostics: GhConfigDiagnostics,
+    configured: bool,
+    enabled: bool,
+    error: Option<String>,
 }
 
-#[cfg(unix)]
-fn resolve_gh_monitor_config_state(
-    home: &std::path::Path,
-    team: &str,
-    request_payload: &serde_json::Value,
-) -> GhMonitorConfigState {
-    let (validation, diagnostics) = validate_gh_monitor_config(home, team, request_payload);
-    match validation {
-        Ok(()) => GhMonitorConfigState {
-            availability_state: "healthy",
-            message: None,
-            diagnostics,
-        },
-        Err(reason) => GhMonitorConfigState {
-            availability_state: "disabled_config_error",
-            message: Some(format!("gh_monitor unavailable: {reason}")),
-            diagnostics,
-        },
-    }
-}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2646,9 +2641,8 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
 
     // Config gate: invalid/disabled config moves availability into
     // disabled_config_error and blocks polling work.
-    let (config_validation, config_diagnostics) =
-        validate_gh_monitor_config(home, &gh_request.team, &request.payload);
-    if let Err(reason) = config_validation {
+    let config_validation = validate_gh_monitor_config(home, &gh_request.team, &request.payload);
+    if let Some(reason) = config_validation.error.clone() {
         // Intentional: command-dispatch config validation updates persisted
         // availability state but does not emit a separate "manual" inbox
         // notification path; transition alerts are emitted by the shared
@@ -2663,8 +2657,10 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         )
         .ok();
         if let Some(ref mut health) = health {
-            health.config_source = config_diagnostics.source.clone();
-            health.config_path = config_diagnostics.path.clone();
+            health.config_source = config_validation.diagnostics.source.clone();
+            health.config_path = config_validation.diagnostics.path.clone();
+            health.configured = config_validation.configured;
+            health.enabled = config_validation.enabled;
             let _ = upsert_gh_monitor_health(home, health.clone());
         }
         return make_error_response(
@@ -2695,12 +2691,14 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         target_kind: gh_request.target_kind,
         target: gh_request.target.clone(),
         state: "monitoring".to_string(),
+        configured: config_validation.configured,
+        enabled: config_validation.enabled,
         run_id: None,
         reference: gh_request.reference.clone(),
         updated_at: now,
         message: None,
-        config_source: config_diagnostics.source.clone(),
-        config_path: config_diagnostics.path.clone(),
+        config_source: config_validation.diagnostics.source.clone(),
+        config_path: config_validation.diagnostics.path.clone(),
     };
 
     let mut transient_failure: Option<String> = None;
@@ -2909,18 +2907,23 @@ async fn handle_gh_monitor_control_command(
         );
     }
 
-    let config_state = resolve_gh_monitor_config_state(home, &control.team, &request.payload);
+    let config_validation = validate_gh_monitor_config(home, &control.team, &request.payload);
+    let config_availability_state = if config_validation.error.is_some() {
+        "disabled_config_error"
+    } else {
+        "healthy"
+    };
+    let config_message = config_validation.error.clone();
 
     let mut health = match control.action {
         GhMonitorLifecycleAction::Start => match set_gh_monitor_health_state(
             home,
             &control.team,
             Some("running"),
-            Some(config_state.availability_state),
+            Some(config_availability_state),
             Some(count_in_flight_monitors(home, &control.team)),
             Some(
-                config_state
-                    .message
+                config_message
                     .clone()
                     .unwrap_or_else(|| "gh monitor lifecycle started".to_string()),
             ),
@@ -2940,7 +2943,7 @@ async fn handle_gh_monitor_control_command(
                 home,
                 &control.team,
                 Some("draining"),
-                Some(config_state.availability_state),
+                Some(config_availability_state),
                 Some(count_in_flight_monitors(home, &control.team)),
                 Some(format!(
                     "draining in-flight monitors (timeout={}s)",
@@ -2968,9 +2971,9 @@ async fn handle_gh_monitor_control_command(
                 home,
                 &control.team,
                 Some("stopped"),
-                Some(config_state.availability_state),
+                Some(config_availability_state),
                 Some(in_flight),
-                Some(config_state.message.clone().unwrap_or(message)),
+                Some(config_message.clone().unwrap_or(message)),
             ) {
                 Ok(health) => health,
                 Err(e) => {
@@ -2988,7 +2991,7 @@ async fn handle_gh_monitor_control_command(
                 home,
                 &control.team,
                 Some("draining"),
-                Some(config_state.availability_state),
+                Some(config_availability_state),
                 Some(count_in_flight_monitors(home, &control.team)),
                 Some(format!(
                     "draining in-flight monitors before restart (timeout={}s)",
@@ -3008,14 +3011,14 @@ async fn handle_gh_monitor_control_command(
                 home,
                 &control.team,
                 Some("running"),
-                Some(config_state.availability_state),
+                Some(config_availability_state),
                 Some(in_flight),
                 Some(if in_flight == 0 {
-                    config_state.message.clone().unwrap_or_else(|| {
+                    config_message.clone().unwrap_or_else(|| {
                         "gh monitor lifecycle restarted after in-flight drain".to_string()
                     })
                 } else {
-                    config_state.message.clone().unwrap_or_else(|| {
+                    config_message.clone().unwrap_or_else(|| {
                         format!(
                         "gh monitor lifecycle restarted after drain timeout; {} in-flight monitor(s) remain",
                         in_flight
@@ -3034,8 +3037,16 @@ async fn handle_gh_monitor_control_command(
             }
         }
     };
-    health.config_source = config_state.diagnostics.source;
-    health.config_path = config_state.diagnostics.path;
+    health.config_source = config_validation.diagnostics.source;
+    health.config_path = config_validation.diagnostics.path;
+    health.configured = config_validation.configured;
+    health.enabled = config_validation.enabled;
+    if let Some(reason) = config_validation.error {
+        health.availability_state = "disabled_config_error".to_string();
+        if health.message.is_none() {
+            health.message = Some(reason);
+        }
+    }
     let _ = upsert_gh_monitor_health(home, health.clone());
 
     make_ok_response(
@@ -3087,19 +3098,23 @@ async fn handle_gh_monitor_health_command(
         );
     }
 
-    let config_state = resolve_gh_monitor_config_state(home, &team, &request.payload);
+    let config_validation = validate_gh_monitor_config(home, &team, &request.payload);
 
     let health = match read_gh_monitor_health(home, &team) {
         Ok(mut health) => {
             health.in_flight = count_in_flight_monitors(home, &team);
             health.lifecycle_state =
                 resolve_live_lifecycle_state(home, &team, &health.lifecycle_state);
-            health.availability_state = config_state.availability_state.to_string();
-            if let Some(message) = config_state.message {
-                health.message = Some(message);
+            health.config_source = config_validation.diagnostics.source;
+            health.config_path = config_validation.diagnostics.path;
+            health.configured = config_validation.configured;
+            health.enabled = config_validation.enabled;
+            if let Some(reason) = config_validation.error {
+                health.availability_state = "disabled_config_error".to_string();
+                if health.message.is_none() {
+                    health.message = Some(reason);
+                }
             }
-            health.config_source = config_state.diagnostics.source;
-            health.config_path = config_state.diagnostics.path;
             let _ = upsert_gh_monitor_health(home, health.clone());
             health
         }
@@ -3214,16 +3229,13 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         }
     };
 
-    let config_state = resolve_gh_monitor_config_state(home, &gh_request.team, &request.payload);
+    let config_validation = validate_gh_monitor_config(home, &gh_request.team, &request.payload);
 
-    if config_state.availability_state != "healthy" {
+    if let Some(ref reason) = config_validation.error {
         return make_error_response(
             &request.request_id,
             "MONITOR_UNAVAILABLE",
-            config_state
-                .message
-                .as_deref()
-                .unwrap_or("gh_monitor unavailable"),
+            reason.as_str(),
         );
     }
 
@@ -3281,11 +3293,13 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
             );
             status.updated_at = chrono::Utc::now().to_rfc3339();
         }
+        status.configured = config_validation.configured;
+        status.enabled = config_validation.enabled;
         if status.config_source.is_none() {
-            status.config_source = config_state.diagnostics.source.clone();
+            status.config_source = config_validation.diagnostics.source.clone();
         }
         if status.config_path.is_none() {
-            status.config_path = config_state.diagnostics.path.clone();
+            status.config_path = config_validation.diagnostics.path.clone();
         }
         return make_ok_response(
             &request.request_id,
@@ -3325,11 +3339,13 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
                 );
                 status.updated_at = chrono::Utc::now().to_rfc3339();
             }
+            status.configured = config_validation.configured;
+            status.enabled = config_validation.enabled;
             if status.config_source.is_none() {
-                status.config_source = config_state.diagnostics.source;
+                status.config_source = config_validation.diagnostics.source.clone();
             }
             if status.config_path.is_none() {
-                status.config_path = config_state.diagnostics.path;
+                status.config_path = config_validation.diagnostics.path.clone();
             }
             return make_ok_response(
                 &request.request_id,
@@ -6983,6 +6999,8 @@ exit 1
             target_kind: GhMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "monitoring".to_string(),
+            configured: true,
+            enabled: true,
             run_id: Some(42),
             reference: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
@@ -7044,6 +7062,8 @@ exit 1
             target_kind: GhMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "monitoring".to_string(),
+            configured: true,
+            enabled: true,
             run_id: Some(42),
             reference: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
@@ -7112,6 +7132,8 @@ exit 1
             target_kind: GhMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "tracking".to_string(),
+            configured: true,
+            enabled: true,
             run_id: Some(42),
             reference: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
@@ -7211,6 +7233,8 @@ exit 1
             target_kind: GhMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "monitoring".to_string(),
+            configured: true,
+            enabled: true,
             run_id: Some(42),
             reference: None,
             updated_at: "2026-03-06T00:00:00Z".to_string(),
@@ -7273,6 +7297,8 @@ exit 1
             target_kind: GhMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "monitoring".to_string(),
+            configured: true,
+            enabled: true,
             run_id: Some(42),
             reference: None,
             updated_at: "2026-03-06T00:00:00Z".to_string(),
@@ -7427,6 +7453,8 @@ exit 1
             target_kind: GhMonitorTargetKind::Workflow,
             target: "ci".to_string(),
             state: "monitoring".to_string(),
+            configured: true,
+            enabled: true,
             run_id: Some(111),
             reference: Some("develop".to_string()),
             updated_at: "2026-03-06T00:00:10Z".to_string(),
@@ -7439,6 +7467,8 @@ exit 1
             target_kind: GhMonitorTargetKind::Workflow,
             target: "ci".to_string(),
             state: "monitoring".to_string(),
+            configured: true,
+            enabled: true,
             run_id: Some(222),
             reference: Some("release/v1".to_string()),
             updated_at: "2026-03-06T00:00:11Z".to_string(),
@@ -7502,6 +7532,8 @@ exit 1
             message: Some("seeded".to_string()),
             config_source: None,
             config_path: None,
+            configured: false,
+            enabled: false,
         };
         upsert_gh_monitor_status(temp.path(), seeded).unwrap();
 
@@ -7538,6 +7570,8 @@ exit 1
             message: Some("seeded".to_string()),
             config_source: None,
             config_path: None,
+            configured: false,
+            enabled: false,
         };
         upsert_gh_monitor_status(temp.path(), seeded).unwrap();
 
@@ -7697,6 +7731,8 @@ exit 1
             health["availability_state"].as_str(),
             Some("disabled_config_error")
         );
+        assert_eq!(health["configured"].as_bool(), Some(false));
+        assert_eq!(health["enabled"].as_bool(), Some(false));
     }
 
     #[tokio::test]
@@ -7728,6 +7764,8 @@ exit 1
         assert_eq!(monitor_resp.status, "ok");
         let payload = monitor_resp.payload.unwrap();
         assert_eq!(payload["state"].as_str(), Some("monitoring"));
+        assert_eq!(payload["configured"].as_bool(), Some(true));
+        assert_eq!(payload["enabled"].as_bool(), Some(true));
         assert_eq!(payload["config_source"].as_str(), Some("repo"));
         let config_path = payload["config_path"].as_str().expect("config_path");
         assert!(
@@ -7751,6 +7789,8 @@ exit 1
         assert_eq!(status_resp.status, "ok");
         let status = status_resp.payload.unwrap();
         assert_eq!(status["config_source"].as_str(), Some("repo"));
+        assert_eq!(status["configured"].as_bool(), Some(true));
+        assert_eq!(status["enabled"].as_bool(), Some(true));
         assert!(status["config_path"].as_str().is_some());
 
         let health_req = serde_json::json!({
@@ -7767,6 +7807,75 @@ exit 1
         assert_eq!(health_resp.status, "ok");
         let health = health_resp.payload.unwrap();
         assert_eq!(health["config_source"].as_str(), Some("repo"));
+        assert_eq!(health["configured"].as_bool(), Some(true));
+        assert_eq!(health["enabled"].as_bool(), Some(true));
+        assert!(health["config_path"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_uses_global_config_when_repo_config_absent() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let cwd_without_repo_config = temp.path().join("no-repo-config");
+        std::fs::create_dir_all(&cwd_without_repo_config).unwrap();
+
+        let req_json = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-global-context",
+            "command": "gh-monitor",
+            "payload": {
+                "team": "atm-dev",
+                "target_kind": "run",
+                "target": "24",
+                "config_cwd": cwd_without_repo_config.display().to_string()
+            }
+        })
+        .to_string();
+        let monitor_resp = handle_gh_monitor_command(&req_json, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+        let monitor = monitor_resp.payload.unwrap();
+        assert_eq!(monitor["config_source"].as_str(), Some("global"));
+        let monitor_path = monitor["config_path"].as_str().expect("config_path");
+        assert!(
+            monitor_path.ends_with("config.toml"),
+            "expected global config path, got {monitor_path}"
+        );
+
+        let status_req = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-status-global-context",
+            "command": "gh-status",
+            "payload": {
+                "team": "atm-dev",
+                "target_kind": "run",
+                "target": "24",
+                "config_cwd": cwd_without_repo_config.display().to_string()
+            }
+        })
+        .to_string();
+        let status_resp = handle_gh_status_command(&status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["config_source"].as_str(), Some("global"));
+        assert!(status["config_path"].as_str().is_some());
+
+        let health_req = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-health-global-context",
+            "command": "gh-monitor-health",
+            "payload": {
+                "team": "atm-dev",
+                "config_cwd": cwd_without_repo_config.display().to_string()
+            }
+        })
+        .to_string();
+        let health_resp = handle_gh_monitor_health_command(&health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let health = health_resp.payload.unwrap();
+        assert_eq!(health["config_source"].as_str(), Some("global"));
         assert!(health["config_path"].as_str().is_some());
     }
 
@@ -7855,37 +7964,8 @@ exit 1
     #[test]
     #[serial]
     fn test_handle_register_hint_registers_external_member_session() {
-        let temp = TempDir::new().unwrap();
-        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
-        let team_dir = temp.path().join(".claude/teams/atm-dev");
-        std::fs::create_dir_all(&team_dir).unwrap();
-        let config = serde_json::json!({
-            "name": "atm-dev",
-            "description": "test",
-            "createdAt": 1739284800000u64,
-            "leadAgentId": "team-lead@atm-dev",
-            "leadSessionId": "lead-sess",
-            "members": [{
-                "agentId": "arch-ctm@atm-dev",
-                "name": "arch-ctm",
-                "agentType": "codex",
-                "model": "gpt5.3-codex",
-                "joinedAt": 1739284800000u64,
-                "cwd": temp.path().to_string_lossy().to_string(),
-                "subscriptions": [],
-                "externalBackendType": "external"
-            }]
-        });
-        {
-            use std::io::Write;
-            let content = serde_json::to_string_pretty(&config).unwrap();
-            let path = team_dir.join("config.json");
-            let file = std::fs::File::create(&path).unwrap();
-            let mut writer = std::io::BufWriter::new(&file);
-            writer.write_all(content.as_bytes()).unwrap();
-            writer.flush().unwrap();
-            file.sync_all().unwrap();
-        }
+        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        set_member_backend(fixture._temp.path(), "atm-dev", "arch-ctm", "external");
 
         let store = make_store();
         let sr = make_sr();

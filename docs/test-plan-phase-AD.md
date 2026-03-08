@@ -12,12 +12,12 @@ This plan defines deterministic coverage for Phase AD contracts:
 
 | Sprint | Focus | Primary Issues |
 |---|---|---|
-| AD.1 | Requirements + policy lock + test matrix | #500, #499 |
+| AD.1 | Requirements + policy lock + test matrix | #500, #506 |
 | AD.2 | Runtime config discovery parity | #499 |
 | AD.3 | Status JSON and output consistency | #504, #507 |
 | AD.4 | Reload/live-state/reachability consistency | #502, #503, #505 |
 | AD.5 | Python migration for runtime scripts | #500 |
-| AD.6 | Residual shell-wrapper cleanup (candidate) | #499, #500 |
+| AD.6 | Residual shell-wrapper cleanup (candidate) | TBD |
 
 ## AD.1 Verification Matrix (Requirements Lock)
 
