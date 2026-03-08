@@ -7177,6 +7177,7 @@ exit 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
     async fn test_gh_monitor_uses_repo_config_source_from_payload_cwd() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -7201,6 +7202,7 @@ exit 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
     async fn test_gh_status_uses_global_config_source_when_repo_missing() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -7247,6 +7249,7 @@ exit 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
     async fn test_gh_monitor_health_reports_global_config_source() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
