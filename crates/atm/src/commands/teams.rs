@@ -38,6 +38,14 @@ enum SpawnPolicy {
     AnyMember,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnAuthorizationDecision {
+    policy_team: String,
+    allowed: Vec<String>,
+    caller_identity: Option<String>,
+    authorized: bool,
+}
+
 /// List all teams on this machine
 #[derive(Args, Debug)]
 pub struct TeamsArgs {
@@ -441,45 +449,9 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| config.core.default_team.clone());
 
-    if let Some((required_team, spawn_policy, co_leaders)) =
-        load_spawn_policy_from_toml(&current_dir)
-        && matches!(spawn_policy, SpawnPolicy::LeadersOnly)
-    {
-        let policy_team = required_team.unwrap_or_else(|| team_name.clone());
-        let caller_identity = resolve_spawn_caller_identity(
-            &home_dir,
-            &policy_team,
-            &resolve_identity(&config.core.identity, &config.roles, &config.aliases),
-        );
-        let mut allowed = vec!["team-lead".to_string()];
-        for identity in co_leaders {
-            if !identity.trim().is_empty() {
-                allowed.push(identity);
-            }
-        }
-        allowed.sort();
-        allowed.dedup();
-
-        let authorized = caller_identity
-            .as_deref()
-            .map(|id| allowed.iter().any(|allowed_id| allowed_id == id))
-            .unwrap_or(false);
-        if !authorized {
-            anyhow::bail!(
-                "{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n\
-                 \n\
-                 Policy team: {}\n\
-                 Allowed identities: {}\n\
-                 Resolved caller: {}\n\
-                 \n\
-                 Action: run spawn as team-lead or add caller to [team.\"{}\"].co_leaders in .atm.toml.",
-                policy_team,
-                allowed.join(", "),
-                caller_identity.unwrap_or_else(|| "<unknown>".to_string()),
-                policy_team
-            );
-        }
-    }
+    let resolved_identity = resolve_identity(&config.core.identity, &config.roles, &config.aliases);
+    let authorization =
+        build_spawn_authorization_decision(&current_dir, &home_dir, &team_name, &resolved_identity);
 
     let parsed_env = parse_env_vars(&args.env)?;
 
@@ -515,6 +487,25 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     }
     let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
     print_launch_command_preview(&launch_command_preview, args.json);
+
+    if let Some(decision) = authorization.as_ref()
+        && !decision.authorized
+    {
+        let error = spawn_unauthorized_error(decision);
+        if args.json {
+            let output = json!({
+                "error": error,
+                "agent": args.agent,
+                "team": team_name,
+                "runtime": runtime_name(&args.runtime),
+                "folder": launch_dir.to_string_lossy(),
+                "launch_command": launch_command_preview,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            std::process::exit(1);
+        }
+        anyhow::bail!("{error}");
+    }
 
     if let Some((env_team, repo_team)) = team_mismatch {
         warn!(
@@ -955,6 +946,58 @@ fn resolve_spawn_caller_identity(
         .iter()
         .find(|member| member.session_id.as_deref() == Some(session_id.as_str()))
         .map(|member| member.name.clone())
+}
+
+fn build_spawn_authorization_decision(
+    current_dir: &Path,
+    home_dir: &Path,
+    team_name: &str,
+    resolved_identity: &str,
+) -> Option<SpawnAuthorizationDecision> {
+    let (required_team, spawn_policy, co_leaders) = load_spawn_policy_from_toml(current_dir)?;
+    if !matches!(spawn_policy, SpawnPolicy::LeadersOnly) {
+        return None;
+    }
+    let policy_team = required_team.unwrap_or_else(|| team_name.to_string());
+    let caller_identity = resolve_spawn_caller_identity(home_dir, &policy_team, resolved_identity);
+    let mut allowed = vec!["team-lead".to_string()];
+    for identity in co_leaders {
+        if !identity.trim().is_empty() {
+            allowed.push(identity);
+        }
+    }
+    allowed.sort();
+    allowed.dedup();
+    let authorized = caller_identity
+        .as_deref()
+        .map(|id| allowed.iter().any(|allowed_id| allowed_id == id))
+        .unwrap_or(false);
+
+    Some(SpawnAuthorizationDecision {
+        policy_team,
+        allowed,
+        caller_identity,
+        authorized,
+    })
+}
+
+fn spawn_unauthorized_error(decision: &SpawnAuthorizationDecision) -> String {
+    format!(
+        "{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n\
+         \n\
+         Policy team: {}\n\
+         Allowed identities: {}\n\
+         Resolved caller: {}\n\
+         \n\
+         Action: run spawn as team-lead or add caller to [team.\"{}\"].co_leaders in .atm.toml.",
+        decision.policy_team,
+        decision.allowed.join(", "),
+        decision
+            .caller_identity
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        decision.policy_team
+    )
 }
 
 fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
