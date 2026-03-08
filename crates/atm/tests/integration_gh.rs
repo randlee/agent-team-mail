@@ -277,12 +277,25 @@ fn start_fake_gh_daemon(home: &Path) -> Child {
 #[cfg(unix)]
 fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) -> Child {
     let script = write_fake_gh_daemon_script(home);
-    let child = Command::new(&script)
-        .env("ATM_HOME", home)
-        .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
-        .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
-        .spawn()
-        .unwrap();
+    // Retry on ETXTBUSY (code 26): Linux can transiently block execution of a
+    // newly-written file on CI while kernel mappings settle.
+    let child = {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match Command::new(&script)
+                .env("ATM_HOME", home)
+                .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
+                .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
+                .spawn()
+            {
+                Ok(child) => break child,
+                Err(e) if e.raw_os_error() == Some(26) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => panic!("failed to spawn fake gh daemon: {e}"),
+            }
+        }
+    };
     wait_for_daemon_socket(home);
     child
 }
