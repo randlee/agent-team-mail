@@ -9041,6 +9041,72 @@ exit 1
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
+    async fn test_hook_event_permission_request_rejects_unknown_agent() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-pr-unknown","command":"hook-event","payload":{"event":"permission_request","agent":"new-agent","session_id":"sess-pr-unknown","team":"atm-dev","tool_name":"Bash"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+        assert!(store.lock().unwrap().get_state("new-agent").is_none());
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "new-agent")
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_stop_rejects_unknown_agent() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-stop-unknown","command":"hook-event","payload":{"event":"stop","agent":"new-agent","session_id":"sess-stop-unknown","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+        assert!(store.lock().unwrap().get_state("new-agent").is_none());
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "new-agent")
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_notification_idle_prompt_rejects_unknown_agent() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-notify-unknown","command":"hook-event","payload":{"event":"notification_idle_prompt","agent":"new-agent","session_id":"sess-notify-unknown","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+        assert!(store.lock().unwrap().get_state("new-agent").is_none());
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "new-agent")
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
     async fn test_hook_event_permission_request_marks_blocked_permission_context_without_liveness_drift()
      {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);

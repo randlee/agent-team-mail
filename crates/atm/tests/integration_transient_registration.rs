@@ -62,6 +62,58 @@ fn member_names(config_path: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+fn assert_transient_absent_from_discovery_views(
+    temp_dir: &TempDir,
+    team: &str,
+    transient_identity: &str,
+) {
+    let mut members_cmd = cargo::cargo_bin_cmd!("atm");
+    configure_cmd(&mut members_cmd, temp_dir);
+    let members_output = members_cmd
+        .args(["members", "--team", team])
+        .output()
+        .expect("members command should run");
+    assert!(
+        members_output.status.success(),
+        "members command failed: {}",
+        String::from_utf8_lossy(&members_output.stderr)
+    );
+    let members_stdout = String::from_utf8_lossy(&members_output.stdout);
+    assert!(
+        !members_stdout.contains(transient_identity),
+        "transient identity unexpectedly appeared in members output"
+    );
+
+    let mut status_cmd = cargo::cargo_bin_cmd!("atm");
+    configure_cmd(&mut status_cmd, temp_dir);
+    let status_output = status_cmd
+        .args(["status", "--team", team])
+        .output()
+        .expect("status command should run");
+    assert!(
+        status_output.status.success(),
+        "status command failed: {}",
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert!(
+        !status_stdout.contains(transient_identity),
+        "transient identity unexpectedly appeared in status output"
+    );
+
+    let mut doctor_cmd = cargo::cargo_bin_cmd!("atm");
+    configure_cmd(&mut doctor_cmd, temp_dir);
+    let doctor_output = doctor_cmd
+        .args(["doctor", "--team", team])
+        .output()
+        .expect("doctor command should run");
+    let doctor_stdout = String::from_utf8_lossy(&doctor_output.stdout);
+    assert!(
+        !doctor_stdout.contains(transient_identity),
+        "transient identity unexpectedly appeared in doctor output"
+    );
+}
+
 #[test]
 fn test_transient_send_does_not_add_sender_to_roster() {
     let temp_dir = TempDir::new().unwrap();
@@ -85,6 +137,7 @@ fn test_transient_send_does_not_add_sender_to_roster() {
         !names.iter().any(|name| name == "transient-worker"),
         "transient sender must not be persisted in team roster"
     );
+    assert_transient_absent_from_discovery_views(&temp_dir, "atm-dev", "transient-worker");
 }
 
 #[test]
@@ -104,14 +157,14 @@ fn test_transient_read_does_not_add_reader_to_roster() {
         "--no-update-seen",
     ])
     .assert()
-    .failure()
-    .stderr(predicate::str::contains("not found in team"));
+    .success();
 
     let names = member_names(&config_path);
     assert!(
         !names.iter().any(|name| name == "transient-reader"),
         "transient reader must not be persisted in team roster"
     );
+    assert_transient_absent_from_discovery_views(&temp_dir, "atm-dev", "transient-reader");
 }
 
 #[test]

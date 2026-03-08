@@ -606,6 +606,19 @@ fn apply_hook_event(
                     return;
                 }
             };
+            let membership =
+                classify_team_membership(claude_root, event.team.as_deref(), &agent_id);
+            if matches!(membership, TeamMembership::NonMember) {
+                if let Some(team) = event.team.as_deref() {
+                    debug!(
+                        "Skipping transient session-end for non-member {}@{}",
+                        agent_id, team
+                    );
+                } else {
+                    debug!("Skipping transient session-end for non-member {}", agent_id);
+                }
+                return;
+            }
             let session_id = match event
                 .session_id
                 .as_deref()
@@ -817,7 +830,7 @@ mod tests {
                     "name": name,
                     "agentType": agent_type,
                     "model": "unknown",
-                    "joinedAt": 1739284800000i64,
+                    "joinedAt": 1739284800000u64,
                     "cwd": ".",
                     "subscriptions": []
                 })
@@ -825,7 +838,7 @@ mod tests {
             .collect();
         let config = serde_json::json!({
             "name": team,
-            "createdAt": 1739284800000i64,
+            "createdAt": 1739284800000u64,
             "leadAgentId": format!("team-lead@{team}"),
             "leadSessionId": "lead-session",
             "members": members_json
@@ -1052,6 +1065,33 @@ mod tests {
             .expect("arch-ctm should be in registry");
         use crate::daemon::session_registry::SessionState;
         assert_eq!(record.state, SessionState::Dead);
+    }
+
+    #[test]
+    fn test_session_end_non_member_with_team_config_is_ignored() {
+        let state = make_state();
+        let mut deduper = make_deduper();
+        let registry = new_session_registry();
+        let dir = tempfile::tempdir().unwrap();
+        write_team_config(dir.path(), "atm-dev", &[("arch-ctm", "codex")]);
+
+        let json = r#"{"type":"session-end","agent":"transient-worker","team":"atm-dev","sessionId":"sess-transient"}"#;
+        process_hook_line(
+            json,
+            &state,
+            Some(&registry),
+            Some(dir.path()),
+            &mut deduper,
+        );
+
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .query_for_team("atm-dev", "transient-worker")
+                .is_none(),
+            "non-member transient session-end must not create or mutate session rows"
+        );
     }
 
     #[test]
@@ -1379,7 +1419,7 @@ mod tests {
         let config_json = serde_json::json!({
             "name": "atm-dev",
             "description": "test team",
-            "createdAt": 1739284800000i64,
+            "createdAt": 1739284800000u64,
             "leadAgentId": "team-lead@atm-dev",
             "leadSessionId": "team-session",
             "members": [
@@ -1388,7 +1428,7 @@ mod tests {
                     "name": "arch-ctm",
                     "agentType": "codex",
                     "model": "gpt5.3-codex",
-                    "joinedAt": 1739284800000i64,
+                    "joinedAt": 1739284800000u64,
                     "cwd": ".",
                     "subscriptions": [],
                     "externalBackendType": "codex",
@@ -1434,7 +1474,7 @@ mod tests {
         // A member without externalBackendType — this should NOT be updated.
         let config_json = serde_json::json!({
             "name": "atm-dev",
-            "createdAt": 1739284800000i64,
+            "createdAt": 1739284800000u64,
             "leadAgentId": "team-lead@atm-dev",
             "leadSessionId": "team-session",
             "members": [
@@ -1443,7 +1483,7 @@ mod tests {
                     "name": "team-lead",
                     "agentType": "general-purpose",
                     "model": "claude-opus-4-6",
-                    "joinedAt": 1739284800000i64,
+                    "joinedAt": 1739284800000u64,
                     "cwd": ".",
                     "subscriptions": [],
                     "sessionId": "old-session"
@@ -1483,7 +1523,7 @@ mod tests {
 
         let config_a = serde_json::json!({
             "name": "atm-dev",
-            "createdAt": 1739284800000i64,
+            "createdAt": 1739284800000u64,
             "leadAgentId": "team-lead@atm-dev",
             "leadSessionId": "lead-a",
             "members": [
@@ -1492,7 +1532,7 @@ mod tests {
                     "name": "arch-ctm",
                     "agentType": "codex",
                     "model": "gpt5.3-codex",
-                    "joinedAt": 1739284800000i64,
+                    "joinedAt": 1739284800000u64,
                     "cwd": ".",
                     "subscriptions": [],
                     "externalBackendType": "codex",
@@ -1502,7 +1542,7 @@ mod tests {
         });
         let config_b = serde_json::json!({
             "name": "other-team",
-            "createdAt": 1739284800000i64,
+            "createdAt": 1739284800000u64,
             "leadAgentId": "team-lead@other-team",
             "leadSessionId": "lead-b",
             "members": [
@@ -1511,7 +1551,7 @@ mod tests {
                     "name": "arch-ctm",
                     "agentType": "codex",
                     "model": "gpt5.3-codex",
-                    "joinedAt": 1739284800000i64,
+                    "joinedAt": 1739284800000u64,
                     "cwd": ".",
                     "subscriptions": [],
                     "externalBackendType": "codex",
