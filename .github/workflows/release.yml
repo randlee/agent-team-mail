@@ -13,6 +13,9 @@ permissions:
   issues: write
   pull-requests: write
 
+env:
+  RELEASE_ARTIFACT_MANIFEST: release/publish-artifacts.toml
+
 jobs:
   gate-and-tag:
     runs-on: ubuntu-latest
@@ -106,16 +109,22 @@ jobs:
           key: ${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} --bin atm --bin atm-daemon --bin atm-agent-mcp --bin atm-tui
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin_args="$(python3 scripts/release_artifacts.py cargo-build-bin-args --manifest "${RELEASE_ARTIFACT_MANIFEST}")"
+          cargo build --release --target ${{ matrix.target }} ${bin_args}
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
+          set -euo pipefail
           VERSION='${{ needs.gate-and-tag.outputs.release_version }}'
           ARCHIVE="atm_${VERSION}_${{ matrix.target }}.tar.gz"
+          mapfile -t bins < <(python3 scripts/release_artifacts.py list-release-binaries --manifest "${RELEASE_ARTIFACT_MANIFEST}")
           cd target/${{ matrix.target }}/release
-          tar czf "../../../${ARCHIVE}" atm atm-daemon atm-agent-mcp atm-tui
+          tar czf "../../../${ARCHIVE}" "${bins[@]}"
           cd ../../..
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
@@ -125,7 +134,14 @@ jobs:
         run: |
           $VERSION = '${{ needs.gate-and-tag.outputs.release_version }}'
           $ARCHIVE = "atm_${VERSION}_${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/atm.exe","target/${{ matrix.target }}/release/atm-daemon.exe","target/${{ matrix.target }}/release/atm-agent-mcp.exe","target/${{ matrix.target }}/release/atm-tui.exe" -DestinationPath $ARCHIVE
+          $bins = python3 scripts/release_artifacts.py list-release-binaries --manifest "${env:RELEASE_ARTIFACT_MANIFEST}"
+          $paths = @()
+          foreach ($bin in $bins) {
+            if (-not [string]::IsNullOrWhiteSpace($bin)) {
+              $paths += "target/${{ matrix.target }}/release/$bin.exe"
+            }
+          }
+          Compress-Archive -Path $paths -DestinationPath $ARCHIVE
           echo "ARCHIVE=$ARCHIVE" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload artifact
@@ -185,94 +201,14 @@ jobs:
           commit="$(git rev-parse "$tag")"
           generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           mkdir -p release
-          python3 - <<'PY' "$version" "$tag" "$commit" "$generated_at"
-          import json
-          import sys
-          from pathlib import Path
-
-          version, tag, commit, generated_at = sys.argv[1:5]
-          inventory = {
-              "releaseVersion": version,
-              "releaseTag": tag,
-              "releaseCommit": commit,
-              "generatedAt": generated_at,
-              "items": [
-                  {
-                      "artifact": "agent-team-mail",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "publish": True,
-                      "required": True,
-                      "verifyCommands": [
-                          f"cargo search agent-team-mail --limit 1 | grep -F 'agent-team-mail = \"{version}\"'",
-                          f"cargo install agent-team-mail --version {version} --locked --force",
-                      ],
-                  },
-                  {
-                      "artifact": "agent-team-mail-core",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "publish": True,
-                      "required": True,
-                      "verifyCommands": [
-                          f"cargo search agent-team-mail-core --limit 1 | grep -F 'agent-team-mail-core = \"{version}\"'",
-                      ],
-                  },
-                  {
-                      "artifact": "agent-team-mail-daemon",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "publish": True,
-                      "required": True,
-                      "verifyCommands": [
-                          f"cargo search agent-team-mail-daemon --limit 1 | grep -F 'agent-team-mail-daemon = \"{version}\"'",
-                      ],
-                  },
-                  {
-                      "artifact": "agent-team-mail-mcp",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "publish": True,
-                      "required": True,
-                      "verifyCommands": [
-                          f"cargo search agent-team-mail-mcp --limit 1 | grep -F 'agent-team-mail-mcp = \"{version}\"'",
-                      ],
-                  },
-                  {
-                      "artifact": "agent-team-mail-tui",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "publish": True,
-                      "required": True,
-                      "verifyCommands": [
-                          f"cargo search agent-team-mail-tui --limit 1 | grep -F 'agent-team-mail-tui = \"{version}\"'",
-                      ],
-                  },
-                  {
-                      "artifact": "sc-composer",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "publish": True,
-                      "required": True,
-                      "verifyCommands": [
-                          f"cargo search sc-composer --limit 1 | grep -F 'sc-composer = \"{version}\"'",
-                      ],
-                  },
-              ],
-          }
-          inventory["items"].sort(key=lambda x: x["artifact"])
-          Path("release/release-inventory.json").write_text(
-              json.dumps(inventory, indent=2) + "\n",
-              encoding="utf-8",
-          )
-          print("wrote release/release-inventory.json")
-          PY
+          python3 scripts/release_artifacts.py emit-inventory \
+            --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+            --version "$version" \
+            --tag "$tag" \
+            --commit "$commit" \
+            --source-ref "refs/tags/${tag}" \
+            --generated-at "$generated_at" \
+            --output release/release-inventory.json
 
       - name: Validate generated release inventory against schema constraints
         shell: bash
@@ -352,8 +288,6 @@ jobs:
   pre-publish-audit:
     needs: [gate-and-tag, prepare-release-inventory]
     runs-on: ubuntu-latest
-    outputs:
-      publish_list: ${{ steps.audit.outputs.publish_list }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -369,19 +303,17 @@ jobs:
           path: release
 
       - name: Validate inventory consistency + waiver gate
-        id: audit
         shell: bash
         run: |
           set -euo pipefail
           version='${{ needs.gate-and-tag.outputs.release_version }}'
-          python3 - <<'PY' "$version" "$GITHUB_OUTPUT"
+          python3 - <<'PY' "$version"
           import json
           import sys
           import tomllib
           from pathlib import Path
 
           release_version = sys.argv[1]
-          github_output = Path(sys.argv[2])
           inventory_path = Path("release/release-inventory.json")
           cargo_toml_path = Path("Cargo.toml")
 
@@ -398,19 +330,28 @@ jobs:
                   f"inventory.releaseVersion mismatch: expected {release_version}, got {inventory.get('releaseVersion')}"
               )
 
-          expected = {
-              "agent-team-mail-core",
-              "agent-team-mail",
-              "agent-team-mail-daemon",
-              "agent-team-mail-mcp",
-              "agent-team-mail-tui",
-          }
+          from subprocess import check_output
+          expected = set(
+              check_output(
+                  [
+                      "python3",
+                      "scripts/release_artifacts.py",
+                      "list-artifacts",
+                      "--manifest",
+                      "release/publish-artifacts.toml",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
 
           items = inventory.get("items", [])
           by_artifact = {item.get("artifact"): item for item in items}
           missing = sorted(expected - set(by_artifact))
           if missing:
               raise SystemExit(f"inventory missing expected artifacts: {', '.join(missing)}")
+          unexpected = sorted(set(by_artifact) - expected)
+          if unexpected:
+              raise SystemExit(f"inventory has unexpected artifacts: {', '.join(unexpected)}")
 
           publishable = []
           for artifact in sorted(expected):
@@ -436,30 +377,31 @@ jobs:
 
           if not publishable:
               raise SystemExit("no publishable crates after waiver checks")
-
-          publish_list = ",".join(publishable)
-          with github_output.open("a", encoding="utf-8") as fh:
-              fh.write(f"publish_list={publish_list}\n")
-          print(f"publish_list={publish_list}")
           PY
 
       - name: Cargo package audit (core crate) + locked compile check (non-core)
         shell: bash
         run: |
           set -euo pipefail
-          # Core crate has no unpublished workspace deps, so full package audit works.
-          # Non-core crates depend on agent-team-mail-core which isn't on crates.io yet
-          # at this version, so cargo package would fail. Use cargo check --locked instead
-          # (matching the preflight workflow behavior).
-          echo "::group::cargo package -p agent-team-mail-core"
-          cargo package -p agent-team-mail-core --locked
-          echo "::endgroup::"
+          mapfile -t full_checks < <(
+            python3 scripts/release_artifacts.py list-preflight \
+              --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+              --mode full
+          )
+          for crate in "${full_checks[@]}"; do
+            [[ -n "$crate" ]] || continue
+            echo "::group::cargo package -p ${crate} --locked"
+            cargo package -p "${crate}" --locked
+            echo "::endgroup::"
+          done
 
-          IFS=',' read -ra crates <<< '${{ steps.audit.outputs.publish_list }}'
-          for crate in "${crates[@]}"; do
-            if [[ "$crate" == "agent-team-mail-core" ]]; then
-              continue
-            fi
+          mapfile -t locked_checks < <(
+            python3 scripts/release_artifacts.py list-preflight \
+              --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+              --mode locked
+          )
+          for crate in "${locked_checks[@]}"; do
+            [[ -n "$crate" ]] || continue
             echo "::group::cargo check -p ${crate} --locked"
             cargo check -p "${crate}" --locked
             echo "::endgroup::"
@@ -490,7 +432,7 @@ jobs:
         run: |
           set -euo pipefail
           version='${{ needs.gate-and-tag.outputs.release_version }}'
-          publish_list_path="${RUNNER_TEMP:?RUNNER_TEMP is required}/publish_list.txt"
+          publish_plan_path="${RUNNER_TEMP:?RUNNER_TEMP is required}/publish_plan.txt"
 
           crate_exists() {
             local crate="$1"
@@ -500,7 +442,7 @@ jobs:
 
           publish_if_missing() {
             local crate="$1"
-            local wait_after="${2:-no}"
+            local wait_seconds="${2:-0}"
             if crate_exists "$crate" "$version"; then
               echo "${crate} ${version} already published; skipping"
               return 0
@@ -509,70 +451,61 @@ jobs:
             echo "Publishing ${crate} ${version}"
             cargo publish -p "$crate" --locked
 
-            if [[ "$wait_after" == "yes" ]]; then
+            if [[ "$wait_seconds" -gt 0 ]]; then
               echo "Waiting for crates.io index propagation after ${crate}"
-              sleep 60
+              sleep "$wait_seconds"
             fi
           }
 
-          python3 - <<'PY' "$version" > "${publish_list_path}"
-          import json
-          import sys
-          from pathlib import Path
-
-          version = sys.argv[1]
-          inventory = json.loads(Path("release/release-inventory.json").read_text(encoding="utf-8"))
-          dependency_order = [
-              "agent-team-mail-core",
-              "agent-team-mail",
-              "agent-team-mail-daemon",
-              "agent-team-mail-mcp",
-              "agent-team-mail-tui",
-              "sc-composer",
-          ]
-          item_by_artifact = {item.get("artifact"): item for item in inventory.get("items", [])}
-          for artifact in dependency_order:
-              item = item_by_artifact.get(artifact)
-              if item is None:
-                  raise SystemExit(f"inventory missing artifact: {artifact}")
-              if item.get("version") != version:
-                  raise SystemExit(f"{artifact}: inventory version mismatch for publish step")
-              if item.get("publish", True):
-                  print(artifact)
-          PY
+          python3 scripts/release_artifacts.py list-publish-plan \
+            --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+            --inventory release/release-inventory.json \
+            --version "$version" > "${publish_plan_path}"
 
           # Phase 1: publish core (the root dependency)
-          core_published=false
-          while IFS= read -r crate; do
+          mapfile -t full_checks < <(
+            python3 scripts/release_artifacts.py list-preflight \
+              --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+              --mode full
+          )
+          while IFS='|' read -r crate wait_seconds; do
             [[ -n "$crate" ]] || continue
-            if [[ "$crate" == "agent-team-mail-core" ]]; then
-              publish_if_missing "$crate" yes
-              core_published=true
-            fi
-          done < "${publish_list_path}"
+            for root in "${full_checks[@]}"; do
+              if [[ "$crate" == "$root" ]]; then
+                publish_if_missing "$crate" "${wait_seconds:-0}"
+                break
+              fi
+            done
+          done < "${publish_plan_path}"
 
-          # Phase 2: after core is on crates.io, validate non-core crates can package
-          if [[ "$core_published" == "true" ]]; then
-            echo "--- Validating non-core crate packaging (core now available on registry) ---"
-            while IFS= read -r crate; do
-              [[ -n "$crate" ]] || continue
-              [[ "$crate" == "agent-team-mail-core" ]] && continue
-              echo "::group::cargo package -p ${crate} --locked (pre-publish validation)"
-              cargo package -p "${crate}" --locked
-              echo "::endgroup::"
-            done < "${publish_list_path}"
-          fi
+          # Phase 2: after root publish, validate non-root crates can package
+          mapfile -t locked_checks < <(
+            python3 scripts/release_artifacts.py list-preflight \
+              --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+              --mode locked
+          )
+          for crate in "${locked_checks[@]}"; do
+            [[ -n "$crate" ]] || continue
+            echo "::group::cargo package -p ${crate} --locked (pre-publish validation)"
+            cargo package -p "${crate}" --locked
+            echo "::endgroup::"
+          done
 
           # Phase 3: publish non-core crates
-          while IFS= read -r crate; do
+          while IFS='|' read -r crate wait_seconds; do
             [[ -n "$crate" ]] || continue
-            [[ "$crate" == "agent-team-mail-core" ]] && continue
-            wait_after="no"
-            if [[ "$crate" == "agent-team-mail" || "$crate" == "agent-team-mail-daemon" || "$crate" == "agent-team-mail-mcp" ]]; then
-              wait_after="yes"
+            skip=false
+            for root in "${full_checks[@]}"; do
+              if [[ "$crate" == "$root" ]]; then
+                skip=true
+                break
+              fi
+            done
+            if [[ "$skip" == "true" ]]; then
+              continue
             fi
-            publish_if_missing "$crate" "$wait_after"
-          done < "${publish_list_path}"
+            publish_if_missing "$crate" "${wait_seconds:-0}"
+          done < "${publish_plan_path}"
 
   post-publish-verify:
     needs: [gate-and-tag, publish-crates, prepare-release-inventory]
@@ -985,13 +918,18 @@ jobs:
               code, _ = github_get(f"/repos/{repo}/releases/tags/{tag}")
               checks.append(("GitHub Release exists", code == 200, f"tag={tag}, status={code}"))
 
-          crates = [
-              "agent-team-mail-core",
-              "agent-team-mail",
-              "agent-team-mail-daemon",
-              "agent-team-mail-mcp",
-              "agent-team-mail-tui",
-          ]
+          crates_output = subprocess.check_output(
+              [
+                  "python3",
+                  "scripts/release_artifacts.py",
+                  "list-artifacts",
+                  "--manifest",
+                  "release/publish-artifacts.toml",
+                  "--publishable-only",
+              ],
+              text=True,
+          )
+          crates = [line.strip() for line in crates_output.splitlines() if line.strip()]
           for crate in crates:
               expected = f'{crate} = "{version}"'
               cmd = ["cargo", "search", crate, "--limit", "1"]
