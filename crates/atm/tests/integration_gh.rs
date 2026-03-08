@@ -3,6 +3,8 @@
 use assert_cmd::cargo;
 use std::fs;
 #[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::path::Path;
@@ -204,10 +206,30 @@ finally:
     except FileNotFoundError:
         pass
 "#;
-    fs::write(&script, body).unwrap();
+    {
+        let mut file = fs::File::create(&script).unwrap();
+        file.write_all(body.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
     let mut perms = fs::metadata(&script).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&script, perms).unwrap();
+    // Guard against file-write races on CI where the script can be executed
+    // before write visibility/metadata updates fully settle.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if fs::read_to_string(&script)
+            .map(|content| content == body)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fake gh daemon script did not become readable in time"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     script
 }
 

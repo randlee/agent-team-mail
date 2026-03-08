@@ -147,6 +147,10 @@ pub struct InitArgs {
     #[arg(long)]
     pub skip_team: bool,
 
+    /// Show planned install actions without writing files
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Legacy compatibility flag; global install is already the default.
     #[arg(long, hide = true, conflicts_with = "local")]
     pub global: bool,
@@ -180,23 +184,13 @@ pub fn execute(args: InitArgs) -> Result<()> {
     let home_dir = crate::util::settings::get_home_dir()?;
     let settings_path = resolve_settings_path(install_global)?;
 
-    let atm_toml_status = ensure_atm_toml(&atm_toml_path, &args.team, &identity)?;
-    let team_status = if args.skip_team {
-        TeamStatus::Skipped
-    } else {
-        ensure_team_config(&home_dir, &args.team, &current_dir)?
-    };
-
-    // Materialize hook scripts to disk before writing settings
     let scripts_dir = if install_global {
         home_dir.join(".claude").join("scripts")
     } else {
         current_dir.join(".claude").join("scripts")
     };
-    materialize_scripts(&scripts_dir)?;
 
     let mut settings = load_settings(&settings_path)?;
-
     let report = merge_hooks(
         &mut settings,
         if install_global {
@@ -206,9 +200,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
         },
     )?;
 
-    write_settings_atomic(&settings_path, &settings)?;
-
-    let mut runtime_reports = vec![RuntimeInstallReport {
+    let claude_runtime = RuntimeInstallReport {
         runtime: "claude",
         status: if report.all_present() {
             RuntimeInstallStatus::AlreadyConfigured
@@ -219,9 +211,49 @@ pub fn execute(args: InitArgs) -> Result<()> {
         },
         detail: None,
         path: Some(settings_path.clone()),
-    }];
-    runtime_reports.push(configure_codex_runtime(&home_dir, &scripts_dir));
-    runtime_reports.push(configure_gemini_runtime(&home_dir, &scripts_dir));
+    };
+
+    let (atm_toml_status, team_status, runtime_reports) = if args.dry_run {
+        let atm_toml_status = if atm_toml_path.exists() {
+            AtmTomlStatus::AlreadyPresent
+        } else {
+            AtmTomlStatus::WouldCreate
+        };
+        let team_status = if args.skip_team {
+            TeamStatus::Skipped
+        } else if home_dir
+            .join(".claude/teams")
+            .join(&args.team)
+            .join("config.json")
+            .exists()
+        {
+            TeamStatus::AlreadyPresent
+        } else {
+            TeamStatus::WouldCreate
+        };
+        let runtime_reports = vec![
+            claude_runtime,
+            plan_codex_runtime(&home_dir, &scripts_dir),
+            plan_gemini_runtime(&home_dir, &scripts_dir),
+        ];
+        (atm_toml_status, team_status, runtime_reports)
+    } else {
+        let atm_toml_status = ensure_atm_toml(&atm_toml_path, &args.team, &identity)?;
+        let team_status = if args.skip_team {
+            TeamStatus::Skipped
+        } else {
+            ensure_team_config(&home_dir, &args.team, &current_dir)?
+        };
+        // Materialize hook scripts to disk before writing settings
+        materialize_scripts(&scripts_dir)?;
+        write_settings_atomic(&settings_path, &settings)?;
+        let runtime_reports = vec![
+            claude_runtime,
+            configure_codex_runtime(&home_dir, &scripts_dir),
+            configure_gemini_runtime(&home_dir, &scripts_dir),
+        ];
+        (atm_toml_status, team_status, runtime_reports)
+    };
 
     print_report(
         &args.team,
@@ -231,6 +263,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
         &atm_toml_path,
         atm_toml_status,
         team_status,
+        args.dry_run,
         &runtime_reports,
     );
 
@@ -241,12 +274,14 @@ pub fn execute(args: InitArgs) -> Result<()> {
 enum AtmTomlStatus {
     Created,
     AlreadyPresent,
+    WouldCreate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TeamStatus {
     Created,
     AlreadyPresent,
+    WouldCreate,
     Skipped,
 }
 
@@ -306,6 +341,33 @@ fn configure_codex_runtime(home_dir: &Path, scripts_dir: &Path) -> RuntimeInstal
     }
 }
 
+fn plan_codex_runtime(home_dir: &Path, scripts_dir: &Path) -> RuntimeInstallReport {
+    let path = home_dir.join(".codex/config.toml");
+    if !runtime_detected("codex", &path) {
+        return RuntimeInstallReport {
+            runtime: "codex",
+            status: RuntimeInstallStatus::SkippedNotDetected,
+            detail: None,
+            path: Some(path),
+        };
+    }
+    let relay_script = scripts_dir.join("atm-hook-relay.py");
+    match preview_codex_notify_config(&path, &relay_script) {
+        Ok(status) => RuntimeInstallReport {
+            runtime: "codex",
+            status,
+            detail: None,
+            path: Some(path),
+        },
+        Err(err) => RuntimeInstallReport {
+            runtime: "codex",
+            status: RuntimeInstallStatus::Error,
+            detail: Some(err.to_string()),
+            path: Some(path),
+        },
+    }
+}
+
 fn configure_gemini_runtime(home_dir: &Path, scripts_dir: &Path) -> RuntimeInstallReport {
     let path = home_dir.join(".gemini/settings.json");
     if !runtime_detected("gemini", &home_dir.join(".gemini")) {
@@ -317,6 +379,32 @@ fn configure_gemini_runtime(home_dir: &Path, scripts_dir: &Path) -> RuntimeInsta
         };
     }
     match install_gemini_hook_config(&path, scripts_dir) {
+        Ok(status) => RuntimeInstallReport {
+            runtime: "gemini",
+            status,
+            detail: None,
+            path: Some(path),
+        },
+        Err(err) => RuntimeInstallReport {
+            runtime: "gemini",
+            status: RuntimeInstallStatus::Error,
+            detail: Some(err.to_string()),
+            path: Some(path),
+        },
+    }
+}
+
+fn plan_gemini_runtime(home_dir: &Path, scripts_dir: &Path) -> RuntimeInstallReport {
+    let path = home_dir.join(".gemini/settings.json");
+    if !runtime_detected("gemini", &home_dir.join(".gemini")) {
+        return RuntimeInstallReport {
+            runtime: "gemini",
+            status: RuntimeInstallStatus::SkippedNotDetected,
+            detail: None,
+            path: Some(path),
+        };
+    }
+    match preview_gemini_hook_config(&path, scripts_dir) {
         Ok(status) => RuntimeInstallReport {
             runtime: "gemini",
             status,
@@ -382,7 +470,7 @@ fn install_codex_notify_config(path: &Path, relay_script: &Path) -> Result<Runti
 
     let desired = vec![
         toml::Value::String("python3".to_string()),
-        toml::Value::String(relay_script.to_string_lossy().to_string()),
+        toml::Value::String(normalize_path_for_runtime_config(relay_script)),
     ];
 
     if let Some(existing) = table.get("notify") {
@@ -410,6 +498,49 @@ fn install_codex_notify_config(path: &Path, relay_script: &Path) -> Result<Runti
         serialized.push('\n');
     }
     write_text_atomic(path, &serialized)?;
+    Ok(if file_exists {
+        RuntimeInstallStatus::Updated
+    } else {
+        RuntimeInstallStatus::Installed
+    })
+}
+
+fn preview_codex_notify_config(path: &Path, relay_script: &Path) -> Result<RuntimeInstallStatus> {
+    let file_exists = path.exists();
+    let mut table = if file_exists {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        content
+            .parse::<toml::Table>()
+            .with_context(|| format!("Failed to parse {}", path.display()))?
+    } else {
+        toml::Table::new()
+    };
+
+    let desired = vec![
+        toml::Value::String("python3".to_string()),
+        toml::Value::String(normalize_path_for_runtime_config(relay_script)),
+    ];
+
+    if let Some(existing) = table.get("notify") {
+        if let Some(existing_array) = existing.as_array() {
+            if existing_array == &desired {
+                return Ok(RuntimeInstallStatus::AlreadyConfigured);
+            }
+            anyhow::bail!(
+                "Detected existing Codex notify configuration. \
+                 Update {} manually so notify = [\"python3\", \"{}\"]",
+                path.display(),
+                relay_script.display()
+            );
+        }
+        anyhow::bail!(
+            "Codex config {} contains non-array `notify`; cannot auto-configure",
+            path.display()
+        );
+    }
+
+    table.insert("notify".to_string(), toml::Value::Array(desired));
     Ok(if file_exists {
         RuntimeInstallStatus::Updated
     } else {
@@ -472,6 +603,71 @@ fn install_gemini_hook_config(path: &Path, scripts_dir: &Path) -> Result<Runtime
     } else {
         RuntimeInstallStatus::Installed
     })
+}
+
+fn preview_gemini_hook_config(path: &Path, scripts_dir: &Path) -> Result<RuntimeInstallStatus> {
+    let existed = path.exists();
+    let mut settings = if existed {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        serde_json::from_str::<serde_json::Value>(&content)
+            .with_context(|| format!("Failed to parse {}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    let mut added_any = false;
+    let session_start = format!(
+        "python3 \"{}\"",
+        normalize_for_bash_quoted_path(&scripts_dir.join("session-start.py"))
+    );
+    let session_end = format!(
+        "python3 \"{}\"",
+        normalize_for_bash_quoted_path(&scripts_dir.join("session-end.py"))
+    );
+    let after_agent = format!(
+        "python3 \"{}\"",
+        normalize_for_bash_quoted_path(&scripts_dir.join("teammate-idle-relay.py"))
+    );
+
+    if ensure_gemini_hook_command(
+        &mut settings,
+        "SessionStart",
+        "atm-session-start",
+        &session_start,
+    )? == HookStatus::Added
+    {
+        added_any = true;
+    }
+    if ensure_gemini_hook_command(&mut settings, "SessionEnd", "atm-session-end", &session_end)?
+        == HookStatus::Added
+    {
+        added_any = true;
+    }
+    if ensure_gemini_hook_command(&mut settings, "AfterAgent", "atm-after-agent", &after_agent)?
+        == HookStatus::Added
+    {
+        added_any = true;
+    }
+
+    if !added_any {
+        return Ok(RuntimeInstallStatus::AlreadyConfigured);
+    }
+    Ok(if existed {
+        RuntimeInstallStatus::Updated
+    } else {
+        RuntimeInstallStatus::Installed
+    })
+}
+
+fn normalize_path_for_runtime_config(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        path.to_string_lossy().replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().to_string()
+    }
 }
 
 fn ensure_gemini_hook_command(
@@ -1083,6 +1279,7 @@ fn print_report(
     atm_toml_path: &Path,
     atm_toml_status: AtmTomlStatus,
     team_status: TeamStatus,
+    dry_run: bool,
     runtime_reports: &[RuntimeInstallReport],
 ) {
     match atm_toml_status {
@@ -1092,11 +1289,15 @@ fn print_report(
         AtmTomlStatus::AlreadyPresent => {
             println!(".atm.toml already present at {}", atm_toml_path.display());
         }
+        AtmTomlStatus::WouldCreate => {
+            println!("Would create .atm.toml at {}", atm_toml_path.display());
+        }
     }
 
     match team_status {
         TeamStatus::Created => println!("Created team '{}'", team),
         TeamStatus::AlreadyPresent => println!("Team '{}' already exists", team),
+        TeamStatus::WouldCreate => println!("Would create team '{}'", team),
         TeamStatus::Skipped => println!("Skipped team creation (--skip-team)"),
     }
 
@@ -1115,79 +1316,123 @@ fn print_report(
         println!("  \u{2713} PreToolUse(Task) hook present");
         println!("  \u{2713} PostToolUse(Bash) hook present");
     } else if report.all_added() {
-        println!(
-            "Installed ATM hooks for team '{}' in {}",
-            team,
-            settings_path.display()
+        if dry_run {
+            println!(
+                "Would install ATM hooks for team '{}' in {}",
+                team,
+                settings_path.display()
+            );
+        } else {
+            println!(
+                "Installed ATM hooks for team '{}' in {}",
+                team,
+                settings_path.display()
+            );
+        }
+        print_hook_line("SessionStart hook", &report.session_start, dry_run);
+        print_hook_line("SessionEnd hook", &report.session_end, dry_run);
+        print_hook_line(
+            "PermissionRequest hook",
+            &report.permission_request,
+            dry_run,
         );
-        print_hook_line("SessionStart hook", &report.session_start);
-        print_hook_line("SessionEnd hook", &report.session_end);
-        print_hook_line("PermissionRequest hook", &report.permission_request);
-        print_hook_line("Stop hook", &report.stop);
+        print_hook_line("Stop hook", &report.stop, dry_run);
         print_hook_line(
             "Notification(idle_prompt) hook",
             &report.notification_idle_prompt,
+            dry_run,
         );
-        print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash);
-        print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
-        print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
+        print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash, dry_run);
+        print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task, dry_run);
+        print_hook_line(
+            "PostToolUse(Bash) hook",
+            &report.post_tool_use_bash,
+            dry_run,
+        );
     } else if report.any_added() {
-        println!(
-            "Updated ATM hooks for team '{}' in {}",
-            team,
-            settings_path.display()
+        if dry_run {
+            println!(
+                "Would update ATM hooks for team '{}' in {}",
+                team,
+                settings_path.display()
+            );
+        } else {
+            println!(
+                "Updated ATM hooks for team '{}' in {}",
+                team,
+                settings_path.display()
+            );
+        }
+        print_hook_line("SessionStart hook", &report.session_start, dry_run);
+        print_hook_line("SessionEnd hook", &report.session_end, dry_run);
+        print_hook_line(
+            "PermissionRequest hook",
+            &report.permission_request,
+            dry_run,
         );
-        print_hook_line("SessionStart hook", &report.session_start);
-        print_hook_line("SessionEnd hook", &report.session_end);
-        print_hook_line("PermissionRequest hook", &report.permission_request);
-        print_hook_line("Stop hook", &report.stop);
+        print_hook_line("Stop hook", &report.stop, dry_run);
         print_hook_line(
             "Notification(idle_prompt) hook",
             &report.notification_idle_prompt,
+            dry_run,
         );
-        print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash);
-        print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
-        print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
+        print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash, dry_run);
+        print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task, dry_run);
+        print_hook_line(
+            "PostToolUse(Bash) hook",
+            &report.post_tool_use_bash,
+            dry_run,
+        );
     }
 
     println!(
         "Hook scope: {}",
         if install_global { "global" } else { "local" }
     );
+    if dry_run {
+        println!("Dry run: no files were written.");
+    }
     println!("Runtime installs:");
     for runtime in runtime_reports {
+        let status = if dry_run {
+            match runtime.status {
+                RuntimeInstallStatus::Installed => "would-install",
+                RuntimeInstallStatus::Updated => "would-update",
+                RuntimeInstallStatus::AlreadyConfigured => "already-configured",
+                RuntimeInstallStatus::SkippedNotDetected => "skipped-not-detected",
+                RuntimeInstallStatus::Error => "error",
+            }
+        } else {
+            runtime.status.as_str()
+        };
         match (&runtime.detail, &runtime.path) {
             (Some(detail), Some(path)) => {
-                println!(
-                    "  - {}: {} ({})",
-                    runtime.runtime,
-                    runtime.status.as_str(),
-                    path.display()
-                );
+                println!("  - {}: {} ({})", runtime.runtime, status, path.display());
                 println!("    remediation: {detail}");
             }
             (Some(detail), None) => {
-                println!("  - {}: {}", runtime.runtime, runtime.status.as_str());
+                println!("  - {}: {}", runtime.runtime, status);
                 println!("    remediation: {detail}");
             }
             (None, Some(path)) => {
-                println!(
-                    "  - {}: {} ({})",
-                    runtime.runtime,
-                    runtime.status.as_str(),
-                    path.display()
-                );
+                println!("  - {}: {} ({})", runtime.runtime, status, path.display());
             }
             (None, None) => {
-                println!("  - {}: {}", runtime.runtime, runtime.status.as_str());
+                println!("  - {}: {}", runtime.runtime, status);
             }
         }
     }
 }
 
-fn print_hook_line(label: &str, status: &HookStatus) {
+fn print_hook_line(label: &str, status: &HookStatus, dry_run: bool) {
     match status {
-        HookStatus::Added => println!("  + {label} added"),
+        HookStatus::Added => {
+            if dry_run {
+                println!("  + {label} would be added");
+            } else {
+                println!("  + {label} added");
+            }
+        }
         HookStatus::AlreadyPresent => println!("  \u{2713} {label} present"),
     }
 }
@@ -1633,6 +1878,7 @@ mod tests {
             local: false,
             identity: Some("team-lead".to_string()),
             skip_team: false,
+            dry_run: false,
             global: false,
         });
 

@@ -40,6 +40,14 @@ def _repo_root(explicit: str) -> Path:
     return script_root
 
 
+def _is_atm_context(repo_root: Path) -> bool:
+    if os.environ.get("ATM_TEAM", "").strip():
+        return True
+    if os.environ.get("ATM_IDENTITY", "").strip():
+        return True
+    return (repo_root / ".atm.toml").exists()
+
+
 def _extract_frontmatter(agent_file: Path) -> tuple[str, str, str]:
     if not agent_file.exists():
         return "", "", ""
@@ -95,11 +103,13 @@ def _shell_quote(value: str) -> str:
 
 def main() -> int:
     args = _parse_args()
+    repo_root = _repo_root(args.repo_root)
+    if not _is_atm_context(repo_root):
+        return 0
 
     agent_name = os.environ.get("ATM_IDENTITY", args.agent_name)
     team_name = os.environ.get("ATM_TEAM", args.team_name)
 
-    repo_root = _repo_root(args.repo_root)
     agent_file = repo_root / ".claude" / "agents" / f"{agent_name}.md"
     fm_model, fm_color, prompt_body = _extract_frontmatter(agent_file)
 

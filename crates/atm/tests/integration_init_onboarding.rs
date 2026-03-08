@@ -116,6 +116,17 @@ fn count_gemini_hook_command(settings_path: &Path, category: &str, command: &str
         .unwrap_or(0)
 }
 
+fn normalize_runtime_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        path.replace('\\', "/").to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string()
+    }
+}
+
 #[test]
 fn test_init_fresh_repo_creates_atm_toml_team_and_global_hooks() {
     let home = TempDir::new().unwrap();
@@ -566,7 +577,67 @@ fn test_init_installs_codex_notify_when_detected_by_config() {
         .join(".claude/scripts/atm-hook-relay.py")
         .to_string_lossy()
         .to_string();
-    assert_eq!(notify[1].as_str(), Some(relay.as_str()));
+    let actual = notify[1].as_str().expect("notify relay path");
+    assert_eq!(
+        normalize_runtime_path(actual),
+        normalize_runtime_path(&relay)
+    );
+}
+
+#[test]
+fn test_init_reports_codex_already_configured_on_second_run() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let codex_dir = home.path().join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(codex_dir.join("config.toml"), "model = \"gpt-5\"\n").unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("codex: updated"));
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("codex: already-configured"));
+}
+
+#[test]
+fn test_init_dry_run_shows_planned_actions_without_writes() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Dry run: no files were written."))
+        .stdout(predicate::str::contains("Would create .atm.toml"))
+        .stdout(predicate::str::contains("Would create team 'my-team'"))
+        .stdout(predicate::str::contains("claude: would-install"))
+        .stdout(predicate::str::contains("codex:"))
+        .stdout(predicate::str::contains("gemini:"));
+
+    assert!(
+        !repo.join(".atm.toml").exists(),
+        "dry-run must not write .atm.toml"
+    );
+    assert!(
+        !home.path().join(".claude/settings.json").exists(),
+        "dry-run must not write settings.json"
+    );
+    assert!(
+        !home
+            .path()
+            .join(".claude/teams/my-team/config.json")
+            .exists(),
+        "dry-run must not create team config"
+    );
 }
 
 #[test]

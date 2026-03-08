@@ -25,6 +25,13 @@ def _run(cmd: list[str], *, check: bool = True, capture: bool = False) -> subpro
     return subprocess.run(cmd, check=check, text=True, capture_output=capture)
 
 
+def _repo_root() -> Path:
+    override = os.environ.get("LAUNCH_REPO_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parent.parent
+
+
 def _read_default_team(atm_toml: Path) -> str:
     try:
         import tomllib
@@ -49,12 +56,10 @@ def main() -> int:
     args = _parse_args()
     mode = os.environ.get("LAUNCH_MODE", "session").strip() or "session"
 
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = _repo_root()
     atm_toml = repo_root / ".atm.toml"
     if not atm_toml.exists():
-        print(f"Error: .atm.toml not found at {atm_toml}", file=sys.stderr)
-        print("Set up [core].default_team in repo .atm.toml before launching workers.", file=sys.stderr)
-        return 1
+        return 0
 
     try:
         default_team = _read_default_team(atm_toml)
