@@ -167,7 +167,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | Z | Daemon SSoT + Observability Hardening | Canonical daemon-owned member state, session-registry sync closure, and doctor/status observability consistency (Z.1–Z.7 COMPLETE) | COMPLETE |
 | AA | Session Correctness + Spawn Authorization + Reliability UX | Session-end correctness, spawn authorization, cleanup/help reliability hardening | COMPLETE |
 | AB | GitHub CI Monitor Command + Availability Hardening | Complete `atm gh` plugin requirements and deliver monitor/state/reporting contracts | COMPLETE |
-| AC | Daemon Status Convergence + Hook Install Confidence | Finalize daemon status/lifecycle consistency and pre-release hook install confidence for local/global paths | IN PROGRESS |
+| AC | Daemon Status Convergence + Hook Install Confidence | Finalize daemon status/lifecycle consistency and pre-release hook install confidence for local/global paths | COMPLETE |
 
 ---
 
@@ -1438,41 +1438,21 @@ the current tranche focused on onboarding contract closure.
 | | AC.8 | Init Install Matrix QA Blocker Closure | COMPLETE | [#487](https://github.com/randlee/agent-team-mail/pull/487) |
 | | AC.9 | Multi-Team Recovery Determinism | COMPLETE | [#488](https://github.com/randlee/agent-team-mail/pull/488) |
 | | AC.10 | Final AC Verification + Release Readiness | COMPLETE | [#489](https://github.com/randlee/agent-team-mail/pull/489) |
+| Phase AE | AE.1 | Config Discovery + `atm gh init` Baseline | COMPLETE | [#518](https://github.com/randlee/agent-team-mail/pull/518) |
+| | AE.2 | Live Status + JSON + Output Consistency | COMPLETE | [#519](https://github.com/randlee/agent-team-mail/pull/519) |
+| | AE.3 | Monitor Reload Semantics | COMPLETE | [#521](https://github.com/randlee/agent-team-mail/pull/521) |
+| | AE.4 | Daemon Logging/Autostart/Plugin Isolation | COMPLETE | [#522](https://github.com/randlee/agent-team-mail/pull/522) |
+| | AE.5 | Identity Ambiguity + Phase Closeout | COMPLETE | [#523](https://github.com/randlee/agent-team-mail/pull/523) |
 | **AF** | AF.1 | Lifecycle Correctness (Session + PID Liveness) | COMPLETE | [#524](https://github.com/randlee/agent-team-mail/pull/524) |
 | | AF.2 | Spawn Authorization + Preview UX | COMPLETE | [#526](https://github.com/randlee/agent-team-mail/pull/526) |
 | | AF.3 | Transient Agent Registration Controls | COMPLETE | [#527](https://github.com/randlee/agent-team-mail/pull/527) |
 | | AF.4 | Cleanup Preview + tmux Sentinel | COMPLETE | [#528](https://github.com/randlee/agent-team-mail/pull/528) |
 | | AF.5 | Reliability Regression + Documentation Closure | COMPLETE | `feature/pAF-s5-reliability-closeout` (PR pending) |
 
-**Completed**: 123+ sprints across 27 phases (CI green)
-**Current version**: v0.38.0
-**Current phase**: Phase AF (IN PROGRESS)
+**Completed**: 128+ sprints across 28 phases (CI green)
+**Current version**: v0.39.0
+**Current phase**: Phase AF (COMPLETE)
 **Next planned phase**: Phase AG (TBD)
-
----
-
-## 17.10 Phase AF: Reliability + Lifecycle Closeout
-
-**Goal**: close lifecycle/spawn/transient/cleanup reliability gaps and align
-requirements, planning, and regression coverage.
-
-**Integration branch**: `integrate/phase-AF`
-
-### Sprint Summary
-
-| Sprint | Name | PR | Branch | Issues | Status |
-|---|---|---|---|---|---|
-| AF.1 | Lifecycle Correctness (Session + PID Liveness) | [#524](https://github.com/randlee/agent-team-mail/pull/524) | `feature/pAF-s1-lifecycle-correctness` | [#448](https://github.com/randlee/agent-team-mail/issues/448), [#449](https://github.com/randlee/agent-team-mail/issues/449) | COMPLETE |
-| AF.2 | Spawn Authorization + Preview UX | [#526](https://github.com/randlee/agent-team-mail/pull/526) | `feature/pAF-s2-spawn-auth-preview` | [#394](https://github.com/randlee/agent-team-mail/issues/394), [#456](https://github.com/randlee/agent-team-mail/issues/456) | COMPLETE |
-| AF.3 | Transient Agent Registration Controls | [#527](https://github.com/randlee/agent-team-mail/pull/527) | `feature/pAF-s3-transient-registration` | [#393](https://github.com/randlee/agent-team-mail/issues/393) | COMPLETE |
-| AF.4 | Cleanup Preview + tmux Sentinel | [#528](https://github.com/randlee/agent-team-mail/pull/528) | `feature/pAF-s4-cleanup-sentinel` | [#373](https://github.com/randlee/agent-team-mail/issues/373), [#45](https://github.com/randlee/agent-team-mail/issues/45) | COMPLETE |
-| AF.5 | Reliability Regression + Documentation Closure | — (pending AF.5 PR) | `feature/pAF-s5-reliability-closeout` | [#448](https://github.com/randlee/agent-team-mail/issues/448), [#449](https://github.com/randlee/agent-team-mail/issues/449), [#393](https://github.com/randlee/agent-team-mail/issues/393), [#394](https://github.com/randlee/agent-team-mail/issues/394), [#456](https://github.com/randlee/agent-team-mail/issues/456), [#373](https://github.com/randlee/agent-team-mail/issues/373), [#45](https://github.com/randlee/agent-team-mail/issues/45) | COMPLETE |
-
-### AF.5 Closeout Artifacts
-
-1. `docs/test-plan-phase-AF.md` issue-to-coverage matrix and deferred-item record.
-2. `docs/adr/af3-transient-registration-contract.md` AF.3 contract rationale.
-3. Daemon regression test for non-member `session_start` rejection in `socket.rs`.
 
 ---
 
@@ -1905,6 +1885,30 @@ for both project-local and global-install paths before Homebrew/global hook roll
 
 ---
 
+## 17.15 Phase AD: Cross-Platform Script Standardization
+
+**Goal**: remove product/runtime shell-script dependencies and standardize runtime
+script behavior on Python across macOS/Linux/Windows.
+
+**Requirements references**:
+- `docs/requirements.md` §4.9.3a (Python-only runtime script policy)
+- `docs/requirements.md` §4.9.5 (`atm init` runtime detection + install contract)
+
+**Integration branch**: `integrate/phase-AD`
+
+**Planning doc**: `docs/phase-ad-planning.md`
+
+### Sprint Summary
+| Sprint | Name | PR | Branch | Issues | Status |
+|--------|------|----|--------|--------|--------|
+| AD.1 | Python Runtime Policy + atm init Auto-Install | [#513](https://github.com/randlee/agent-team-mail/pull/513) | `feature/pAD-s1-python-policy` | #500 (→AE), #506 (→AE) | COMPLETE |
+| AD.2 | Runtime Config Discovery Parity | [#514](https://github.com/randlee/agent-team-mail/pull/514) | `feature/pAD-s2-config-parity` | #499 (→AE) | COMPLETE |
+| AD.3 | GH Monitor Status Hardening | [#515](https://github.com/randlee/agent-team-mail/pull/515) | `feature/pAD-s3-gh-status-hardening` | #504 (→AE), #507 | COMPLETE |
+| AD.4 | Live State + Config Reload | [#516](https://github.com/randlee/agent-team-mail/pull/516) | `feature/pAD-s4-live-state` | #502 (→AE), #503 (→AE), #505 (→AE) | COMPLETE |
+| AD.5 | Script Conversion + atm init Auto-Install | [#517](https://github.com/randlee/agent-team-mail/pull/517) | `feature/pAD-s5-script-conversion` | TBD | COMPLETE |
+| AD.6 | Bash Wrapper Removal | — | `feature/pAD-s6-bash-removal` | — | CANDIDATE |
+
+---
 ## 20. Phase Integration PRs
 
 | Phase | Integration PR | Status |
@@ -1932,6 +1936,8 @@ for both project-local and global-install paths before Homebrew/global hook roll
 | Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Merged |
 | Phase AA | `integrate/phase-AA` | Merged ([#459](https://github.com/randlee/agent-team-mail/pull/459)) |
 | Phase AB | `integrate/phase-AB` | [#469](https://github.com/randlee/agent-team-mail/pull/469) Pending merge |
+| Phase AD | `integrate/phase-AD` → [#520](https://github.com/randlee/agent-team-mail/pull/520) | Merged |
+| Phase AE | `integrate/phase-AE` → [#525](https://github.com/randlee/agent-team-mail/pull/525) | Merged |
 
 ---
 
@@ -2006,11 +2012,11 @@ observability/runtime gaps discovered during dogfooding.
 
 | Sprint | Name | PR | Branch | Issues | Status |
 |---|---|---|---|---|---|
-| AE.1 | Config Discovery + `atm gh init` Baseline | [#518](https://github.com/randlee/agent-team-mail/pull/518) | `feature/pAE-s1-config-init` | #499, #500 | IN PROGRESS |
-| AE.2 | Live Status + JSON + Output Consistency | — | `feature/pAE-s2-live-status-json` | #503, #504, #505 | IN PROGRESS |
-| AE.3 | Monitor Reload Semantics | — | `feature/pAE-s3-reload-semantics` | #502 | PLANNED |
-| AE.4 | Daemon Logging/Autostart/Plugin Isolation | — | `feature/pAE-s4-daemon-observability` | #472, #473, #474 | PLANNED |
-| AE.5 | Identity Ambiguity + Phase Closeout | — | `feature/pAE-s5-identity-closeout` | #506 | PLANNED |
+| AE.1 | Config Discovery + `atm gh init` Baseline | [#518](https://github.com/randlee/agent-team-mail/pull/518) | `feature/pAE-s1-config-init` | #499, #500 | COMPLETE |
+| AE.2 | Live Status + JSON + Output Consistency | [#519](https://github.com/randlee/agent-team-mail/pull/519) | `feature/pAE-s2-live-status-json` | #503, #504, #505 | COMPLETE |
+| AE.3 | Monitor Reload Semantics | [#521](https://github.com/randlee/agent-team-mail/pull/521) | `feature/pAE-s3-reload-semantics` | #502 | COMPLETE |
+| AE.4 | Daemon Logging/Autostart/Plugin Isolation | [#522](https://github.com/randlee/agent-team-mail/pull/522) | `feature/pAE-s4-daemon-observability` | #472, #473, #474 | COMPLETE |
+| AE.5 | Identity Ambiguity + Phase Closeout | [#523](https://github.com/randlee/agent-team-mail/pull/523) | `feature/pAE-s5-identity-closeout` | #506 | COMPLETE |
 
 ## 23. Scrum Master Agent Prompt
 

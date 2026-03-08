@@ -145,11 +145,31 @@ pub fn execute(args: SendArgs) -> Result<()> {
     // Get message text from appropriate source
     let message_text = get_message_text(&args)?;
 
-    // Self-send check: warn and prepend warning only when sender and recipient
-    // are the same identity in the same team.
-    let message_text = if let Some(warning) =
-        build_self_send_warning(&config.core.identity, &sender_team, &agent_name, &team_name)
-    {
+    // Resolve sender session once so concurrent same-identity sessions can be
+    // disambiguated deterministically.
+    let sender_session_id =
+        resolve_sender_session_id_with_context(Some(&sender_team), Some(&config.core.identity))?;
+
+    // Self-send check: warn and prepend warning only when sender/recipient are
+    // same identity in same team and daemon session ownership points to this
+    // session (or ownership is unknown).
+    let message_text = if should_warn_self_send(
+        &config.core.identity,
+        &sender_team,
+        &agent_name,
+        &team_name,
+        sender_session_id.as_deref(),
+    ) {
+        let session_id = sender_session_id
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| std::env::var("CLAUDE_SESSION_ID").ok())
+            .unwrap_or_else(|| "unknown".to_string());
+        let session_short = &session_id[..8.min(session_id.len())];
+        let warning = format!(
+            "[WARNING: Sent to self — identity={}, session={}. Check ATM_IDENTITY.]",
+            config.core.identity, session_short
+        );
         println!("{warning}");
         format!("{warning}\n{message_text}")
     } else {
@@ -192,7 +212,12 @@ pub fn execute(args: SendArgs) -> Result<()> {
         // Non-fatal: log warning but proceed with send
         eprintln!("Warning: Failed to update sender activity: {e}");
     }
-    register_sender_hint(&team_name, &config.core.identity, &team_config)?;
+    register_sender_hint(
+        &team_name,
+        &config.core.identity,
+        &team_config,
+        sender_session_id.as_deref(),
+    )?;
 
     // Generate summary
     let summary = args
@@ -436,81 +461,16 @@ fn is_self_send(
     sender_identity == recipient_agent && sender_team == recipient_team
 }
 
-fn build_self_send_warning(
-    sender_identity: &str,
-    sender_team: &str,
-    recipient_agent: &str,
-    recipient_team: &str,
-) -> Option<String> {
-    if !is_self_send(
-        sender_identity,
-        sender_team,
-        recipient_agent,
-        recipient_team,
-    ) {
-        return None;
-    }
-    let session_id =
-        detect_sender_session_id_with_context(Some(sender_team), Some(sender_identity))
-            .unwrap_or_else(|| "unknown".to_string());
-    let session_short = &session_id[..8.min(session_id.len())];
-    let identity_collision =
-        identity_has_session_collision(sender_team, sender_identity, &session_id);
-
-    Some(render_self_send_warning(
-        sender_identity,
-        sender_team,
-        session_short,
-        identity_collision,
-    ))
-}
-
-fn render_self_send_warning(
-    sender_identity: &str,
-    sender_team: &str,
-    session_short: &str,
-    identity_collision: bool,
-) -> String {
-    if identity_collision {
-        format!(
-            "[WARNING: Identity collision — {}@{} has multiple active sessions; delivery uses shared inbox (session={}).]",
-            sender_identity, sender_team, session_short
-        )
-    } else {
-        format!(
-            "[WARNING: Sent to self — identity={}, session={}. Check ATM_IDENTITY.]",
-            sender_identity, session_short
-        )
-    }
-}
-
-fn identity_has_session_collision(team: &str, identity: &str, current_session_id: &str) -> bool {
-    identity_has_session_collision_with_lookup(team, identity, current_session_id, |t, id| {
-        read_session_file(t, id)
-    })
-}
-
-fn identity_has_session_collision_with_lookup<F>(
-    team: &str,
-    identity: &str,
-    current_session_id: &str,
-    lookup: F,
-) -> bool
-where
-    F: Fn(&str, &str) -> Result<Option<String>>,
-{
-    match lookup(team, identity) {
-        Ok(Some(unique_session_id)) => unique_session_id != current_session_id,
-        Ok(None) => false,
-        Err(err) => err.to_string().contains("Ambiguous:"),
-    }
-}
-
 fn destination_target(agent_name: &str, team_name: &str) -> String {
     format!("{agent_name}@{team_name}")
 }
 
-fn register_sender_hint(team: &str, sender: &str, cfg: &TeamConfig) -> Result<()> {
+fn register_sender_hint(
+    team: &str,
+    sender: &str,
+    cfg: &TeamConfig,
+    sender_session_id: Option<&str>,
+) -> Result<()> {
     let Some(member) = cfg.members.iter().find(|m| m.name == sender) else {
         return Ok(());
     };
@@ -521,7 +481,8 @@ fn register_sender_hint(team: &str, sender: &str, cfg: &TeamConfig) -> Result<()
         return Ok(());
     }
 
-    let session_id = detect_sender_session_id_with_context(Some(team), Some(sender))
+    let session_id = sender_session_id
+        .map(str::to_string)
         // Non-hook shells (Codex/Gemini CLI) still need a stable daemon session
         // key. Keep this stable for the life of the detected PID.
         .unwrap_or_else(|| format!("local:{sender}:pid:{process_id}"));
@@ -649,28 +610,82 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     Ok(())
 }
 
-fn detect_sender_session_id_with_context(
+fn resolve_sender_session_id_with_context(
     team: Option<&str>,
     identity: Option<&str>,
-) -> Option<String> {
+) -> Result<Option<String>> {
     // 1. PID-based hook file (fastest, most precise — set by PreToolUse Bash hook).
     if let Ok(Some(hook)) = read_hook_file() {
         let trimmed = hook.session_id.trim();
         if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
+            return Ok(Some(trimmed.to_string()));
         }
     }
-    // 2. Session file written by SessionStart hook (survives bash subshell env loss).
-    if let (Some(t), Some(id)) = (team, identity) {
-        if let Ok(Some(session_id)) = read_session_file(t, id) {
-            return Some(session_id);
-        }
-    }
-    // 3. CLAUDE_SESSION_ID env var (explicit override or tmux/codex sessions).
-    std::env::var("CLAUDE_SESSION_ID")
+    // 2. Explicit environment override.
+    if let Some(env_session) = std::env::var("CLAUDE_SESSION_ID")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+    {
+        return Ok(Some(env_session));
+    }
+    // 3. Session file written by SessionStart hook (survives bash subshell env loss).
+    if let (Some(t), Some(id)) = (team, identity) {
+        if let Some(session_id) = read_session_file(t, id)? {
+            return Ok(Some(session_id));
+        }
+    }
+    Ok(None)
+}
+
+fn should_warn_self_send(
+    sender_identity: &str,
+    sender_team: &str,
+    recipient_agent: &str,
+    recipient_team: &str,
+    sender_session_id: Option<&str>,
+) -> bool {
+    should_warn_self_send_with_query(
+        sender_identity,
+        sender_team,
+        recipient_agent,
+        recipient_team,
+        sender_session_id,
+        agent_team_mail_core::daemon_client::query_session_for_team,
+    )
+}
+
+fn should_warn_self_send_with_query<F>(
+    sender_identity: &str,
+    sender_team: &str,
+    recipient_agent: &str,
+    recipient_team: &str,
+    sender_session_id: Option<&str>,
+    query: F,
+) -> bool
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
+    if !is_self_send(
+        sender_identity,
+        sender_team,
+        recipient_agent,
+        recipient_team,
+    ) {
+        return false;
+    }
+
+    let Some(sender_session_id) = sender_session_id else {
+        // Unknown sender session: retain warning to avoid silent misrouting.
+        return true;
+    };
+
+    match query(recipient_team, recipient_agent) {
+        Ok(Some(session)) if session.alive => session.session_id == sender_session_id,
+        Ok(Some(_)) => true,
+        Ok(None) => true,
+        Err(_) => true,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -959,37 +974,6 @@ mod tests {
     }
 
     #[test]
-    fn test_self_send_warning_prepended() {
-        // When sender identity == target agent name, the warning should be
-        // prepended to the message text when teams also match.
-        let sender = "team-lead";
-        let sender_team = "atm-dev";
-        let agent_name = "team-lead"; // same as sender → self-send
-        let target_team = "atm-dev";
-        let raw_message = "Hello self!";
-
-        let message_text = if is_self_send(sender, sender_team, agent_name, target_team) {
-            let warning = render_self_send_warning(sender, sender_team, "test-ses", false);
-            format!("{warning}\n{raw_message}")
-        } else {
-            raw_message.to_string()
-        };
-
-        assert!(message_text.starts_with("[WARNING: Sent to self"));
-        assert!(message_text.contains("team-lead"));
-        assert!(message_text.contains("test-ses")); // first 8 chars
-        assert!(message_text.contains("Hello self!"));
-    }
-
-    #[test]
-    fn test_render_self_send_warning_identity_collision_variant() {
-        let warning = render_self_send_warning("team-lead", "atm-dev", "abc12345", true);
-        assert!(warning.contains("Identity collision"));
-        assert!(warning.contains("team-lead@atm-dev"));
-        assert!(warning.contains("abc12345"));
-    }
-
-    #[test]
     fn test_self_send_warning_not_added_for_different_recipient() {
         let sender = "team-lead";
         let sender_team = "atm-dev";
@@ -1035,44 +1019,6 @@ mod tests {
     fn test_is_self_send_different_name_same_team_no_warning() {
         // team-lead@atm-dev sending to arch-ctm@atm-dev — different agent, must NOT warn.
         assert!(!is_self_send("team-lead", "atm-dev", "arch-ctm", "atm-dev"));
-    }
-
-    #[test]
-    fn test_identity_collision_lookup_true_on_ambiguous_error() {
-        let collision =
-            identity_has_session_collision_with_lookup("atm-dev", "team-lead", "sess-1", |_, _| {
-                Err(anyhow!(
-                    "Ambiguous: 2 active sessions for team-lead@atm-dev"
-                ))
-            });
-        assert!(collision);
-    }
-
-    #[test]
-    fn test_identity_collision_lookup_false_for_unique_same_session() {
-        let collision =
-            identity_has_session_collision_with_lookup("atm-dev", "team-lead", "sess-1", |_, _| {
-                Ok(Some("sess-1".to_string()))
-            });
-        assert!(!collision);
-    }
-
-    #[test]
-    fn test_identity_collision_lookup_true_for_unique_mismatched_session() {
-        let collision =
-            identity_has_session_collision_with_lookup("atm-dev", "team-lead", "sess-1", |_, _| {
-                Ok(Some("sess-2".to_string()))
-            });
-        assert!(collision);
-    }
-
-    #[test]
-    fn test_identity_collision_lookup_false_when_no_session_data() {
-        let collision =
-            identity_has_session_collision_with_lookup("atm-dev", "team-lead", "sess-1", |_, _| {
-                Ok(None)
-            });
-        assert!(!collision);
     }
 
     #[test]
@@ -1216,7 +1162,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_detect_sender_session_id_prefers_hook_file_over_session_and_env() {
+    fn test_resolve_sender_session_id_prefers_hook_file_over_session_and_env() {
         let temp = TempDir::new().unwrap();
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
@@ -1229,7 +1175,8 @@ mod tests {
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
-        let actual = detect_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"));
+        let actual =
+            resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
             std::env::remove_var("ATM_HOME");
@@ -1242,7 +1189,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_detect_sender_session_id_uses_session_file_when_hook_missing() {
+    fn test_resolve_sender_session_id_prefers_env_when_hook_missing() {
         let temp = TempDir::new().unwrap();
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
@@ -1254,7 +1201,33 @@ mod tests {
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
-        let actual = detect_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"));
+        let actual =
+            resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(actual.as_deref(), Some("sid-from-env"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_sender_session_id_uses_session_file_when_hook_and_env_missing() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let actual =
+            resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
             std::env::remove_var("ATM_HOME");
@@ -1266,7 +1239,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_detect_sender_session_id_uses_env_when_hook_and_session_missing() {
+    fn test_resolve_sender_session_id_uses_env_when_hook_and_session_missing() {
         let temp = TempDir::new().unwrap();
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
@@ -1276,7 +1249,8 @@ mod tests {
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
-        let actual = detect_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"));
+        let actual =
+            resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
             std::env::remove_var("ATM_HOME");
@@ -1284,5 +1258,91 @@ mod tests {
         }
 
         assert_eq!(actual.as_deref(), Some("sid-from-env"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_sender_session_id_errors_on_ambiguous_session_files_without_env() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-a");
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-b");
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let err = resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"))
+            .expect_err("ambiguous session files should error");
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert!(err.to_string().contains("Ambiguous:"));
+        assert!(err.to_string().contains("Export CLAUDE_SESSION_ID"));
+    }
+
+    #[test]
+    fn test_should_warn_self_send_true_when_same_session_owned() {
+        let warn = should_warn_self_send_with_query(
+            "team-lead",
+            "atm-dev",
+            "team-lead",
+            "atm-dev",
+            Some("sid-123"),
+            |_, _| {
+                Ok(Some(SessionQueryResult {
+                    session_id: "sid-123".to_string(),
+                    process_id: 100,
+                    alive: true,
+                    runtime: None,
+                    runtime_session_id: None,
+                    pane_id: None,
+                    runtime_home: None,
+                }))
+            },
+        );
+        assert!(warn);
+    }
+
+    #[test]
+    fn test_should_warn_self_send_false_when_different_active_session_owns_identity() {
+        let warn = should_warn_self_send_with_query(
+            "team-lead",
+            "atm-dev",
+            "team-lead",
+            "atm-dev",
+            Some("sid-local"),
+            |_, _| {
+                Ok(Some(SessionQueryResult {
+                    session_id: "sid-remote".to_string(),
+                    process_id: 101,
+                    alive: true,
+                    runtime: None,
+                    runtime_session_id: None,
+                    pane_id: None,
+                    runtime_home: None,
+                }))
+            },
+        );
+        assert!(!warn);
+    }
+
+    #[test]
+    fn test_should_warn_self_send_true_when_sender_session_unknown() {
+        let warn = should_warn_self_send_with_query(
+            "team-lead",
+            "atm-dev",
+            "team-lead",
+            "atm-dev",
+            None,
+            |_, _| Ok(None),
+        );
+        assert!(warn);
     }
 }
