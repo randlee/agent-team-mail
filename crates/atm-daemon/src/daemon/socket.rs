@@ -6108,21 +6108,29 @@ poll_interval_secs = 1
         let atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
         write_hook_auth_team_config(temp.path(), team, lead, members);
 
-        // Spin-wait until config is readable — macOS APFS directory entry visibility
-        // is not guaranteed immediately after write+sync without this verification.
+        // Spin-wait until config is readable AND contains valid JSON with the
+        // expected leadAgentId — macOS APFS VFS page cache can return a
+        // successful but empty/partial read immediately after write+sync.
+        // Matching the pattern used in set_member_backend.
         let config_path = temp
             .path()
             .join(".claude/teams")
             .join(team)
             .join("config.json");
+        let expected_lead_id = format!("{lead}@{team}");
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         loop {
-            if std::fs::read_to_string(&config_path).is_ok() {
+            let visible = std::fs::read_to_string(&config_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v["leadAgentId"].as_str().map(str::to_string))
+                .is_some_and(|id| id == expected_lead_id);
+            if visible {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "fixture config not readable after 500ms: {}",
+                "fixture config not readable/valid after 500ms: {}",
                 config_path.display()
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
