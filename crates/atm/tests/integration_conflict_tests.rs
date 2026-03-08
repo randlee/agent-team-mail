@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+#[path = "support/daemon_test_registry.rs"]
+mod daemon_test_registry;
 
 /// Helper to set home directory for cross-platform test compatibility.
 /// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
@@ -111,6 +113,7 @@ impl DaemonProcessGuard {
             "atm-daemon binary not found at {}",
             daemon_bin.display()
         );
+        daemon_test_registry::sweep_stale_test_daemons();
         let mut cmd = Command::new(daemon_bin);
         cmd.env("ATM_HOME", home.path())
             .env("ATM_DAEMON_AUTOSTART", "0")
@@ -124,6 +127,15 @@ impl DaemonProcessGuard {
         let child = cmd.spawn().expect("failed to spawn atm-daemon");
         let pid = child.id();
         assert!(pid > 1, "spawned daemon PID must be > 1, got {pid}");
+        let daemon_bin_for_registry = {
+            let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
+            #[cfg(windows)]
+            candidate.set_file_name("atm-daemon.exe");
+            #[cfg(not(windows))]
+            candidate.set_file_name("atm-daemon");
+            candidate
+        };
+        daemon_test_registry::register_test_daemon(pid, &daemon_bin_for_registry);
         Self { child, pid }
     }
 
@@ -212,6 +224,7 @@ impl Drop for DaemonProcessGuard {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        daemon_test_registry::unregister_test_daemon(self.pid);
     }
 }
 
