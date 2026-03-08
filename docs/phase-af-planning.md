@@ -104,7 +104,8 @@ Improve cleanup safety and tmux process observability.
 ### Deliverables
 
 1. Add non-mutating `atm teams cleanup --dry-run` preview output with reason codes.
-2. Implement tmux sentinel injection contract for lifecycle tracing.
+2. Implement tmux sentinel injection contract for lifecycle tracing
+   (`[agent-team-msg:<tier>] unread=<count>`, tiered `info|urgent|blocked`).
 3. Add tests for dry-run output parity with actual cleanup behavior.
 
 ### Acceptance Criteria
