@@ -1891,11 +1891,11 @@ script behavior on Python across macOS/Linux/Windows.
 ### Sprint Summary
 | Sprint | Name | PR | Branch | Issues | Status |
 |--------|------|----|--------|--------|--------|
-| AD.1 | Python Runtime Policy + atm init Auto-Install | — | `feature/pAD-s1-python-policy` | #500, #499 | PLANNED |
-| AD.2 | Gemini Hook Install | — | `feature/pAD-s2-gemini-hook` | #503 | PLANNED |
-| AD.3 | Relay Script Migration | — | `feature/pAD-s3-relay-migration` | #499 | PLANNED |
-| AD.4 | Spawn/Launch Script Python Rewrite | — | `feature/pAD-s4-spawn-python` | — | PLANNED |
-| AD.5 | setup-codex-hooks.sh Absorption | — | `feature/pAD-s5-codex-hooks` | — | PLANNED |
+| AD.1 | Python Runtime Policy + atm init Auto-Install | — | `feature/pAD-s1-python-policy` | #500, #506 | PLANNED |
+| AD.2 | Runtime Config Discovery Parity | — | `feature/pAD-s2-config-parity` | #499 | PLANNED |
+| AD.3 | GH Monitor Status Hardening | — | `feature/pAD-s3-gh-status-hardening` | #503, #504, #505 | PLANNED |
+| AD.4 | Live State + Config Reload | — | `feature/pAD-s4-live-state` | #502, #506 | PLANNED |
+| AD.5 | Script Conversion + atm init Auto-Install | — | `feature/pAD-s5-script-conversion` | #500, #472, #473, #474 | PLANNED |
 | AD.6 | Bash Wrapper Removal | — | `feature/pAD-s6-bash-removal` | — | CANDIDATE |
 
 ---
