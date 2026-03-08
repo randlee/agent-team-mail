@@ -6021,6 +6021,33 @@ poll_interval_secs = 1
             writer.flush().unwrap();
             file.sync_all().unwrap();
         }
+        // Spin-wait until the updated externalBackendType is readable — macOS APFS VFS
+        // page cache may return stale content immediately after write+sync.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            let visible = std::fs::read_to_string(&cfg_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    v["members"]
+                        .as_array()
+                        .and_then(|arr| {
+                            arr.iter().find(|m| m["name"].as_str() == Some(member_name))
+                        })
+                        .and_then(|m| m["externalBackendType"].as_str().map(str::to_string))
+                })
+                .is_some_and(|t| t == backend);
+            if visible {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "set_member_backend: externalBackendType='{}' not readable after 500ms: {}",
+                backend,
+                cfg_path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     fn test_member(name: &str, backend: &str) -> agent_team_mail_core::schema::AgentMember {
@@ -7177,6 +7204,7 @@ exit 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
     async fn test_gh_monitor_uses_repo_config_source_from_payload_cwd() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -7201,6 +7229,7 @@ exit 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
     async fn test_gh_status_uses_global_config_source_when_repo_missing() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -7247,6 +7276,7 @@ exit 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
     async fn test_gh_monitor_health_reports_global_config_source() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());

@@ -12,8 +12,11 @@ use agent_team_mail_core::daemon_client::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
+use std::io::ErrorKind;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::NamedTempFile;
 
 use crate::util::settings::get_home_dir;
 
@@ -172,6 +175,7 @@ struct GhInitPreview {
     gh_authenticated: bool,
     owner: Option<String>,
     repo: String,
+    notify_target: String,
     next_steps: Vec<String>,
 }
 
@@ -223,7 +227,7 @@ pub fn execute(args: GhArgs) -> Result<()> {
                 return print_namespace_status(&health, args.json);
             }
 
-            enforce_plugin_ready(&plugin_state)?;
+            enforce_plugin_ready(&plugin_state, args.json)?;
             agent_team_mail_core::daemon_client::ensure_daemon_running()
                 .context("failed to auto-start daemon for atm gh status command")?;
 
@@ -245,7 +249,7 @@ pub fn execute(args: GhArgs) -> Result<()> {
                 return print_namespace_status(&health, args.json);
             }
 
-            enforce_plugin_ready(&plugin_state)?;
+            enforce_plugin_ready(&plugin_state, args.json)?;
             agent_team_mail_core::daemon_client::ensure_daemon_running()
                 .context("failed to auto-start daemon for atm gh monitor command")?;
 
@@ -459,7 +463,7 @@ fn resolve_namespace_health(
     })
 }
 
-fn enforce_plugin_ready(plugin_state: &GhPluginState) -> Result<()> {
+fn enforce_plugin_ready(plugin_state: &GhPluginState, json: bool) -> Result<()> {
     if plugin_state.is_usable() {
         return Ok(());
     }
@@ -468,6 +472,15 @@ fn enforce_plugin_ready(plugin_state: &GhPluginState) -> Result<()> {
         .message
         .as_deref()
         .unwrap_or("gh_monitor plugin is not configured/enabled for this team");
+
+    if json {
+        let payload = serde_json::json!({
+            "error_code": "PLUGIN_UNAVAILABLE",
+            "message": reason,
+            "hint": "Run `atm gh init` to configure and enable GitHub monitor for this team.",
+        });
+        bail!("{}", serde_json::to_string_pretty(&payload)?);
+    }
 
     bail!("{reason}\nRun `atm gh init` to configure and enable GitHub monitor for this team.")
 }
@@ -643,6 +656,11 @@ fn execute_init(
         .or_insert_with(|| toml::Value::Integer(60));
     gh.entry("notify_target".to_string())
         .or_insert_with(|| toml::Value::String("team-lead".to_string()));
+    let notify_target = gh
+        .get("notify_target")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("team-lead")
+        .to_string();
 
     let preview = GhInitPreview {
         team: team.to_string(),
@@ -653,6 +671,7 @@ fn execute_init(
         gh_authenticated: true,
         owner,
         repo,
+        notify_target,
         next_steps: vec![
             "atm gh".to_string(),
             "atm gh status".to_string(),
@@ -694,6 +713,7 @@ fn execute_init(
         } else {
             println!("Repository:   {}", preview.repo);
         }
+        println!("Notify:       {}", preview.notify_target);
         println!("Enabled:      yes");
         println!();
         println!("Next steps:");
@@ -817,16 +837,29 @@ fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    let tmp_path = path.with_extension("tmp");
-    std::fs::write(&tmp_path, content)
-        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-    std::fs::rename(&tmp_path, path).with_context(|| {
-        format!(
-            "failed to replace {} with {}",
-            path.display(),
-            tmp_path.display()
-        )
-    })?;
+    let tmp_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = NamedTempFile::new_in(tmp_dir)
+        .with_context(|| format!("failed to create temp file in {}", tmp_dir.display()))?;
+    tmp.write_all(content.as_bytes())
+        .with_context(|| format!("failed to write {}", tmp.path().display()))?;
+    tmp.flush()
+        .with_context(|| format!("failed to flush {}", tmp.path().display()))?;
+
+    match tmp.persist(path) {
+        Ok(_) => {}
+        Err(err) if err.error.kind() == ErrorKind::AlreadyExists => {
+            std::fs::remove_file(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            err.file
+                .persist(path)
+                .map_err(|persist_err| persist_err.error)
+                .with_context(|| format!("failed to replace {}", path.display()))?;
+        }
+        Err(err) => {
+            return Err(err.error).with_context(|| format!("failed to replace {}", path.display()));
+        }
+    }
+
     Ok(())
 }
 
