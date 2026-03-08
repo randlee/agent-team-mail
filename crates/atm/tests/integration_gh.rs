@@ -3,6 +3,8 @@
 use assert_cmd::cargo;
 use std::fs;
 #[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::path::Path;
@@ -224,10 +226,30 @@ finally:
     except FileNotFoundError:
         pass
 "#;
-    fs::write(&script, body).unwrap();
+    {
+        let mut file = fs::File::create(&script).unwrap();
+        file.write_all(body.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
     let mut perms = fs::metadata(&script).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&script, perms).unwrap();
+    // Guard against file-write races on CI where the script can be executed
+    // before write visibility/metadata updates fully settle.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if fs::read_to_string(&script)
+            .map(|content| content == body)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fake gh daemon script did not become readable in time"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     script
 }
 
@@ -255,12 +277,25 @@ fn start_fake_gh_daemon(home: &Path) -> Child {
 #[cfg(unix)]
 fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) -> Child {
     let script = write_fake_gh_daemon_script(home);
-    let child = Command::new(&script)
-        .env("ATM_HOME", home)
-        .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
-        .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
-        .spawn()
-        .unwrap();
+    // Retry on ETXTBUSY (code 26): Linux can transiently block execution of a
+    // newly-written file on CI while kernel mappings settle.
+    let child = {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match Command::new(&script)
+                .env("ATM_HOME", home)
+                .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
+                .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
+                .spawn()
+            {
+                Ok(child) => break child,
+                Err(e) if e.raw_os_error() == Some(26) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => panic!("failed to spawn fake gh daemon: {e}"),
+            }
+        }
+    };
     wait_for_daemon_socket(home);
     child
 }

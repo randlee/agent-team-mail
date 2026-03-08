@@ -47,7 +47,7 @@ def _run_gate(
     *,
     session_id: str = "sess-lead-001",
     tmpdir: str,
-    toml_content: str | None = None,
+    toml_content: str | None = _TOML_WITH_TEAM,
     team_config: dict | None = None,
     team_name_for_config: str = "atm-dev",
     agent_frontmatters: dict[str, str] | None = None,

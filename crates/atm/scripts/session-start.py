@@ -50,14 +50,6 @@ def main() -> int:
     session_id: str = data.get("session_id", "") or ""
     source: str = data.get("source", "init") or "init"
 
-    # Always print SESSION_ID to stdout for Claude context injection.
-    # This is pure stdout output — safe for all Claude sessions, no file I/O.
-    if session_id:
-        if source == "compact":
-            print(f"SESSION_ID={session_id} (returning from compact)")
-        else:
-            print(f"SESSION_ID={session_id} (starting fresh)")
-
     # Resolve routing context from .atm.toml (repo) or env (spawned teammates).
     # This keeps hooks fail-open for non-ATM sessions while still supporting
     # cross-folder spawned teammates that rely on env-only context.
@@ -73,6 +65,12 @@ def main() -> int:
 
     if atm_config is None and not default_team and not identity:
         return 0  # Not an ATM project session and no env fallback — do nothing further
+
+    if session_id:
+        if source == "compact":
+            print(f"SESSION_ID={session_id} (returning from compact)")
+        else:
+            print(f"SESSION_ID={session_id} (starting fresh)")
 
     if isinstance(atm_config, dict):
         toml_team: str = (

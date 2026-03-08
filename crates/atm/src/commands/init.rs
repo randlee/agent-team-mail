@@ -41,6 +41,7 @@ const ATM_IDENTITY_WRITE_PY: &str = include_str!("../../scripts/atm-identity-wri
 const ATM_IDENTITY_CLEANUP_PY: &str = include_str!("../../scripts/atm-identity-cleanup.py");
 const GATE_AGENT_SPAWNS_PY: &str = include_str!("../../scripts/gate-agent-spawns.py");
 const ATM_HOOK_LIB_PY: &str = include_str!("../../scripts/atm_hook_lib.py");
+const ATM_HOOK_RELAY_PY: &str = include_str!("../../scripts/atm-hook-relay.py");
 
 // ---------------------------------------------------------------------------
 // Hook command templates
@@ -61,84 +62,49 @@ const ATM_HOOK_LIB_PY: &str = include_str!("../../scripts/atm_hook_lib.py");
 /// Return the SessionStart hook command string for local or global install.
 fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "session-start.py");
-    format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
-    )
+    format!("python3 \"{script}\"")
 }
 
 /// Return the SessionEnd hook command string for local or global install.
 fn session_end_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "session-end.py");
-    format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
-    )
+    format!("python3 \"{script}\"")
 }
 
 /// Return the PermissionRequest hook command string for local or global install.
 fn permission_request_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "permission-request-relay.py");
-    format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
-    )
+    format!("python3 \"{script}\"")
 }
 
 /// Return the Stop hook command string for local or global install.
 fn stop_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "stop-relay.py");
-    format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
-    )
+    format!("python3 \"{script}\"")
 }
 
 /// Return the Notification(idle_prompt) hook command string for local/global install.
 fn notification_idle_prompt_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "notification-idle-relay.py");
-    format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
-    )
+    format!("python3 \"{script}\"")
 }
 
 /// Return the PreToolUse(Bash) hook command string for local or global install.
 fn pre_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "atm-identity-write.py");
-    match global_scripts_dir {
-        Some(_) => {
-            format!(
-                "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
-            )
-        }
-        None => {
-            format!("bash -c 'test -f \"{script}\" && python3 \"{script}\" || true'")
-        }
-    }
+    format!("python3 \"{script}\"")
 }
 
 /// Return the PreToolUse(Task) hook command string for local or global install.
 fn pre_tool_use_task_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "gate-agent-spawns.py");
-    match global_scripts_dir {
-        Some(_) => format!(
-            "bash -c 'if test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\"; then python3 \"{script}\"; else exit 0; fi'"
-        ),
-        None => {
-            format!("bash -c 'if test -f \"{script}\"; then python3 \"{script}\"; else exit 0; fi'")
-        }
-    }
+    format!("python3 \"{script}\"")
 }
 
 /// Return the PostToolUse(Bash) hook command string for local or global install.
 fn post_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "atm-identity-cleanup.py");
-    match global_scripts_dir {
-        Some(_) => {
-            format!(
-                "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{script}\" || true'"
-            )
-        }
-        None => {
-            format!("bash -c 'test -f \"{script}\" && python3 \"{script}\" || true'")
-        }
-    }
+    format!("python3 \"{script}\"")
 }
 
 /// Return a hook script path expression:
@@ -151,8 +117,8 @@ fn hook_script_path(global_scripts_dir: Option<&Path>, script_name: &str) -> Str
     }
 }
 
-/// Normalize a filesystem path for inclusion inside a double-quoted `bash -c`
-/// command string.
+/// Normalize a filesystem path for inclusion inside a double-quoted command
+/// argument.
 fn normalize_for_bash_quoted_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "/")
@@ -180,6 +146,10 @@ pub struct InitArgs {
     /// Skip team creation step (`~/.claude/teams/<team>/config.json`)
     #[arg(long)]
     pub skip_team: bool,
+
+    /// Show planned install actions without writing files
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// Legacy compatibility flag; global install is already the default.
     #[arg(long, hide = true, conflicts_with = "local")]
@@ -214,23 +184,13 @@ pub fn execute(args: InitArgs) -> Result<()> {
     let home_dir = crate::util::settings::get_home_dir()?;
     let settings_path = resolve_settings_path(install_global)?;
 
-    let atm_toml_status = ensure_atm_toml(&atm_toml_path, &args.team, &identity)?;
-    let team_status = if args.skip_team {
-        TeamStatus::Skipped
-    } else {
-        ensure_team_config(&home_dir, &args.team, &current_dir)?
-    };
-
-    // Materialize hook scripts to disk before writing settings
     let scripts_dir = if install_global {
         home_dir.join(".claude").join("scripts")
     } else {
         current_dir.join(".claude").join("scripts")
     };
-    materialize_scripts(&scripts_dir)?;
 
     let mut settings = load_settings(&settings_path)?;
-
     let report = merge_hooks(
         &mut settings,
         if install_global {
@@ -240,7 +200,60 @@ pub fn execute(args: InitArgs) -> Result<()> {
         },
     )?;
 
-    write_settings_atomic(&settings_path, &settings)?;
+    let claude_runtime = RuntimeInstallReport {
+        runtime: "claude",
+        status: if report.all_present() {
+            RuntimeInstallStatus::AlreadyConfigured
+        } else if report.all_added() {
+            RuntimeInstallStatus::Installed
+        } else {
+            RuntimeInstallStatus::Updated
+        },
+        detail: None,
+        path: Some(settings_path.clone()),
+    };
+
+    let (atm_toml_status, team_status, runtime_reports) = if args.dry_run {
+        let atm_toml_status = if atm_toml_path.exists() {
+            AtmTomlStatus::AlreadyPresent
+        } else {
+            AtmTomlStatus::WouldCreate
+        };
+        let team_status = if args.skip_team {
+            TeamStatus::Skipped
+        } else if home_dir
+            .join(".claude/teams")
+            .join(&args.team)
+            .join("config.json")
+            .exists()
+        {
+            TeamStatus::AlreadyPresent
+        } else {
+            TeamStatus::WouldCreate
+        };
+        let runtime_reports = vec![
+            claude_runtime,
+            plan_codex_runtime(&home_dir, &scripts_dir),
+            plan_gemini_runtime(&home_dir, &scripts_dir),
+        ];
+        (atm_toml_status, team_status, runtime_reports)
+    } else {
+        let atm_toml_status = ensure_atm_toml(&atm_toml_path, &args.team, &identity)?;
+        let team_status = if args.skip_team {
+            TeamStatus::Skipped
+        } else {
+            ensure_team_config(&home_dir, &args.team, &current_dir)?
+        };
+        // Materialize hook scripts to disk before writing settings
+        materialize_scripts(&scripts_dir)?;
+        write_settings_atomic(&settings_path, &settings)?;
+        let runtime_reports = vec![
+            claude_runtime,
+            configure_codex_runtime(&home_dir, &scripts_dir),
+            configure_gemini_runtime(&home_dir, &scripts_dir),
+        ];
+        (atm_toml_status, team_status, runtime_reports)
+    };
 
     print_report(
         &args.team,
@@ -250,6 +263,8 @@ pub fn execute(args: InitArgs) -> Result<()> {
         &atm_toml_path,
         atm_toml_status,
         team_status,
+        args.dry_run,
+        &runtime_reports,
     );
 
     Ok(())
@@ -259,13 +274,442 @@ pub fn execute(args: InitArgs) -> Result<()> {
 enum AtmTomlStatus {
     Created,
     AlreadyPresent,
+    WouldCreate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TeamStatus {
     Created,
     AlreadyPresent,
+    WouldCreate,
     Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeInstallStatus {
+    Installed,
+    Updated,
+    AlreadyConfigured,
+    SkippedNotDetected,
+    Error,
+}
+
+impl RuntimeInstallStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            RuntimeInstallStatus::Installed => "installed",
+            RuntimeInstallStatus::Updated => "updated",
+            RuntimeInstallStatus::AlreadyConfigured => "already-configured",
+            RuntimeInstallStatus::SkippedNotDetected => "skipped-not-detected",
+            RuntimeInstallStatus::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeInstallReport {
+    runtime: &'static str,
+    status: RuntimeInstallStatus,
+    detail: Option<String>,
+    path: Option<PathBuf>,
+}
+
+fn configure_codex_runtime(home_dir: &Path, scripts_dir: &Path) -> RuntimeInstallReport {
+    let path = home_dir.join(".codex/config.toml");
+    if !runtime_detected("codex", &path) {
+        return RuntimeInstallReport {
+            runtime: "codex",
+            status: RuntimeInstallStatus::SkippedNotDetected,
+            detail: None,
+            path: Some(path),
+        };
+    }
+    let relay_script = scripts_dir.join("atm-hook-relay.py");
+    match install_codex_notify_config(&path, &relay_script) {
+        Ok(status) => RuntimeInstallReport {
+            runtime: "codex",
+            status,
+            detail: None,
+            path: Some(path),
+        },
+        Err(err) => RuntimeInstallReport {
+            runtime: "codex",
+            status: RuntimeInstallStatus::Error,
+            detail: Some(err.to_string()),
+            path: Some(path),
+        },
+    }
+}
+
+fn plan_codex_runtime(home_dir: &Path, scripts_dir: &Path) -> RuntimeInstallReport {
+    let path = home_dir.join(".codex/config.toml");
+    if !runtime_detected("codex", &path) {
+        return RuntimeInstallReport {
+            runtime: "codex",
+            status: RuntimeInstallStatus::SkippedNotDetected,
+            detail: None,
+            path: Some(path),
+        };
+    }
+    let relay_script = scripts_dir.join("atm-hook-relay.py");
+    match preview_codex_notify_config(&path, &relay_script) {
+        Ok(status) => RuntimeInstallReport {
+            runtime: "codex",
+            status,
+            detail: None,
+            path: Some(path),
+        },
+        Err(err) => RuntimeInstallReport {
+            runtime: "codex",
+            status: RuntimeInstallStatus::Error,
+            detail: Some(err.to_string()),
+            path: Some(path),
+        },
+    }
+}
+
+fn configure_gemini_runtime(home_dir: &Path, scripts_dir: &Path) -> RuntimeInstallReport {
+    let path = home_dir.join(".gemini/settings.json");
+    if !runtime_detected("gemini", &home_dir.join(".gemini")) {
+        return RuntimeInstallReport {
+            runtime: "gemini",
+            status: RuntimeInstallStatus::SkippedNotDetected,
+            detail: None,
+            path: Some(path),
+        };
+    }
+    match install_gemini_hook_config(&path, scripts_dir) {
+        Ok(status) => RuntimeInstallReport {
+            runtime: "gemini",
+            status,
+            detail: None,
+            path: Some(path),
+        },
+        Err(err) => RuntimeInstallReport {
+            runtime: "gemini",
+            status: RuntimeInstallStatus::Error,
+            detail: Some(err.to_string()),
+            path: Some(path),
+        },
+    }
+}
+
+fn plan_gemini_runtime(home_dir: &Path, scripts_dir: &Path) -> RuntimeInstallReport {
+    let path = home_dir.join(".gemini/settings.json");
+    if !runtime_detected("gemini", &home_dir.join(".gemini")) {
+        return RuntimeInstallReport {
+            runtime: "gemini",
+            status: RuntimeInstallStatus::SkippedNotDetected,
+            detail: None,
+            path: Some(path),
+        };
+    }
+    match preview_gemini_hook_config(&path, scripts_dir) {
+        Ok(status) => RuntimeInstallReport {
+            runtime: "gemini",
+            status,
+            detail: None,
+            path: Some(path),
+        },
+        Err(err) => RuntimeInstallReport {
+            runtime: "gemini",
+            status: RuntimeInstallStatus::Error,
+            detail: Some(err.to_string()),
+            path: Some(path),
+        },
+    }
+}
+
+fn runtime_detected(binary_name: &str, config_path: &Path) -> bool {
+    find_in_path(binary_name).is_some() || config_path.exists()
+}
+
+fn find_in_path(binary_name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(binary_name);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        for ext in &["exe", "cmd", "bat"] {
+            let with_ext = dir.join(format!("{binary_name}.{ext}"));
+            if is_executable(&with_ext) {
+                return Some(with_ext);
+            }
+        }
+    }
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+fn install_codex_notify_config(path: &Path, relay_script: &Path) -> Result<RuntimeInstallStatus> {
+    let file_exists = path.exists();
+    let mut table = if file_exists {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        content
+            .parse::<toml::Table>()
+            .with_context(|| format!("Failed to parse {}", path.display()))?
+    } else {
+        toml::Table::new()
+    };
+
+    let desired = vec![
+        toml::Value::String("python3".to_string()),
+        toml::Value::String(normalize_path_for_runtime_config(relay_script)),
+    ];
+
+    if let Some(existing) = table.get("notify") {
+        if let Some(existing_array) = existing.as_array() {
+            if existing_array == &desired {
+                return Ok(RuntimeInstallStatus::AlreadyConfigured);
+            }
+            anyhow::bail!(
+                "Detected existing Codex notify configuration. \
+                 Update {} manually so notify = [\"python3\", \"{}\"]",
+                path.display(),
+                relay_script.display()
+            );
+        }
+        anyhow::bail!(
+            "Codex config {} contains non-array `notify`; cannot auto-configure",
+            path.display()
+        );
+    }
+
+    table.insert("notify".to_string(), toml::Value::Array(desired));
+    let mut serialized =
+        toml::to_string_pretty(&table).context("Failed to serialize Codex TOML")?;
+    if !serialized.ends_with('\n') {
+        serialized.push('\n');
+    }
+    write_text_atomic(path, &serialized)?;
+    Ok(if file_exists {
+        RuntimeInstallStatus::Updated
+    } else {
+        RuntimeInstallStatus::Installed
+    })
+}
+
+fn preview_codex_notify_config(path: &Path, relay_script: &Path) -> Result<RuntimeInstallStatus> {
+    let file_exists = path.exists();
+    let mut table = if file_exists {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        content
+            .parse::<toml::Table>()
+            .with_context(|| format!("Failed to parse {}", path.display()))?
+    } else {
+        toml::Table::new()
+    };
+
+    let desired = vec![
+        toml::Value::String("python3".to_string()),
+        toml::Value::String(normalize_path_for_runtime_config(relay_script)),
+    ];
+
+    if let Some(existing) = table.get("notify") {
+        if let Some(existing_array) = existing.as_array() {
+            if existing_array == &desired {
+                return Ok(RuntimeInstallStatus::AlreadyConfigured);
+            }
+            anyhow::bail!(
+                "Detected existing Codex notify configuration. \
+                 Update {} manually so notify = [\"python3\", \"{}\"]",
+                path.display(),
+                relay_script.display()
+            );
+        }
+        anyhow::bail!(
+            "Codex config {} contains non-array `notify`; cannot auto-configure",
+            path.display()
+        );
+    }
+
+    table.insert("notify".to_string(), toml::Value::Array(desired));
+    Ok(if file_exists {
+        RuntimeInstallStatus::Updated
+    } else {
+        RuntimeInstallStatus::Installed
+    })
+}
+
+fn install_gemini_hook_config(path: &Path, scripts_dir: &Path) -> Result<RuntimeInstallStatus> {
+    let existed = path.exists();
+    let mut settings = if existed {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        serde_json::from_str::<serde_json::Value>(&content)
+            .with_context(|| format!("Failed to parse {}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+
+    let mut added_any = false;
+    let session_start = format!(
+        "python3 \"{}\"",
+        normalize_for_bash_quoted_path(&scripts_dir.join("session-start.py"))
+    );
+    let session_end = format!(
+        "python3 \"{}\"",
+        normalize_for_bash_quoted_path(&scripts_dir.join("session-end.py"))
+    );
+    let after_agent = format!(
+        "python3 \"{}\"",
+        normalize_for_bash_quoted_path(&scripts_dir.join("teammate-idle-relay.py"))
+    );
+
+    if ensure_gemini_hook_command(
+        &mut settings,
+        "SessionStart",
+        "atm-session-start",
+        &session_start,
+    )? == HookStatus::Added
+    {
+        added_any = true;
+    }
+    if ensure_gemini_hook_command(&mut settings, "SessionEnd", "atm-session-end", &session_end)?
+        == HookStatus::Added
+    {
+        added_any = true;
+    }
+    if ensure_gemini_hook_command(&mut settings, "AfterAgent", "atm-after-agent", &after_agent)?
+        == HookStatus::Added
+    {
+        added_any = true;
+    }
+
+    if !added_any {
+        return Ok(RuntimeInstallStatus::AlreadyConfigured);
+    }
+
+    write_settings_atomic(path, &settings)?;
+    Ok(if existed {
+        RuntimeInstallStatus::Updated
+    } else {
+        RuntimeInstallStatus::Installed
+    })
+}
+
+fn preview_gemini_hook_config(path: &Path, scripts_dir: &Path) -> Result<RuntimeInstallStatus> {
+    let existed = path.exists();
+    let mut settings = if existed {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        serde_json::from_str::<serde_json::Value>(&content)
+            .with_context(|| format!("Failed to parse {}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    let mut added_any = false;
+    let session_start = format!(
+        "python3 \"{}\"",
+        normalize_for_bash_quoted_path(&scripts_dir.join("session-start.py"))
+    );
+    let session_end = format!(
+        "python3 \"{}\"",
+        normalize_for_bash_quoted_path(&scripts_dir.join("session-end.py"))
+    );
+    let after_agent = format!(
+        "python3 \"{}\"",
+        normalize_for_bash_quoted_path(&scripts_dir.join("teammate-idle-relay.py"))
+    );
+
+    if ensure_gemini_hook_command(
+        &mut settings,
+        "SessionStart",
+        "atm-session-start",
+        &session_start,
+    )? == HookStatus::Added
+    {
+        added_any = true;
+    }
+    if ensure_gemini_hook_command(&mut settings, "SessionEnd", "atm-session-end", &session_end)?
+        == HookStatus::Added
+    {
+        added_any = true;
+    }
+    if ensure_gemini_hook_command(&mut settings, "AfterAgent", "atm-after-agent", &after_agent)?
+        == HookStatus::Added
+    {
+        added_any = true;
+    }
+
+    if !added_any {
+        return Ok(RuntimeInstallStatus::AlreadyConfigured);
+    }
+    Ok(if existed {
+        RuntimeInstallStatus::Updated
+    } else {
+        RuntimeInstallStatus::Installed
+    })
+}
+
+fn normalize_path_for_runtime_config(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        path.to_string_lossy().replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().to_string()
+    }
+}
+
+fn ensure_gemini_hook_command(
+    settings: &mut serde_json::Value,
+    category: &str,
+    name: &str,
+    command: &str,
+) -> Result<HookStatus> {
+    let root = settings
+        .as_object_mut()
+        .context("Gemini settings root is not a JSON object")?;
+    let hooks_entry = root
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_obj = hooks_entry
+        .as_object_mut()
+        .context("Gemini settings `hooks` is not a JSON object")?;
+    let category_entry = hooks_obj
+        .entry(category.to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let category_array = category_entry
+        .as_array_mut()
+        .with_context(|| format!("Gemini hooks.{category} is not an array"))?;
+
+    for definition in category_array.iter() {
+        if let Some(inner_hooks) = definition.get("hooks").and_then(|h| h.as_array())
+            && hook_command_present(inner_hooks, command)
+        {
+            return Ok(HookStatus::AlreadyPresent);
+        }
+    }
+
+    category_array.push(serde_json::json!({
+        "hooks": [
+            {
+                "type": "command",
+                "name": name,
+                "command": command
+            }
+        ]
+    }));
+    Ok(HookStatus::Added)
 }
 
 fn ensure_atm_toml(path: &Path, team: &str, identity: &str) -> Result<AtmTomlStatus> {
@@ -392,6 +836,7 @@ fn materialize_scripts(scripts_dir: &Path) -> Result<()> {
         ("atm-identity-cleanup.py", ATM_IDENTITY_CLEANUP_PY),
         ("gate-agent-spawns.py", GATE_AGENT_SPAWNS_PY),
         ("atm_hook_lib.py", ATM_HOOK_LIB_PY),
+        ("atm-hook-relay.py", ATM_HOOK_RELAY_PY),
     ];
 
     for (name, content) in &files {
@@ -825,6 +1270,7 @@ fn hook_command_present(array: &[serde_json::Value], cmd: &str) -> bool {
 // Output
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn print_report(
     team: &str,
     settings_path: &Path,
@@ -833,6 +1279,8 @@ fn print_report(
     atm_toml_path: &Path,
     atm_toml_status: AtmTomlStatus,
     team_status: TeamStatus,
+    dry_run: bool,
+    runtime_reports: &[RuntimeInstallReport],
 ) {
     match atm_toml_status {
         AtmTomlStatus::Created => {
@@ -841,11 +1289,15 @@ fn print_report(
         AtmTomlStatus::AlreadyPresent => {
             println!(".atm.toml already present at {}", atm_toml_path.display());
         }
+        AtmTomlStatus::WouldCreate => {
+            println!("Would create .atm.toml at {}", atm_toml_path.display());
+        }
     }
 
     match team_status {
         TeamStatus::Created => println!("Created team '{}'", team),
         TeamStatus::AlreadyPresent => println!("Team '{}' already exists", team),
+        TeamStatus::WouldCreate => println!("Would create team '{}'", team),
         TeamStatus::Skipped => println!("Skipped team creation (--skip-team)"),
     }
 
@@ -864,50 +1316,123 @@ fn print_report(
         println!("  \u{2713} PreToolUse(Task) hook present");
         println!("  \u{2713} PostToolUse(Bash) hook present");
     } else if report.all_added() {
-        println!(
-            "Installed ATM hooks for team '{}' in {}",
-            team,
-            settings_path.display()
+        if dry_run {
+            println!(
+                "Would install ATM hooks for team '{}' in {}",
+                team,
+                settings_path.display()
+            );
+        } else {
+            println!(
+                "Installed ATM hooks for team '{}' in {}",
+                team,
+                settings_path.display()
+            );
+        }
+        print_hook_line("SessionStart hook", &report.session_start, dry_run);
+        print_hook_line("SessionEnd hook", &report.session_end, dry_run);
+        print_hook_line(
+            "PermissionRequest hook",
+            &report.permission_request,
+            dry_run,
         );
-        print_hook_line("SessionStart hook", &report.session_start);
-        print_hook_line("SessionEnd hook", &report.session_end);
-        print_hook_line("PermissionRequest hook", &report.permission_request);
-        print_hook_line("Stop hook", &report.stop);
+        print_hook_line("Stop hook", &report.stop, dry_run);
         print_hook_line(
             "Notification(idle_prompt) hook",
             &report.notification_idle_prompt,
+            dry_run,
         );
-        print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash);
-        print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
-        print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
+        print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash, dry_run);
+        print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task, dry_run);
+        print_hook_line(
+            "PostToolUse(Bash) hook",
+            &report.post_tool_use_bash,
+            dry_run,
+        );
     } else if report.any_added() {
-        println!(
-            "Updated ATM hooks for team '{}' in {}",
-            team,
-            settings_path.display()
+        if dry_run {
+            println!(
+                "Would update ATM hooks for team '{}' in {}",
+                team,
+                settings_path.display()
+            );
+        } else {
+            println!(
+                "Updated ATM hooks for team '{}' in {}",
+                team,
+                settings_path.display()
+            );
+        }
+        print_hook_line("SessionStart hook", &report.session_start, dry_run);
+        print_hook_line("SessionEnd hook", &report.session_end, dry_run);
+        print_hook_line(
+            "PermissionRequest hook",
+            &report.permission_request,
+            dry_run,
         );
-        print_hook_line("SessionStart hook", &report.session_start);
-        print_hook_line("SessionEnd hook", &report.session_end);
-        print_hook_line("PermissionRequest hook", &report.permission_request);
-        print_hook_line("Stop hook", &report.stop);
+        print_hook_line("Stop hook", &report.stop, dry_run);
         print_hook_line(
             "Notification(idle_prompt) hook",
             &report.notification_idle_prompt,
+            dry_run,
         );
-        print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash);
-        print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task);
-        print_hook_line("PostToolUse(Bash) hook", &report.post_tool_use_bash);
+        print_hook_line("PreToolUse(Bash) hook", &report.pre_tool_use_bash, dry_run);
+        print_hook_line("PreToolUse(Task) hook", &report.pre_tool_use_task, dry_run);
+        print_hook_line(
+            "PostToolUse(Bash) hook",
+            &report.post_tool_use_bash,
+            dry_run,
+        );
     }
 
     println!(
         "Hook scope: {}",
         if install_global { "global" } else { "local" }
     );
+    if dry_run {
+        println!("Dry run: no files were written.");
+    }
+    println!("Runtime installs:");
+    for runtime in runtime_reports {
+        let status = if dry_run {
+            match runtime.status {
+                RuntimeInstallStatus::Installed => "would-install",
+                RuntimeInstallStatus::Updated => "would-update",
+                RuntimeInstallStatus::AlreadyConfigured => "already-configured",
+                RuntimeInstallStatus::SkippedNotDetected => "skipped-not-detected",
+                RuntimeInstallStatus::Error => "error",
+            }
+        } else {
+            runtime.status.as_str()
+        };
+        match (&runtime.detail, &runtime.path) {
+            (Some(detail), Some(path)) => {
+                println!("  - {}: {} ({})", runtime.runtime, status, path.display());
+                println!("    remediation: {detail}");
+            }
+            (Some(detail), None) => {
+                println!("  - {}: {}", runtime.runtime, status);
+                println!("    remediation: {detail}");
+            }
+            (None, Some(path)) => {
+                println!("  - {}: {} ({})", runtime.runtime, status, path.display());
+            }
+            (None, None) => {
+                println!("  - {}: {}", runtime.runtime, status);
+            }
+        }
+    }
 }
 
-fn print_hook_line(label: &str, status: &HookStatus) {
+fn print_hook_line(label: &str, status: &HookStatus, dry_run: bool) {
     match status {
-        HookStatus::Added => println!("  + {label} added"),
+        HookStatus::Added => {
+            if dry_run {
+                println!("  + {label} would be added");
+            } else {
+                println!("  + {label} added");
+            }
+        }
         HookStatus::AlreadyPresent => println!("  \u{2713} {label} present"),
     }
 }
@@ -1353,6 +1878,7 @@ mod tests {
             local: false,
             identity: Some("team-lead".to_string()),
             skip_team: false,
+            dry_run: false,
             global: false,
         });
 
@@ -1406,6 +1932,7 @@ mod tests {
             "atm-identity-cleanup.py",
             "gate-agent-spawns.py",
             "atm_hook_lib.py",
+            "atm-hook-relay.py",
         ] {
             assert!(
                 scripts_dir.join(name).exists(),
