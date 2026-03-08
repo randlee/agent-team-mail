@@ -7823,6 +7823,10 @@ exit 1
         set_member_backend(fixture._temp.path(), "atm-dev", "arch-ctm", "external");
         let store = make_store();
         let sr = make_sr();
+        // Must be >1 to satisfy register-hint payload validation.
+        // Use a non-live high PID to keep this test focused on mismatch-baseline
+        // recovery behavior rather than backend process identity matching.
+        let hint_pid: u32 = u32::MAX - 7;
 
         {
             let mut tracker = store.lock().unwrap();
@@ -7841,7 +7845,7 @@ exit 1
                 "team": "atm-dev",
                 "agent": "arch-ctm",
                 "session_id": "local:arch-ctm:recover:1",
-                "process_id": 0,
+                "process_id": hint_pid,
                 "runtime": "codex",
                 "runtime_session_id": "local:arch-ctm:recover:1"
             }),
