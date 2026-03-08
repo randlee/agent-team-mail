@@ -93,6 +93,29 @@ fn count_matcher_command_entries(
         .unwrap_or(0)
 }
 
+fn count_gemini_hook_command(settings_path: &Path, category: &str, command: &str) -> usize {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+    parsed["hooks"][category]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.get("command").and_then(|c| c.as_str()) == Some(command)
+                            })
+                        })
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 #[test]
 fn test_init_fresh_repo_creates_atm_toml_team_and_global_hooks() {
     let home = TempDir::new().unwrap();
@@ -144,16 +167,12 @@ fn test_init_is_idempotent_on_rerun() {
         .join("session-start.py")
         .to_string_lossy()
         .replace('\\', "/");
-    let session_start_cmd = format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{session_start_py}\" || true'"
-    );
+    let session_start_cmd = format!("python3 \"{session_start_py}\"");
     let session_end_py = scripts_dir
         .join("session-end.py")
         .to_string_lossy()
         .replace('\\', "/");
-    let session_end_cmd = format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{session_end_py}\" || true'"
-    );
+    let session_end_cmd = format!("python3 \"{session_end_py}\"");
     assert_eq!(
         count_nested_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
         1,
@@ -283,16 +302,12 @@ fn test_init_with_existing_hooks_creates_atm_toml_without_duplicating_hooks() {
         .join("session-start.py")
         .to_string_lossy()
         .replace('\\', "/");
-    let session_start_cmd = format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{session_start_py}\" || true'"
-    );
+    let session_start_cmd = format!("python3 \"{session_start_py}\"");
     let session_end_py = scripts_dir
         .join("session-end.py")
         .to_string_lossy()
         .replace('\\', "/");
-    let session_end_cmd = format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{session_end_py}\" || true'"
-    );
+    let session_end_cmd = format!("python3 \"{session_end_py}\"");
     assert_eq!(
         count_nested_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
         1,
@@ -390,15 +405,9 @@ fn test_init_global_relay_hook_paths_are_absolute() {
         .to_string_lossy()
         .replace('\\', "/");
 
-    let permission_cmd = format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{permission_py}\" || true'"
-    );
-    let stop_cmd = format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{stop_py}\" || true'"
-    );
-    let notify_cmd = format!(
-        "bash -c 'test -f \"${{CLAUDE_PROJECT_DIR}}/.atm.toml\" && python3 \"{notify_py}\" || true'"
-    );
+    let permission_cmd = format!("python3 \"{permission_py}\"");
+    let stop_cmd = format!("python3 \"{stop_py}\"");
+    let notify_cmd = format!("python3 \"{notify_py}\"");
 
     assert_eq!(
         count_nested_command_in_hooks(&settings_path, "PermissionRequest", &permission_cmd),
@@ -444,9 +453,10 @@ fn test_init_local_relay_hook_paths_use_claude_project_dir() {
         .success();
 
     let settings_path = repo.join(".claude/settings.json");
-    let permission_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/permission-request-relay.py\" || true'";
-    let stop_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/stop-relay.py\" || true'";
-    let notify_cmd = "bash -c 'test -f \"${CLAUDE_PROJECT_DIR}/.atm.toml\" && python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/notification-idle-relay.py\" || true'";
+    let permission_cmd =
+        "python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/permission-request-relay.py\"";
+    let stop_cmd = "python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/stop-relay.py\"";
+    let notify_cmd = "python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/notification-idle-relay.py\"";
 
     assert_eq!(
         count_nested_command_in_hooks(&settings_path, "PermissionRequest", permission_cmd),
@@ -526,4 +536,130 @@ fn test_init_preserves_existing_non_atm_hooks_integration() {
                 })
     });
     assert!(preserved, "existing non-ATM hook should be preserved");
+}
+
+#[test]
+fn test_init_installs_codex_notify_when_detected_by_config() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let codex_dir = home.path().join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(codex_dir.join("config.toml"), "model = \"gpt-5\"\n").unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("codex: updated"));
+
+    let cfg = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+    let parsed: toml::Value = cfg.parse().unwrap();
+    let notify = parsed
+        .get("notify")
+        .and_then(|v| v.as_array())
+        .expect("notify array");
+    assert_eq!(notify.len(), 2);
+    assert_eq!(notify[0].as_str(), Some("python3"));
+    let relay = home
+        .path()
+        .join(".claude/scripts/atm-hook-relay.py")
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(notify[1].as_str(), Some(relay.as_str()));
+}
+
+#[test]
+fn test_init_reports_codex_notify_conflict_without_failing_command() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let codex_dir = home.path().join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(
+        codex_dir.join("config.toml"),
+        "notify = [\"echo\", \"hello\"]\n",
+    )
+    .unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("codex: error"))
+        .stdout(predicate::str::contains(
+            "Detected existing Codex notify configuration",
+        ));
+}
+
+#[test]
+fn test_init_installs_gemini_hooks_when_detected_by_config_dir() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(home.path().join(".gemini")).unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gemini: installed"));
+
+    let settings_path = home.path().join(".gemini/settings.json");
+    assert!(settings_path.exists(), "gemini settings should be created");
+
+    let scripts_dir = home.path().join(".claude/scripts");
+    let session_start = format!(
+        "python3 \"{}\"",
+        scripts_dir
+            .join("session-start.py")
+            .to_string_lossy()
+            .replace('\\', "/")
+    );
+    let session_end = format!(
+        "python3 \"{}\"",
+        scripts_dir
+            .join("session-end.py")
+            .to_string_lossy()
+            .replace('\\', "/")
+    );
+    let after_agent = format!(
+        "python3 \"{}\"",
+        scripts_dir
+            .join("teammate-idle-relay.py")
+            .to_string_lossy()
+            .replace('\\', "/")
+    );
+
+    assert_eq!(
+        count_gemini_hook_command(&settings_path, "SessionStart", &session_start),
+        1
+    );
+    assert_eq!(
+        count_gemini_hook_command(&settings_path, "SessionEnd", &session_end),
+        1
+    );
+    assert_eq!(
+        count_gemini_hook_command(&settings_path, "AfterAgent", &after_agent),
+        1
+    );
+}
+
+#[test]
+fn test_init_gemini_hook_install_is_idempotent() {
+    let home = TempDir::new().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(home.path().join(".gemini")).unwrap();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success();
+
+    init_cmd(&home, &repo)
+        .args(["init", "my-team"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gemini: already-configured"));
 }

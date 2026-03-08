@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Import shared utilities
 sys.path.insert(0, str(Path(__file__).parent))
-from atm_hook_lib import load_payload, read_atm_toml
+from atm_hook_lib import first_str, load_payload, read_atm_toml
 
 
 def _is_atm_invocation(command: str) -> bool:
@@ -48,14 +48,13 @@ def main() -> None:
 
     session_id = payload.get("session_id", "")
 
-    # Resolve agent_name from .atm.toml identity field.
+    # Resolve routing context from repo config or env overrides.
     toml = read_atm_toml()
-    agent_name: str | None = None
-    if toml:
-        core = toml.get("core", {})
-        raw = core.get("identity") if isinstance(core, dict) else None
-        if isinstance(raw, str) and raw.strip():
-            agent_name = raw.strip()
+    core = toml.get("core", {}) if isinstance(toml, dict) else {}
+    team_name = first_str(os.environ.get("ATM_TEAM"), core.get("default_team"))
+    agent_name = first_str(os.environ.get("ATM_IDENTITY"), core.get("identity"))
+    if toml is None and not team_name and not agent_name:
+        sys.exit(0)
 
     hook_file_name = f"atm-hook-{os.getpid()}.json"
     hook_file = Path(tempfile.gettempdir()) / hook_file_name
@@ -64,6 +63,7 @@ def main() -> None:
         "pid": os.getppid(),
         "session_id": session_id,
         "agent_name": agent_name,
+        "team_name": team_name,
         "created_at": time.time(),
     }
 

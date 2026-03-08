@@ -68,24 +68,30 @@ class TestSessionStartOutput(unittest.TestCase):
         return rc, captured.getvalue()
 
     def test_session_id_in_stdout_on_init(self):
-        """SESSION_ID line appears in stdout when payload has session_id + source=init."""
-        rc, out = self._run_main({"session_id": "abc-123", "source": "init"})
+        """SESSION_ID line appears when ATM context exists."""
+        rc, out = self._run_main(
+            {"session_id": "abc-123", "source": "init"},
+            env_overrides={"ATM_TEAM": "atm-dev", "ATM_IDENTITY": "arch-ctm"},
+        )
         self.assertEqual(rc, 0)
         self.assertIn("SESSION_ID=abc-123", out)
         self.assertIn("starting fresh", out)
 
     def test_source_compact_shows_returning_message(self):
         """source=compact produces '(returning from compact)' in output."""
-        rc, out = self._run_main({"session_id": "abc-456", "source": "compact"})
+        rc, out = self._run_main(
+            {"session_id": "abc-456", "source": "compact"},
+            env_overrides={"ATM_TEAM": "atm-dev", "ATM_IDENTITY": "arch-ctm"},
+        )
         self.assertEqual(rc, 0)
         self.assertIn("SESSION_ID=abc-456", out)
         self.assertIn("returning from compact", out)
 
     def test_no_atm_toml_no_team_output(self):
-        """No .atm.toml → no 'ATM team:' line but SESSION_ID still printed."""
+        """No ATM context → no output."""
         rc, out = self._run_main({"session_id": "xyz-789", "source": "init"})
         self.assertEqual(rc, 0)
-        self.assertIn("SESSION_ID=xyz-789", out)
+        self.assertEqual(out, "")
         self.assertNotIn("ATM team:", out)
 
     def test_atm_toml_present_shows_team(self):
@@ -405,8 +411,8 @@ class TestSessionStartGuards(unittest.TestCase):
                 os.chdir(orig_dir)
 
         self.assertEqual(rc, 0)
-        # SESSION_ID stdout is unconditional — that is expected
-        self.assertIn("SESSION_ID=test-sid", captured.getvalue())
+        # No ATM context, so no context injection output.
+        self.assertEqual(captured.getvalue(), "")
         # No socket, no file writes: open_calls stays empty (no fake_open was triggered)
         self.assertEqual(open_calls, [])
 
@@ -446,8 +452,8 @@ class TestSessionStartGuards(unittest.TestCase):
                 os.chdir(orig_dir)
 
         self.assertEqual(rc, 0)
-        # SESSION_ID stdout still printed (unconditional)
-        self.assertIn("SESSION_ID=sid-no-toml", captured.getvalue())
+        # Without TOML parsing and without env context, no output should be emitted.
+        self.assertEqual(captured.getvalue(), "")
         # No socket send — tomllib unavailable means read_atm_toml() returned None
         self.assertEqual(socket_calls, [], "Socket must not be called when tomllib is unavailable")
 

@@ -12,12 +12,18 @@ from pathlib import Path
 
 # Import shared utilities
 sys.path.insert(0, str(Path(__file__).parent))
-from atm_hook_lib import load_payload  # noqa: F401 — imported for symmetry / future use
+from atm_hook_lib import first_str, load_payload, read_atm_toml
 
 
 def main() -> None:
     # load_payload() drains stdin so the hook machinery doesn't block.
     load_payload()
+    toml = read_atm_toml()
+    core = toml.get("core", {}) if isinstance(toml, dict) else {}
+    team_name = first_str(os.environ.get("ATM_TEAM"), core.get("default_team"))
+    agent_name = first_str(os.environ.get("ATM_IDENTITY"), core.get("identity"))
+    if toml is None and not team_name and not agent_name:
+        sys.exit(0)
 
     hook_file = Path(tempfile.gettempdir()) / f"atm-hook-{os.getpid()}.json"
 
