@@ -64,13 +64,13 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
         if args.all_teams {
             anyhow::bail!("--agent cannot be combined with --all-teams");
         }
-        if args.dry_run {
-            anyhow::bail!("--dry-run is not supported with --agent");
-        }
         let team_name = args
             .team
             .clone()
             .unwrap_or_else(|| config.core.default_team.clone());
+        if args.dry_run {
+            return teams::cleanup_single_agent_dry_run(team_name, agent.clone(), args.force);
+        }
         return execute_agent_cleanup(
             &home_dir,
             &team_name,

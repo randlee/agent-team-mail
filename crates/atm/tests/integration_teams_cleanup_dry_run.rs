@@ -57,6 +57,21 @@ fn write_team_config(home: &TempDir, team: &str, include_publisher: bool) {
     .unwrap();
 }
 
+fn write_recent_seen_state(home: &TempDir, team: &str, agent: &str) {
+    let state_path = home.path().join(".config/atm/state.json");
+    if let Some(parent) = state_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let state = serde_json::json!({
+        "last_seen": {
+            team: {
+                agent: "2099-01-01T00:00:00Z"
+            }
+        }
+    });
+    fs::write(state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+}
+
 #[test]
 fn test_teams_cleanup_dry_run_preview_table_and_no_mutation() {
     let temp_dir = TempDir::new().unwrap();
@@ -78,8 +93,8 @@ fn test_teams_cleanup_dry_run_preview_table_and_no_mutation() {
     assert!(stdout.contains("roster-remove"));
     assert!(stdout.contains("mailbox-delete"));
     assert!(stdout.contains("session-prune"));
-    assert!(stdout.contains("forced cleanup (--force)"));
-    assert!(stdout.contains("stale session metadata"));
+    assert!(stdout.contains("forced-cleanup"));
+    assert!(stdout.contains("stale-session-metadata"));
     assert!(stdout.contains("Totals:"));
 
     let config_after =
@@ -163,13 +178,14 @@ fn test_teams_cleanup_dry_run_suppresses_session_prune_without_session_id() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("roster-remove"));
     assert!(stdout.contains("mailbox-delete"));
-    assert!(!stdout.contains("session-prune  stale session metadata"));
+    assert!(!stdout.contains("session-prune  stale-session-metadata"));
 }
 
 #[test]
 fn test_teams_cleanup_dry_run_lists_skipped_external_agent_without_session_id() {
     let temp_dir = TempDir::new().unwrap();
     write_team_config(&temp_dir, "atm-dev", true);
+    write_recent_seen_state(&temp_dir, "atm-dev", "publisher");
 
     // Mark publisher as external and remove sessionId so cleanup must skip it.
     let config_path = temp_dir.path().join(".claude/teams/atm-dev/config.json");
@@ -209,6 +225,7 @@ fn test_teams_cleanup_dry_run_lists_skipped_external_agent_without_session_id() 
 fn test_teams_cleanup_dry_run_treats_codex_agent_type_as_external_for_skip_preview() {
     let temp_dir = TempDir::new().unwrap();
     write_team_config(&temp_dir, "atm-dev", true);
+    write_recent_seen_state(&temp_dir, "atm-dev", "publisher");
 
     // Simulate legacy roster entry: codex agentType + sessionId, but no externalBackendType.
     let config_path = temp_dir.path().join(".claude/teams/atm-dev/config.json");
@@ -244,5 +261,54 @@ fn test_teams_cleanup_dry_run_treats_codex_agent_type_as_external_for_skip_previ
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("publisher"));
     assert!(stdout.contains("skip"));
-    assert!(stdout.contains("external agent liveness unknown"));
+    assert!(stdout.contains("external-agent-no-state"));
+}
+
+#[test]
+fn test_teams_cleanup_dry_run_totals_match_actual_cleanup_force() {
+    let temp_dir = TempDir::new().unwrap();
+    write_team_config(&temp_dir, "atm-dev", true);
+
+    // Dry-run preview should predict exactly one member cleanup (publisher):
+    // roster-remove + mailbox-delete + session-prune.
+    let mut dry = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut dry, &temp_dir);
+    let dry_assert = dry
+        .args(["teams", "cleanup", "atm-dev", "--dry-run", "--force"])
+        .assert()
+        .success();
+    let dry_stdout = String::from_utf8(dry_assert.get_output().stdout.clone()).unwrap();
+    assert!(dry_stdout.contains("roster-remove: 1"));
+    assert!(dry_stdout.contains("mailbox-delete: 1"));
+    assert!(dry_stdout.contains("session-prune: 1"));
+    assert!(dry_stdout.contains("skip: 0"));
+
+    // Actual cleanup should remove that same member + inbox artifact.
+    let mut apply = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut apply, &temp_dir);
+    let apply_assert = apply
+        .args(["teams", "cleanup", "atm-dev", "--force"])
+        .assert()
+        .success();
+    let apply_stdout = String::from_utf8(apply_assert.get_output().stdout.clone()).unwrap();
+    assert!(apply_stdout.contains("Removed 1 stale member(s): publisher"));
+
+    let config_path = temp_dir.path().join(".claude/teams/atm-dev/config.json");
+    let config_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+    let names: Vec<String> = config_json["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.get("name").and_then(serde_json::Value::as_str))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(names, vec!["team-lead".to_string()]);
+    assert!(
+        !temp_dir
+            .path()
+            .join(".claude/teams/atm-dev/inboxes/publisher.json")
+            .exists(),
+        "publisher inbox must be removed during real cleanup"
+    );
 }

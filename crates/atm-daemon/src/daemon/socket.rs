@@ -1833,6 +1833,10 @@ async fn handle_hook_event_command_with_dedup(
                     );
                 }
                 MarkDeadForSessionOutcome::SessionMismatch { current_session_id } => {
+                    let msg = format!(
+                        "session_end ignored due to session mismatch (expected/current='{}', received='{}')",
+                        current_session_id, session_id
+                    );
                     warn!(
                         team = %team,
                         agent = %agent,
@@ -1841,6 +1845,18 @@ async fn handle_hook_event_command_with_dedup(
                         received_session_id = %session_id,
                         "hook_event session_end session_id mismatch; ignoring"
                     );
+                    emit_event_best_effort(EventFields {
+                        level: "warn",
+                        source: "atm-daemon",
+                        action: "SESSION_END_SESSION_MISMATCH",
+                        team: Some(team.clone()),
+                        agent_name: Some(agent.clone()),
+                        session_id: Some(current_session_id),
+                        target: Some(format!("received:{session_id}")),
+                        result: Some("ignored".to_string()),
+                        error: Some(msg),
+                        ..Default::default()
+                    });
                 }
             }
             emit_hook_success(
@@ -4248,16 +4264,14 @@ fn control_request_is_live(
     state_store: &SharedStateStore,
     session_registry: &SharedSessionRegistry,
 ) -> ControlResult {
-    let registry = session_registry.lock().unwrap();
-    let Some(record) = registry.query(&control.agent_id) else {
+    let mut registry = session_registry.lock().unwrap();
+    let Some(record) = registry.query_with_liveness(&control.agent_id) else {
         return ControlResult::NotFound;
     };
     if record.session_id != control.session_id {
         return ControlResult::NotFound;
     }
-    if record.state != crate::daemon::session_registry::SessionState::Active
-        || !record.is_process_alive()
-    {
+    if record.state != crate::daemon::session_registry::SessionState::Active {
         return ControlResult::NotLive;
     }
 
@@ -4765,16 +4779,17 @@ fn handle_session_query(
         }
     };
 
-    let registry = session_registry.lock().unwrap();
-    match registry.query(&name) {
+    let mut registry = session_registry.lock().unwrap();
+    match registry.query_with_liveness(&name) {
         Some(record) => {
-            let alive = record.is_process_alive();
+            let alive = record.state == crate::daemon::session_registry::SessionState::Active;
             make_ok_response(
                 &request.request_id,
                 serde_json::json!({
                     "session_id": record.session_id,
                     "process_id": record.process_id,
                     "alive": alive,
+                    "last_alive_at": record.last_alive_at,
                     "runtime": record.runtime,
                     "runtime_session_id": record.runtime_session_id,
                     "pane_id": record.pane_id,
@@ -4821,8 +4836,8 @@ fn handle_session_query_team(
         }
     };
 
-    let registry = session_registry.lock().unwrap();
-    let Some(record) = registry.query_for_team(&team, &name) else {
+    let mut registry = session_registry.lock().unwrap();
+    let Some(record) = registry.query_for_team_with_liveness(&team, &name) else {
         return make_error_response(
             &request.request_id,
             "AGENT_NOT_FOUND",
@@ -4873,13 +4888,14 @@ fn handle_session_query_team(
         }
     }
 
-    let alive = record.is_process_alive();
+    let alive = record.state == crate::daemon::session_registry::SessionState::Active;
     make_ok_response(
         &request.request_id,
         serde_json::json!({
             "session_id": record.session_id,
             "process_id": record.process_id,
             "alive": alive,
+            "last_alive_at": record.last_alive_at,
             "runtime": record.runtime,
             "runtime_session_id": record.runtime_session_id,
             "pane_id": record.pane_id,
@@ -5160,8 +5176,7 @@ fn handle_agent_state(
     let session = session_registry
         .lock()
         .unwrap()
-        .query_for_team(&team, &agent)
-        .cloned();
+        .query_for_team_with_liveness(&team, &agent);
     let canonical = derive_canonical_member_state(
         &team,
         &member,
@@ -5213,13 +5228,18 @@ fn handle_list_agents(
             bootstrap_session_from_member_hint(team_name, &m, &mut session_guard);
             let tracker_state = tracker.get_state(&m.name);
             let tracker_meta = tracker.transition_meta(&m.name);
-            let session = session_guard.query_for_team(team_name, &m.name);
-            let state =
-                derive_canonical_member_state(team_name, &m, tracker_state, session, tracker_meta);
+            let session = session_guard.query_for_team_with_liveness(team_name, &m.name);
+            let state = derive_canonical_member_state(
+                team_name,
+                &m,
+                tracker_state,
+                session.as_ref(),
+                tracker_meta,
+            );
             merged_states.insert(m.name.clone(), state);
         }
 
-        for session in session_guard.sessions_for_team(team_name) {
+        for session in session_guard.sessions_for_team_with_liveness(team_name) {
             if merged_states.contains_key(&session.agent_name) {
                 continue;
             }
@@ -5375,8 +5395,7 @@ fn derive_canonical_member_state(
 ) -> CanonicalMemberState {
     let agent = member.name.as_str();
     if let Some(session) = session {
-        let session_alive = session.state == crate::daemon::session_registry::SessionState::Active
-            && session.is_process_alive();
+        let session_alive = session.state == crate::daemon::session_registry::SessionState::Active;
         if !session_alive {
             return CanonicalMemberState {
                 agent: agent.to_string(),
@@ -5384,6 +5403,7 @@ fn derive_canonical_member_state(
                 activity: "unknown".to_string(),
                 session_id: Some(session.session_id.clone()),
                 process_id: Some(session.process_id),
+                last_alive_at: session.last_alive_at.clone(),
                 reason: "session inactive or pid dead".to_string(),
                 source: "session_registry".to_string(),
                 in_config: true,
@@ -5410,6 +5430,7 @@ fn derive_canonical_member_state(
                 activity: "unknown".to_string(),
                 session_id: Some(session.session_id.clone()),
                 process_id: Some(session.process_id),
+                last_alive_at: session.last_alive_at.clone(),
                 reason: mismatch_reason,
                 source: "pid_backend_validation".to_string(),
                 in_config: true,
@@ -5428,6 +5449,7 @@ fn derive_canonical_member_state(
                 activity: "idle".to_string(),
                 session_id: Some(session.session_id.clone()),
                 process_id: Some(session.process_id),
+                last_alive_at: session.last_alive_at.clone(),
                 reason,
                 source,
                 in_config: true,
@@ -5439,6 +5461,7 @@ fn derive_canonical_member_state(
             activity: "busy".to_string(),
             session_id: Some(session.session_id.clone()),
             process_id: Some(session.process_id),
+            last_alive_at: session.last_alive_at.clone(),
             reason: "session active with live pid".to_string(),
             source: "session_registry".to_string(),
             in_config: true,
@@ -5452,6 +5475,7 @@ fn derive_canonical_member_state(
             activity: "idle".to_string(),
             session_id: None,
             process_id: None,
+            last_alive_at: None,
             reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "idle tracker state".to_string()),
@@ -5466,6 +5490,7 @@ fn derive_canonical_member_state(
             activity: "busy".to_string(),
             session_id: None,
             process_id: None,
+            last_alive_at: None,
             reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "active tracker state".to_string()),
@@ -5480,6 +5505,7 @@ fn derive_canonical_member_state(
             activity: "unknown".to_string(),
             session_id: None,
             process_id: None,
+            last_alive_at: None,
             reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "offline tracker state".to_string()),
@@ -5494,6 +5520,7 @@ fn derive_canonical_member_state(
             activity: "unknown".to_string(),
             session_id: None,
             process_id: None,
+            last_alive_at: None,
             reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "no lifecycle/session evidence".to_string()),
@@ -5511,15 +5538,14 @@ fn derive_unregistered_member_state(
     tracker_state: Option<AgentState>,
     tracker_meta: Option<&crate::plugins::worker_adapter::TransitionMeta>,
 ) -> CanonicalMemberState {
-    if session.state != crate::daemon::session_registry::SessionState::Active
-        || !session.is_process_alive()
-    {
+    if session.state != crate::daemon::session_registry::SessionState::Active {
         return CanonicalMemberState {
             agent: session.agent_name.clone(),
             state: "offline".to_string(),
             activity: "unknown".to_string(),
             session_id: Some(session.session_id.clone()),
             process_id: Some(session.process_id),
+            last_alive_at: session.last_alive_at.clone(),
             reason: "session tracked but member missing from config".to_string(),
             source: "session_registry".to_string(),
             in_config: false,
@@ -5533,6 +5559,7 @@ fn derive_unregistered_member_state(
             activity: "idle".to_string(),
             session_id: Some(session.session_id.clone()),
             process_id: Some(session.process_id),
+            last_alive_at: session.last_alive_at.clone(),
             reason: tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "idle lifecycle signal".to_string()),
@@ -5564,6 +5591,7 @@ fn derive_unregistered_member_state(
             activity: "unknown".to_string(),
             session_id: Some(session.session_id.clone()),
             process_id: Some(session.process_id),
+            last_alive_at: session.last_alive_at.clone(),
             reason: mismatch_reason,
             source: "pid_backend_validation".to_string(),
             in_config: false,
@@ -5576,6 +5604,7 @@ fn derive_unregistered_member_state(
         activity: "busy".to_string(),
         session_id: Some(session.session_id.clone()),
         process_id: Some(session.process_id),
+        last_alive_at: session.last_alive_at.clone(),
         reason: "session tracked but member missing from config".to_string(),
         source: "session_registry".to_string(),
         in_config: false,
@@ -6096,6 +6125,7 @@ poll_interval_secs = 1
             process_id: std::process::id(),
             state: crate::daemon::session_registry::SessionState::Active,
             updated_at: "2026-03-05T00:00:00Z".to_string(),
+            last_alive_at: Some("2026-03-05T00:00:00Z".to_string()),
             runtime: runtime.map(str::to_string),
             runtime_session_id: None,
             pane_id: None,
@@ -9896,6 +9926,10 @@ exit 1
             std::process::id() as u64
         );
         assert!(payload["alive"].as_bool().unwrap());
+        assert!(
+            payload["last_alive_at"].as_str().is_some(),
+            "live session-query responses should expose last_alive_at"
+        );
     }
 
     #[test]
@@ -9913,6 +9947,17 @@ exit 1
         assert_eq!(payload["session_id"].as_str().unwrap(), "sess-deadbeef");
         // alive is false because the PID doesn't exist (non-unix: always false)
         assert!(!payload["alive"].as_bool().unwrap());
+        let reg = sr.lock().unwrap();
+        let state = reg
+            .query("stale-agent")
+            .expect("stale agent should remain tracked for dead-state diagnostics")
+            .state
+            .clone();
+        assert_eq!(
+            state,
+            crate::daemon::session_registry::SessionState::Dead,
+            "dead pid should converge to dead state after query"
+        );
     }
 
     #[test]

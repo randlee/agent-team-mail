@@ -11,7 +11,19 @@ pub const DEFAULT_COMMAND: &str = "codex --yolo";
 /// Default nudge message template.
 ///
 /// `{count}` is replaced with the number of unread messages.
-pub const DEFAULT_NUDGE_TEXT: &str = "You have {count} unread ATM messages. Run: atm read";
+pub const DEFAULT_NUDGE_TEXT: &str = "[agent-team-msg:{tier}] unread={count}";
+
+/// Default sentinel tier for tmux nudge injection.
+pub const DEFAULT_NUDGE_SENTINEL_TIER: &str = "urgent";
+
+fn normalize_sentinel_tier(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "info" => Some("info"),
+        "urgent" => Some("urgent"),
+        "blocked" => Some("blocked"),
+        _ => None,
+    }
+}
 
 /// Default nudge cooldown in seconds (30 seconds between nudges per agent).
 pub const DEFAULT_NUDGE_COOLDOWN_SECS: u64 = 30;
@@ -28,8 +40,11 @@ pub struct NudgeConfig {
     pub cooldown_secs: u64,
     /// Message template sent to the agent pane via send-keys.
     ///
-    /// `{count}` is replaced with the number of unread messages.
+    /// `{count}` is replaced with the number of unread messages and `{tier}`
+    /// is replaced with `sentinel_tier`.
     pub text_template: String,
+    /// Sentinel tier injected into nudge template (`info|urgent|blocked`).
+    pub sentinel_tier: String,
 }
 
 impl Default for NudgeConfig {
@@ -38,6 +53,7 @@ impl Default for NudgeConfig {
             enabled: true,
             cooldown_secs: DEFAULT_NUDGE_COOLDOWN_SECS,
             text_template: DEFAULT_NUDGE_TEXT.to_string(),
+            sentinel_tier: DEFAULT_NUDGE_SENTINEL_TIER.to_string(),
         }
     }
 }
@@ -65,10 +81,18 @@ impl NudgeConfig {
             .unwrap_or(DEFAULT_NUDGE_TEXT)
             .to_string();
 
+        let sentinel_tier = t
+            .get("sentinel_tier")
+            .and_then(|v| v.as_str())
+            .and_then(normalize_sentinel_tier)
+            .unwrap_or(DEFAULT_NUDGE_SENTINEL_TIER)
+            .to_string();
+
         Self {
             enabled,
             cooldown_secs,
             text_template,
+            sentinel_tier,
         }
     }
 }
@@ -549,6 +573,7 @@ mod tests {
         assert!(nudge.enabled);
         assert_eq!(nudge.cooldown_secs, DEFAULT_NUDGE_COOLDOWN_SECS);
         assert!(nudge.text_template.contains("{count}"));
+        assert_eq!(nudge.sentinel_tier, DEFAULT_NUDGE_SENTINEL_TIER);
     }
 
     #[test]
@@ -556,6 +581,7 @@ mod tests {
         let nudge = NudgeConfig::from_toml(None);
         assert!(nudge.enabled);
         assert_eq!(nudge.cooldown_secs, 30);
+        assert_eq!(nudge.sentinel_tier, "urgent");
     }
 
     #[test]
@@ -564,6 +590,7 @@ mod tests {
 enabled = false
 cooldown_secs = 60
 text_template = "You have {count} messages waiting."
+sentinel_tier = "blocked"
 "#;
         let table: toml::Table = toml::from_str(toml_str).unwrap();
         let value = toml::Value::Table(table);
@@ -571,6 +598,18 @@ text_template = "You have {count} messages waiting."
         assert!(!nudge.enabled);
         assert_eq!(nudge.cooldown_secs, 60);
         assert_eq!(nudge.text_template, "You have {count} messages waiting.");
+        assert_eq!(nudge.sentinel_tier, "blocked");
+    }
+
+    #[test]
+    fn test_nudge_config_invalid_sentinel_tier_falls_back_to_urgent() {
+        let toml_str = r#"
+sentinel_tier = "invalid"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let value = toml::Value::Table(table);
+        let nudge = NudgeConfig::from_toml(Some(&value));
+        assert_eq!(nudge.sentinel_tier, "urgent");
     }
 
     #[test]

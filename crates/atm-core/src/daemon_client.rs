@@ -174,6 +174,9 @@ pub struct CanonicalMemberState {
     /// Process ID from the daemon registry when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_id: Option<u32>,
+    /// Most recent liveness confirmation timestamp from daemon PID checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_alive_at: Option<String>,
     /// Human-readable derivation reason.
     #[serde(default)]
     pub reason: String,
@@ -2463,6 +2466,7 @@ sleep 2
             activity: "busy".to_string(),
             session_id: Some("sess-123".to_string()),
             process_id: Some(4242),
+            last_alive_at: Some("2026-03-08T00:00:00Z".to_string()),
             reason: "session active with live pid".to_string(),
             source: "session_registry".to_string(),
             in_config: true,
@@ -2474,6 +2478,10 @@ sleep 2
         assert_eq!(decoded.activity, "busy");
         assert_eq!(decoded.session_id.as_deref(), Some("sess-123"));
         assert_eq!(decoded.process_id, Some(4242));
+        assert_eq!(
+            decoded.last_alive_at.as_deref(),
+            Some("2026-03-08T00:00:00Z")
+        );
         assert!(decoded.in_config);
     }
 
@@ -2485,6 +2493,7 @@ sleep 2
             activity: "busy".to_string(),
             session_id: None,
             process_id: None,
+            last_alive_at: None,
             reason: String::new(),
             source: String::new(),
             in_config: true,

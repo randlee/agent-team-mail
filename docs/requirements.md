@@ -803,6 +803,18 @@ it MUST enter interactive review-panel mode before executing any spawn side effe
   all flags, and a description of the config registration step.
 - MUST print `No changes made (dry-run).` and exit 0.
 
+### 4.3.3 Tmux Sentinel Injection (Issue #45)
+
+When notifying tmux-based teammates about unread inbox messages, daemon nudges
+MUST inject a structured sentinel line (not the message payload itself):
+
+- Format: `[agent-team-msg:<tier>] unread=<count>`
+- Tier vocabulary: `info`, `urgent`, `blocked` (default: `urgent`)
+- Sentinel delivery MUST only occur for eligible idle-transition nudges
+  (idle-only + cooldown + watermark controls)
+- Actual message content remains mailbox-backed (`atm read`), and MUST NOT be
+  duplicated into tmux nudge payloads.
+
 **Non-goal**:
 - The interactive panel renders line-by-line to a standard terminal; full
   ratatui/crossterm TUI widget system is out of scope for this feature.
