@@ -1469,6 +1469,16 @@ the current tranche focused on onboarding contract closure.
 - Execution plan: `docs/phase-ag-planning.md`
 - Pre-AG gate: AG.0 stale-daemon hygiene planning for issue [#539](https://github.com/randlee/agent-team-mail/issues/539)
 
+### Phase AG Planned Sprint Map
+
+| Sprint | Name | Issues | Status |
+|---|---|---|---|
+| AG.0 | Daemon stale-process hygiene (pre-gate) | [#539](https://github.com/randlee/agent-team-mail/issues/539) | PLANNED |
+| AG.1 | Library MVP: frontmatter + render (file mode) | sc-composer rollout | PLANNED |
+| AG.2 | Resolver + include expansion + pipeline/search-trace foundations | sc-composer rollout | PLANNED |
+| AG.3 | `sc-compose` CLI full FR-7/FR-9 contract | sc-composer rollout | PLANNED |
+| AG.4 | `atm teams spawn` + `atm init` integration wiring | ATM integration with sc-composer | PLANNED |
+
 ---
 
 ## 17.11 Phase Z: Daemon SSoT + Observability Hardening

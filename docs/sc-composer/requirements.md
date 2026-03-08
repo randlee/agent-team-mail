@@ -87,6 +87,9 @@ ATM integration contract:
   - emit warnings in `validate` and `render` diagnostics.
 - Missing frontmatter-declared required variables must fail render.
 - Strict mode (`--strict`) must fail render/validate on undeclared referenced tokens.
+- Undefined-variable render failures (template engine strict undefined) and
+  undeclared-token validation warnings/errors are distinct diagnostics and must
+  use distinct stable diagnostic codes.
 - Missing-variable errors must include:
   - full list of missing variable names,
   - the template/include file where each variable was referenced,
@@ -154,7 +157,11 @@ Profile-kind path conventions:
 - `kind=command`:
   - runtime-specific `<runtime>/commands/<name>.md` then shared `.agents/commands/<name>.md`
 - `kind=skill`:
-  - runtime-specific `<runtime>/skills/<name>/SKILL.md` then shared `.agents/skills/<name>/SKILL.md`
+  - runtime-specific `<runtime>/skills/<name>/` probe order:
+    1. `SKILL.md.j2`
+    2. `SKILL.md`
+    3. `SKILL.j2`
+  - then shared `.agents/skills/<name>/` with the same probe order.
 
 For ATM repository compatibility, `.claude/<kind>/...` remains a valid fallback
 for all runtimes when runtime-specific/shared paths are absent.

@@ -118,9 +118,10 @@ This is the unlock — once this sprint ships, external projects can start using
 **Deliverables in `crates/sc-composer/src/`:**
 
 - `resolver.rs` — resolve profile file by `RuntimeKind` + `kind` (agent/command/skill)
-  - probe order within each candidate dir: `<name>.md.j2` → `<name>.md` → `<name>.j2`
-  - runtime root dirs: `.claude`, `.codex`, `.gemini`, `.opencode`, `.agents/agents`
-    plus legacy `.agents` fallback for `kind=agent`
+  - implement FR-5 precedence chains exactly (runtime-specific chain +
+    shared fallback + legacy compatibility fallback)
+  - expose full search trace metadata for profile resolution so `validate` can
+    report attempted locations on failure
   - explicit `template_path` bypasses probe (root safety check still applies)
 - `include.rs` — expand `@<path>` directives recursively
   - confined to `policy.allowed_roots`
@@ -128,9 +129,12 @@ This is the unlock — once this sprint ships, external projects can start using
   - max depth guard (`policy.max_include_depth`, default 8)
   - included files may have their own frontmatter (merged into parent context)
 - Update `compose()` to support `mode = Profile` — run resolver before render
+- `pipeline.rs` — implement deterministic 3-block composition contract:
+  1) resolved profile body, 2) guidance block, 3) user prompt block
 
 **Tests:** probe order, explicit path override, include expansion, cycle detection,
-depth limit, out-of-root escape rejected with `ROOT_ESCAPE` diagnostic
+depth limit, out-of-root escape rejected with `ROOT_ESCAPE` diagnostic, and
+profile-mode search-trace coverage for resolution failures
 
 ---
 
@@ -153,10 +157,15 @@ depth limit, out-of-root escape rejected with `ROOT_ESCAPE` diagnostic
   - `sc-compose validate [OPTIONS] <template>` — exit 2 on error
   - `sc-compose frontmatter-init <file>` — write default frontmatter stub
   - `sc-compose init` — repo bootstrap (`.prompts/`, `.gitignore`, template scan hints)
-- Global flags: `--runtime`, `--root`, `--var key=val`, `--env-prefix`, `--json`
+- Global flags (FR-7 complete set): `--mode`, `--kind`, `--agent-type`/`--agent`,
+  `--runtime`/`--ai`, `--root`, `--var key=val`, `--var-file`, `--env-prefix`,
+  `--json`, `--dry-run`
 - Exit codes: 0 success, 2 validation/render failure, 3 usage/config error
 - `--json` flag: emit `Diagnostic` list as JSON on stderr, rendered text on stdout
-- Smoke tests: render round-trip, missing var exits 2, `--json` parses cleanly
+- `observability.rs` integration: CLI emits structured command start/end,
+  resolver decisions, validate/render outcomes (FR-9)
+- Smoke tests: render round-trip, missing var exits 2, `--json` parses cleanly,
+  `--dry-run` no-write guarantees, and profile-mode `validate` search-trace output
 
 ---
 
@@ -172,6 +181,8 @@ depth limit, out-of-root escape rejected with `ROOT_ESCAPE` diagnostic
   write rendered text to a temp file, pass temp path to runtime adapter
 - Plain `.md` files: passthrough (backwards compat — no rendering)
 - `SpawnSpec` extended with `prompt_vars: BTreeMap<String, String>` for additional caller-supplied vars
+- `atm init` integration: invoke compose-init-equivalent helper so `.prompts/`
+  bootstrap and `.gitignore` enforcement are applied by ATM init contract
 
 **Library integration tests in `crates/sc-composer/tests/integration.rs`:**
 - file-mode end-to-end: `.md.j2` with vars → correct rendered output
@@ -180,21 +191,25 @@ depth limit, out-of-root escape rejected with `ROOT_ESCAPE` diagnostic
 - error paths: missing required var, cycle, out-of-root
 - cross-platform: all paths via `std::env::temp_dir()` or `tempfile::TempDir`
 
+**ATM integration tests in `crates/atm/tests/`:**
+- `atm init` applies compose-init-equivalent bootstrap idempotently
+- spawn composition path uses library APIs directly (no shell/subprocess path)
+
 ---
 
 ## Sprint Dependency Graph
 
 ```
 AG.1 (library MVP — working compose())
-  └── AG.2 (resolver + includes)
-        └── AG.3 (sc-compose binary)  ← also depends on AG.1 for core API
-              └── AG.4 (atm teams spawn + integration tests)
+  └── AG.2 (resolver + includes + search trace + pipeline)
+        └── AG.3 (sc-compose binary + FR-7/FR-9 full CLI contract)
+              └── AG.4 (atm teams spawn + atm init integration tests)
 
 AG.0 (stale-daemon hygiene) runs as a pre-AG gate before AG.1.
 ```
 
-AG.3 can start after AG.1 (binary only needs file-mode compose); AG.2 and AG.3
-can overlap if arch-ctm batches them.
+AG.3 depends on AG.2. No AG.2/AG.3 overlap is planned to avoid profile-mode and
+search-trace contract ambiguity.
 
 ---
 
@@ -213,9 +228,17 @@ can overlap if arch-ctm batches them.
 
 ## Success Criteria
 
+0. AG.0 stale-daemon pre-gate contracts are documented and test-scoped cleanup
+   plan is approved.
 1. `sc_composer::compose()` renders a `.md.j2` template with variable injection. `NotImplemented` is gone.
 2. `sc-compose render --var role=team-lead template.md.j2` prints rendered text.
 3. `sc-compose validate` exits 2 when a required variable is missing.
 4. `atm teams spawn --system-prompt agent.md.j2 --var project=scmux` renders and injects the prompt.
-5. All CI green on ubuntu, macos, windows.
-6. `sc-composer = "0.42.0"` and `sc-compose = "0.42.0"` available on crates.io.
+5. `sc-compose validate --mode profile` includes search-trace output when
+   resolution fails.
+6. `sc-compose --dry-run` paths perform zero writes for write-capable commands.
+7. `atm init` applies compose-init-equivalent bootstrap idempotently.
+8. FR-9 logging events are emitted for CLI command lifecycle and resolver/validate outcomes.
+9. All CI green on ubuntu, macos, windows.
+10. `sc-composer = "0.42.0"` and `sc-compose = "0.42.0"` available on crates.io,
+    and `sc-compose` is present in Homebrew release artifacts.
