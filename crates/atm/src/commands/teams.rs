@@ -25,17 +25,28 @@ use tracing::warn;
 
 use crate::commands::runtime_adapter::{RuntimeKind, SpawnSpec, adapter_for_runtime};
 use crate::util::settings::get_home_dir;
+use crate::util::state::{SeenState, get_last_seen, load_seen_state};
 
 /// Number of backups to retain per team. Older snapshots are pruned after
 /// each backup or auto-backup-on-resume. Increase if longer rollback windows
 /// are needed.
 const BACKUP_RETENTION_COUNT: usize = 5;
 const SPAWN_UNAUTHORIZED: &str = "SPAWN_UNAUTHORIZED";
+const DEFAULT_EXTERNAL_AGENT_STALE_DAYS: i64 = 7;
+const EXTERNAL_AGENT_STALE_DAYS_ENV: &str = "ATM_EXTERNAL_AGENT_STALE_DAYS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpawnPolicy {
     LeadersOnly,
     AnyMember,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnAuthorizationDecision {
+    policy_team: String,
+    allowed: Vec<String>,
+    caller_identity: Option<String>,
+    authorized: bool,
 }
 
 /// List all teams on this machine
@@ -441,45 +452,9 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| config.core.default_team.clone());
 
-    if let Some((required_team, spawn_policy, co_leaders)) =
-        load_spawn_policy_from_toml(&current_dir)
-        && matches!(spawn_policy, SpawnPolicy::LeadersOnly)
-    {
-        let policy_team = required_team.unwrap_or_else(|| team_name.clone());
-        let caller_identity = resolve_spawn_caller_identity(
-            &home_dir,
-            &policy_team,
-            &resolve_identity(&config.core.identity, &config.roles, &config.aliases),
-        );
-        let mut allowed = vec!["team-lead".to_string()];
-        for identity in co_leaders {
-            if !identity.trim().is_empty() {
-                allowed.push(identity);
-            }
-        }
-        allowed.sort();
-        allowed.dedup();
-
-        let authorized = caller_identity
-            .as_deref()
-            .map(|id| allowed.iter().any(|allowed_id| allowed_id == id))
-            .unwrap_or(false);
-        if !authorized {
-            anyhow::bail!(
-                "{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n\
-                 \n\
-                 Policy team: {}\n\
-                 Allowed identities: {}\n\
-                 Resolved caller: {}\n\
-                 \n\
-                 Action: run spawn as team-lead or add caller to [team.\"{}\"].co_leaders in .atm.toml.",
-                policy_team,
-                allowed.join(", "),
-                caller_identity.unwrap_or_else(|| "<unknown>".to_string()),
-                policy_team
-            );
-        }
-    }
+    let resolved_identity = resolve_identity(&config.core.identity, &config.roles, &config.aliases);
+    let authorization =
+        build_spawn_authorization_decision(&current_dir, &home_dir, &team_name, &resolved_identity);
 
     let parsed_env = parse_env_vars(&args.env)?;
 
@@ -515,6 +490,25 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     }
     let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
     print_launch_command_preview(&launch_command_preview, args.json);
+
+    if let Some(decision) = authorization.as_ref()
+        && !decision.authorized
+    {
+        let error = spawn_unauthorized_error(decision);
+        if args.json {
+            let output = json!({
+                "error": error,
+                "agent": args.agent,
+                "team": team_name,
+                "runtime": runtime_name(&args.runtime),
+                "folder": launch_dir.to_string_lossy(),
+                "launch_command": launch_command_preview,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            std::process::exit(1);
+        }
+        anyhow::bail!("{error}");
+    }
 
     if let Some((env_team, repo_team)) = team_mismatch {
         warn!(
@@ -873,12 +867,16 @@ fn read_repo_default_team(current_dir: &Path) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn load_spawn_policy_from_toml(
-    current_dir: &Path,
-) -> Option<(Option<String>, SpawnPolicy, Vec<String>)> {
-    let config_path = find_repo_local_atm_toml(current_dir)?;
-    let contents = fs::read_to_string(config_path).ok()?;
-    let value: toml::Value = toml::from_str(&contents).ok()?;
+fn load_spawn_policy_from_toml(current_dir: &Path) -> (Option<String>, SpawnPolicy, Vec<String>) {
+    let Some(config_path) = find_repo_local_atm_toml(current_dir) else {
+        return (None, SpawnPolicy::LeadersOnly, Vec::new());
+    };
+    let Ok(contents) = fs::read_to_string(config_path) else {
+        return (None, SpawnPolicy::LeadersOnly, Vec::new());
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
+        return (None, SpawnPolicy::LeadersOnly, Vec::new());
+    };
 
     let required_team = value
         .get("core")
@@ -919,7 +917,7 @@ fn load_spawn_policy_from_toml(
         }
     }
 
-    Some((required_team, spawn_policy, co_leaders))
+    (required_team, spawn_policy, co_leaders)
 }
 
 fn resolve_spawn_caller_identity(
@@ -955,6 +953,58 @@ fn resolve_spawn_caller_identity(
         .iter()
         .find(|member| member.session_id.as_deref() == Some(session_id.as_str()))
         .map(|member| member.name.clone())
+}
+
+fn build_spawn_authorization_decision(
+    current_dir: &Path,
+    home_dir: &Path,
+    team_name: &str,
+    resolved_identity: &str,
+) -> Option<SpawnAuthorizationDecision> {
+    let (required_team, spawn_policy, co_leaders) = load_spawn_policy_from_toml(current_dir);
+    if !matches!(spawn_policy, SpawnPolicy::LeadersOnly) {
+        return None;
+    }
+    let policy_team = required_team.unwrap_or_else(|| team_name.to_string());
+    let caller_identity = resolve_spawn_caller_identity(home_dir, &policy_team, resolved_identity);
+    let mut allowed = vec!["team-lead".to_string()];
+    for identity in co_leaders {
+        if !identity.trim().is_empty() {
+            allowed.push(identity);
+        }
+    }
+    allowed.sort();
+    allowed.dedup();
+    let authorized = caller_identity
+        .as_deref()
+        .map(|id| allowed.iter().any(|allowed_id| allowed_id == id))
+        .unwrap_or(false);
+
+    Some(SpawnAuthorizationDecision {
+        policy_team,
+        allowed,
+        caller_identity,
+        authorized,
+    })
+}
+
+fn spawn_unauthorized_error(decision: &SpawnAuthorizationDecision) -> String {
+    format!(
+        "{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n\
+         \n\
+         Policy team: {}\n\
+         Allowed identities: {}\n\
+         Resolved caller: {}\n\
+         \n\
+         Action: run spawn as team-lead or add caller to [team.\"{}\"].co_leaders in .atm.toml.",
+        decision.policy_team,
+        decision.allowed.join(", "),
+        decision
+            .caller_identity
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        decision.policy_team
+    )
 }
 
 fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
@@ -1728,6 +1778,54 @@ fn cleanup_preview_output(team: &str, rows: &[CleanupPreviewRow]) -> String {
     output
 }
 
+fn parse_positive_days(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok().filter(|days| *days > 0)
+}
+
+fn external_agent_stale_days(team: &str, home_dir: &Path) -> i64 {
+    if let Some(days) = std::env::var(EXTERNAL_AGENT_STALE_DAYS_ENV)
+        .ok()
+        .and_then(|v| parse_positive_days(&v))
+    {
+        return days;
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        let overrides = ConfigOverrides {
+            team: Some(team.to_string()),
+            ..Default::default()
+        };
+        if let Ok(config) = resolve_config(&overrides, &current_dir, home_dir)
+            && let Some(plugin) = config.plugin_config("cleanup")
+        {
+            for key in ["external_staleness_days", "external_agent_stale_days"] {
+                if let Some(days) = plugin
+                    .get(key)
+                    .and_then(|value| value.as_integer())
+                    .filter(|days| *days > 0)
+                {
+                    return days;
+                }
+            }
+        }
+    }
+
+    DEFAULT_EXTERNAL_AGENT_STALE_DAYS
+}
+
+fn external_agent_missing_state_is_stale(
+    seen_state: &SeenState,
+    team: &str,
+    agent: &str,
+    now: DateTime<Utc>,
+    stale_after: chrono::Duration,
+) -> bool {
+    match get_last_seen(seen_state, team, agent) {
+        None => true,
+        Some(last_seen) => now.signed_duration_since(last_seen) >= stale_after,
+    }
+}
+
 /// Implement `atm teams cleanup <team> [agent]`
 ///
 /// Removes members whose daemon session record indicates the process is dead
@@ -1765,11 +1863,22 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
 
     // Check daemon reachability once before iterating members.
     let daemon_running = agent_team_mail_core::daemon_client::daemon_is_running();
+    let seen_state = load_seen_state().unwrap_or_default();
+    let external_stale_days = external_agent_stale_days(&args.team, &home_dir);
+    let external_stale_after = chrono::Duration::days(external_stale_days);
+    let now = Utc::now();
     let mut skipped_names: Vec<String> = Vec::new();
 
     for member in &members_to_check {
         // Safety rule: never remove team-lead via cleanup.
         if member.name == "team-lead" {
+            if args.dry_run {
+                dry_run_rows.push(CleanupPreviewRow {
+                    agent: member.name.clone(),
+                    action: CleanupActionKind::Skip,
+                    reason: "team-lead-protected".to_string(),
+                });
+            }
             if args.agent.is_some() {
                 println!("Warning: team-lead is protected and cannot be removed by cleanup");
             }
@@ -1800,66 +1909,80 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
 
         let (is_dead, dead_reason): (bool, Option<String>) = if args.force {
             // Force mode intentionally bypasses daemon liveness checks.
-            (true, Some("forced cleanup (--force)".to_string()))
+            (true, Some("forced-cleanup".to_string()))
         } else if is_external {
-            // External agent: use session_id for the liveness query if available.
-            let query_key = match &member.session_id {
-                Some(sid) => sid.clone(),
-                None => {
-                    // No session_id → cannot confirm liveness; keep the member.
-                    if args.dry_run {
-                        dry_run_rows.push(CleanupPreviewRow {
-                            agent: member.name.clone(),
-                            action: CleanupActionKind::Skip,
-                            reason: "external-agent-no-state".to_string(),
-                        });
-                    }
-                    warn!(
-                        "Warning: external agent '{}' has no session_id, skipping (unknown liveness)",
-                        member.name
-                    );
-                    skipped_names.push(member.name.clone());
-                    continue;
-                }
-            };
+            let stale_without_daemon_state = external_agent_missing_state_is_stale(
+                &seen_state,
+                &args.team,
+                &member.name,
+                now,
+                external_stale_after,
+            );
 
-            match agent_team_mail_core::daemon_client::query_session(&query_key) {
-                Ok(Some(ref info)) if !info.alive => {
-                    // Daemon explicitly reports the session as dead → safe to remove.
-                    (true, Some("daemon reports session dead".to_string()))
-                }
-                Ok(_) => {
-                    // Daemon unreachable, session alive, or no record → keep the agent.
-                    if args.dry_run {
-                        dry_run_rows.push(CleanupPreviewRow {
-                            agent: member.name.clone(),
-                            action: CleanupActionKind::Skip,
-                            reason: "external agent liveness unknown (daemon did not confirm dead)"
-                                .to_string(),
-                        });
+            // External agent: use session_id for daemon liveness query when available.
+            // If daemon has no record, fall back to state.json last_seen staleness:
+            // absent or stale heartbeat is cleanup-eligible; recent heartbeat is retained.
+            match member.session_id.as_deref() {
+                Some(query_key) => {
+                    match agent_team_mail_core::daemon_client::query_session(query_key) {
+                        Ok(Some(ref info)) if !info.alive => {
+                            (true, Some("daemon-session-dead".to_string()))
+                        }
+                        Ok(Some(_)) => (false, None),
+                        Ok(None) => {
+                            if stale_without_daemon_state {
+                                (true, Some("daemon-no-session-record".to_string()))
+                            } else {
+                                if args.dry_run {
+                                    dry_run_rows.push(CleanupPreviewRow {
+                                        agent: member.name.clone(),
+                                        action: CleanupActionKind::Skip,
+                                        reason: "external-agent-no-state".to_string(),
+                                    });
+                                }
+                                warn!(
+                                    "Warning: external agent '{}' has no daemon state record and recent heartbeat (<{}d), skipping",
+                                    member.name, external_stale_days
+                                );
+                                skipped_names.push(member.name.clone());
+                                continue;
+                            }
+                        }
+                        Err(_) => {
+                            if args.dry_run {
+                                dry_run_rows.push(CleanupPreviewRow {
+                                    agent: member.name.clone(),
+                                    action: CleanupActionKind::Skip,
+                                    reason: "external-agent-daemon-query-error".to_string(),
+                                });
+                            }
+                            warn!(
+                                "Warning: daemon query error for external agent '{}', skipping",
+                                member.name
+                            );
+                            skipped_names.push(member.name.clone());
+                            continue;
+                        }
                     }
-                    warn!(
-                        "Warning: external agent '{}' liveness unknown, skipping — use --force to override",
-                        member.name
-                    );
-                    skipped_names.push(member.name.clone());
-                    continue;
                 }
-                Err(_) => {
-                    // I/O error → keep the agent to be safe.
-                    if args.dry_run {
-                        dry_run_rows.push(CleanupPreviewRow {
-                            agent: member.name.clone(),
-                            action: CleanupActionKind::Skip,
-                            reason: "external agent daemon query error".to_string(),
-                        });
+                None => {
+                    if stale_without_daemon_state {
+                        (true, Some("daemon-no-session-record".to_string()))
+                    } else {
+                        if args.dry_run {
+                            dry_run_rows.push(CleanupPreviewRow {
+                                agent: member.name.clone(),
+                                action: CleanupActionKind::Skip,
+                                reason: "external-agent-liveness-unknown".to_string(),
+                            });
+                        }
+                        warn!(
+                            "Warning: external agent '{}' has no session_id and recent heartbeat (<{}d), skipping",
+                            member.name, external_stale_days
+                        );
+                        skipped_names.push(member.name.clone());
+                        continue;
                     }
-                    warn!(
-                        "Warning: daemon query error for external agent '{}', skipping",
-                        member.name
-                    );
-                    skipped_names.push(member.name.clone());
-                    continue;
                 }
             }
         } else {
@@ -1873,7 +1996,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                     (
                         !info.alive,
                         if !info.alive {
-                            Some("daemon reports session dead".to_string())
+                            Some("daemon-session-dead".to_string())
                         } else {
                             None
                         },
@@ -1881,13 +2004,17 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 }
                 Ok(None) if daemon_running => {
                     // Daemon is running but has no record for this member — session is gone.
-                    (
-                        true,
-                        Some("daemon has no active session record".to_string()),
-                    )
+                    (true, Some("daemon-no-session-record".to_string()))
                 }
                 Ok(None) => {
                     // Daemon is not running: we cannot confirm liveness.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "daemon-unreachable".to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: daemon unreachable, skipping {} — use --force to override",
                         member.name
@@ -1898,6 +2025,13 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 Err(e) => {
                     // Unexpected I/O error after connection was established — cannot
                     // determine liveness; skip the member to avoid unsafe removal.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "daemon-query-error".to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: daemon query error for {}, skipping: {e}",
                         member.name
@@ -1909,7 +2043,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         };
 
         if is_dead {
-            let reason = dead_reason.unwrap_or_else(|| "candidate for cleanup".to_string());
+            let reason = dead_reason.unwrap_or_else(|| "candidate-cleanup".to_string());
             if args.dry_run {
                 dry_run_rows.push(CleanupPreviewRow {
                     agent: member.name.clone(),
@@ -1926,7 +2060,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                     dry_run_rows.push(CleanupPreviewRow {
                         agent: member.name.clone(),
                         action: CleanupActionKind::SessionPrune,
-                        reason: "stale session metadata".to_string(),
+                        reason: "stale-session-metadata".to_string(),
                     });
                 }
             } else {
@@ -1961,7 +2095,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 dry_run_rows.push(CleanupPreviewRow {
                     agent: orphan,
                     action: CleanupActionKind::MailboxDelete,
-                    reason: "orphan mailbox not present in roster".to_string(),
+                    reason: "orphan-mailbox".to_string(),
                 });
             }
         } else {
@@ -1974,7 +2108,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         if !skipped_names.is_empty() {
             let names = skipped_names.join(", ");
             let count = skipped_names.len();
-            println!("Skipped {count} member(s) (daemon unreachable): {names}");
+            println!("Skipped {count} member(s): {names}");
         }
         return Ok(());
     }
@@ -2147,6 +2281,16 @@ pub(crate) fn cleanup_single_agent(team: String, agent: String, force: bool) -> 
         team,
         agent: Some(agent),
         dry_run: false,
+        force,
+    })
+}
+
+/// Dry-run entry point for `atm cleanup --agent` compatibility.
+pub(crate) fn cleanup_single_agent_dry_run(team: String, agent: String, force: bool) -> Result<()> {
+    cleanup(CleanupArgs {
+        team,
+        agent: Some(agent),
+        dry_run: true,
         force,
     })
 }
@@ -2632,6 +2776,20 @@ mod tests {
         team_dir
     }
 
+    fn write_last_seen(temp_dir: &TempDir, team: &str, agent: &str, timestamp: DateTime<Utc>) {
+        let state_dir = temp_dir.path().join(".config/atm");
+        fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("state.json");
+        let payload = serde_json::json!({
+            "last_seen": {
+                team: {
+                    agent: timestamp.to_rfc3339(),
+                }
+            }
+        });
+        fs::write(state_path, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+    }
+
     #[cfg(unix)]
     fn spawn_mock_session_query_team_server(
         home: &std::path::Path,
@@ -3033,8 +3191,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_cleanup_does_not_remove_external_agent_without_state() {
-        // External members without session_id must be kept (unknown liveness).
+    fn test_cleanup_removes_external_agent_without_state_when_last_seen_missing() {
+        // External member has no daemon state and no heartbeat in state.json:
+        // this is stale by default policy (7d) and cleanup-eligible.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
@@ -3069,6 +3228,64 @@ mod tests {
         };
 
         let result = cleanup(args);
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+        assert!(!inbox.exists(), "external agent inbox should be removed");
+        let reloaded: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            !reloaded.members.iter().any(|m| m.name == "publisher"),
+            "external stale member must be removed from roster"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cleanup_keeps_external_agent_without_state_when_last_seen_recent() {
+        // External member has no daemon state but a recent heartbeat in state.json:
+        // keep member and report incomplete cleanup (unknown liveness).
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        write_last_seen(&temp_dir, "atm-dev", "publisher", Utc::now());
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = None;
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            dry_run: false,
+            force: false,
+        };
+        let result = cleanup(args);
         assert!(result.is_err(), "cleanup should report incomplete state");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -3076,12 +3293,12 @@ mod tests {
             "error should indicate incomplete cleanup: {err}"
         );
 
-        assert!(inbox.exists(), "external agent inbox should remain");
+        assert!(inbox.exists(), "recent external agent inbox should remain");
         let reloaded: TeamConfig =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert!(
             reloaded.members.iter().any(|m| m.name == "publisher"),
-            "external member must remain in roster"
+            "recent external member must remain in roster"
         );
 
         // SAFETY: test-only cleanup
@@ -4435,6 +4652,364 @@ mod tests {
     fn test_parse_env_vars_empty_key_errors() {
         let err = parse_env_vars(&["=value".to_string()]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_load_spawn_policy_defaults_to_leaders_only_when_toml_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let (required_team, spawn_policy, co_leaders) =
+            load_spawn_policy_from_toml(temp_dir.path());
+        assert!(required_team.is_none());
+        assert_eq!(spawn_policy, SpawnPolicy::LeadersOnly);
+        assert!(co_leaders.is_empty());
+    }
+
+    fn write_spawn_policy_toml(workdir: &Path, body: &str) {
+        fs::write(workdir.join(".atm.toml"), body).unwrap();
+    }
+
+    fn restore_env_var(name: &str, original: Option<String>) {
+        // SAFETY: test-only env cleanup.
+        unsafe {
+            match original {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    #[test]
+    fn test_load_spawn_policy_reads_any_member_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "any-member"
+co_leaders = ["arch-atm", "arch-atm", " lead-2 "]
+"#
+            .trim_start(),
+        );
+        let (required_team, spawn_policy, co_leaders) = load_spawn_policy_from_toml(&workdir);
+        assert_eq!(required_team.as_deref(), Some("atm-dev"));
+        assert_eq!(spawn_policy, SpawnPolicy::AnyMember);
+        assert_eq!(
+            co_leaders,
+            vec!["arch-atm".to_string(), "lead-2".to_string()]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_prefers_atm_identity_env() {
+        let temp_dir = TempDir::new().unwrap();
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "env-caller");
+            std::env::set_var("CLAUDE_SESSION_ID", "session-ignored");
+        }
+
+        let resolved = resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "human");
+        assert_eq!(resolved.as_deref(), Some("env-caller"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_uses_resolved_identity_when_not_human() {
+        let temp_dir = TempDir::new().unwrap();
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::set_var("CLAUDE_SESSION_ID", "session-ignored");
+        }
+
+        let resolved =
+            resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "resolved-from-config");
+        assert_eq!(resolved.as_deref(), Some("resolved-from-config"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_uses_claude_session_id_for_team_lead() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let config_path = team_dir.join("config.json");
+        let mut cfg: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        cfg.lead_session_id = "lead-session-123".to_string();
+        fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::set_var("CLAUDE_SESSION_ID", "lead-session-123");
+        }
+
+        let resolved = resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "human");
+        assert_eq!(resolved.as_deref(), Some("team-lead"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_uses_claude_session_id_for_member() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let config_path = team_dir.join("config.json");
+        let mut cfg: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = cfg
+            .members
+            .iter_mut()
+            .find(|member| member.name == "publisher")
+            .expect("publisher member should exist");
+        publisher.session_id = Some("publisher-session-777".to_string());
+        fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::set_var("CLAUDE_SESSION_ID", "publisher-session-777");
+        }
+
+        let resolved = resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "human");
+        assert_eq!(resolved.as_deref(), Some("publisher"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_team_lead_allowed() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(decision.authorized);
+        assert_eq!(decision.caller_identity.as_deref(), Some("team-lead"));
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_co_leader_allowed() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "arch-atm");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(decision.authorized);
+        assert_eq!(decision.caller_identity.as_deref(), Some("arch-atm"));
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_member_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "dev-1");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(!decision.authorized);
+        assert_eq!(decision.caller_identity.as_deref(), Some("dev-1"));
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_unknown_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(!decision.authorized);
+        assert!(decision.caller_identity.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_absent_toml_defaults_to_leaders_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+
+        // Without .atm.toml, team-lead is allowed.
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+        }
+        let lead =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("default leaders-only policy should produce an auth decision");
+        assert!(lead.authorized);
+        assert_eq!(lead.allowed, vec!["team-lead".to_string()]);
+
+        // Non-lead remains blocked under default leaders-only.
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "dev-1");
+        }
+        let member =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("default leaders-only policy should produce an auth decision");
+        assert!(!member.authorized);
+
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    fn test_spawn_unauthorized_error_includes_context() {
+        let decision = SpawnAuthorizationDecision {
+            policy_team: "atm-dev".to_string(),
+            allowed: vec!["arch-atm".to_string(), "team-lead".to_string()],
+            caller_identity: Some("dev-1".to_string()),
+            authorized: false,
+        };
+        let msg = spawn_unauthorized_error(&decision);
+        assert!(msg.contains("SPAWN_UNAUTHORIZED"));
+        assert!(msg.contains("Policy team: atm-dev"));
+        assert!(msg.contains("Allowed identities: arch-atm, team-lead"));
+        assert!(msg.contains("Resolved caller: dev-1"));
+        assert!(msg.contains("co_leaders"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_any_member_policy_bypasses_gate() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "any-member"
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "dev-1");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human");
+        assert!(
+            decision.is_none(),
+            "any-member should bypass leaders-only authorization gate"
+        );
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
     }
 
     #[test]

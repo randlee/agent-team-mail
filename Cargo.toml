@@ -6,13 +6,14 @@ members = [
     "crates/atm-daemon",
     "crates/atm-agent-mcp",
     "crates/atm-tui",
+    "crates/sc-composer",
 ]
 exclude = [
     "examples/provider-stub",
 ]
 
 [workspace.package]
-version = "0.38.0"
+version = "0.41.0"
 edition = "2024"
 authors = ["agent-team-mail contributors"]
 license = "MIT OR Apache-2.0"
@@ -33,4 +34,4 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Internal dependencies
-agent-team-mail-core = { path = "crates/atm-core", version = "=0.38.0" }
+agent-team-mail-core = { path = "crates/atm-core", version = "=0.41.0" }

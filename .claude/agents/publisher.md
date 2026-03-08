@@ -35,6 +35,8 @@ Publisher does not invent alternate flows.
 - Preflight workflow: `.github/workflows/release-preflight.yml` (manual dispatch)
 - Workflow: `.github/workflows/release.yml` (manual dispatch)
 - Gate script: `scripts/release_gate.sh`
+- Artifact manifest SSoT: `release/publish-artifacts.toml`
+- Manifest helper: `scripts/release_artifacts.py`
 - Tag policy: `docs/release-tag-protection.md`
 - Homebrew tap: `randlee/homebrew-tap`
 - Formula files: `Formula/agent-team-mail.rb`, `Formula/atm.rb`
@@ -87,24 +89,23 @@ print('Inventory loaded. Keys:', list(inv.keys()))
 "
 ```
 
-**Step B — Confirm all 5 crates are present in inventory:**
+**Step B — Confirm inventory exactly matches the manifest artifact set:**
 ```bash
-python3 -c "
-import json, sys
-with open('release/release-inventory.json') as f:
+python3 - <<'PY'
+import json, subprocess, sys
+with open('release/release-inventory.json', encoding='utf-8') as f:
     inv = json.load(f)
-required = {
-    'agent-team-mail-core',
-    'agent-team-mail',
-    'agent-team-mail-daemon',
-    'agent-team-mail-tui',
-    'agent-team-mail-mcp',
-}
-artifacts = {item['artifact'] for item in inv.get('items', [])}
-missing = required - artifacts
-print('Missing crates:', missing or 'none')
-sys.exit(1 if missing else 0)
-"
+expected = set(subprocess.check_output(
+    ['python3', 'scripts/release_artifacts.py', 'list-artifacts', '--manifest', 'release/publish-artifacts.toml'],
+    text=True,
+).splitlines())
+actual = {item.get('artifact') for item in inv.get('items', [])}
+missing = sorted(expected - actual)
+extra = sorted(actual - expected)
+print('Missing artifacts:', missing or 'none')
+print('Unexpected artifacts:', extra or 'none')
+sys.exit(1 if missing or extra else 0)
+PY
 ```
 
 **Step C — Workspace version matches inventory:**
@@ -140,10 +141,10 @@ print('All waivers valid (or none present).')
 "
 ```
 
-**Step E — Confirm all 5 crates exist on crates.io before publish:**
+**Step E — Confirm all manifest artifacts exist on crates.io before publish:**
 ```bash
 # Use cargo search (not curl) — crates.io blocks curl from CI/GH Actions IPs
-for crate in agent-team-mail-core agent-team-mail agent-team-mail-daemon agent-team-mail-tui agent-team-mail-mcp; do
+for crate in $(python3 scripts/release_artifacts.py list-artifacts --manifest release/publish-artifacts.toml --publishable-only); do
   cargo search "$crate" --limit 1 2>/dev/null | grep -q "^$crate " && echo "$crate: found" || echo "$crate: not found"
 done
 ```
@@ -176,12 +177,8 @@ If the gate fails: stop and report; do not workaround.
   - publish target
   - verification command(s)
 - GitHub release `vX.Y.Z` exists with expected assets + checksums.
-- crates.io has `X.Y.Z` for:
-  - `agent-team-mail-core`
-  - `agent-team-mail`
-  - `agent-team-mail-daemon`
-  - `agent-team-mail-mcp`
-  - `agent-team-mail-tui`
+- crates.io has `X.Y.Z` for every publishable artifact in
+  `release/publish-artifacts.toml`.
 - Published crates’ `.cargo_vcs_info.json` points to the expected release commit.
 - Homebrew formulas (`agent-team-mail.rb` and `atm.rb`) both match the released version and checksums.
 - Post-publish verification executed for every required inventory item, with

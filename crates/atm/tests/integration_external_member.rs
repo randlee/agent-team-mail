@@ -13,6 +13,7 @@
 //! Windows CI compatibility (see `docs/cross-platform-guidelines.md`).
 
 use assert_cmd::cargo;
+use chrono::Utc;
 use serial_test::serial;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,6 +80,20 @@ fn member_names(team_dir: &Path) -> Vec<String> {
         .iter()
         .map(|m| m["name"].as_str().unwrap().to_string())
         .collect()
+}
+
+fn write_recent_last_seen(temp_dir: &TempDir, team: &str, agent: &str) {
+    let state_dir = temp_dir.path().join(".config/atm");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
+    let state = serde_json::json!({
+        "last_seen": {
+            team: {
+                agent: Utc::now().to_rfc3339()
+            }
+        }
+    });
+    fs::write(state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
 }
 
 /// Read the team config and find a member by name. Returns the member JSON.
@@ -149,6 +164,7 @@ fn test_send_empty_message_rejected() {
             "subscriptions": []
         }));
     fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    write_recent_last_seen(&temp_dir, "cleanup-ext-team", "arch-ctm");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
@@ -659,6 +675,7 @@ fn test_cleanup_skips_external_agent_without_session_confirmation() {
             "isActive": true
         }));
     fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    write_recent_last_seen(&temp_dir, "cleanup-ext-team", "arch-ctm");
 
     // Ensure no ATM_HOME socket or daemon process is reachable.
     // The daemon socket path depends on ATM_HOME, which is set to temp_dir.

@@ -150,8 +150,11 @@ pub fn execute(args: ReadArgs) -> Result<()> {
     let team_config: TeamConfig =
         serde_json::from_str(&std::fs::read_to_string(&team_config_path)?)?;
 
-    // Verify agent exists in team
-    if !team_config.members.iter().any(|m| m.name == agent_name) {
+    // Verify target agent exists in team.
+    // For transient identities reading their own inbox (`atm read --as <name>`),
+    // remain fail-open and return an empty inbox instead of hard-failing.
+    let agent_exists = team_config.members.iter().any(|m| m.name == agent_name);
+    if !agent_exists && args.agent.is_some() {
         anyhow::bail!("Agent '{agent_name}' not found in team '{team_name}'");
     }
 

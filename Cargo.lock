@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-team-mail"
-version = "0.38.0"
+version = "0.41.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-core"
-version = "0.38.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-daemon"
-version = "0.38.0"
+version = "0.41.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-mcp"
-version = "0.38.0"
+version = "0.41.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-tui"
-version = "0.38.0"
+version = "0.41.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -1025,9 +1025,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.182"
+version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
+checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
 name = "libloading"
@@ -1517,6 +1517,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "sc-composer"
+version = "0.41.0"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]
