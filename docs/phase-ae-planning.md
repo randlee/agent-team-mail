@@ -38,11 +38,11 @@ gaps discovered during dogfooding.
 
 | Sprint | Name | PR | Branch | Issues | Status |
 |---|---|---|---|---|---|
-| AE.1 | Config Discovery + `atm gh init` Baseline | — | `feature/pAE-s1-config-init` | #499, #500 | PLANNED |
-| AE.2 | Live Status + JSON + Output Consistency | — | `feature/pAE-s2-live-status-json` | #503, #504, #505 | PLANNED |
-| AE.3 | Monitor Reload Semantics | — | `feature/pAE-s3-reload-semantics` | #502 | PLANNED |
-| AE.4 | Daemon Logging/Autostart/Plugin Isolation | — | `feature/pAE-s4-daemon-observability` | #472, #473, #474 | PLANNED |
-| AE.5 | Identity Ambiguity + Phase Closeout | — | `feature/pAE-s5-identity-closeout` | #506 | PLANNED |
+| AE.1 | Config Discovery + `atm gh init` Baseline | [#518](https://github.com/randlee/agent-team-mail/pull/518) | `feature/pAE-s1-config-init` | #499, #500 | COMPLETE |
+| AE.2 | Live Status + JSON + Output Consistency | [#519](https://github.com/randlee/agent-team-mail/pull/519) | `feature/pAE-s2-live-status-json` | #503, #504, #505 | COMPLETE |
+| AE.3 | Monitor Reload Semantics | [#521](https://github.com/randlee/agent-team-mail/pull/521) | `feature/pAE-s3-reload-semantics` | #502 | COMPLETE |
+| AE.4 | Daemon Logging/Autostart/Plugin Isolation | [#522](https://github.com/randlee/agent-team-mail/pull/522) | `feature/pAE-s4-daemon-observability` | #472, #473, #474 | COMPLETE |
+| AE.5 | Identity Ambiguity + Phase Closeout | [#523](https://github.com/randlee/agent-team-mail/pull/523) | `feature/pAE-s5-identity-closeout` | #506 | COMPLETE |
 
 ## AE.1 — Config Discovery + `atm gh init` Baseline
 
