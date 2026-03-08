@@ -2,7 +2,7 @@
 
 **Version**: 0.6
 **Date**: 2026-03-05
-**Status**: Phase AF complete (v0.41.0, integration PR #530 pending).
+**Status**: Phase AF complete (v0.41.0). Phase AG planning in review.
 
 ---
 
@@ -171,6 +171,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AD | Cross-Platform Script Standardization | Python-first script conversion and runtime policy hardening across ATM tooling | COMPLETE |
 | AE | GH Monitor Reliability + Daemon Logging | Stabilize gh-monitor status/lifecycle contracts and daemon observability behavior | COMPLETE |
 | AF | External Agent Lifecycle Hardening | Close lifecycle, cleanup, transient registration, and reliability/documentation hardening | COMPLETE |
+| AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | PLANNED |
 
 ---
 
@@ -1460,10 +1461,12 @@ the current tranche focused on onboarding contract closure.
 **Completed**: 128+ sprints across 28 phases (CI green)
 **Current version**: v0.41.0
 **Current phase**: Phase AF (COMPLETE)
-**Next planned phase**: Phase AG (TBD)
+**Next planned phase**: Phase AG (PLANNED)
 **Phase AG canonical docs**:
 - Requirements: `docs/sc-composer/requirements.md`
 - Design/architecture: `docs/sc-composer/architecture.md`
+- Test plan: `docs/test-plan-phase-AG.md`
+- Execution plan: `docs/phase-ag-planning.md`
 
 ---
 

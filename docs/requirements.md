@@ -2357,6 +2357,8 @@ atm init <team> --skip-team
   1. Create `.atm.toml` in cwd when missing (writes `identity`, `default_team`).
   2. Create team (`~/.claude/teams/<team>/`) when missing, unless `--skip-team`.
   3. Install hooks (global by default, or local with `--local`).
+  4. Apply compose-init-equivalent repo bootstrap (`.prompts/` plus `.gitignore`
+     entry) via the same shared helper semantics used by `sc-compose init`.
 - Default install writes/merges hook entries in `~/.claude/settings.json` (global scope).
 - `--local` install writes/merges hook entries in project `.claude/settings.json`.
 - Installs are idempotent: reruns preserve unrelated settings and avoid duplicate entries.

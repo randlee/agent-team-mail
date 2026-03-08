@@ -5,7 +5,8 @@
 **Integration branch:** `integrate/phase-AG`
 **Based on:** Phase AF (`integrate/phase-AF` → develop)
 **Canonical docs:** `docs/sc-composer/requirements.md` (requirements) |
-`docs/sc-composer/architecture.md` (design)
+`docs/sc-composer/architecture.md` (design) |
+`docs/test-plan-phase-AG.md` (test plan)
 
 ---
 
@@ -34,7 +35,7 @@ The library skeleton is already in the workspace (v0.41.0) but `compose()` and
 | Consumer | How |
 |----------|-----|
 | **scmux** | `sc-composer = "0.42.0"` in Cargo.toml; `sc-compose` binary via Homebrew |
-| **atm spawn** | `sc-composer` workspace dep; renders `.md.j2` templates before passing to runtime |
+| **atm teams spawn** | `sc-composer` workspace dep; renders `.md.j2` templates before passing to runtime |
 | **CI/dev workflows** | `sc-compose render` binary from Homebrew or `cargo install` |
 
 ---
@@ -50,10 +51,11 @@ This is the unlock — once this sprint ships, external projects can start using
 
 - `frontmatter.rs` — parse optional YAML frontmatter from file text
   - fields: `required_variables: Vec<String>`, `defaults: BTreeMap<String, String>`
-  - absent frontmatter → all empty (graceful)
+  - absent frontmatter → validate/render diagnostics must recommend
+    `sc-compose frontmatter-init <file>.j2`
 - `context.rs` — variable merge with precedence `input > env > defaults`
   - track `VariableSource` per variable
-  - emit `Diagnostic` for missing required vars or unknown vars per policy
+  - emit `Diagnostic` for missing required vars or unknown/undeclared vars per policy
 - `render.rs` — Jinja2 rendering via `minijinja` (pure Rust)
   - strict undefined mode — undefined variable → `ComposerError`
   - context injected from merged variable map
@@ -81,7 +83,8 @@ This is the unlock — once this sprint ships, external projects can start using
 
 - `resolver.rs` — resolve profile file by `RuntimeKind` + `kind` (agent/command/skill)
   - probe order within each candidate dir: `<name>.md.j2` → `<name>.md` → `<name>.j2`
-  - runtime root dirs: `.claude`, `.codex`, `.gemini`, `.opencode`, `.agents`
+  - runtime root dirs: `.claude`, `.codex`, `.gemini`, `.opencode`, `.agents/agents`
+    plus legacy `.agents` fallback for `kind=agent`
   - explicit `template_path` bypasses probe (root safety check still applies)
 - `include.rs` — expand `@<path>` directives recursively
   - confined to `policy.allowed_roots`
@@ -113,6 +116,7 @@ depth limit, out-of-root escape rejected with `ROOT_ESCAPE` diagnostic
   - `sc-compose resolve [OPTIONS] <agent>` — print resolved file path
   - `sc-compose validate [OPTIONS] <template>` — exit 2 on error
   - `sc-compose frontmatter-init <file>` — write default frontmatter stub
+  - `sc-compose init` — repo bootstrap (`.prompts/`, `.gitignore`, template scan hints)
 - Global flags: `--runtime`, `--root`, `--var key=val`, `--env-prefix`, `--json`
 - Exit codes: 0 success, 2 validation/render failure, 3 usage/config error
 - `--json` flag: emit `Diagnostic` list as JSON on stderr, rendered text on stdout
@@ -120,9 +124,9 @@ depth limit, out-of-root escape rejected with `ROOT_ESCAPE` diagnostic
 
 ---
 
-### AG.4 — `atm spawn` Integration + Full Integration Tests
+### AG.4 — `atm teams spawn` Integration + Full Integration Tests
 
-**Goal:** Wire sc-composer into `atm spawn`; comprehensive library integration tests.
+**Goal:** Wire sc-composer into `atm teams spawn`; comprehensive library integration tests.
 
 **Deliverables in `crates/atm/`:**
 
@@ -148,7 +152,7 @@ depth limit, out-of-root escape rejected with `ROOT_ESCAPE` diagnostic
 AG.1 (library MVP — working compose())
   └── AG.2 (resolver + includes)
         └── AG.3 (sc-compose binary)  ← also depends on AG.1 for core API
-              └── AG.4 (atm spawn + integration tests)
+              └── AG.4 (atm teams spawn + integration tests)
 ```
 
 AG.3 can start after AG.1 (binary only needs file-mode compose); AG.2 and AG.3
@@ -174,6 +178,6 @@ can overlap if arch-ctm batches them.
 1. `sc_composer::compose()` renders a `.md.j2` template with variable injection. `NotImplemented` is gone.
 2. `sc-compose render --var role=team-lead template.md.j2` prints rendered text.
 3. `sc-compose validate` exits 2 when a required variable is missing.
-4. `atm spawn --system-prompt agent.md.j2 --var project=scmux` renders and injects the prompt.
+4. `atm teams spawn --system-prompt agent.md.j2 --var project=scmux` renders and injects the prompt.
 5. All CI green on ubuntu, macos, windows.
 6. `sc-composer = "0.42.0"` and `sc-compose = "0.42.0"` available on crates.io.
