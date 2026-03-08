@@ -353,6 +353,12 @@ pub fn daemon_socket_path() -> anyhow::Result<PathBuf> {
 /// (OS-level home dir, not `ATM_HOME`).  The pointer file guards against
 /// `ATM_HOME` mismatch between a hook-started daemon and a plain CLI call.
 ///
+/// The pointer-file fallback is **skipped** when `ATM_HOME` is explicitly set
+/// in the environment — an explicit `ATM_HOME` means the caller controls the
+/// socket path and the pointer file is not relevant.  This also ensures that
+/// tests that set `ATM_HOME` to a temporary directory always use their own
+/// mock socket rather than a stale pointer from a previous daemon run.
+///
 /// This function is used by connection and spawn-guard logic only.
 /// It does **not** attempt to connect — callers perform the actual connect.
 #[cfg(unix)]
@@ -361,9 +367,15 @@ fn effective_daemon_socket_path() -> PathBuf {
         Ok(p) => p,
         Err(_) => return PathBuf::new(),
     };
+    // Skip the pointer-file fallback when ATM_HOME is explicitly provided.
+    // An explicit ATM_HOME pins the socket location; the pointer file is only
+    // useful when the daemon was started with a *different* implicit home dir.
+    if std::env::var_os("ATM_HOME").is_some() {
+        return primary;
+    }
     // Prefer the pointer file path when it is different from primary, so that
     // a daemon started with a different ATM_HOME is still reachable.
-    if let Some(os_home) = dirs::home_dir() {
+    if let Ok(os_home) = crate::home::get_os_home_dir() {
         let pointer_path = os_home.join(".config/atm/daemon-socket.path");
         if let Ok(raw) = std::fs::read_to_string(&pointer_path) {
             let pointer = PathBuf::from(raw.trim());

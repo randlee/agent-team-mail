@@ -175,7 +175,7 @@ fn cleanup_socket_files(socket_path: &PathBuf, pid_path: &PathBuf) {
     }
     // Remove the socket-path pointer file so a stale pointer does not mislead
     // the next CLI invocation into connecting to a non-existent socket.
-    if let Some(os_home) = dirs::home_dir() {
+    if let Ok(os_home) = agent_team_mail_core::home::get_os_home_dir() {
         let pointer_path = os_home.join(".config/atm/daemon-socket.path");
         if pointer_path.exists() {
             if let Err(e) = std::fs::remove_file(&pointer_path) {
@@ -336,9 +336,9 @@ async fn start_unix_socket_server(
     // daemon socket.  This guards against ATM_HOME mismatch between a
     // hook-started daemon (e.g., ATM_HOME=~/.claude) and a plain CLI call
     // (which uses the OS home dir).  The pointer file lives at
-    // `~/.config/atm/daemon-socket.path` using `dirs::home_dir()` directly
+    // `~/.config/atm/daemon-socket.path` using `get_os_home_dir()` directly
     // so it is always at the same location regardless of ATM_HOME.
-    if let Some(os_home) = dirs::home_dir() {
+    if let Ok(os_home) = agent_team_mail_core::home::get_os_home_dir() {
         let pointer_dir = os_home.join(".config/atm");
         let pointer_path = pointer_dir.join("daemon-socket.path");
         if std::fs::create_dir_all(&pointer_dir).is_ok() {

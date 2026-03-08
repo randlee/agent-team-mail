@@ -98,6 +98,24 @@ pub fn get_home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
 }
 
+/// Get the OS-level home directory, always bypassing `ATM_HOME`.
+///
+/// Unlike [`get_home_dir`], this function ignores the `ATM_HOME` environment
+/// variable and returns the platform default home directory directly.
+///
+/// This is intentionally distinct from [`get_home_dir`] and is reserved for
+/// locations that must be stable regardless of `ATM_HOME` — specifically the
+/// daemon socket pointer file at `~/.config/atm/daemon-socket.path`, which
+/// needs to be reachable by any CLI invocation even when `ATM_HOME` points to
+/// a different directory.
+///
+/// # Errors
+///
+/// Returns an error if the platform cannot determine a home directory.
+pub fn get_os_home_dir() -> Result<PathBuf> {
+    dirs::home_dir().context("Could not determine OS home directory")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
