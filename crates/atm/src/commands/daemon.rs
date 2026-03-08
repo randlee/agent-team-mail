@@ -35,6 +35,26 @@ pub struct DaemonArgs {
 enum DaemonCommands {
     /// Show daemon status
     Status(StatusArgs),
+    /// Stop the running daemon gracefully
+    Stop(StopArgs),
+    /// Restart the daemon (stop then autostart)
+    Restart(RestartArgs),
+}
+
+/// Stop the running daemon
+#[derive(Args, Debug)]
+pub struct StopArgs {
+    /// Wait timeout in seconds for graceful shutdown (default 10)
+    #[arg(long, default_value_t = 10)]
+    timeout: u64,
+}
+
+/// Restart the daemon (stop then autostart)
+#[derive(Args, Debug)]
+pub struct RestartArgs {
+    /// Wait timeout in seconds for graceful shutdown before restart (default 10)
+    #[arg(long, default_value_t = 10)]
+    timeout: u64,
 }
 
 /// Show daemon status
@@ -56,6 +76,8 @@ pub fn execute(args: DaemonArgs) -> Result<()> {
         .unwrap_or(DaemonCommands::Status(StatusArgs { json: false }))
     {
         DaemonCommands::Status(status_args) => execute_status(status_args),
+        DaemonCommands::Stop(stop_args) => execute_stop(stop_args.timeout.max(1)),
+        DaemonCommands::Restart(restart_args) => execute_restart(restart_args.timeout.max(1)),
     }
 }
 
@@ -213,6 +235,93 @@ fn send_shutdown_request(
         .join("inboxes")
         .join(format!("{agent_name}.json"));
     inbox_append(&inbox_path, &msg, team_name, "atm")?;
+    Ok(())
+}
+
+/// Stop the running daemon by sending SIGTERM to the PID recorded in the PID file.
+///
+/// On non-Unix platforms this is a no-op (returns `Ok(())`).
+fn execute_stop(timeout_secs: u64) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let pid_path = agent_team_mail_core::daemon_client::daemon_pid_path()
+            .context("failed to resolve daemon PID file path")?;
+
+        if !pid_path.exists() {
+            println!(
+                "Daemon is not running (no PID file at {}).",
+                pid_path.display()
+            );
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(&pid_path)
+            .with_context(|| format!("failed to read daemon PID file {}", pid_path.display()))?;
+        let pid: i32 = content.trim().parse().with_context(|| {
+            format!(
+                "daemon PID file {} contains non-integer content",
+                pid_path.display()
+            )
+        })?;
+
+        if pid <= 1 {
+            anyhow::bail!(
+                "daemon PID file contains invalid PID {}; refusing to send signal",
+                pid
+            );
+        }
+
+        // SAFETY: SIGTERM requests cooperative shutdown of the daemon process.
+        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                println!("Daemon process {pid} no longer exists; cleaning up PID file.");
+                let _ = std::fs::remove_file(&pid_path);
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!(
+                "failed to send SIGTERM to daemon process {pid}: {err}"
+            ));
+        }
+
+        println!("Sent SIGTERM to daemon (PID {pid}); waiting up to {timeout_secs}s for exit...");
+
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        while Instant::now() < deadline {
+            // SAFETY: kill(pid, 0) checks if the process is alive without sending a signal.
+            let alive = unsafe { libc::kill(pid, 0) == 0 };
+            if !alive {
+                println!("Daemon (PID {pid}) has stopped.");
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        println!("Daemon (PID {pid}) did not stop within {timeout_secs}s after SIGTERM.");
+        println!("You may force-kill it with: kill -9 {pid}");
+        std::process::exit(1);
+    }
+
+    #[cfg(not(unix))]
+    {
+        eprintln!("atm daemon stop is not supported on this platform.");
+        std::process::exit(1);
+    }
+}
+
+/// Restart the daemon: stop the running instance then trigger autostart.
+fn execute_restart(timeout_secs: u64) -> Result<()> {
+    execute_stop(timeout_secs)?;
+    // Brief pause to let socket and PID files be cleaned up before autostart.
+    std::thread::sleep(Duration::from_millis(500));
+    agent_team_mail_core::daemon_client::ensure_daemon_running()
+        .context("failed to autostart daemon after stop")?;
+    if agent_team_mail_core::daemon_client::daemon_is_running() {
+        println!("Daemon restarted successfully.");
+    } else {
+        anyhow::bail!("daemon did not come back online after restart");
+    }
     Ok(())
 }
 
