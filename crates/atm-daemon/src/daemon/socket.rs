@@ -8973,7 +8973,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-pre","command":"hook-event","payload":{"event":"pre_compact","agent":"team-lead","team":"atm-dev","session_id":"sess-pre","process_id":4321}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8988,7 +8988,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-compact-complete","command":"hook-event","payload":{"event":"compact_complete","agent":"team-lead","team":"atm-dev","session_id":"sess-compact","process_id":4321}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
