@@ -1442,7 +1442,7 @@ the current tranche focused on onboarding contract closure.
 **Completed**: 123+ sprints across 27 phases (CI green)
 **Current version**: v0.38.0
 **Current phase**: Phase AC COMPLETE
-**Next planned phase**: Phase AD (TBD)
+**Next planned phase**: Phase AD (cross-platform script standardization)
 
 ---
 
@@ -1875,6 +1875,31 @@ for both project-local and global-install paths before Homebrew/global hook roll
 
 ---
 
+## 17.15 Phase AD: Cross-Platform Script Standardization
+
+**Goal**: remove product/runtime shell-script dependencies and standardize runtime
+script behavior on Python across macOS/Linux/Windows.
+
+**Requirements references**:
+- `docs/requirements.md` §4.9.3a (Python-only runtime script policy)
+- `docs/requirements.md` §4.9.5 (`atm init` runtime detection + install contract)
+
+**Integration branch**: `integrate/phase-AD`
+
+**Planning doc**: `docs/phase-ad-planning.md`
+
+### Sprint Summary
+| Sprint | Name | PR | Branch | Issues | Status |
+|--------|------|----|--------|--------|--------|
+| AD.1 | Python Runtime Policy + atm init Auto-Install | — | `feature/pAD-s1-python-policy` | #500, #506 | PLANNED |
+| AD.2 | Runtime Config Discovery Parity | — | `feature/pAD-s2-config-parity` | #499 | PLANNED |
+| AD.3 | GH Monitor Status Hardening | — | `feature/pAD-s3-gh-status-hardening` | #504, #507 | PLANNED |
+| AD.4 | Live State + Config Reload | — | `feature/pAD-s4-live-state` | #502, #503, #505 | PLANNED |
+| AD.5 | Script Conversion + atm init Auto-Install | — | `feature/pAD-s5-script-conversion` | TBD | PLANNED |
+| AD.6 | Bash Wrapper Removal | — | `feature/pAD-s6-bash-removal` | — | CANDIDATE |
+
+---
+
 ## 20. Phase Integration PRs
 
 | Phase | Integration PR | Status |
@@ -1902,6 +1927,7 @@ for both project-local and global-install paths before Homebrew/global hook roll
 | Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Merged |
 | Phase AA | `integrate/phase-AA` | Merged ([#459](https://github.com/randlee/agent-team-mail/pull/459)) |
 | Phase AB | `integrate/phase-AB` | [#469](https://github.com/randlee/agent-team-mail/pull/469) Pending merge |
+| Phase AD | `integrate/phase-AD` | Planned |
 
 ---
 
