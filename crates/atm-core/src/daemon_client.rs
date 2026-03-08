@@ -795,6 +795,8 @@ pub struct GhMonitorRequest {
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
 }
 
 /// Request payload for daemon-routed `gh-status` command.
@@ -805,6 +807,8 @@ pub struct GhStatusRequest {
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
 }
 
 /// Lifecycle action for the GitHub monitor plugin.
@@ -823,39 +827,45 @@ pub struct GhMonitorControlRequest {
     pub action: GhMonitorLifecycleAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
 }
 
 /// Daemon response payload for `gh-monitor-control` / `gh-monitor-health`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GhMonitorHealth {
     pub team: String,
-    pub lifecycle_state: String,
-    pub availability_state: String,
     #[serde(default)]
     pub configured: bool,
     #[serde(default)]
     pub enabled: bool,
-    pub in_flight: u64,
-    pub updated_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_path: Option<String>,
+    pub lifecycle_state: String,
+    pub availability_state: String,
+    pub in_flight: u64,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Daemon response payload for `gh-monitor`/`gh-status`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GhMonitorStatus {
     pub team: String,
-    pub target_kind: GhMonitorTargetKind,
-    pub target: String,
-    pub state: String,
     #[serde(default)]
     pub configured: bool,
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    pub target_kind: GhMonitorTargetKind,
+    pub target: String,
+    pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -863,10 +873,6 @@ pub struct GhMonitorStatus {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_path: Option<String>,
 }
 
 /// Query the daemon for the session record of a named agent.
@@ -1218,13 +1224,22 @@ pub fn gh_monitor_control(
 /// Query daemon-routed GitHub monitor plugin health
 /// (`command: "gh-monitor-health"`).
 pub fn gh_monitor_health(team: &str) -> anyhow::Result<Option<GhMonitorHealth>> {
-    let mut payload = serde_json::json!({ "team": team });
-    inject_request_config_cwd(&mut payload);
+    gh_monitor_health_with_context(team, None)
+}
+
+/// Query daemon-routed GitHub monitor plugin health with explicit config cwd.
+pub fn gh_monitor_health_with_context(
+    team: &str,
+    config_cwd: Option<String>,
+) -> anyhow::Result<Option<GhMonitorHealth>> {
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
         command: "gh-monitor-health".to_string(),
-        payload,
+        payload: serde_json::json!({
+            "team": team,
+            "config_cwd": config_cwd,
+        }),
     };
 
     let response = match query_daemon(&socket_request)? {
