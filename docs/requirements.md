@@ -416,6 +416,23 @@ Before writing to the inbox, `atm send` queries daemon session state (`query_ses
 - The sender receives a warning: `Warning: Agent X appears offline. Message will be queued with call-to-action.`
 - The message is still delivered (written to inbox file) — the warning is informational, not a hard block.
 
+**Same-identity concurrent-session behavior**:
+
+- For `atm send` where sender and recipient resolve to the same identity on the same team,
+  self-send warning behavior must be session-aware (not identity-only).
+- Sender session resolution order for this check:
+  1. Hook file session id (`atm-hook-<ppid>.json`)
+  2. `CLAUDE_SESSION_ID` environment variable (explicit disambiguation)
+  3. Session file fallback (`.claude/teams/<team>/sessions/*.json`)
+- If session file fallback finds multiple active sessions for the same
+  `team+identity` and no explicit session id is provided, `atm send` must fail
+  with an actionable ambiguity error (`Export CLAUDE_SESSION_ID=<session-id> ...`).
+- When daemon session query reports the identity is currently owned by a
+  different active session id than the sender session id, `atm send` must treat
+  this as cross-session same-identity routing and must not prepend the self-send warning.
+- When daemon session ownership is missing/unavailable, `atm send` may conservatively
+  keep the self-send warning behavior.
+
 **Agent activity tracking (daemon-managed)**:
 
 The daemon tracks agent activity by monitoring inbox file changes and message timestamps:
