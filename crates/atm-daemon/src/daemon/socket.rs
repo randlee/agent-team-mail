@@ -2092,15 +2092,97 @@ fn read_gh_monitor_health(home: &std::path::Path, team: &str) -> Result<GhMonito
 }
 
 #[cfg(unix)]
+fn gh_monitor_live_registry()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(unix)]
+fn monitor_registry_scope_key(home: &std::path::Path, team: &str) -> String {
+    format!("{}::{team}", home.display())
+}
+
+#[cfg(unix)]
+fn mark_monitor_in_flight(home: &std::path::Path, team: &str, key: &str) {
+    let scope = monitor_registry_scope_key(home, team);
+    let mut registry = gh_monitor_live_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.entry(scope).or_default().insert(key.to_string());
+}
+
+#[cfg(unix)]
+fn clear_monitor_in_flight(home: &std::path::Path, team: &str, key: &str) {
+    let scope = monitor_registry_scope_key(home, team);
+    let mut registry = gh_monitor_live_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(keys) = registry.get_mut(&scope) {
+        keys.remove(key);
+        if keys.is_empty() {
+            registry.remove(&scope);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_monitor_in_flight(
+    home: &std::path::Path,
+    team: &str,
+    target_kind: GhMonitorTargetKind,
+    target: &str,
+    reference: Option<&str>,
+) -> bool {
+    let scope = monitor_registry_scope_key(home, team);
+    let key = gh_monitor_key(team, target_kind, target, reference);
+    let registry = gh_monitor_live_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry
+        .get(&scope)
+        .map(|keys| keys.contains(&key))
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
 fn count_in_flight_monitors(home: &std::path::Path, team: &str) -> u64 {
-    load_gh_monitor_state_map(home)
-        .ok()
-        .map(|map| {
-            map.values()
-                .filter(|status| status.team == team && status.state == "tracking")
-                .count() as u64
-        })
+    let scope = monitor_registry_scope_key(home, team);
+    let registry = gh_monitor_live_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry
+        .get(&scope)
+        .map(|keys| keys.len() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(unix)]
+struct MonitorInFlightGuard {
+    home: PathBuf,
+    team: String,
+    key: String,
+}
+
+#[cfg(unix)]
+impl MonitorInFlightGuard {
+    fn new(home: &std::path::Path, team: &str, key: &str) -> Self {
+        mark_monitor_in_flight(home, team, key);
+        Self {
+            home: home.to_path_buf(),
+            team: team.to_string(),
+            key: key.to_string(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MonitorInFlightGuard {
+    fn drop(&mut self) {
+        clear_monitor_in_flight(&self.home, &self.team, &self.key);
+    }
 }
 
 #[cfg(unix)]
@@ -2350,6 +2432,35 @@ fn validate_gh_monitor_config(
         );
     }
     (Ok(()), diagnostics)
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct GhMonitorConfigState {
+    availability_state: &'static str,
+    message: Option<String>,
+    diagnostics: GhConfigDiagnostics,
+}
+
+#[cfg(unix)]
+fn resolve_gh_monitor_config_state(
+    home: &std::path::Path,
+    team: &str,
+    request_payload: &serde_json::Value,
+) -> GhMonitorConfigState {
+    let (validation, diagnostics) = validate_gh_monitor_config(home, team, request_payload);
+    match validation {
+        Ok(()) => GhMonitorConfigState {
+            availability_state: "healthy",
+            message: None,
+            diagnostics,
+        },
+        Err(reason) => GhMonitorConfigState {
+            availability_state: "disabled_config_error",
+            message: Some(format!("gh_monitor unavailable: {reason}")),
+            diagnostics,
+        },
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2690,7 +2801,16 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         let home = home.to_path_buf();
         let status_seed = status.clone();
         let gh_request = gh_request.clone();
+        let monitor_key = gh_monitor_key(
+            &status_seed.team,
+            status_seed.target_kind,
+            &status_seed.target,
+            status_seed.reference.as_deref(),
+        );
+        let in_flight_guard =
+            MonitorInFlightGuard::new(home.as_path(), &status_seed.team, &monitor_key);
         tokio::spawn(async move {
+            let _in_flight_guard = in_flight_guard;
             if let Err(e) = monitor_gh_run(home.as_path(), &status_seed, &gh_request, run_id).await
             {
                 warn!(
@@ -2775,25 +2895,21 @@ async fn handle_gh_monitor_control_command(
         );
     }
 
-    let config_diagnostics = resolve_gh_config_diagnostics(
-        home,
-        &request_config_cwd(&request.payload)
-            .as_deref()
-            .filter(|p| p.exists())
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| home.to_path_buf()),
-        "gh_monitor",
-    );
+    let config_state = resolve_gh_monitor_config_state(home, &control.team, &request.payload);
 
     let mut health = match control.action {
         GhMonitorLifecycleAction::Start => match set_gh_monitor_health_state(
             home,
             &control.team,
             Some("running"),
-            None,
+            Some(config_state.availability_state),
             Some(count_in_flight_monitors(home, &control.team)),
-            Some("gh monitor lifecycle started".to_string()),
+            Some(
+                config_state
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "gh monitor lifecycle started".to_string()),
+            ),
         ) {
             Ok(health) => health,
             Err(e) => {
@@ -2810,7 +2926,7 @@ async fn handle_gh_monitor_control_command(
                 home,
                 &control.team,
                 Some("draining"),
-                None,
+                Some(config_state.availability_state),
                 Some(count_in_flight_monitors(home, &control.team)),
                 Some(format!(
                     "draining in-flight monitors (timeout={}s)",
@@ -2838,9 +2954,9 @@ async fn handle_gh_monitor_control_command(
                 home,
                 &control.team,
                 Some("stopped"),
-                None,
+                Some(config_state.availability_state),
                 Some(in_flight),
-                Some(message),
+                Some(config_state.message.clone().unwrap_or(message)),
             ) {
                 Ok(health) => health,
                 Err(e) => {
@@ -2858,7 +2974,7 @@ async fn handle_gh_monitor_control_command(
                 home,
                 &control.team,
                 Some("draining"),
-                None,
+                Some(config_state.availability_state),
                 Some(count_in_flight_monitors(home, &control.team)),
                 Some(format!(
                     "draining in-flight monitors before restart (timeout={}s)",
@@ -2878,15 +2994,19 @@ async fn handle_gh_monitor_control_command(
                 home,
                 &control.team,
                 Some("running"),
-                Some("healthy"),
+                Some(config_state.availability_state),
                 Some(in_flight),
                 Some(if in_flight == 0 {
-                    "gh monitor lifecycle restarted after in-flight drain".to_string()
+                    config_state.message.clone().unwrap_or_else(|| {
+                        "gh monitor lifecycle restarted after in-flight drain".to_string()
+                    })
                 } else {
-                    format!(
+                    config_state.message.clone().unwrap_or_else(|| {
+                        format!(
                         "gh monitor lifecycle restarted after drain timeout; {} in-flight monitor(s) remain",
                         in_flight
                     )
+                    })
                 }),
             ) {
                 Ok(health) => health,
@@ -2900,8 +3020,9 @@ async fn handle_gh_monitor_control_command(
             }
         }
     };
-    health.config_source = config_diagnostics.source;
-    health.config_path = config_diagnostics.path;
+    health.config_source = config_state.diagnostics.source;
+    health.config_path = config_state.diagnostics.path;
+    let _ = upsert_gh_monitor_health(home, health.clone());
 
     make_ok_response(
         &request.request_id,
@@ -2952,22 +3073,18 @@ async fn handle_gh_monitor_health_command(
         );
     }
 
-    let config_diagnostics = resolve_gh_config_diagnostics(
-        home,
-        &request_config_cwd(&request.payload)
-            .as_deref()
-            .filter(|p| p.exists())
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| home.to_path_buf()),
-        "gh_monitor",
-    );
+    let config_state = resolve_gh_monitor_config_state(home, &team, &request.payload);
 
     let health = match read_gh_monitor_health(home, &team) {
         Ok(mut health) => {
             health.in_flight = count_in_flight_monitors(home, &team);
-            health.config_source = config_diagnostics.source;
-            health.config_path = config_diagnostics.path;
+            health.availability_state = config_state.availability_state.to_string();
+            if let Some(message) = config_state.message {
+                health.message = Some(message);
+            }
+            health.config_source = config_state.diagnostics.source;
+            health.config_path = config_state.diagnostics.path;
+            let _ = upsert_gh_monitor_health(home, health.clone());
             health
         }
         Err(e) => {
@@ -3081,16 +3198,36 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         }
     };
 
-    let config_diagnostics = resolve_gh_config_diagnostics(
-        home,
-        &request_config_cwd(&request.payload)
-            .as_deref()
-            .filter(|p| p.exists())
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| home.to_path_buf()),
-        "gh_monitor",
-    );
+    let config_state = resolve_gh_monitor_config_state(home, &gh_request.team, &request.payload);
+
+    if config_state.availability_state != "healthy" {
+        return make_error_response(
+            &request.request_id,
+            "MONITOR_UNAVAILABLE",
+            config_state
+                .message
+                .as_deref()
+                .unwrap_or("gh_monitor unavailable"),
+        );
+    }
+
+    let current_health = match read_gh_monitor_health(home, &gh_request.team) {
+        Ok(health) => health,
+        Err(e) => {
+            return make_error_response(
+                &request.request_id,
+                "INTERNAL_ERROR",
+                &format!("Failed to read gh monitor health: {e}"),
+            );
+        }
+    };
+    if current_health.lifecycle_state == "stopped" {
+        return make_error_response(
+            &request.request_id,
+            "MONITOR_UNAVAILABLE",
+            "gh monitor lifecycle is not running (run `atm gh monitor start` first)",
+        );
+    }
 
     let state = match load_gh_monitor_state_map(home) {
         Ok(map) => map,
@@ -3111,11 +3248,26 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
     );
     if let Some(status) = state.get(&key) {
         let mut status = status.clone();
+        if status.state == "tracking"
+            && !is_monitor_in_flight(
+                home,
+                &status.team,
+                status.target_kind,
+                &status.target,
+                status.reference.as_deref(),
+            )
+        {
+            status.state = "stale".to_string();
+            status.message = Some(
+                "cached monitor state is stale; no in-flight daemon monitor for target".to_string(),
+            );
+            status.updated_at = chrono::Utc::now().to_rfc3339();
+        }
         if status.config_source.is_none() {
-            status.config_source = config_diagnostics.source.clone();
+            status.config_source = config_state.diagnostics.source.clone();
         }
         if status.config_path.is_none() {
-            status.config_path = config_diagnostics.path.clone();
+            status.config_path = config_state.diagnostics.path.clone();
         }
         return make_ok_response(
             &request.request_id,
@@ -3139,11 +3291,27 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         candidates.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
         if let Some(status) = candidates.last() {
             let mut status = (*status).clone();
+            if status.state == "tracking"
+                && !is_monitor_in_flight(
+                    home,
+                    &status.team,
+                    status.target_kind,
+                    &status.target,
+                    status.reference.as_deref(),
+                )
+            {
+                status.state = "stale".to_string();
+                status.message = Some(
+                    "cached monitor state is stale; no in-flight daemon monitor for target"
+                        .to_string(),
+                );
+                status.updated_at = chrono::Utc::now().to_rfc3339();
+            }
             if status.config_source.is_none() {
-                status.config_source = config_diagnostics.source;
+                status.config_source = config_state.diagnostics.source;
             }
             if status.config_path.is_none() {
-                status.config_path = config_diagnostics.path;
+                status.config_path = config_state.diagnostics.path;
             }
             return make_ok_response(
                 &request.request_id,
@@ -7225,6 +7393,17 @@ exit 1
     #[cfg(unix)]
     async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
         let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let _ = set_gh_monitor_health_state(
+            temp.path(),
+            "atm-dev",
+            Some("running"),
+            Some("healthy"),
+            Some(0),
+            Some("seed".to_string()),
+        )
+        .unwrap();
         let status_a = GhMonitorStatus {
             team: "atm-dev".to_string(),
             target_kind: GhMonitorTargetKind::Workflow,
@@ -7258,6 +7437,102 @@ exit 1
         let status = status_resp.payload.unwrap();
         assert_eq!(status["reference"].as_str(), Some("release/v1"));
         assert_eq!(status["run_id"].as_u64(), Some(222));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_restart_reloads_updated_config_without_daemon_restart() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+
+        let restart_req = r#"{"version":1,"request_id":"r-gh-restart-1","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"restart","drain_timeout_secs":1}}"#;
+        let restart_ok = handle_gh_monitor_control_command(restart_req, temp.path()).await;
+        assert_eq!(restart_ok.status, "ok");
+        let payload_ok = restart_ok.payload.unwrap();
+        assert_eq!(payload_ok["availability_state"].as_str(), Some("healthy"));
+
+        write_invalid_gh_monitor_config(temp.path(), "atm-dev");
+        let restart_bad = handle_gh_monitor_control_command(restart_req, temp.path()).await;
+        assert_eq!(restart_bad.status, "ok");
+        let payload_bad = restart_bad.payload.unwrap();
+        assert_eq!(
+            payload_bad["availability_state"].as_str(),
+            Some("disabled_config_error")
+        );
+        let message = payload_bad["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("gh_monitor unavailable"),
+            "expected actionable unavailable message, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_status_rejects_when_monitor_config_unavailable() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_invalid_gh_monitor_config(temp.path(), "atm-dev");
+        let seeded = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Run,
+            target: "123".to_string(),
+            state: "tracking".to_string(),
+            run_id: Some(123),
+            reference: None,
+            updated_at: "2026-03-06T00:00:00Z".to_string(),
+            message: Some("seeded".to_string()),
+            config_source: None,
+            config_path: None,
+        };
+        upsert_gh_monitor_status(temp.path(), seeded).unwrap();
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-unavailable","command":"gh-status","payload":{"team":"atm-dev","target_kind":"run","target":"123"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "error");
+        let error = status_resp.error.unwrap();
+        assert_eq!(error.code, "MONITOR_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_status_marks_tracking_state_stale_when_no_live_monitor() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let _ = set_gh_monitor_health_state(
+            temp.path(),
+            "atm-dev",
+            Some("running"),
+            Some("healthy"),
+            Some(0),
+            Some("seed".to_string()),
+        )
+        .unwrap();
+        let seeded = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Workflow,
+            target: "ci".to_string(),
+            state: "tracking".to_string(),
+            run_id: Some(777),
+            reference: Some("develop".to_string()),
+            updated_at: "2026-03-06T00:00:00Z".to_string(),
+            message: Some("seeded".to_string()),
+            config_source: None,
+            config_path: None,
+        };
+        upsert_gh_monitor_status(temp.path(), seeded).unwrap();
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-stale","command":"gh-status","payload":{"team":"atm-dev","target_kind":"workflow","target":"ci","reference":"develop"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let payload = status_resp.payload.unwrap();
+        assert_eq!(payload["state"].as_str(), Some("stale"));
+        let message = payload["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("stale"),
+            "expected stale-state message, got: {message}"
+        );
     }
 
     #[tokio::test]
