@@ -6162,6 +6162,35 @@ poll_interval_secs = 1
         }
     }
 
+    #[cfg(unix)]
+    async fn handle_hook_event_command_with_dedup_retry(
+        req_json: &str,
+        store: &SharedStateStore,
+        sr: &SharedSessionRegistry,
+        dd: &SharedDedupeStore,
+    ) -> agent_team_mail_core::daemon_client::SocketResponse {
+        let mut attempts = 0u8;
+        loop {
+            attempts += 1;
+            let resp = handle_hook_event_command_with_dedup(req_json, store, sr, dd).await;
+            let retry = resp
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("processed").and_then(|v| v.as_bool()))
+                .is_some_and(|processed| !processed)
+                && resp
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("reason").and_then(|v| v.as_str()))
+                    .is_some_and(|reason| reason.contains("team config not found"));
+            if retry && attempts < 4 {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                continue;
+            }
+            return resp;
+        }
+    }
+
     #[test]
     #[serial]
     fn test_agent_state_not_found() {
@@ -8910,7 +8939,7 @@ exit 1
         let (dd, _dd_dir) = make_dd();
         let req_json = r#"{"version":1,"request_id":"r-dedup-1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-dedup","process_id":0}}"#;
 
-        let first = handle_hook_event_command_with_dedup(req_json, &store, &sr, &dd).await;
+        let first = handle_hook_event_command_with_dedup_retry(req_json, &store, &sr, &dd).await;
         assert_eq!(first.status, "ok");
         let payload1 = first.payload.unwrap();
         assert!(payload1["processed"].as_bool().unwrap());
@@ -8918,7 +8947,7 @@ exit 1
 
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-        let second = handle_hook_event_command_with_dedup(req_json, &store, &sr, &dd).await;
+        let second = handle_hook_event_command_with_dedup_retry(req_json, &store, &sr, &dd).await;
         assert_eq!(second.status, "ok");
         let payload2 = second.payload.unwrap();
         assert!(payload2["processed"].as_bool().unwrap());

@@ -1980,7 +1980,7 @@ observability/runtime gaps discovered during dogfooding.
 | AE.2 | Live Status + JSON + Output Consistency | — | `feature/pAE-s2-live-status-json` | #503, #504, #505 | IN PROGRESS |
 | AE.3 | Monitor Reload Semantics | — | `feature/pAE-s3-reload-semantics` | #502 | PLANNED |
 | AE.4 | Daemon Logging/Autostart/Plugin Isolation | — | `feature/pAE-s4-daemon-observability` | #472, #473, #474 | PLANNED |
-| AE.5 | Identity Ambiguity + Phase Closeout | — | `feature/pAE-s5-identity-closeout` | #506 | PLANNED |
+| AE.5 | Identity Ambiguity + Phase Closeout | [#523](https://github.com/randlee/agent-team-mail/pull/523) | `feature/pAE-s5-identity-closeout` | #506 | COMPLETE |
 
 ## 23. Scrum Master Agent Prompt
 
