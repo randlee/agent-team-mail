@@ -7841,7 +7841,7 @@ exit 1
                 "team": "atm-dev",
                 "agent": "arch-ctm",
                 "session_id": "local:arch-ctm:recover:1",
-                "process_id": std::process::id(),
+                "process_id": 0,
                 "runtime": "codex",
                 "runtime_session_id": "local:arch-ctm:recover:1"
             }),
