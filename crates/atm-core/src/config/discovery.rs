@@ -6,6 +6,15 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracing::warn;
 
+/// Location metadata for a plugin configuration section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginConfigLocation {
+    /// Config source label (`repo` or `global`).
+    pub source: String,
+    /// Absolute path to the config file that declares the plugin section.
+    pub path: PathBuf,
+}
+
 /// Configuration error
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -93,6 +102,41 @@ pub fn resolve_config(
     Ok(config)
 }
 
+/// Resolve where a plugin section is declared, using the same repo→global
+/// precedence as [`resolve_config`].
+///
+/// Returns the file location for the first matching plugin section:
+/// 1. repo-local `.atm.toml` (nearest match walking up to git root)
+/// 2. global `~/.config/atm/config.toml`
+pub fn resolve_plugin_config_location(
+    plugin_name: &str,
+    current_dir: &Path,
+    home_dir: &Path,
+) -> Option<PluginConfigLocation> {
+    if plugin_name.trim().is_empty() {
+        return None;
+    }
+
+    if let Some(repo_config_path) = find_repo_local_config(current_dir)
+        && config_file_declares_plugin(&repo_config_path, plugin_name)
+    {
+        return Some(PluginConfigLocation {
+            source: "repo".to_string(),
+            path: repo_config_path,
+        });
+    }
+
+    let global_config_path = home_dir.join(".config/atm/config.toml");
+    if config_file_declares_plugin(&global_config_path, plugin_name) {
+        return Some(PluginConfigLocation {
+            source: "global".to_string(),
+            path: global_config_path,
+        });
+    }
+
+    None
+}
+
 /// Find repo-local config file
 ///
 /// Searches current directory and parent directories up to git root
@@ -122,6 +166,20 @@ fn load_config_file(path: &Path) -> Result<Config, ConfigError> {
     let contents = std::fs::read_to_string(path)?;
     let config: Config = toml::from_str(&contents)?;
     Ok(config)
+}
+
+fn config_file_declares_plugin(path: &Path, plugin_name: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
+        return false;
+    };
+
+    value
+        .get("plugins")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|plugins| plugins.contains_key(plugin_name))
 }
 
 /// Merge file config into base config
@@ -744,5 +802,74 @@ enabled = false
         let config = resolve_config(&ConfigOverrides::default(), &repo_dir, home_dir).unwrap();
         assert_eq!(config.core.default_team, "env-team");
         assert_eq!(config.core.identity, "env-user");
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_plugin_config_location_prefers_repo_over_global() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let global_cfg_dir = home_dir.join(".config/atm");
+        std::fs::create_dir_all(&global_cfg_dir).unwrap();
+        std::fs::write(
+            global_cfg_dir.join("config.toml"),
+            "[plugins.gh_monitor]\nenabled = false\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            "[plugins.gh_monitor]\nenabled = true\n",
+        )
+        .unwrap();
+
+        let location =
+            resolve_plugin_config_location("gh_monitor", &repo_dir, home_dir).expect("location");
+        assert_eq!(location.source, "repo");
+        assert_eq!(location.path, repo_dir.join(".atm.toml"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_plugin_config_location_falls_back_to_global() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let global_cfg_dir = home_dir.join(".config/atm");
+        std::fs::create_dir_all(&global_cfg_dir).unwrap();
+        std::fs::write(
+            global_cfg_dir.join("config.toml"),
+            "[plugins.gh_monitor]\nenabled = true\n",
+        )
+        .unwrap();
+
+        let location =
+            resolve_plugin_config_location("gh_monitor", &repo_dir, home_dir).expect("location");
+        assert_eq!(location.source, "global");
+        assert_eq!(location.path, global_cfg_dir.join("config.toml"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_plugin_config_location_none_when_not_declared() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        assert!(resolve_plugin_config_location("gh_monitor", &repo_dir, home_dir).is_none());
     }
 }
