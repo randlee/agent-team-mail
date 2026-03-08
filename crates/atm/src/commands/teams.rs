@@ -1771,6 +1771,13 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         // Safety rule: never remove team-lead via cleanup.
         if member.name == "team-lead" {
             if args.agent.is_some() {
+                if args.dry_run {
+                    dry_run_rows.push(CleanupPreviewRow {
+                        agent: member.name.clone(),
+                        action: CleanupActionKind::Skip,
+                        reason: "team-lead-protected".to_string(),
+                    });
+                }
                 println!("Warning: team-lead is protected and cannot be removed by cleanup");
             }
             continue;
@@ -1800,7 +1807,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
 
         let (is_dead, dead_reason): (bool, Option<String>) = if args.force {
             // Force mode intentionally bypasses daemon liveness checks.
-            (true, Some("forced cleanup (--force)".to_string()))
+            (true, Some("forced-cleanup".to_string()))
         } else if is_external {
             // External agent: use session_id for the liveness query if available.
             let query_key = match &member.session_id {
@@ -1826,7 +1833,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             match agent_team_mail_core::daemon_client::query_session(&query_key) {
                 Ok(Some(ref info)) if !info.alive => {
                     // Daemon explicitly reports the session as dead → safe to remove.
-                    (true, Some("daemon reports session dead".to_string()))
+                    (true, Some("daemon-session-dead".to_string()))
                 }
                 Ok(_) => {
                     // Daemon unreachable, session alive, or no record → keep the agent.
@@ -1834,8 +1841,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                         dry_run_rows.push(CleanupPreviewRow {
                             agent: member.name.clone(),
                             action: CleanupActionKind::Skip,
-                            reason: "external agent liveness unknown (daemon did not confirm dead)"
-                                .to_string(),
+                            reason: "external-agent-liveness-unknown".to_string(),
                         });
                     }
                     warn!(
@@ -1851,7 +1857,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                         dry_run_rows.push(CleanupPreviewRow {
                             agent: member.name.clone(),
                             action: CleanupActionKind::Skip,
-                            reason: "external agent daemon query error".to_string(),
+                            reason: "external-agent-daemon-query-error".to_string(),
                         });
                     }
                     warn!(
@@ -1873,7 +1879,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                     (
                         !info.alive,
                         if !info.alive {
-                            Some("daemon reports session dead".to_string())
+                            Some("daemon-session-dead".to_string())
                         } else {
                             None
                         },
@@ -1881,13 +1887,17 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 }
                 Ok(None) if daemon_running => {
                     // Daemon is running but has no record for this member — session is gone.
-                    (
-                        true,
-                        Some("daemon has no active session record".to_string()),
-                    )
+                    (true, Some("daemon-no-session-record".to_string()))
                 }
                 Ok(None) => {
                     // Daemon is not running: we cannot confirm liveness.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "daemon-unreachable".to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: daemon unreachable, skipping {} — use --force to override",
                         member.name
@@ -1898,6 +1908,13 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 Err(e) => {
                     // Unexpected I/O error after connection was established — cannot
                     // determine liveness; skip the member to avoid unsafe removal.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "daemon-query-error".to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: daemon query error for {}, skipping: {e}",
                         member.name
@@ -1909,7 +1926,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         };
 
         if is_dead {
-            let reason = dead_reason.unwrap_or_else(|| "candidate for cleanup".to_string());
+            let reason = dead_reason.unwrap_or_else(|| "candidate-cleanup".to_string());
             if args.dry_run {
                 dry_run_rows.push(CleanupPreviewRow {
                     agent: member.name.clone(),
@@ -1926,7 +1943,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                     dry_run_rows.push(CleanupPreviewRow {
                         agent: member.name.clone(),
                         action: CleanupActionKind::SessionPrune,
-                        reason: "stale session metadata".to_string(),
+                        reason: "stale-session-metadata".to_string(),
                     });
                 }
             } else {
@@ -1961,7 +1978,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                 dry_run_rows.push(CleanupPreviewRow {
                     agent: orphan,
                     action: CleanupActionKind::MailboxDelete,
-                    reason: "orphan mailbox not present in roster".to_string(),
+                    reason: "orphan-mailbox".to_string(),
                 });
             }
         } else {
@@ -1974,7 +1991,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         if !skipped_names.is_empty() {
             let names = skipped_names.join(", ");
             let count = skipped_names.len();
-            println!("Skipped {count} member(s) (daemon unreachable): {names}");
+            println!("Skipped {count} member(s): {names}");
         }
         return Ok(());
     }

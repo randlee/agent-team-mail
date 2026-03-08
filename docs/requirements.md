@@ -657,11 +657,23 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
   then teardown cleanup invariant.
 - `atm teams cleanup <team> [agent] --dry-run`: non-mutating preview mode that MUST:
   1. render a table of candidate actions (roster removal, mailbox delete, session prune),
-  2. include a reason per row,
+  2. include a stable reason code per row (kebab-case),
   3. include total counts by action type, and
   4. exit `0` with no writes.
   If there are no candidates, output `Nothing to clean up for team <name>.`,
   do not print an empty table header, and still exit `0`.
+  Required reason-code vocabulary includes:
+  - `forced-cleanup`
+  - `daemon-session-dead`
+  - `daemon-no-session-record`
+  - `daemon-unreachable`
+  - `daemon-query-error`
+  - `external-agent-no-state`
+  - `external-agent-liveness-unknown`
+  - `external-agent-daemon-query-error`
+  - `stale-session-metadata`
+  - `orphan-mailbox`
+  - `team-lead-protected`
 
 ### 4.3.2 `atm teams spawn` (Claude Runtime Baseline)
 
@@ -773,6 +785,18 @@ it MUST enter interactive review-panel mode before executing any spawn side effe
 - Output MUST include: pane placement action, fully resolved launch command with
   all flags, and a description of the config registration step.
 - MUST print `No changes made (dry-run).` and exit 0.
+
+### 4.3.3 Tmux Sentinel Injection (Issue #45)
+
+When notifying tmux-based teammates about unread inbox messages, daemon nudges
+MUST inject a structured sentinel line (not the message payload itself):
+
+- Format: `[agent-team-msg:<tier>] unread=<count>`
+- Tier vocabulary: `info`, `urgent`, `blocked` (default: `urgent`)
+- Sentinel delivery MUST only occur for eligible idle-transition nudges
+  (idle-only + cooldown + watermark controls)
+- Actual message content remains mailbox-backed (`atm read`), and MUST NOT be
+  duplicated into tmux nudge payloads.
 
 **Non-goal**:
 - The interactive panel renders line-by-line to a standard terminal; full

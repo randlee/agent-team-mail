@@ -78,8 +78,8 @@ fn test_teams_cleanup_dry_run_preview_table_and_no_mutation() {
     assert!(stdout.contains("roster-remove"));
     assert!(stdout.contains("mailbox-delete"));
     assert!(stdout.contains("session-prune"));
-    assert!(stdout.contains("forced cleanup (--force)"));
-    assert!(stdout.contains("stale session metadata"));
+    assert!(stdout.contains("forced-cleanup"));
+    assert!(stdout.contains("stale-session-metadata"));
     assert!(stdout.contains("Totals:"));
 
     let config_after =
@@ -163,7 +163,7 @@ fn test_teams_cleanup_dry_run_suppresses_session_prune_without_session_id() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("roster-remove"));
     assert!(stdout.contains("mailbox-delete"));
-    assert!(!stdout.contains("session-prune  stale session metadata"));
+    assert!(!stdout.contains("session-prune  stale-session-metadata"));
 }
 
 #[test]
@@ -244,5 +244,54 @@ fn test_teams_cleanup_dry_run_treats_codex_agent_type_as_external_for_skip_previ
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("publisher"));
     assert!(stdout.contains("skip"));
-    assert!(stdout.contains("external agent liveness unknown"));
+    assert!(stdout.contains("external-agent-liveness-unknown"));
+}
+
+#[test]
+fn test_teams_cleanup_dry_run_totals_match_actual_cleanup_force() {
+    let temp_dir = TempDir::new().unwrap();
+    write_team_config(&temp_dir, "atm-dev", true);
+
+    // Dry-run preview should predict exactly one member cleanup (publisher):
+    // roster-remove + mailbox-delete + session-prune.
+    let mut dry = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut dry, &temp_dir);
+    let dry_assert = dry
+        .args(["teams", "cleanup", "atm-dev", "--dry-run", "--force"])
+        .assert()
+        .success();
+    let dry_stdout = String::from_utf8(dry_assert.get_output().stdout.clone()).unwrap();
+    assert!(dry_stdout.contains("roster-remove: 1"));
+    assert!(dry_stdout.contains("mailbox-delete: 1"));
+    assert!(dry_stdout.contains("session-prune: 1"));
+    assert!(dry_stdout.contains("skip: 0"));
+
+    // Actual cleanup should remove that same member + inbox artifact.
+    let mut apply = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut apply, &temp_dir);
+    let apply_assert = apply
+        .args(["teams", "cleanup", "atm-dev", "--force"])
+        .assert()
+        .success();
+    let apply_stdout = String::from_utf8(apply_assert.get_output().stdout.clone()).unwrap();
+    assert!(apply_stdout.contains("Removed 1 stale member(s): publisher"));
+
+    let config_path = temp_dir.path().join(".claude/teams/atm-dev/config.json");
+    let config_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+    let names: Vec<String> = config_json["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.get("name").and_then(serde_json::Value::as_str))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(names, vec!["team-lead".to_string()]);
+    assert!(
+        !temp_dir
+            .path()
+            .join(".claude/teams/atm-dev/inboxes/publisher.json")
+            .exists(),
+        "publisher inbox must be removed during real cleanup"
+    );
 }
