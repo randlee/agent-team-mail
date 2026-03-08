@@ -38,6 +38,14 @@ enum SpawnPolicy {
     AnyMember,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnAuthorizationDecision {
+    policy_team: String,
+    allowed: Vec<String>,
+    caller_identity: Option<String>,
+    authorized: bool,
+}
+
 /// List all teams on this machine
 #[derive(Args, Debug)]
 pub struct TeamsArgs {
@@ -441,45 +449,9 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| config.core.default_team.clone());
 
-    if let Some((required_team, spawn_policy, co_leaders)) =
-        load_spawn_policy_from_toml(&current_dir)
-        && matches!(spawn_policy, SpawnPolicy::LeadersOnly)
-    {
-        let policy_team = required_team.unwrap_or_else(|| team_name.clone());
-        let caller_identity = resolve_spawn_caller_identity(
-            &home_dir,
-            &policy_team,
-            &resolve_identity(&config.core.identity, &config.roles, &config.aliases),
-        );
-        let mut allowed = vec!["team-lead".to_string()];
-        for identity in co_leaders {
-            if !identity.trim().is_empty() {
-                allowed.push(identity);
-            }
-        }
-        allowed.sort();
-        allowed.dedup();
-
-        let authorized = caller_identity
-            .as_deref()
-            .map(|id| allowed.iter().any(|allowed_id| allowed_id == id))
-            .unwrap_or(false);
-        if !authorized {
-            anyhow::bail!(
-                "{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n\
-                 \n\
-                 Policy team: {}\n\
-                 Allowed identities: {}\n\
-                 Resolved caller: {}\n\
-                 \n\
-                 Action: run spawn as team-lead or add caller to [team.\"{}\"].co_leaders in .atm.toml.",
-                policy_team,
-                allowed.join(", "),
-                caller_identity.unwrap_or_else(|| "<unknown>".to_string()),
-                policy_team
-            );
-        }
-    }
+    let resolved_identity = resolve_identity(&config.core.identity, &config.roles, &config.aliases);
+    let authorization =
+        build_spawn_authorization_decision(&current_dir, &home_dir, &team_name, &resolved_identity);
 
     let parsed_env = parse_env_vars(&args.env)?;
 
@@ -515,6 +487,25 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     }
     let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
     print_launch_command_preview(&launch_command_preview, args.json);
+
+    if let Some(decision) = authorization.as_ref()
+        && !decision.authorized
+    {
+        let error = spawn_unauthorized_error(decision);
+        if args.json {
+            let output = json!({
+                "error": error,
+                "agent": args.agent,
+                "team": team_name,
+                "runtime": runtime_name(&args.runtime),
+                "folder": launch_dir.to_string_lossy(),
+                "launch_command": launch_command_preview,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            std::process::exit(1);
+        }
+        anyhow::bail!("{error}");
+    }
 
     if let Some((env_team, repo_team)) = team_mismatch {
         warn!(
@@ -873,12 +864,16 @@ fn read_repo_default_team(current_dir: &Path) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn load_spawn_policy_from_toml(
-    current_dir: &Path,
-) -> Option<(Option<String>, SpawnPolicy, Vec<String>)> {
-    let config_path = find_repo_local_atm_toml(current_dir)?;
-    let contents = fs::read_to_string(config_path).ok()?;
-    let value: toml::Value = toml::from_str(&contents).ok()?;
+fn load_spawn_policy_from_toml(current_dir: &Path) -> (Option<String>, SpawnPolicy, Vec<String>) {
+    let Some(config_path) = find_repo_local_atm_toml(current_dir) else {
+        return (None, SpawnPolicy::LeadersOnly, Vec::new());
+    };
+    let Ok(contents) = fs::read_to_string(config_path) else {
+        return (None, SpawnPolicy::LeadersOnly, Vec::new());
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
+        return (None, SpawnPolicy::LeadersOnly, Vec::new());
+    };
 
     let required_team = value
         .get("core")
@@ -919,7 +914,7 @@ fn load_spawn_policy_from_toml(
         }
     }
 
-    Some((required_team, spawn_policy, co_leaders))
+    (required_team, spawn_policy, co_leaders)
 }
 
 fn resolve_spawn_caller_identity(
@@ -955,6 +950,58 @@ fn resolve_spawn_caller_identity(
         .iter()
         .find(|member| member.session_id.as_deref() == Some(session_id.as_str()))
         .map(|member| member.name.clone())
+}
+
+fn build_spawn_authorization_decision(
+    current_dir: &Path,
+    home_dir: &Path,
+    team_name: &str,
+    resolved_identity: &str,
+) -> Option<SpawnAuthorizationDecision> {
+    let (required_team, spawn_policy, co_leaders) = load_spawn_policy_from_toml(current_dir);
+    if !matches!(spawn_policy, SpawnPolicy::LeadersOnly) {
+        return None;
+    }
+    let policy_team = required_team.unwrap_or_else(|| team_name.to_string());
+    let caller_identity = resolve_spawn_caller_identity(home_dir, &policy_team, resolved_identity);
+    let mut allowed = vec!["team-lead".to_string()];
+    for identity in co_leaders {
+        if !identity.trim().is_empty() {
+            allowed.push(identity);
+        }
+    }
+    allowed.sort();
+    allowed.dedup();
+    let authorized = caller_identity
+        .as_deref()
+        .map(|id| allowed.iter().any(|allowed_id| allowed_id == id))
+        .unwrap_or(false);
+
+    Some(SpawnAuthorizationDecision {
+        policy_team,
+        allowed,
+        caller_identity,
+        authorized,
+    })
+}
+
+fn spawn_unauthorized_error(decision: &SpawnAuthorizationDecision) -> String {
+    format!(
+        "{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n\
+         \n\
+         Policy team: {}\n\
+         Allowed identities: {}\n\
+         Resolved caller: {}\n\
+         \n\
+         Action: run spawn as team-lead or add caller to [team.\"{}\"].co_leaders in .atm.toml.",
+        decision.policy_team,
+        decision.allowed.join(", "),
+        decision
+            .caller_identity
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        decision.policy_team
+    )
 }
 
 fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
@@ -4435,6 +4482,364 @@ mod tests {
     fn test_parse_env_vars_empty_key_errors() {
         let err = parse_env_vars(&["=value".to_string()]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_load_spawn_policy_defaults_to_leaders_only_when_toml_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let (required_team, spawn_policy, co_leaders) =
+            load_spawn_policy_from_toml(temp_dir.path());
+        assert!(required_team.is_none());
+        assert_eq!(spawn_policy, SpawnPolicy::LeadersOnly);
+        assert!(co_leaders.is_empty());
+    }
+
+    fn write_spawn_policy_toml(workdir: &Path, body: &str) {
+        fs::write(workdir.join(".atm.toml"), body).unwrap();
+    }
+
+    fn restore_env_var(name: &str, original: Option<String>) {
+        // SAFETY: test-only env cleanup.
+        unsafe {
+            match original {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    #[test]
+    fn test_load_spawn_policy_reads_any_member_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "any-member"
+co_leaders = ["arch-atm", "arch-atm", " lead-2 "]
+"#
+            .trim_start(),
+        );
+        let (required_team, spawn_policy, co_leaders) = load_spawn_policy_from_toml(&workdir);
+        assert_eq!(required_team.as_deref(), Some("atm-dev"));
+        assert_eq!(spawn_policy, SpawnPolicy::AnyMember);
+        assert_eq!(
+            co_leaders,
+            vec!["arch-atm".to_string(), "lead-2".to_string()]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_prefers_atm_identity_env() {
+        let temp_dir = TempDir::new().unwrap();
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "env-caller");
+            std::env::set_var("CLAUDE_SESSION_ID", "session-ignored");
+        }
+
+        let resolved = resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "human");
+        assert_eq!(resolved.as_deref(), Some("env-caller"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_uses_resolved_identity_when_not_human() {
+        let temp_dir = TempDir::new().unwrap();
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::set_var("CLAUDE_SESSION_ID", "session-ignored");
+        }
+
+        let resolved =
+            resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "resolved-from-config");
+        assert_eq!(resolved.as_deref(), Some("resolved-from-config"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_uses_claude_session_id_for_team_lead() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let config_path = team_dir.join("config.json");
+        let mut cfg: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        cfg.lead_session_id = "lead-session-123".to_string();
+        fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::set_var("CLAUDE_SESSION_ID", "lead-session-123");
+        }
+
+        let resolved = resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "human");
+        assert_eq!(resolved.as_deref(), Some("team-lead"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_uses_claude_session_id_for_member() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let config_path = team_dir.join("config.json");
+        let mut cfg: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = cfg
+            .members
+            .iter_mut()
+            .find(|member| member.name == "publisher")
+            .expect("publisher member should exist");
+        publisher.session_id = Some("publisher-session-777".to_string());
+        fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::set_var("CLAUDE_SESSION_ID", "publisher-session-777");
+        }
+
+        let resolved = resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "human");
+        assert_eq!(resolved.as_deref(), Some("publisher"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_team_lead_allowed() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(decision.authorized);
+        assert_eq!(decision.caller_identity.as_deref(), Some("team-lead"));
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_co_leader_allowed() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "arch-atm");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(decision.authorized);
+        assert_eq!(decision.caller_identity.as_deref(), Some("arch-atm"));
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_member_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "dev-1");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(!decision.authorized);
+        assert_eq!(decision.caller_identity.as_deref(), Some("dev-1"));
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_unknown_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(!decision.authorized);
+        assert!(decision.caller_identity.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_absent_toml_defaults_to_leaders_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+
+        // Without .atm.toml, team-lead is allowed.
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+        }
+        let lead =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("default leaders-only policy should produce an auth decision");
+        assert!(lead.authorized);
+        assert_eq!(lead.allowed, vec!["team-lead".to_string()]);
+
+        // Non-lead remains blocked under default leaders-only.
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "dev-1");
+        }
+        let member =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("default leaders-only policy should produce an auth decision");
+        assert!(!member.authorized);
+
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    fn test_spawn_unauthorized_error_includes_context() {
+        let decision = SpawnAuthorizationDecision {
+            policy_team: "atm-dev".to_string(),
+            allowed: vec!["arch-atm".to_string(), "team-lead".to_string()],
+            caller_identity: Some("dev-1".to_string()),
+            authorized: false,
+        };
+        let msg = spawn_unauthorized_error(&decision);
+        assert!(msg.contains("SPAWN_UNAUTHORIZED"));
+        assert!(msg.contains("Policy team: atm-dev"));
+        assert!(msg.contains("Allowed identities: arch-atm, team-lead"));
+        assert!(msg.contains("Resolved caller: dev-1"));
+        assert!(msg.contains("co_leaders"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_any_member_policy_bypasses_gate() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "any-member"
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "dev-1");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human");
+        assert!(
+            decision.is_none(),
+            "any-member should bypass leaders-only authorization gate"
+        );
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
     }
 
     #[test]
