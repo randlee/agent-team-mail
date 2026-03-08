@@ -17,7 +17,7 @@ verifiable tests across:
 | AF.2 | [#526](https://github.com/randlee/agent-team-mail/pull/526) | `feature/pAF-s2-spawn-auth-preview` | COMPLETE |
 | AF.3 | [#527](https://github.com/randlee/agent-team-mail/pull/527) | `feature/pAF-s3-transient-registration` | COMPLETE |
 | AF.4 | [#528](https://github.com/randlee/agent-team-mail/pull/528) | `feature/pAF-s4-cleanup-sentinel` | COMPLETE |
-| AF.5 | TBD (pending AF.5 PR) | `feature/pAF-s5-reliability-closeout` | COMPLETE |
+| AF.5 | Pending (AF.5 PR not yet created at commit time) | `feature/pAF-s5-reliability-closeout` | COMPLETE |
 
 ## Issue Coverage Matrix
 
@@ -30,6 +30,18 @@ verifiable tests across:
 | [#393](https://github.com/randlee/agent-team-mail/issues/393) | AF.3 | transient non-member registration controls | `integration_transient_registration` + daemon hook watcher tests |
 | [#373](https://github.com/randlee/agent-team-mail/issues/373) | AF.4 | cleanup dry-run preview reason-code and parity contract | `integration_teams_cleanup_dry_run` (including parity totals vs actual cleanup) |
 | [#45](https://github.com/randlee/agent-team-mail/issues/45) | AF.4 | tmux sentinel nudge contract (`[agent-team-msg:<tier>] unread=<count>`) | worker-adapter nudge + config unit tests |
+
+## End-to-End Reliability Matrix (Scenario x Guarantee x Coverage)
+
+| Scenario | Guarantee | Coverage |
+|---|---|---|
+| Lifecycle session_end/session_start race windows (`#448`) | Session identity transitions are deterministic; stale session entries are rejected and replaced only via valid lifecycle events. | `crates/atm-daemon/src/daemon/socket.rs` lifecycle tests + AF.1 CI/QA regression run |
+| PID liveness convergence (`#449`) | Member status converges on daemon SSoT liveness with no stale "alive" drift across refresh intervals. | daemon/core liveness unit tests + AF.1 QA pass |
+| Spawn authorization failure path (`#394`) | Unauthorized callers are denied before mutation/launch and always receive copy-pastable launch preview output. | `commands::teams::tests::*authorization*` + `integration_spawn_folder` unauthorized assertions |
+| Spawn preview/error UX (`#456`) | Launch command preview is printed on success and failure in text + JSON output modes. | `integration_spawn_folder` preview assertions (stdout + JSON payload) |
+| Transient non-member hook events (`#393`) | Non-member `session_start` events are rejected without silent roster/session mutation. | `test_hook_event_session_start_rejects_non_member` + `integration_transient_registration` |
+| Cleanup preview parity (`#373`) | `--dry-run` output is non-mutating and reason/totals parity matches executable cleanup behavior. | `integration_teams_cleanup_dry_run` + `commands::teams::tests::*cleanup*` |
+| tmux sentinel nudges (`#45`) | Sentinel contract remains deterministic across info/urgent/blocked paths with config-aware rendering. | daemon `nudge::tests::*` + `config::tests::test_nudge_config_*` |
 
 ## AF.5 QA Finding Closure
 
@@ -54,3 +66,4 @@ verifiable tests across:
 2. `cargo test -p agent-team-mail-daemon config::tests::test_nudge_config_`
 3. `cargo test -p agent-team-mail --bin atm commands::teams::tests::`
 4. `cargo test -p agent-team-mail --test integration_teams_cleanup_dry_run`
+5. `cargo test -p agent-team-mail-daemon test_hook_event_session_start_rejects_non_member`

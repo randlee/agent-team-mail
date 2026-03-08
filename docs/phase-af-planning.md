@@ -130,3 +130,14 @@ Finalize AF with a full regression pass and documentation alignment.
 1. AF issue scope is fully mapped to tests and implementation outcomes.
 2. Docs and behavior are consistent and reviewable by atm-qa.
 3. No unresolved blocking reliability gaps remain for next release tranche.
+
+### AF.5 Reliability Matrix (Scenario x Guarantee x Coverage)
+
+| Scenario | Guarantee | Coverage |
+|---|---|---|
+| Session lifecycle correctness (`#448`) | Deterministic session transitions; stale/non-member events rejected. | daemon socket lifecycle tests + `test_hook_event_session_start_rejects_non_member` |
+| PID liveness convergence (`#449`) | Daemon state converges to true process liveness (no stale alive drift). | daemon/core liveness unit tests + AF.1 QA regression pass |
+| Spawn authorization + preview UX (`#394`, `#456`) | Unauthorized callers fail before mutation; launch preview always emitted. | `commands::teams::tests::*authorization*` + `integration_spawn_folder` |
+| Cleanup/tmux reliability (`#373`, `#45`) | Dry-run parity + deterministic sentinel behavior across tiers. | `integration_teams_cleanup_dry_run` + daemon nudge/config tests |
+
+Full validation command list is maintained in [docs/test-plan-phase-AF.md](./test-plan-phase-AF.md).

@@ -477,7 +477,7 @@ fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
     let mut daemon = start_fake_gh_daemon_with_mode(temp_dir.path(), false, false);
 
     let mut status = cargo::cargo_bin_cmd!("atm");
-    set_home_env(&mut status, &temp_dir);
+    set_home_env(&mut status, &temp_dir, "test-team", false);
     let output = status
         .env("ATM_TEAM", "test-team")
         .arg("gh")
@@ -494,8 +494,10 @@ fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
         "status should fail when gh_monitor is not configured"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("gh_monitor plugin is not configured"));
-    assert!(stderr.contains("Remediation: run `atm gh init` and retry."));
+    assert!(stderr.contains("missing [plugins.gh_monitor] configuration"));
+    assert!(
+        stderr.contains("Run `atm gh init` to configure and enable GitHub monitor for this team.")
+    );
 
     let _ = daemon.kill();
     let _ = daemon.wait();
@@ -509,7 +511,7 @@ fn test_gh_monitor_status_accepts_json_flag_after_subcommand() {
     let mut daemon = start_fake_gh_daemon(temp_dir.path());
 
     let mut health = cargo::cargo_bin_cmd!("atm");
-    set_home_env(&mut health, &temp_dir);
+    set_home_env(&mut health, &temp_dir, "test-team", true);
     let health_output = health
         .env("ATM_TEAM", "test-team")
         .arg("gh")
@@ -539,7 +541,7 @@ fn test_gh_monitor_status_human_output_is_single_block() {
     let mut daemon = start_fake_gh_daemon(temp_dir.path());
 
     let mut health = cargo::cargo_bin_cmd!("atm");
-    set_home_env(&mut health, &temp_dir);
+    set_home_env(&mut health, &temp_dir, "test-team", true);
     let health_output = health
         .env("ATM_TEAM", "test-team")
         .arg("gh")
