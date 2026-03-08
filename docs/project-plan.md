@@ -1451,12 +1451,19 @@ the current tranche focused on onboarding contract closure.
 **Goal**: remove product/runtime shell-script dependencies and standardize runtime
 script behavior on Python across macOS/Linux/Windows.
 
+**Integration branch**: `integrate/phase-AD`
+
 **Planning doc**: `docs/phase-ad-planning.md`
 
 ### Sprint Summary
 | Sprint | Name | PR | Branch | Issues | Status |
 |--------|------|----|--------|--------|--------|
-| AD.1 | Python Runtime Policy + `atm init` Runtime Auto-Install Contract | — | `planning/phase-AD` | cross-platform shell dependency elimination | PLANNED |
+| AD.1 | Python Runtime Policy + `atm init` Runtime Auto-Install Contract | — | `feature/pAD-s1-python-policy` | #500, #506 | PLANNED |
+| AD.2 | Runtime Config Discovery Parity | — | `feature/pAD-s2-config-discovery-parity` | #499 | PLANNED |
+| AD.3 | GH Status Surface Hardening | — | `feature/pAD-s3-gh-status-hardening` | #504, #507 | PLANNED |
+| AD.4 | Live State + Reload Reliability | — | `feature/pAD-s4-live-state-reload` | #502, #503, #505 | PLANNED |
+| AD.5 | Runtime Script Conversion + Init Absorption | — | `feature/pAD-s5-python-script-conversion` | #500 | PLANNED |
+| AD.6 | Remaining Wrapper Cleanup (Candidate Follow-On) | — | `feature/pAD-s6-wrapper-cleanup` | #499, #500 | PLANNED |
 
 ### AD.1 — Python Runtime Policy + `atm init` Runtime Auto-Install Contract
 **Deliverables**
@@ -1470,6 +1477,12 @@ script behavior on Python across macOS/Linux/Windows.
 2. `atm init` runtime auto-install behavior is specified and idempotent per runtime.
 3. Known shell violations are inventoried and scheduled.
 4. CI test expectations include pytest coverage for affected Python hook/script paths.
+
+### AD.2-AD.6 Notes
+1. DG-001/#497, DG-002/#498, and DG-005/#501 are pre-AD hotfix items and are not
+   implemented in AD sprints.
+2. AD.2-AD.4 close remaining dogfood findings DG-003, DG-006..DG-011.
+3. AD.5-AD.6 close runtime shell-script conversion and migration cleanup work.
 
 ---
 
