@@ -1438,11 +1438,41 @@ the current tranche focused on onboarding contract closure.
 | | AC.8 | Init Install Matrix QA Blocker Closure | COMPLETE | [#487](https://github.com/randlee/agent-team-mail/pull/487) |
 | | AC.9 | Multi-Team Recovery Determinism | COMPLETE | [#488](https://github.com/randlee/agent-team-mail/pull/488) |
 | | AC.10 | Final AC Verification + Release Readiness | COMPLETE | [#489](https://github.com/randlee/agent-team-mail/pull/489) |
+| **AF** | AF.1 | Lifecycle Correctness (Session + PID Liveness) | COMPLETE | [#524](https://github.com/randlee/agent-team-mail/pull/524) |
+| | AF.2 | Spawn Authorization + Preview UX | COMPLETE | [#526](https://github.com/randlee/agent-team-mail/pull/526) |
+| | AF.3 | Transient Agent Registration Controls | COMPLETE | [#527](https://github.com/randlee/agent-team-mail/pull/527) |
+| | AF.4 | Cleanup Preview + tmux Sentinel | COMPLETE | [#528](https://github.com/randlee/agent-team-mail/pull/528) |
+| | AF.5 | Reliability Regression + Documentation Closure | COMPLETE | `feature/pAF-s5-reliability-closeout` (PR pending) |
 
 **Completed**: 123+ sprints across 27 phases (CI green)
 **Current version**: v0.38.0
-**Current phase**: Phase AE (IN PROGRESS)
-**Next planned phase**: Phase AF (TBD)
+**Current phase**: Phase AF (IN PROGRESS)
+**Next planned phase**: Phase AG (TBD)
+
+---
+
+## 17.10 Phase AF: Reliability + Lifecycle Closeout
+
+**Goal**: close lifecycle/spawn/transient/cleanup reliability gaps and align
+requirements, planning, and regression coverage.
+
+**Integration branch**: `integrate/phase-AF`
+
+### Sprint Summary
+
+| Sprint | Name | PR | Branch | Issues | Status |
+|---|---|---|---|---|---|
+| AF.1 | Lifecycle Correctness (Session + PID Liveness) | [#524](https://github.com/randlee/agent-team-mail/pull/524) | `feature/pAF-s1-lifecycle-correctness` | [#448](https://github.com/randlee/agent-team-mail/issues/448), [#449](https://github.com/randlee/agent-team-mail/issues/449) | COMPLETE |
+| AF.2 | Spawn Authorization + Preview UX | [#526](https://github.com/randlee/agent-team-mail/pull/526) | `feature/pAF-s2-spawn-auth-preview` | [#394](https://github.com/randlee/agent-team-mail/issues/394), [#456](https://github.com/randlee/agent-team-mail/issues/456) | COMPLETE |
+| AF.3 | Transient Agent Registration Controls | [#527](https://github.com/randlee/agent-team-mail/pull/527) | `feature/pAF-s3-transient-registration` | [#393](https://github.com/randlee/agent-team-mail/issues/393) | COMPLETE |
+| AF.4 | Cleanup Preview + tmux Sentinel | [#528](https://github.com/randlee/agent-team-mail/pull/528) | `feature/pAF-s4-cleanup-sentinel` | [#373](https://github.com/randlee/agent-team-mail/issues/373), [#45](https://github.com/randlee/agent-team-mail/issues/45) | COMPLETE |
+| AF.5 | Reliability Regression + Documentation Closure | — (pending AF.5 PR) | `feature/pAF-s5-reliability-closeout` | [#448](https://github.com/randlee/agent-team-mail/issues/448), [#449](https://github.com/randlee/agent-team-mail/issues/449), [#393](https://github.com/randlee/agent-team-mail/issues/393), [#394](https://github.com/randlee/agent-team-mail/issues/394), [#456](https://github.com/randlee/agent-team-mail/issues/456), [#373](https://github.com/randlee/agent-team-mail/issues/373), [#45](https://github.com/randlee/agent-team-mail/issues/45) | COMPLETE |
+
+### AF.5 Closeout Artifacts
+
+1. `docs/test-plan-phase-AF.md` issue-to-coverage matrix and deferred-item record.
+2. `docs/adr/af3-transient-registration-contract.md` AF.3 contract rationale.
+3. Daemon regression test for non-member `session_start` rejection in `socket.rs`.
 
 ---
 

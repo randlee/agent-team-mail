@@ -9422,6 +9422,27 @@ exit 1
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
+    async fn test_hook_event_session_start_rejects_non_member() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r-non-member-start","command":"hook-event","payload":{"event":"session_start","agent":"rogue-member","team":"atm-dev","session_id":"sess-rogue"}}"#;
+        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(!payload["processed"].as_bool().unwrap());
+        assert_eq!(payload["reason"].as_str().unwrap(), "agent not in team");
+
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query_for_team("atm-dev", "rogue-member").is_none(),
+            "non-member session_start must not register daemon session state"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
     async fn test_hook_event_session_start_rejects_backend_pid_mismatch() {
         let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
 
