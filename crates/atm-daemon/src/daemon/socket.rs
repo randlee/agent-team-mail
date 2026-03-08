@@ -9374,6 +9374,63 @@ exit 1
         );
     }
 
+    /// QA-001: non-lead sending session_end for a live matching session must be rejected.
+    /// The team-lead gate in the Some(_) arm must fire before marking the session dead.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_non_lead_live_session_is_rejected() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        // Seed a live session for arch-ctm so the Some(_) arm is reached.
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-live-nolead", 2222);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r5-nolead-live","command":"hook-event","payload":{"event":"session_end","agent":"arch-ctm","session_id":"sess-live-nolead","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            !payload["processed"].as_bool().unwrap(),
+            "non-lead session_end on live session must not be processed"
+        );
+        assert!(
+            payload["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("only team-lead"),
+            "reason must indicate team-lead restriction, got: {:?}",
+            payload["reason"]
+        );
+
+        // Session must remain live — the gate must not have marked it dead.
+        let reg = sr.lock().unwrap();
+        let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
+        assert_ne!(
+            record.state,
+            crate::daemon::session_registry::SessionState::Dead,
+            "team-lead gate must not mark the session dead"
+        );
+
+        // Activity tracker must be unchanged.
+        let tracker = store.lock().unwrap();
+        assert_eq!(
+            tracker.get_state("arch-ctm"),
+            Some(AgentState::Idle),
+            "non-lead session_end must not mutate activity tracker"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
