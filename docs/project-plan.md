@@ -1442,7 +1442,7 @@ the current tranche focused on onboarding contract closure.
 **Completed**: 123+ sprints across 27 phases (CI green)
 **Current version**: v0.38.0
 **Current phase**: Phase AC COMPLETE
-**Next planned phase**: Phase AD (TBD)
+**Next planned phase**: Phase AD (cross-platform script standardization)
 
 ---
 
@@ -1875,6 +1875,29 @@ for both project-local and global-install paths before Homebrew/global hook roll
 
 ---
 
+## 17.15 Phase AD: Cross-Platform Script Standardization
+
+**Goal**: remove product/runtime shell-script dependencies and standardize runtime
+script behavior on Python across macOS/Linux/Windows.
+
+**Requirements references**:
+- `docs/requirements.md` §4.9.3a (Python-only runtime script policy)
+- `docs/requirements.md` §4.9.5 (`atm init` runtime detection + install contract)
+
+**Integration branch**: `integrate/phase-AD`
+
+### Sprint Summary
+| Sprint | Name | PR | Branch | Issues | Status |
+|--------|------|----|--------|--------|--------|
+| AD.1 | Python Runtime Policy + atm init Auto-Install | — | `feature/pAD-s1-python-policy` | #500, #499 | PLANNED |
+| AD.2 | Gemini Hook Install | — | `feature/pAD-s2-gemini-hook` | #503 | PLANNED |
+| AD.3 | Relay Script Migration | — | `feature/pAD-s3-relay-migration` | #499 | PLANNED |
+| AD.4 | Spawn/Launch Script Python Rewrite | — | `feature/pAD-s4-spawn-python` | — | PLANNED |
+| AD.5 | setup-codex-hooks.sh Absorption | — | `feature/pAD-s5-codex-hooks` | — | PLANNED |
+| AD.6 | Bash Wrapper Removal | — | `feature/pAD-s6-bash-removal` | — | CANDIDATE |
+
+---
+
 ## 20. Phase Integration PRs
 
 | Phase | Integration PR | Status |
@@ -1902,6 +1925,7 @@ for both project-local and global-install paths before Homebrew/global hook roll
 | Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Merged |
 | Phase AA | `integrate/phase-AA` | Merged ([#459](https://github.com/randlee/agent-team-mail/pull/459)) |
 | Phase AB | `integrate/phase-AB` | [#469](https://github.com/randlee/agent-team-mail/pull/469) Pending merge |
+| Phase AD | `integrate/phase-AD` | Planned |
 
 ---
 
