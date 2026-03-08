@@ -2270,6 +2270,12 @@ Required constraints:
 - Every release must produce a machine-readable artifact inventory that includes,
   at minimum, artifact identifier, version, source reference, publish target,
   and verification command(s).
+- Release artifact membership/order must have a single source of truth in
+  `release/publish-artifacts.toml`. Release workflows, publisher procedures, and
+  release docs must consume this manifest and must not hardcode artifact counts
+  or crate-name lists.
+- Preflight must fail before merge/release if the candidate version is already
+  published for any manifest artifact with `publish=true`.
 - Post-publish verification must run for every required inventory item and record
   pass/fail evidence for each item.
 - Post-publish verification checks against eventually consistent registries
@@ -2287,6 +2293,10 @@ Acceptance checks:
 - Post-release install validation resolves the expected CLI version.
 - Inventory validation fails when required fields are missing, artifact entries
   are duplicated, or ordering is non-deterministic.
+- Changing `release/publish-artifacts.toml` updates release behavior without
+  requiring workflow code edits for artifact enumeration.
+- Preflight fails with explicit artifact names when target version already exists
+  on crates.io.
 - Post-publish verification failure for any required item fails the release gate
   unless a documented waiver is present.
 - Delayed-index scenarios must show retry/backoff attempts in release logs and

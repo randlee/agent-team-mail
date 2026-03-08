@@ -19,6 +19,8 @@ permissions:
 jobs:
   preflight:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_ARTIFACT_MANIFEST: release/publish-artifacts.toml
     steps:
       - name: Enforce publisher ownership input
         shell: bash
@@ -53,6 +55,20 @@ jobs:
           echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
           echo "release_version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Verify release artifact manifest exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "${RELEASE_ARTIFACT_MANIFEST}"
+
+      - name: Preflight guard — fail if release version already exists on crates.io
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release_artifacts.py check-version-unpublished \
+            --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+            --version '${{ steps.meta.outputs.release_version }}'
+
       - name: Generate preflight release inventory
         shell: bash
         run: |
@@ -61,79 +77,16 @@ jobs:
           tag='${{ steps.meta.outputs.release_tag }}'
           commit="$(git rev-parse HEAD)"
           generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          source_ref="${GITHUB_REF:-refs/heads/develop}"
           mkdir -p release
-          python3 - <<'PY' "$version" "$tag" "$commit" "$generated_at"
-          import json
-          import sys
-          from pathlib import Path
-
-          version, tag, commit, generated_at = sys.argv[1:5]
-          inventory = {
-              "releaseVersion": version,
-              "releaseTag": tag,
-              "releaseCommit": commit,
-              "generatedAt": generated_at,
-              "items": [
-                  {
-                      "artifact": "agent-team-mail",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "required": True,
-                      "verifyCommands": [
-                          f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail/{version}",
-                          f"cargo install agent-team-mail --version {version} --locked --force",
-                      ],
-                  },
-                  {
-                      "artifact": "agent-team-mail-core",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "required": True,
-                      "verifyCommands": [
-                          f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-core/{version}",
-                      ],
-                  },
-                  {
-                      "artifact": "agent-team-mail-daemon",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "required": True,
-                      "verifyCommands": [
-                          f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-daemon/{version}",
-                      ],
-                  },
-                  {
-                      "artifact": "agent-team-mail-mcp",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "required": True,
-                      "verifyCommands": [
-                          f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-mcp/{version}",
-                      ],
-                  },
-                  {
-                      "artifact": "agent-team-mail-tui",
-                      "version": version,
-                      "sourceRef": f"refs/tags/{tag}",
-                      "publishTarget": "crates.io",
-                      "required": True,
-                      "verifyCommands": [
-                          f"curl -fsSL https://crates.io/api/v1/crates/agent-team-mail-tui/{version}",
-                      ],
-                  },
-              ],
-          }
-          inventory["items"].sort(key=lambda x: x["artifact"])
-          Path("release/release-inventory.json").write_text(
-              json.dumps(inventory, indent=2) + "\n",
-              encoding="utf-8",
-          )
-          print("wrote release/release-inventory.json")
-          PY
+          python3 scripts/release_artifacts.py emit-inventory \
+            --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+            --version "$version" \
+            --tag "$tag" \
+            --commit "$commit" \
+            --source-ref "$source_ref" \
+            --generated-at "$generated_at" \
+            --output release/release-inventory.json
 
       - name: Validate inventory schema + deterministic constraints
         shell: bash
@@ -189,25 +142,24 @@ jobs:
         run: |
           set -euo pipefail
           VERSION='${{ steps.meta.outputs.release_version }}'
-          python3 - <<'PY' "$VERSION"
+          python3 - <<'PY' "$VERSION" "$RELEASE_ARTIFACT_MANIFEST"
           import sys
           import tomllib
           from pathlib import Path
+          from subprocess import check_output
 
           version = sys.argv[1]
+          manifest = sys.argv[2]
           root = Path(".")
           root_toml = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
           ws_ver = root_toml.get("workspace", {}).get("package", {}).get("version")
           if ws_ver != version:
               raise SystemExit(f"workspace version mismatch: expected {version}, got {ws_ver}")
 
-          crates = [
-              "crates/atm-core/Cargo.toml",
-              "crates/atm/Cargo.toml",
-              "crates/atm-daemon/Cargo.toml",
-              "crates/atm-agent-mcp/Cargo.toml",
-              "crates/atm-tui/Cargo.toml",
-          ]
+          crates = check_output(
+              ["python3", "scripts/release_artifacts.py", "list-cargo-tomls", "--manifest", manifest],
+              text=True,
+          ).splitlines()
           for rel in crates:
               data = tomllib.loads((root / rel).read_text(encoding="utf-8"))
               pkg = data.get("package", {})
@@ -227,24 +179,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Pre-merge constraint: crates with exact "=X.Y.Z" dependency on
-          # agent-team-mail-core cannot complete publish --dry-run until core is
-          # available in crates.io index. Run full dry-run for core now, and run
-          # locked compile checks for dependents.
-          echo "::group::agent-team-mail-core package"
-          cargo package -p agent-team-mail-core --locked --no-verify
-          echo "::endgroup::"
-          echo "::group::agent-team-mail-core publish-dry-run"
-          cargo publish -p agent-team-mail-core --dry-run --locked --no-verify
-          echo "::endgroup::"
-
-          dependents=(
-            agent-team-mail
-            agent-team-mail-daemon
-            agent-team-mail-mcp
-            agent-team-mail-tui
+          mapfile -t full_checks < <(
+            python3 scripts/release_artifacts.py list-preflight \
+              --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+              --mode full
           )
-          for crate in "${dependents[@]}"; do
+          for crate in "${full_checks[@]}"; do
+            [[ -n "$crate" ]] || continue
+            echo "::group::${crate} package"
+            cargo package -p "$crate" --locked --no-verify
+            echo "::endgroup::"
+            echo "::group::${crate} publish-dry-run"
+            cargo publish -p "$crate" --dry-run --locked --no-verify
+            echo "::endgroup::"
+          done
+
+          mapfile -t locked_checks < <(
+            python3 scripts/release_artifacts.py list-preflight \
+              --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+              --mode locked
+          )
+          for crate in "${locked_checks[@]}"; do
+            [[ -n "$crate" ]] || continue
             echo "::group::${crate} locked-check"
             cargo check -p "$crate" --locked
             echo "::endgroup::"
@@ -267,12 +223,12 @@ jobs:
             "ownerAssertion": "publisher",
             "inventoryLocation": "release/release-inventory.json",
             "checks": [
+              "version-not-already-published",
               "inventory-generation",
               "inventory-schema-validation",
               "workspace-version-alignment",
-              "core-crate-package",
-              "core-crate-publish-dry-run",
-              "non-core-crates-locked-check",
+              "preflight-full-checks",
+              "preflight-locked-checks",
             ],
             "notes": [
               "preflight validates readiness from develop prior to develop->main merge",
