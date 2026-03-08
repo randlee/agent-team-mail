@@ -147,15 +147,9 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     // Self-send check: warn and prepend warning only when sender and recipient
     // are the same identity in the same team.
-    let message_text = if is_self_send(&config.core.identity, &sender_team, &agent_name, &team_name)
+    let message_text = if let Some(warning) =
+        build_self_send_warning(&config.core.identity, &sender_team, &agent_name, &team_name)
     {
-        let session_id =
-            std::env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "unknown".to_string());
-        let session_short = &session_id[..8.min(session_id.len())];
-        let warning = format!(
-            "[WARNING: Sent to self — identity={}, session={}. Check ATM_IDENTITY.]",
-            config.core.identity, session_short
-        );
         println!("{warning}");
         format!("{warning}\n{message_text}")
     } else {
@@ -440,6 +434,76 @@ fn is_self_send(
     recipient_team: &str,
 ) -> bool {
     sender_identity == recipient_agent && sender_team == recipient_team
+}
+
+fn build_self_send_warning(
+    sender_identity: &str,
+    sender_team: &str,
+    recipient_agent: &str,
+    recipient_team: &str,
+) -> Option<String> {
+    if !is_self_send(
+        sender_identity,
+        sender_team,
+        recipient_agent,
+        recipient_team,
+    ) {
+        return None;
+    }
+    let session_id =
+        detect_sender_session_id_with_context(Some(sender_team), Some(sender_identity))
+            .unwrap_or_else(|| "unknown".to_string());
+    let session_short = &session_id[..8.min(session_id.len())];
+    let identity_collision =
+        identity_has_session_collision(sender_team, sender_identity, &session_id);
+
+    Some(render_self_send_warning(
+        sender_identity,
+        sender_team,
+        session_short,
+        identity_collision,
+    ))
+}
+
+fn render_self_send_warning(
+    sender_identity: &str,
+    sender_team: &str,
+    session_short: &str,
+    identity_collision: bool,
+) -> String {
+    if identity_collision {
+        format!(
+            "[WARNING: Identity collision — {}@{} has multiple active sessions; delivery uses shared inbox (session={}).]",
+            sender_identity, sender_team, session_short
+        )
+    } else {
+        format!(
+            "[WARNING: Sent to self — identity={}, session={}. Check ATM_IDENTITY.]",
+            sender_identity, session_short
+        )
+    }
+}
+
+fn identity_has_session_collision(team: &str, identity: &str, current_session_id: &str) -> bool {
+    identity_has_session_collision_with_lookup(team, identity, current_session_id, |t, id| {
+        read_session_file(t, id)
+    })
+}
+
+fn identity_has_session_collision_with_lookup<F>(
+    team: &str,
+    identity: &str,
+    current_session_id: &str,
+    lookup: F,
+) -> bool
+where
+    F: Fn(&str, &str) -> Result<Option<String>>,
+{
+    match lookup(team, identity) {
+        Ok(Some(unique_session_id)) => unique_session_id != current_session_id,
+        Ok(None) => false,
+        Err(err) => err.to_string().contains("Ambiguous:"),
+    }
 }
 
 fn destination_target(agent_name: &str, team_name: &str) -> String {
@@ -904,14 +968,8 @@ mod tests {
         let target_team = "atm-dev";
         let raw_message = "Hello self!";
 
-        // Simulate the self-send check logic (extracted for unit testing)
-        let session_id = "test-session-1234567890";
-        let session_short = &session_id[..8.min(session_id.len())];
-
         let message_text = if is_self_send(sender, sender_team, agent_name, target_team) {
-            let warning = format!(
-                "[WARNING: Sent to self — identity={sender}, session={session_short}. Check ATM_IDENTITY.]"
-            );
+            let warning = render_self_send_warning(sender, sender_team, "test-ses", false);
             format!("{warning}\n{raw_message}")
         } else {
             raw_message.to_string()
@@ -921,6 +979,14 @@ mod tests {
         assert!(message_text.contains("team-lead"));
         assert!(message_text.contains("test-ses")); // first 8 chars
         assert!(message_text.contains("Hello self!"));
+    }
+
+    #[test]
+    fn test_render_self_send_warning_identity_collision_variant() {
+        let warning = render_self_send_warning("team-lead", "atm-dev", "abc12345", true);
+        assert!(warning.contains("Identity collision"));
+        assert!(warning.contains("team-lead@atm-dev"));
+        assert!(warning.contains("abc12345"));
     }
 
     #[test]
@@ -969,6 +1035,44 @@ mod tests {
     fn test_is_self_send_different_name_same_team_no_warning() {
         // team-lead@atm-dev sending to arch-ctm@atm-dev — different agent, must NOT warn.
         assert!(!is_self_send("team-lead", "atm-dev", "arch-ctm", "atm-dev"));
+    }
+
+    #[test]
+    fn test_identity_collision_lookup_true_on_ambiguous_error() {
+        let collision =
+            identity_has_session_collision_with_lookup("atm-dev", "team-lead", "sess-1", |_, _| {
+                Err(anyhow!(
+                    "Ambiguous: 2 active sessions for team-lead@atm-dev"
+                ))
+            });
+        assert!(collision);
+    }
+
+    #[test]
+    fn test_identity_collision_lookup_false_for_unique_same_session() {
+        let collision =
+            identity_has_session_collision_with_lookup("atm-dev", "team-lead", "sess-1", |_, _| {
+                Ok(Some("sess-1".to_string()))
+            });
+        assert!(!collision);
+    }
+
+    #[test]
+    fn test_identity_collision_lookup_true_for_unique_mismatched_session() {
+        let collision =
+            identity_has_session_collision_with_lookup("atm-dev", "team-lead", "sess-1", |_, _| {
+                Ok(Some("sess-2".to_string()))
+            });
+        assert!(collision);
+    }
+
+    #[test]
+    fn test_identity_collision_lookup_false_when_no_session_data() {
+        let collision =
+            identity_has_session_collision_with_lookup("atm-dev", "team-lead", "sess-1", |_, _| {
+                Ok(None)
+            });
+        assert!(!collision);
     }
 
     #[test]

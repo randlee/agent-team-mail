@@ -196,6 +196,14 @@ def main() -> int:
         # Can't parse input - allow by default (fail open)
         return 0
 
+    # Passive global behavior: if this is not an ATM context (no repo config
+    # and no env routing context), do nothing and avoid all side effects.
+    atm_config = read_atm_toml()
+    env_team = (os.environ.get("ATM_TEAM") or "").strip()
+    env_identity = (os.environ.get("ATM_IDENTITY") or "").strip()
+    if atm_config is None and not env_team and not env_identity:
+        return 0
+
     # Log for debugging (include process_id for diagnostics)
     try:
         log_entry = {**data, "process_id": os.getpid()}

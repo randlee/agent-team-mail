@@ -2302,17 +2302,38 @@ atm init <team> --skip-team
 - Generated hook command paths should use `"$CLAUDE_PROJECT_DIR"` for project-local scripts and absolute per-user script paths for global installs; do not use `${CLAUDE_PLUGIN_ROOT}`.
 - `atm init` success output must include whether hooks were installed globally or locally.
 
-#### 4.9.3a Script Runtime Portability Policy
+#### 4.9.3a Product Runtime Script Policy (Python-Only)
 
-- Product/runtime scripts MUST be Python-based and cross-platform.
+Runtime scripts executed as part of ATM product behavior MUST be Python-based and
+cross-platform safe.
+
+Policy rules:
+- Product/runtime script execution paths MUST use Python (`python3`/`python`) and
+  repository-shipped `.py` scripts.
+- Shell runtime dependencies (`bash`, `sh`, `zsh`, `pwsh`, `.bat`) are prohibited
+  for product/runtime paths invoked by:
+  - installed hook commands,
+  - `atm init` generated configuration,
+  - runtime launcher/relay flows used by shipped ATM commands.
 - ATM product behavior MUST NOT require `bash`, `sh`, `zsh`, or `pwsh` for core
   functionality.
-- Shell scripts may exist only as development/CI helpers and MUST be explicitly
-  documented as non-product exceptions.
+- Existing shell scripts may remain only as explicitly documented dev/CI-only
+  exceptions and must not be required for user runtime operation.
 - Any exception requiring shell for product behavior requires explicit
   requirements approval and a documented cross-platform mitigation path.
-- Hook wiring installed by `atm init` MUST invoke Python entrypoints directly for
-  product paths.
+- Current approved dev/CI-only shell wrapper exceptions:
+  - `.claude/scripts/spawn-teammate.sh`
+  - `.claude/scripts/launch-worker.sh`
+  - `.claude/scripts/atm-hook-relay.sh`
+  These wrappers are test/developer tooling only, are not distributed runtime
+  dependencies, and are exempt from product runtime portability requirements.
+- Hook commands must invoke Python scripts directly; shell wrapper forms such as
+  `bash -c "python ..."` are not allowed in product hook wiring.
+
+Verification requirements:
+- Runtime script behavior must be covered by pytest in `tests/hook-scripts/`.
+- The pytest lane covering runtime scripts is required in CI for changes that
+  modify hook/launcher/relay runtime script paths.
 
 #### 4.9.4 Exit and Result Semantics
 
@@ -2322,7 +2343,49 @@ atm init <team> --skip-team
 - Idempotent no-op cases (`.atm.toml` exists, team exists, hooks already configured)
   are success states and must be explicitly reported in human output.
 
-#### 4.9.5 Test and CI Coverage (Hook/Script Portability)
+#### 4.9.5 Runtime Detection + Auto-Install Contract
+
+`atm init` must detect supported runtimes and apply installation steps in a
+runtime-aware, idempotent manner.
+
+Supported runtimes:
+- Claude Code
+- Codex CLI
+- Gemini CLI
+
+Detection contract:
+- Runtime detection is true when either condition holds:
+  1. Runtime binary is reachable on PATH, or
+  2. Runtime config location exists.
+- Detection precedence and locations:
+  - Claude Code:
+    - project `.claude/settings.json`, then user `~/.claude/settings.json`
+    - binary check (if available in environment) is additive, not required
+  - Codex CLI:
+    - binary `codex` on PATH
+    - config `~/.codex/config.toml` (or equivalent configured home path)
+  - Gemini CLI:
+    - binary `gemini` on PATH
+    - config directory/file under `~/.gemini/`
+
+Install behavior:
+- `atm init` must report per-runtime outcome in human output (and JSON when
+  supported): `installed`, `updated`, `already-configured`, `skipped-not-detected`,
+  or `error`.
+- Runtimes that are not detected are skipped without failing the command.
+- Runtime install actions must be idempotent and must not create duplicate hook
+  entries on re-run.
+- Duplicate detection for hook commands must validate command content (ATM hook
+  relay invocation identity), not only hook key presence.
+- `--dry-run` mode must show per-runtime planned actions with no writes.
+
+Failure behavior:
+- A failure in one runtime install path must not abort installation/reporting for
+  other detected runtimes.
+- Final command result must summarize per-runtime outcomes and include actionable
+  remediation for each error entry.
+
+#### 4.9.5a Test and CI Coverage (Hook/Script Portability)
 
 - Python hook/script behavior required by `atm init` MUST be covered by pytest
   tests under `tests/hook-scripts/`.
@@ -2388,6 +2451,10 @@ Operator status UX contract:
   - currently available (`healthy` / `degraded` / `disabled_config_error` / `disabled_init_error`).
 - When not enabled, human output must clearly state that monitoring is disabled
   and include next-step guidance to enable/configure `[plugins.gh_monitor]`.
+- Disabled guidance must include both:
+  - the exact command to run: `atm gh init`
+  - the minimum config keys required (team/agent/repo/monitor recipients) and
+    the config file path where those keys are expected.
 - JSON output must expose the same status fields without lossy conversion.
 - When `gh_monitor` is disabled/unconfigured, only the following command paths
   are allowed:

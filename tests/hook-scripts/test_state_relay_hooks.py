@@ -32,6 +32,7 @@ _PARITY_SET = [
     "permission-request-relay.py",
     "stop-relay.py",
     "notification-idle-relay.py",
+    "atm-hook-relay.py",
     "atm_hook_lib.py",
 ]
 

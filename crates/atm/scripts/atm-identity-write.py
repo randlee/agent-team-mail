@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Import shared utilities
 sys.path.insert(0, str(Path(__file__).parent))
-from atm_hook_lib import load_payload, read_atm_toml, atm_home
+from atm_hook_lib import first_str, load_payload, read_atm_toml
 
 
 def _is_atm_invocation(command: str) -> bool:
@@ -48,14 +48,13 @@ def main() -> None:
 
     session_id = payload.get("session_id", "")
 
-    # Resolve agent_name from .atm.toml identity field.
+    # Resolve routing context from repo config or env overrides.
     toml = read_atm_toml()
-    agent_name: str | None = None
-    if toml:
-        core = toml.get("core", {})
-        raw = core.get("identity") if isinstance(core, dict) else None
-        if isinstance(raw, str) and raw.strip():
-            agent_name = raw.strip()
+    core = toml.get("core", {}) if isinstance(toml, dict) else {}
+    team_name = first_str(os.environ.get("ATM_TEAM"), core.get("default_team"))
+    agent_name = first_str(os.environ.get("ATM_IDENTITY"), core.get("identity"))
+    if toml is None and not team_name and not agent_name:
+        sys.exit(0)
 
     hook_file_name = f"atm-hook-{os.getpid()}.json"
     hook_file = Path(tempfile.gettempdir()) / hook_file_name
@@ -64,6 +63,7 @@ def main() -> None:
         "pid": os.getppid(),
         "session_id": session_id,
         "agent_name": agent_name,
+        "team_name": team_name,
         "created_at": time.time(),
     }
 
@@ -75,25 +75,6 @@ def main() -> None:
             sys.stderr.write("[atm-hook] Windows: skipping chmod (fail-open)\n")
     except Exception as exc:
         sys.stderr.write(f"[atm-hook] Failed to write identity file: {exc}\n")
-
-    # Refresh updated_at on the session file (keeps the 24h TTL alive).
-    # Team is resolved from .atm.toml only (not ATM_TEAM env) to ensure the heartbeat
-    # updates the same path that session-start.py created. Invocations without .atm.toml
-    # context do not update the timestamp.
-    if session_id and agent_name:
-        try:
-            toml_inner = toml or {}
-            core_inner = toml_inner.get("core", {}) if isinstance(toml_inner.get("core"), dict) else {}
-            default_team: str = core_inner.get("default_team", "") or ""
-            if default_team:
-                sessions_dir = atm_home() / ".claude" / "teams" / default_team / "sessions"
-                session_file = sessions_dir / f"{session_id}.json"
-                if session_file.exists():
-                    sf_data = json.loads(session_file.read_text())
-                    sf_data["updated_at"] = time.time()
-                    session_file.write_text(json.dumps(sf_data))
-        except Exception:
-            pass  # Fail-open: session file refresh is best-effort
 
     sys.exit(0)
 

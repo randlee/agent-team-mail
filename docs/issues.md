@@ -8,15 +8,15 @@ Last updated: 2026-03-07
 |---|---|---|---|---|---|---|
 | [#497](https://github.com/randlee/agent-team-mail/issues/497) | DG-001: daemon process leak (multiple concurrent `atm-daemon` processes) | Bug | Open | Critical | Pre-AD hotfix | Must be fixed before AD sprint implementation starts |
 | [#498](https://github.com/randlee/agent-team-mail/issues/498) | DG-002: daemon socket path mismatch between hook context and CLI context | Bug | Open | Critical | Pre-AD hotfix | `ATM_HOME`/socket-path divergence caused false daemon-unreachable errors |
-| [#499](https://github.com/randlee/agent-team-mail/issues/499) | DG-003: repo `.atm.toml` plugin config not visible to daemon | Bug | Open | High | AD.2 | Daemon/CLI config resolution parity gap |
+| [#499](https://github.com/randlee/agent-team-mail/issues/499) | DG-003: repo `.atm.toml` plugin config not visible to daemon | Bug | Closed (implemented) | High | AD.2 | Closed in AD.2 (daemon/CLI config resolution parity delivered). |
 | [#500](https://github.com/randlee/agent-team-mail/issues/500) | DG-004: missing `atm gh init` guided setup command | Enhancement | Open | High | AD.1 | Required by plugin requirements; currently dead-end setup flow |
 | [#501](https://github.com/randlee/agent-team-mail/issues/501) | DG-005: missing daemon stop/restart/reload command set | Bug | Open | High | Pre-AD hotfix | Operational recovery requires manual PID kill today |
-| [#502](https://github.com/randlee/agent-team-mail/issues/502) | DG-006: monitor restart reloads lifecycle but not updated config | Bug | Open | Medium | AD.4 | Config edits require full daemon restart |
-| [#503](https://github.com/randlee/agent-team-mail/issues/503) | DG-007: `atm gh monitor status` reads cached state instead of live daemon state | Bug | Open | Medium | AD.4 | Can report stale PIDs/health for dead processes |
-| [#504](https://github.com/randlee/agent-team-mail/issues/504) | DG-008: `atm gh monitor status --json` not supported | Bug | Open | Medium | AD.3 | JSON output required for automation |
-| [#505](https://github.com/randlee/agent-team-mail/issues/505) | DG-009: inconsistent daemon reachability across `atm gh` commands | Bug | Open | Medium | AD.4 | Status can show healthy while monitor commands fail unreachable |
-| [#506](https://github.com/randlee/agent-team-mail/issues/506) | DG-010: `disabled_config_error` has no actionable guidance | UX | Open | Low | AD.1 | Must point users to exact init/config remediation |
-| [#507](https://github.com/randlee/agent-team-mail/issues/507) | DG-011: duplicate daemon status output blocks in `atm gh` surfaces | UX | Open | Low | AD.3 | Remove duplicated output and keep single canonical status block |
+| [#502](https://github.com/randlee/agent-team-mail/issues/502) | DG-006: monitor restart reloads lifecycle but not updated config | Bug | Closed (implemented) | Medium | AD.4 | Closed in AD.4 (restart now reloads monitor config). |
+| [#503](https://github.com/randlee/agent-team-mail/issues/503) | DG-007: `atm gh monitor status` reads cached state instead of live daemon state | Bug | Closed (implemented) | Medium | AD.4 | Closed in AD.4 (status surfaces now resolve live daemon state). |
+| [#504](https://github.com/randlee/agent-team-mail/issues/504) | DG-008: `atm gh monitor status --json` not supported | Bug | Closed (implemented) | Medium | AD.3 | Closed in AD.3 (`--json` support delivered for monitor status). |
+| [#505](https://github.com/randlee/agent-team-mail/issues/505) | DG-009: inconsistent daemon reachability across `atm gh` commands | Bug | Closed (implemented) | Medium | AD.4 | Closed in AD.4 (reachability/state reporting parity across `atm gh`). |
+| [#506](https://github.com/randlee/agent-team-mail/issues/506) | DG-010: `disabled_config_error` has no actionable guidance | UX | Closed (implemented) | Low | AD.1 | Closed in AD.1 (unavailable states now include actionable init guidance). |
+| [#507](https://github.com/randlee/agent-team-mail/issues/507) | DG-011: duplicate daemon status output blocks in `atm gh` surfaces | UX | Closed (implemented) | Low | AD.3 | Closed in AD.3 (single canonical status output retained). |
 
 ## Phase V Issues (Doctor/Lifecycle — arch-ctm's V.0–V.7)
 
