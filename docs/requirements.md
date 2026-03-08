@@ -711,6 +711,16 @@ When ATM consumes `sc-composer`, ATM must not redefine or fork those semantics
 in `docs/requirements.md`; ATM requirements here are limited to call-site
 contracts (inputs passed to composer, error propagation, and spawn fallback UX).
 
+ATM integration parity requirements:
+- `atm teams spawn` composition behavior must match `sc-compose` CLI semantics
+  for resolution, include expansion, variable validation, and diagnostics.
+- ATM must invoke `sc-composer` library APIs directly in-process.
+- ATM must not invoke composition through shell commands or subprocess wrappers
+  (for example, no `bash -> sc-compose` execution path for core spawn behavior).
+- For current ATM packaging mode, `sc-composer` and `sc-compose` are
+  version-locked to ATM and must be installed/upgraded together through ATM
+  distribution channels.
+
 Required baseline behavior:
 - Resolve agent runtime metadata from `.claude/agents/<agent>.md` frontmatter
   (at minimum `model`, `color`; prompt body used for initial instruction delivery).

@@ -18,6 +18,12 @@ crates.io as v0.42.0. External projects (scmux, others) consume from crates.io
 This plan is an execution plan; detailed product semantics must be sourced from
 the dedicated sc-composer requirements/architecture docs above.
 
+ATM integration in this phase must be library-first:
+- `atm` calls `sc-composer` APIs directly.
+- `atm` must not execute `sc-compose` through shell/subprocess wrappers for
+  core spawn/composition behavior.
+- `atm` composition behavior must match `sc-compose` semantics.
+
 The library skeleton is already in the workspace (v0.41.0) but `compose()` and
 `validate()` return `NotImplemented`. This phase makes them real.
 
@@ -153,8 +159,12 @@ can overlap if arch-ctm batches them.
 ## Version and Release
 
 - Version: `0.42.0` (bump on integrate/phase-AG before final PR)
-- Both `sc-composer` and `sc-compose` publish to crates.io
+- `sc-composer` and `sc-compose` are version-locked to ATM in this phase and
+  are released together in the same ATM publish cycle.
+- Both `sc-composer` and `sc-compose` publish to crates.io (co-released).
 - `sc-compose` binary added to Homebrew formula and release archives (4 targets)
+- ATM install/upgrade paths must install/upgrade the paired `sc-compose` CLI in
+  the same release step (no separate/manual compose upgrade path).
 - After publish: scmux adds `sc-composer = "0.42.0"` — no ATM sprint needed
 
 ---

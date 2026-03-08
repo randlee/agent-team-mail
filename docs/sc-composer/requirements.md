@@ -25,6 +25,20 @@ validation.
 
 The library is runtime-agnostic and reusable by ATM and non-ATM tooling.
 
+Current packaging/release mode (required for this phase):
+- `sc-composer` and `sc-compose` are part of the ATM workspace and are
+  version-locked to the ATM release version.
+- They are released together in one ATM publish cycle (no independent versioning
+  during this mode).
+- ATM distribution install/upgrade paths must install/upgrade both the
+  `sc-composer` crate release and `sc-compose` CLI together.
+
+ATM integration contract:
+- ATM is a first-class consumer of `sc-composer` and must use the same
+  composition semantics exposed by `sc-compose`.
+- ATM integration must call `sc-composer` APIs directly; shell/subprocess
+  invocation of `sc-compose` is not an acceptable core integration path.
+
 ## 3. Functional Requirements
 
 ### FR-1: Template Inputs
