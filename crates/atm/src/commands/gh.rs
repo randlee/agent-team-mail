@@ -279,6 +279,12 @@ fn print_status(status: &GhMonitorStatus, json: bool) -> Result<()> {
     if let Some(message) = status.message.as_deref() {
         println!("Message:     {message}");
     }
+    if let Some(source) = status.config_source.as_deref() {
+        println!("Config Src:  {source}");
+    }
+    if let Some(path) = status.config_path.as_deref() {
+        println!("Config Path: {path}");
+    }
     println!("Updated At:  {}", status.updated_at);
 
     Ok(())
@@ -296,6 +302,12 @@ fn print_health(health: &GhMonitorHealth, json: bool) -> Result<()> {
     println!("In-flight Monitors {}", health.in_flight);
     if let Some(message) = health.message.as_deref() {
         println!("Message:           {message}");
+    }
+    if let Some(source) = health.config_source.as_deref() {
+        println!("Config Source:     {source}");
+    }
+    if let Some(path) = health.config_path.as_deref() {
+        println!("Config Path:       {path}");
     }
     println!("Updated At:        {}", health.updated_at);
     Ok(())

@@ -35,7 +35,7 @@ use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
 use crate::daemon::log_writer::LogEventQueue;
@@ -2025,6 +2025,13 @@ struct GhMonitorHealthFile {
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, Default)]
+struct GhConfigDiagnostics {
+    source: Option<String>,
+    path: Option<String>,
+}
+
+#[cfg(unix)]
 fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
     GhMonitorHealth {
         team: team.to_string(),
@@ -2033,6 +2040,8 @@ fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
         in_flight: 0,
         updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         message: None,
+        config_source: None,
+        config_path: None,
     }
 }
 
@@ -2199,26 +2208,134 @@ fn set_gh_monitor_health_state(
 }
 
 #[cfg(unix)]
+fn request_config_cwd(payload: &serde_json::Value) -> Option<PathBuf> {
+    payload
+        .get("config_cwd")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(unix)]
+fn find_repo_local_config_path(current_dir: &Path) -> Option<PathBuf> {
+    let mut dir = Some(current_dir);
+    while let Some(path) = dir {
+        let cfg = path.join(".atm.toml");
+        if cfg.exists() {
+            return Some(cfg);
+        }
+        if path.join(".git").exists() {
+            break;
+        }
+        dir = path.parent();
+    }
+    None
+}
+
+#[cfg(unix)]
+fn file_has_plugin_config(path: &Path, plugin_name: &str) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&raw) else {
+        return false;
+    };
+    value
+        .get("plugins")
+        .and_then(|v| v.as_table())
+        .is_some_and(|plugins| plugins.contains_key(plugin_name))
+}
+
+#[cfg(unix)]
+fn resolve_gh_config_diagnostics(
+    home: &Path,
+    current_dir: &Path,
+    plugin_name: &str,
+) -> GhConfigDiagnostics {
+    if let Ok(override_path) = std::env::var("ATM_CONFIG") {
+        let override_path = PathBuf::from(override_path);
+        if override_path.exists() && file_has_plugin_config(&override_path, plugin_name) {
+            return GhConfigDiagnostics {
+                source: Some("override".to_string()),
+                path: Some(override_path.display().to_string()),
+            };
+        }
+    }
+
+    let repo_path = find_repo_local_config_path(current_dir);
+    if let Some(path) = repo_path.as_ref()
+        && file_has_plugin_config(path, plugin_name)
+    {
+        return GhConfigDiagnostics {
+            source: Some("repo".to_string()),
+            path: Some(path.display().to_string()),
+        };
+    }
+
+    let global_path = home.join(".config/atm/config.toml");
+    if global_path.exists() && file_has_plugin_config(&global_path, plugin_name) {
+        return GhConfigDiagnostics {
+            source: Some("global".to_string()),
+            path: Some(global_path.display().to_string()),
+        };
+    }
+
+    if let Some(path) = repo_path {
+        return GhConfigDiagnostics {
+            source: Some("repo".to_string()),
+            path: Some(path.display().to_string()),
+        };
+    }
+
+    GhConfigDiagnostics::default()
+}
+
+#[cfg(unix)]
 fn validate_gh_monitor_config(
     home: &std::path::Path,
     team: &str,
-) -> std::result::Result<(), String> {
+    request_payload: &serde_json::Value,
+) -> (std::result::Result<(), String>, GhConfigDiagnostics) {
+    let request_cwd = request_config_cwd(request_payload);
+    let current_dir = request_cwd
+        .as_deref()
+        .filter(|p| p.exists())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| home.to_path_buf());
+    let diagnostics = resolve_gh_config_diagnostics(home, &current_dir, "gh_monitor");
+
     let config = agent_team_mail_core::config::resolve_config(
         &agent_team_mail_core::config::ConfigOverrides {
             team: Some(team.to_string()),
             ..Default::default()
         },
+        &current_dir,
         home,
-        home,
-    )
-    .map_err(|e| e.to_string())?;
+    );
+    let config = match config {
+        Ok(c) => c,
+        Err(e) => return (Err(e.to_string()), diagnostics),
+    };
     let table = config
         .plugin_config("gh_monitor")
-        .ok_or_else(|| "missing [plugins.gh_monitor] configuration".to_string())?;
+        .ok_or_else(|| "missing [plugins.gh_monitor] configuration".to_string());
+    let table = match table {
+        Ok(t) => t,
+        Err(e) => return (Err(e), diagnostics),
+    };
     let parsed =
-        crate::plugins::ci_monitor::CiMonitorConfig::from_toml(table).map_err(|e| e.to_string())?;
+        crate::plugins::ci_monitor::CiMonitorConfig::from_toml(table).map_err(|e| e.to_string());
+    let parsed = match parsed {
+        Ok(p) => p,
+        Err(e) => return (Err(e), diagnostics),
+    };
     if !parsed.enabled {
-        return Err("gh_monitor plugin disabled in configuration".to_string());
+        return (
+            Err("gh_monitor plugin disabled in configuration".to_string()),
+            diagnostics,
+        );
     }
     if parsed
         .repo
@@ -2227,9 +2344,12 @@ fn validate_gh_monitor_config(
         .unwrap_or("")
         .is_empty()
     {
-        return Err("gh_monitor configuration missing required field: repo".to_string());
+        return (
+            Err("gh_monitor configuration missing required field: repo".to_string()),
+            diagnostics,
+        );
     }
-    Ok(())
+    (Ok(()), diagnostics)
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2401,19 +2521,27 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
 
     // Config gate: invalid/disabled config moves availability into
     // disabled_config_error and blocks polling work.
-    if let Err(reason) = validate_gh_monitor_config(home, &gh_request.team) {
+    let (config_validation, config_diagnostics) =
+        validate_gh_monitor_config(home, &gh_request.team, &request.payload);
+    if let Err(reason) = config_validation {
         // Intentional: command-dispatch config validation updates persisted
         // availability state but does not emit a separate "manual" inbox
         // notification path; transition alerts are emitted by the shared
         // state-transition hook (when availability actually changes).
-        let _ = set_gh_monitor_health_state(
+        let mut health = set_gh_monitor_health_state(
             home,
             &gh_request.team,
             None,
             Some("disabled_config_error"),
             Some(0),
             Some(reason.clone()),
-        );
+        )
+        .ok();
+        if let Some(ref mut health) = health {
+            health.config_source = config_diagnostics.source.clone();
+            health.config_path = config_diagnostics.path.clone();
+            let _ = upsert_gh_monitor_health(home, health.clone());
+        }
         return make_error_response(
             &request.request_id,
             "CONFIG_ERROR",
@@ -2446,6 +2574,8 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         reference: gh_request.reference.clone(),
         updated_at: now,
         message: None,
+        config_source: config_diagnostics.source.clone(),
+        config_path: config_diagnostics.path.clone(),
     };
 
     let mut transient_failure: Option<String> = None;
@@ -2645,7 +2775,18 @@ async fn handle_gh_monitor_control_command(
         );
     }
 
-    let health = match control.action {
+    let config_diagnostics = resolve_gh_config_diagnostics(
+        home,
+        &request_config_cwd(&request.payload)
+            .as_deref()
+            .filter(|p| p.exists())
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| home.to_path_buf()),
+        "gh_monitor",
+    );
+
+    let mut health = match control.action {
         GhMonitorLifecycleAction::Start => match set_gh_monitor_health_state(
             home,
             &control.team,
@@ -2759,6 +2900,8 @@ async fn handle_gh_monitor_control_command(
             }
         }
     };
+    health.config_source = config_diagnostics.source;
+    health.config_path = config_diagnostics.path;
 
     make_ok_response(
         &request.request_id,
@@ -2809,9 +2952,22 @@ async fn handle_gh_monitor_health_command(
         );
     }
 
+    let config_diagnostics = resolve_gh_config_diagnostics(
+        home,
+        &request_config_cwd(&request.payload)
+            .as_deref()
+            .filter(|p| p.exists())
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| home.to_path_buf()),
+        "gh_monitor",
+    );
+
     let health = match read_gh_monitor_health(home, &team) {
         Ok(mut health) => {
             health.in_flight = count_in_flight_monitors(home, &team);
+            health.config_source = config_diagnostics.source;
+            health.config_path = config_diagnostics.path;
             health
         }
         Err(e) => {
@@ -2925,6 +3081,17 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         }
     };
 
+    let config_diagnostics = resolve_gh_config_diagnostics(
+        home,
+        &request_config_cwd(&request.payload)
+            .as_deref()
+            .filter(|p| p.exists())
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| home.to_path_buf()),
+        "gh_monitor",
+    );
+
     let state = match load_gh_monitor_state_map(home) {
         Ok(map) => map,
         Err(e) => {
@@ -2943,6 +3110,13 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         gh_request.reference.as_deref(),
     );
     if let Some(status) = state.get(&key) {
+        let mut status = status.clone();
+        if status.config_source.is_none() {
+            status.config_source = config_diagnostics.source.clone();
+        }
+        if status.config_path.is_none() {
+            status.config_path = config_diagnostics.path.clone();
+        }
         return make_ok_response(
             &request.request_id,
             serde_json::to_value(status).unwrap_or_default(),
@@ -2964,6 +3138,13 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
             .collect();
         candidates.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
         if let Some(status) = candidates.last() {
+            let mut status = (*status).clone();
+            if status.config_source.is_none() {
+                status.config_source = config_diagnostics.source;
+            }
+            if status.config_path.is_none() {
+                status.config_path = config_diagnostics.path;
+            }
             return make_ok_response(
                 &request.request_id,
                 serde_json::to_value(status).unwrap_or_default(),
@@ -5713,6 +5894,23 @@ poll_interval_secs = 1
         std::fs::write(cfg_dir.join("config.toml"), config).unwrap();
     }
 
+    fn write_repo_gh_monitor_config(repo_dir: &Path, team: &str, repo_name: &str) {
+        let config = format!(
+            r#"[core]
+default_team = "{team}"
+identity = "repo-test"
+
+[plugins.gh_monitor]
+enabled = true
+team = "{team}"
+agent = "repo-monitor"
+repo = "{repo_name}"
+poll_interval_secs = 60
+"#
+        );
+        std::fs::write(repo_dir.join(".atm.toml"), config).unwrap();
+    }
+
     struct EnvGuard {
         key: &'static str,
         previous: Option<String>,
@@ -6603,6 +6801,8 @@ exit 1
             reference: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
             message: None,
+            config_source: None,
+            config_path: None,
         };
         let gh_request = GhMonitorRequest {
             team: "atm-dev".to_string(),
@@ -6662,6 +6862,8 @@ exit 1
             reference: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
             message: None,
+            config_source: None,
+            config_path: None,
         };
         let gh_request = GhMonitorRequest {
             team: "atm-dev".to_string(),
@@ -6728,6 +6930,8 @@ exit 1
             reference: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
             message: None,
+            config_source: None,
+            config_path: None,
         };
         let gh_request = GhMonitorRequest {
             team: "atm-dev".to_string(),
@@ -6825,6 +7029,8 @@ exit 1
             reference: None,
             updated_at: "2026-03-06T00:00:00Z".to_string(),
             message: None,
+            config_source: None,
+            config_path: None,
         };
         let request = GhMonitorRequest {
             team: "atm-dev".to_string(),
@@ -6885,6 +7091,8 @@ exit 1
             reference: None,
             updated_at: "2026-03-06T00:00:00Z".to_string(),
             message: None,
+            config_source: None,
+            config_path: None,
         };
         let request = GhMonitorRequest {
             team: "atm-dev".to_string(),
@@ -7026,6 +7234,8 @@ exit 1
             reference: Some("develop".to_string()),
             updated_at: "2026-03-06T00:00:10Z".to_string(),
             message: None,
+            config_source: None,
+            config_path: None,
         };
         let status_b = GhMonitorStatus {
             team: "atm-dev".to_string(),
@@ -7036,6 +7246,8 @@ exit 1
             reference: Some("release/v1".to_string()),
             updated_at: "2026-03-06T00:00:11Z".to_string(),
             message: None,
+            config_source: None,
+            config_path: None,
         };
         upsert_gh_monitor_status(temp.path(), status_a).unwrap();
         upsert_gh_monitor_status(temp.path(), status_b).unwrap();
@@ -7109,20 +7321,178 @@ exit 1
         let temp = TempDir::new().unwrap();
         write_invalid_gh_monitor_config(temp.path(), "atm-dev");
 
-        let req_json = r#"{"version":1,"request_id":"r-gh-config","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"42"}}"#;
-        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        let req_json = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-config",
+            "command": "gh-monitor",
+            "payload": {
+                "team": "atm-dev",
+                "target_kind": "run",
+                "target": "42",
+                "config_cwd": temp.path().display().to_string()
+            }
+        })
+        .to_string();
+        let resp = handle_gh_monitor_command(&req_json, temp.path()).await;
         assert_eq!(resp.status, "error");
         let err = resp.error.unwrap();
         assert_eq!(err.code, "CONFIG_ERROR");
 
-        let health_req = r#"{"version":1,"request_id":"r-gh-health","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
-        let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+        let health_req = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-health",
+            "command": "gh-monitor-health",
+            "payload": {
+                "team": "atm-dev",
+                "config_cwd": temp.path().display().to_string()
+            }
+        })
+        .to_string();
+        let health_resp = handle_gh_monitor_health_command(&health_req, temp.path()).await;
         assert_eq!(health_resp.status, "ok");
         let health = health_resp.payload.unwrap();
         assert_eq!(
             health["availability_state"].as_str(),
             Some("disabled_config_error")
         );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_uses_repo_config_context_and_reports_source_path() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+
+        // Global config exists but repo-local config must take precedence when
+        // config_cwd points at the repo.
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let repo_dir = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        write_repo_gh_monitor_config(&repo_dir, "atm-dev", "repo-local");
+
+        let req_json = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-repo-context",
+            "command": "gh-monitor",
+            "payload": {
+                "team": "atm-dev",
+                "target_kind": "run",
+                "target": "42",
+                "config_cwd": repo_dir.display().to_string()
+            }
+        })
+        .to_string();
+        let monitor_resp = handle_gh_monitor_command(&req_json, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+        let payload = monitor_resp.payload.unwrap();
+        assert_eq!(payload["state"].as_str(), Some("monitoring"));
+        assert_eq!(payload["config_source"].as_str(), Some("repo"));
+        let config_path = payload["config_path"].as_str().expect("config_path");
+        assert!(
+            config_path.ends_with(".atm.toml"),
+            "config_path should point to repo .atm.toml, got {config_path}"
+        );
+
+        let status_req = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-status-repo-context",
+            "command": "gh-status",
+            "payload": {
+                "team": "atm-dev",
+                "target_kind": "run",
+                "target": "42",
+                "config_cwd": repo_dir.display().to_string()
+            }
+        })
+        .to_string();
+        let status_resp = handle_gh_status_command(&status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["config_source"].as_str(), Some("repo"));
+        assert!(status["config_path"].as_str().is_some());
+
+        let health_req = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-health-repo-context",
+            "command": "gh-monitor-health",
+            "payload": {
+                "team": "atm-dev",
+                "config_cwd": repo_dir.display().to_string()
+            }
+        })
+        .to_string();
+        let health_resp = handle_gh_monitor_health_command(&health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let health = health_resp.payload.unwrap();
+        assert_eq!(health["config_source"].as_str(), Some("repo"));
+        assert!(health["config_path"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_uses_global_config_when_repo_config_absent() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let cwd_without_repo_config = temp.path().join("no-repo-config");
+        std::fs::create_dir_all(&cwd_without_repo_config).unwrap();
+
+        let req_json = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-global-context",
+            "command": "gh-monitor",
+            "payload": {
+                "team": "atm-dev",
+                "target_kind": "run",
+                "target": "24",
+                "config_cwd": cwd_without_repo_config.display().to_string()
+            }
+        })
+        .to_string();
+        let monitor_resp = handle_gh_monitor_command(&req_json, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+        let monitor = monitor_resp.payload.unwrap();
+        assert_eq!(monitor["config_source"].as_str(), Some("global"));
+        let monitor_path = monitor["config_path"].as_str().expect("config_path");
+        assert!(
+            monitor_path.ends_with("config.toml"),
+            "expected global config path, got {monitor_path}"
+        );
+
+        let status_req = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-status-global-context",
+            "command": "gh-status",
+            "payload": {
+                "team": "atm-dev",
+                "target_kind": "run",
+                "target": "24",
+                "config_cwd": cwd_without_repo_config.display().to_string()
+            }
+        })
+        .to_string();
+        let status_resp = handle_gh_status_command(&status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["config_source"].as_str(), Some("global"));
+        assert!(status["config_path"].as_str().is_some());
+
+        let health_req = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-health-global-context",
+            "command": "gh-monitor-health",
+            "payload": {
+                "team": "atm-dev",
+                "config_cwd": cwd_without_repo_config.display().to_string()
+            }
+        })
+        .to_string();
+        let health_resp = handle_gh_monitor_health_command(&health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let health = health_resp.payload.unwrap();
+        assert_eq!(health["config_source"].as_str(), Some("global"));
+        assert!(health["config_path"].as_str().is_some());
     }
 
     #[tokio::test]
