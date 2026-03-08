@@ -494,9 +494,9 @@ fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
         "status should fail when gh_monitor is not configured"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("missing [plugins.gh_monitor] configuration"));
     assert!(
-        stderr.contains("gh_monitor") || stderr.contains("not configured"),
-        "expected config error in stderr: {stderr}"
+        stderr.contains("Run `atm gh init` to configure and enable GitHub monitor for this team.")
     );
 
     let _ = daemon.kill();
