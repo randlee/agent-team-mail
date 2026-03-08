@@ -2468,7 +2468,6 @@ struct GhConfigValidation {
     error: Option<String>,
 }
 
-
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhRunView {
@@ -3232,11 +3231,7 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
     let config_validation = validate_gh_monitor_config(home, &gh_request.team, &request.payload);
 
     if let Some(ref reason) = config_validation.error {
-        return make_error_response(
-            &request.request_id,
-            "MONITOR_UNAVAILABLE",
-            reason.as_str(),
-        );
+        return make_error_response(&request.request_id, "MONITOR_UNAVAILABLE", reason.as_str());
     }
 
     let current_health = match read_gh_monitor_health(home, &gh_request.team) {
