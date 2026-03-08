@@ -14,7 +14,10 @@ mod types;
 
 pub use aliases::{resolve_alias, resolve_identity};
 pub use bridge::{BridgeConfig, BridgeRole, HostnameRegistry, RemoteConfig};
-pub use discovery::{ConfigError, ConfigOverrides, resolve_config, resolve_settings};
+pub use discovery::{
+    ConfigError, ConfigOverrides, PluginConfigLocation, resolve_config,
+    resolve_plugin_config_location, resolve_settings,
+};
 pub use types::{
     CleanupStrategy, Config, CoreConfig, DisplayConfig, MessagingConfig, OutputFormat,
     RetentionConfig, TimestampFormat,

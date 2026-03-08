@@ -346,47 +346,6 @@ pub fn daemon_socket_path() -> anyhow::Result<PathBuf> {
     Ok(home.join(".claude/daemon/atm-daemon.sock"))
 }
 
-/// Return the effective daemon socket path for connection attempts.
-///
-/// Tries the primary ATM_HOME-relative path first, then falls back to the
-/// pointer file written by the daemon at `~/.config/atm/daemon-socket.path`
-/// (OS-level home dir, not `ATM_HOME`).  The pointer file guards against
-/// `ATM_HOME` mismatch between a hook-started daemon and a plain CLI call.
-///
-/// The pointer-file fallback is **skipped** when `ATM_HOME` is explicitly set
-/// in the environment — an explicit `ATM_HOME` means the caller controls the
-/// socket path and the pointer file is not relevant.  This also ensures that
-/// tests that set `ATM_HOME` to a temporary directory always use their own
-/// mock socket rather than a stale pointer from a previous daemon run.
-///
-/// This function is used by connection and spawn-guard logic only.
-/// It does **not** attempt to connect — callers perform the actual connect.
-#[cfg(unix)]
-fn effective_daemon_socket_path() -> PathBuf {
-    let primary = match daemon_socket_path() {
-        Ok(p) => p,
-        Err(_) => return PathBuf::new(),
-    };
-    // Skip the pointer-file fallback when ATM_HOME is explicitly provided.
-    // An explicit ATM_HOME pins the socket location; the pointer file is only
-    // useful when the daemon was started with a *different* implicit home dir.
-    if std::env::var_os("ATM_HOME").is_some() {
-        return primary;
-    }
-    // Prefer the pointer file path when it is different from primary, so that
-    // a daemon started with a different ATM_HOME is still reachable.
-    if let Ok(os_home) = crate::home::get_os_home_dir() {
-        let pointer_path = os_home.join(".config/atm/daemon-socket.path");
-        if let Ok(raw) = std::fs::read_to_string(&pointer_path) {
-            let pointer = PathBuf::from(raw.trim());
-            if !pointer.as_os_str().is_empty() && pointer != primary {
-                return pointer;
-            }
-        }
-    }
-    primary
-}
-
 /// Compute the well-known PID file path for the ATM daemon.
 ///
 /// The path is `${ATM_HOME}/.claude/daemon/atm-daemon.pid`.
@@ -455,37 +414,7 @@ pub fn ensure_daemon_running() -> anyhow::Result<()> {
 pub fn query_daemon(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
     #[cfg(unix)]
     {
-        query_daemon_unix(request, std::time::Duration::from_millis(500))
-    }
-
-    #[cfg(not(unix))]
-    {
-        Ok(None)
-    }
-}
-
-/// Send a single request to the daemon with a caller-specified socket timeout.
-///
-/// Use this variant for commands that may require the daemon to perform
-/// long-running external I/O (e.g., GitHub API calls) before responding.
-/// The default [`query_daemon`] uses a 500 ms timeout, which is too short for
-/// commands like `gh-monitor` that block on network operations.
-///
-/// # Arguments
-///
-/// * `request` - The request to send.
-/// * `read_timeout` - Maximum time to wait for the daemon's response line.
-///
-/// # Platform Behaviour
-///
-/// On non-Unix platforms this function always returns `Ok(None)`.
-pub fn query_daemon_with_timeout(
-    request: &SocketRequest,
-    read_timeout: std::time::Duration,
-) -> anyhow::Result<Option<SocketResponse>> {
-    #[cfg(unix)]
-    {
-        query_daemon_unix(request, read_timeout)
+        query_daemon_unix(request)
     }
 
     #[cfg(not(unix))]
@@ -795,6 +724,8 @@ pub struct GhMonitorRequest {
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
 }
 
 /// Request payload for daemon-routed `gh-status` command.
@@ -805,6 +736,8 @@ pub struct GhStatusRequest {
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
 }
 
 /// Lifecycle action for the GitHub monitor plugin.
@@ -823,39 +756,45 @@ pub struct GhMonitorControlRequest {
     pub action: GhMonitorLifecycleAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
 }
 
 /// Daemon response payload for `gh-monitor-control` / `gh-monitor-health`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GhMonitorHealth {
     pub team: String,
-    pub lifecycle_state: String,
-    pub availability_state: String,
     #[serde(default)]
     pub configured: bool,
     #[serde(default)]
     pub enabled: bool,
-    pub in_flight: u64,
-    pub updated_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_path: Option<String>,
+    pub lifecycle_state: String,
+    pub availability_state: String,
+    pub in_flight: u64,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Daemon response payload for `gh-monitor`/`gh-status`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GhMonitorStatus {
     pub team: String,
-    pub target_kind: GhMonitorTargetKind,
-    pub target: String,
-    pub state: String,
     #[serde(default)]
     pub configured: bool,
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    pub target_kind: GhMonitorTargetKind,
+    pub target: String,
+    pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -863,10 +802,6 @@ pub struct GhMonitorStatus {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_path: Option<String>,
 }
 
 /// Query the daemon for the session record of a named agent.
@@ -1133,35 +1068,20 @@ pub fn register_hint(
 
 /// Send a daemon-routed GitHub monitor request (`command: "gh-monitor"`).
 ///
-/// The daemon may block for up to `start_timeout_secs` (default 120 s) waiting
-/// for a GitHub workflow run to appear before returning.  A generous socket
-/// read timeout is therefore applied: `start_timeout_secs + 30 s`, capped at
-/// 180 s, so the CLI does not incorrectly report the daemon as unreachable
-/// while it is legitimately waiting on GitHub API responses.
-///
 /// Returns:
 /// - `Ok(Some(status))` when the daemon accepted the request and returned
 ///   monitor status.
 /// - `Ok(None)` when daemon/socket is unavailable.
 /// - `Err` when daemon returns an explicit command error.
 pub fn gh_monitor(request: &GhMonitorRequest) -> anyhow::Result<Option<GhMonitorStatus>> {
-    let mut payload = serde_json::to_value(request)?;
-    inject_request_config_cwd(&mut payload);
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
         command: "gh-monitor".to_string(),
-        payload,
+        payload: serde_json::to_value(request)?,
     };
 
-    // gh-monitor PR/workflow commands poll GitHub and may take up to
-    // start_timeout_secs before responding. Add a 30 s buffer so the CLI
-    // does not time out while the daemon is legitimately waiting.
-    let start_secs = request.start_timeout_secs.unwrap_or(120);
-    let read_timeout_secs = (start_secs + 30).min(180);
-    let read_timeout = std::time::Duration::from_secs(read_timeout_secs);
-
-    let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
+    let response = match query_daemon(&socket_request)? {
         Some(r) => r,
         None => return Ok(None),
     };
@@ -1176,13 +1096,11 @@ pub fn gh_monitor(request: &GhMonitorRequest) -> anyhow::Result<Option<GhMonitor
 /// - `Ok(None)` when daemon/socket is unavailable.
 /// - `Err` when daemon returns an explicit command error.
 pub fn gh_status(request: &GhStatusRequest) -> anyhow::Result<Option<GhMonitorStatus>> {
-    let mut payload = serde_json::to_value(request)?;
-    inject_request_config_cwd(&mut payload);
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
         command: "gh-status".to_string(),
-        payload,
+        payload: serde_json::to_value(request)?,
     };
 
     let response = match query_daemon(&socket_request)? {
@@ -1198,13 +1116,11 @@ pub fn gh_status(request: &GhStatusRequest) -> anyhow::Result<Option<GhMonitorSt
 pub fn gh_monitor_control(
     request: &GhMonitorControlRequest,
 ) -> anyhow::Result<Option<GhMonitorHealth>> {
-    let mut payload = serde_json::to_value(request)?;
-    inject_request_config_cwd(&mut payload);
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
         command: "gh-monitor-control".to_string(),
-        payload,
+        payload: serde_json::to_value(request)?,
     };
 
     let response = match query_daemon(&socket_request)? {
@@ -1218,13 +1134,22 @@ pub fn gh_monitor_control(
 /// Query daemon-routed GitHub monitor plugin health
 /// (`command: "gh-monitor-health"`).
 pub fn gh_monitor_health(team: &str) -> anyhow::Result<Option<GhMonitorHealth>> {
-    let mut payload = serde_json::json!({ "team": team });
-    inject_request_config_cwd(&mut payload);
+    gh_monitor_health_with_context(team, None)
+}
+
+/// Query daemon-routed GitHub monitor plugin health with explicit config cwd.
+pub fn gh_monitor_health_with_context(
+    team: &str,
+    config_cwd: Option<String>,
+) -> anyhow::Result<Option<GhMonitorHealth>> {
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
         command: "gh-monitor-health".to_string(),
-        payload,
+        payload: serde_json::json!({
+            "team": team,
+            "config_cwd": config_cwd,
+        }),
     };
 
     let response = match query_daemon(&socket_request)? {
@@ -1254,18 +1179,6 @@ fn decode_gh_monitor_response(response: SocketResponse) -> anyhow::Result<GhMoni
 
     serde_json::from_value::<GhMonitorStatus>(payload)
         .map_err(|e| anyhow::anyhow!("Failed to parse GhMonitorStatus from daemon response: {e}"))
-}
-
-fn inject_request_config_cwd(payload: &mut serde_json::Value) {
-    let Some(cwd) = std::env::current_dir()
-        .ok()
-        .and_then(|path| path.to_str().map(str::to_string))
-    else {
-        return;
-    };
-    if let serde_json::Value::Object(map) = payload {
-        map.insert("config_cwd".to_string(), serde_json::Value::String(cwd));
-    }
 }
 
 fn decode_gh_monitor_health_response(response: SocketResponse) -> anyhow::Result<GhMonitorHealth> {
@@ -1326,19 +1239,12 @@ fn new_request_id() -> String {
 // ── Unix implementation ──────────────────────────────────────────────────────
 
 #[cfg(unix)]
-fn query_daemon_unix(
-    request: &SocketRequest,
-    read_timeout: std::time::Duration,
-) -> anyhow::Result<Option<SocketResponse>> {
+fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
 
-    // Use the effective socket path which falls back to the pointer file when
-    // the primary ATM_HOME-relative path is not the one the daemon was started
-    // with.  This resolves the ATM_HOME mismatch between hook-started daemons
-    // and plain CLI invocations without attempting spurious test connections.
-    let socket_path = effective_daemon_socket_path();
+    let socket_path = daemon_socket_path()?;
 
     // First attempt connection directly.
     let stream = match UnixStream::connect(&socket_path) {
@@ -1369,14 +1275,10 @@ fn query_daemon_unix(
         }
     };
 
-    // Use caller-specified read timeout; always use a short write timeout.
-    // A short write timeout (500 ms) is sufficient because writing a single
-    // JSON line is fast. The read timeout is longer for commands that block on
-    // external I/O (e.g., gh-monitor waiting on GitHub API).
-    stream.set_read_timeout(Some(read_timeout)).ok();
-    stream
-        .set_write_timeout(Some(Duration::from_millis(500)))
-        .ok();
+    // Set a short timeout so a stale/hung daemon does not block the CLI
+    let timeout = Duration::from_millis(500);
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
 
     let request_line = serde_json::to_string(request)?;
 
@@ -1447,14 +1349,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    // Check both PID file liveness and direct socket connectivity.  The two
-    // checks guard against ATM_HOME mismatch between the daemon process (which
-    // may have been launched with a different ATM_HOME by a hook) and this CLI
-    // invocation: if either the PID file shows the daemon alive OR the socket
-    // accepts a connection, we know a daemon is already running and must not
-    // spawn another instance.
-    let home = crate::home::get_home_dir().unwrap_or_default();
-    if daemon_is_running() || daemon_socket_connectable(&home) {
+    if daemon_is_running() {
         return Ok(());
     }
 
@@ -1622,18 +1517,8 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
 #[cfg(unix)]
 fn daemon_socket_connectable(home: &std::path::Path) -> bool {
     use std::os::unix::net::UnixStream;
-    // Check both the ATM_HOME-relative path and the effective path (which
-    // falls back to the pointer file written at daemon startup).
-    let primary = home.join(".claude/daemon/atm-daemon.sock");
-    if UnixStream::connect(&primary).is_ok() {
-        return true;
-    }
-    // Fallback via pointer file for cross-ATM_HOME detection.
-    let effective = effective_daemon_socket_path();
-    if effective != primary {
-        return UnixStream::connect(&effective).is_ok();
-    }
-    false
+    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    UnixStream::connect(socket_path).is_ok()
 }
 
 #[cfg(unix)]
@@ -1649,12 +1534,7 @@ fn cleanup_stale_daemon_runtime_files(home: &std::path::Path) {
         let _ = std::fs::remove_file(&pid_path);
     }
 
-    // Remove stale socket only when daemon ownership is known-dead AND the
-    // socket does not accept connections.  The socket-connectable check is
-    // the authoritative guard: a live daemon whose PID file is invisible to
-    // this ATM_HOME resolution (e.g., started by a hook with a different
-    // ATM_HOME) would still answer a connect() call and must not have its
-    // socket deleted.
+    // Remove stale socket only when daemon ownership is known-dead.
     let ownership_known_dead = matches!(
         pid_state,
         PidState::Dead | PidState::Missing | PidState::Malformed
@@ -1699,7 +1579,7 @@ fn subscribe_stream_events_unix() -> anyhow::Result<Option<StreamSubscription>> 
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
 
-    let socket_path = effective_daemon_socket_path();
+    let socket_path = daemon_socket_path()?;
     let mut stream = match UnixStream::connect(&socket_path) {
         Ok(s) => s,
         Err(_) => return Ok(None),
@@ -1804,39 +1684,6 @@ fn pid_alive(pid: i32) -> bool {
 mod tests {
     use super::*;
     use serial_test::serial;
-
-    /// RAII guard that sets an environment variable for the duration of a test
-    /// and restores the previous value (or removes the variable) on drop.
-    ///
-    /// All callers must be annotated with `#[serial]` to prevent concurrent
-    /// env mutations from interfering with each other.
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            // SAFETY: test-only env mutation, guarded by #[serial] on callers.
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: test-only env mutation, guarded by #[serial] on callers.
-            unsafe {
-                match &self.previous {
-                    Some(v) => std::env::set_var(self.key, v),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
 
     fn with_autostart_disabled<T>(f: impl FnOnce() -> T) -> T {
         let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
@@ -2011,7 +1858,6 @@ mod tests {
         fs::write(&pid_path, "999999\n").unwrap();
         assert!(pid_path.exists());
 
-        let _atm_home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
         cleanup_stale_daemon_runtime_files(home);
         assert!(
             !pid_path.exists(),
@@ -2035,7 +1881,6 @@ mod tests {
         fs::write(&pid_path, "not-a-pid\n").unwrap();
         fs::write(&socket_path, "stale").unwrap();
 
-        let _atm_home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
         cleanup_stale_daemon_runtime_files(home);
 
         assert!(
@@ -2068,7 +1913,6 @@ mod tests {
         perms.set_mode(0o000);
         fs::set_permissions(&pid_path, perms).unwrap();
 
-        let _atm_home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
         cleanup_stale_daemon_runtime_files(home);
         assert!(
             socket_path.exists(),

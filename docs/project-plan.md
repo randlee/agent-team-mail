@@ -1441,8 +1441,8 @@ the current tranche focused on onboarding contract closure.
 
 **Completed**: 123+ sprints across 27 phases (CI green)
 **Current version**: v0.38.0
-**Current phase**: Phase AC COMPLETE
-**Next planned phase**: Phase AD (cross-platform script standardization)
+**Current phase**: Phase AE (IN PROGRESS)
+**Next planned phase**: Phase AF (TBD)
 
 ---
 
@@ -1875,31 +1875,6 @@ for both project-local and global-install paths before Homebrew/global hook roll
 
 ---
 
-## 17.15 Phase AD: Cross-Platform Script Standardization
-
-**Goal**: remove product/runtime shell-script dependencies and standardize runtime
-script behavior on Python across macOS/Linux/Windows.
-
-**Requirements references**:
-- `docs/requirements.md` §4.9.3a (Python-only runtime script policy)
-- `docs/requirements.md` §4.9.5 (`atm init` runtime detection + install contract)
-
-**Integration branch**: `integrate/phase-AD`
-
-**Planning doc**: `docs/phase-ad-planning.md`
-
-### Sprint Summary
-| Sprint | Name | PR | Branch | Issues | Status |
-|--------|------|----|--------|--------|--------|
-| AD.1 | Python Runtime Policy + atm init Auto-Install | — | `feature/pAD-s1-python-policy` | #500, #506 | PLANNED |
-| AD.2 | Runtime Config Discovery Parity | — | `feature/pAD-s2-config-parity` | #499 | PLANNED |
-| AD.3 | GH Monitor Status Hardening | — | `feature/pAD-s3-gh-status-hardening` | #504, #507 | PLANNED |
-| AD.4 | Live State + Config Reload | — | `feature/pAD-s4-live-state` | #502, #503, #505 | PLANNED |
-| AD.5 | Script Conversion + atm init Auto-Install | — | `feature/pAD-s5-script-conversion` | TBD | PLANNED |
-| AD.6 | Bash Wrapper Removal | — | `feature/pAD-s6-bash-removal` | — | CANDIDATE |
-
----
-
 ## 20. Phase Integration PRs
 
 | Phase | Integration PR | Status |
@@ -1927,7 +1902,6 @@ script behavior on Python across macOS/Linux/Windows.
 | Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Merged |
 | Phase AA | `integrate/phase-AA` | Merged ([#459](https://github.com/randlee/agent-team-mail/pull/459)) |
 | Phase AB | `integrate/phase-AB` | [#469](https://github.com/randlee/agent-team-mail/pull/469) Pending merge |
-| Phase AD | `integrate/phase-AD` | Planned |
 
 ---
 
@@ -1983,7 +1957,32 @@ Key commits:
 
 ---
 
-## 22. Scrum Master Agent Prompt
+## 22. Phase AE: GH Monitor Reliability + Daemon Logging Isolation
+
+**Goal**: complete GH monitor operational contracts and close daemon
+observability/runtime gaps discovered during dogfooding.
+
+**Integration branch**: `integrate/phase-AE`
+
+### Dependency graph
+
+1. AE.1 is foundational (config/init contract).
+2. AE.2 depends on AE.1.
+3. AE.3 depends on AE.1 + AE.2.
+4. AE.4 runs in parallel with AE.2/AE.3.
+5. AE.5 runs after AE.2 + AE.4.
+
+### Sprint Summary
+
+| Sprint | Name | PR | Branch | Issues | Status |
+|---|---|---|---|---|---|
+| AE.1 | Config Discovery + `atm gh init` Baseline | [#518](https://github.com/randlee/agent-team-mail/pull/518) | `feature/pAE-s1-config-init` | #499, #500 | IN PROGRESS |
+| AE.2 | Live Status + JSON + Output Consistency | — | `feature/pAE-s2-live-status-json` | #503, #504, #505 | IN PROGRESS |
+| AE.3 | Monitor Reload Semantics | — | `feature/pAE-s3-reload-semantics` | #502 | PLANNED |
+| AE.4 | Daemon Logging/Autostart/Plugin Isolation | — | `feature/pAE-s4-daemon-observability` | #472, #473, #474 | PLANNED |
+| AE.5 | Identity Ambiguity + Phase Closeout | — | `feature/pAE-s5-identity-closeout` | #506 | PLANNED |
+
+## 23. Scrum Master Agent Prompt
 
 ```
 You are the Scrum Master for the agent-team-mail (atm) project.
