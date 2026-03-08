@@ -8,6 +8,7 @@ use agent_team_mail_core::daemon_client::{
 };
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
+use std::fmt::Write as _;
 
 use crate::util::settings::get_home_dir;
 
@@ -19,7 +20,7 @@ pub struct GhArgs {
     team: Option<String>,
 
     /// Output as JSON
-    #[arg(long)]
+    #[arg(long, global = true)]
     json: bool,
 
     #[command(subcommand)]
@@ -146,6 +147,10 @@ pub fn execute(args: GhArgs) -> Result<()> {
     agent_team_mail_core::daemon_client::ensure_daemon_running()
         .context("failed to auto-start daemon for atm gh command")?;
 
+    if requires_gh_monitor_config(&args.command) {
+        preflight_gh_monitor_config(team)?;
+    }
+
     enum GhOutput {
         MonitorStatus(GhMonitorStatus),
         MonitorHealth(GhMonitorHealth),
@@ -252,12 +257,46 @@ fn status_kind_to_wire(kind: StatusTargetKind) -> GhMonitorTargetKind {
     }
 }
 
+fn requires_gh_monitor_config(command: &GhCommand) -> bool {
+    match command {
+        GhCommand::Monitor(_) | GhCommand::Status(_) => true,
+    }
+}
+
+fn preflight_gh_monitor_config(team: &str) -> Result<()> {
+    let health = gh_monitor_health(team)?
+        .ok_or_else(|| anyhow::anyhow!("daemon is not reachable for atm gh command preflight"))?;
+    let unavailable = !health.configured
+        || !health.enabled
+        || health.availability_state == "disabled_config_error";
+    if !unavailable {
+        return Ok(());
+    }
+
+    let reason = if let Some(message) = health.message.as_deref() {
+        message.to_string()
+    } else if !health.configured {
+        "gh_monitor plugin is not configured".to_string()
+    } else if !health.enabled {
+        "gh_monitor plugin is disabled in configuration".to_string()
+    } else {
+        format!("gh_monitor unavailable: {}", health.availability_state)
+    };
+    anyhow::bail!("{reason}\nRemediation: run `atm gh init` and retry.")
+}
+
 fn print_status(status: &GhMonitorStatus, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(status)?);
         return Ok(());
     }
 
+    print!("{}", render_status(status));
+    Ok(())
+}
+
+fn render_status(status: &GhMonitorStatus) -> String {
+    let mut output = String::new();
     let target_label = match status.target_kind {
         GhMonitorTargetKind::Pr => format!("pr:{}", status.target),
         GhMonitorTargetKind::Workflow => {
@@ -270,24 +309,25 @@ fn print_status(status: &GhMonitorStatus, json: bool) -> Result<()> {
         GhMonitorTargetKind::Run => format!("run:{}", status.target),
     };
 
-    println!("Team:        {}", status.team);
-    println!("Target:      {target_label}");
-    println!("State:       {}", status.state);
+    let _ = writeln!(output, "Team:        {}", status.team);
+    let _ = writeln!(output, "Target:      {target_label}");
+    let _ = writeln!(output, "State:       {}", status.state);
+    let _ = writeln!(output, "Configured:  {}", status.configured);
+    let _ = writeln!(output, "Enabled:     {}", status.enabled);
     if let Some(run_id) = status.run_id {
-        println!("Run ID:      {run_id}");
+        let _ = writeln!(output, "Run ID:      {run_id}");
     }
     if let Some(message) = status.message.as_deref() {
-        println!("Message:     {message}");
+        let _ = writeln!(output, "Message:     {message}");
     }
     if let Some(source) = status.config_source.as_deref() {
-        println!("Config Src:  {source}");
+        let _ = writeln!(output, "Config Src:  {source}");
     }
     if let Some(path) = status.config_path.as_deref() {
-        println!("Config Path: {path}");
+        let _ = writeln!(output, "Config Path: {path}");
     }
-    println!("Updated At:  {}", status.updated_at);
-
-    Ok(())
+    let _ = writeln!(output, "Updated At:  {}", status.updated_at);
+    output
 }
 
 fn print_health(health: &GhMonitorHealth, json: bool) -> Result<()> {
@@ -296,21 +336,29 @@ fn print_health(health: &GhMonitorHealth, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("Team:              {}", health.team);
-    println!("Lifecycle:         {}", health.lifecycle_state);
-    println!("Availability:      {}", health.availability_state);
-    println!("In-flight Monitors {}", health.in_flight);
+    print!("{}", render_health(health));
+    Ok(())
+}
+
+fn render_health(health: &GhMonitorHealth) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "Team:              {}", health.team);
+    let _ = writeln!(output, "Lifecycle:         {}", health.lifecycle_state);
+    let _ = writeln!(output, "Availability:      {}", health.availability_state);
+    let _ = writeln!(output, "Configured:        {}", health.configured);
+    let _ = writeln!(output, "Enabled:           {}", health.enabled);
+    let _ = writeln!(output, "In-flight Monitors {}", health.in_flight);
     if let Some(message) = health.message.as_deref() {
-        println!("Message:           {message}");
+        let _ = writeln!(output, "Message:           {message}");
     }
     if let Some(source) = health.config_source.as_deref() {
-        println!("Config Source:     {source}");
+        let _ = writeln!(output, "Config Source:     {source}");
     }
     if let Some(path) = health.config_path.as_deref() {
-        println!("Config Path:       {path}");
+        let _ = writeln!(output, "Config Path:       {path}");
     }
-    println!("Updated At:        {}", health.updated_at);
-    Ok(())
+    let _ = writeln!(output, "Updated At:        {}", health.updated_at);
+    output
 }
 
 #[cfg(test)]
@@ -360,5 +408,47 @@ mod tests {
         assert_eq!(req.target, "987654");
         assert_eq!(req.reference, None);
         assert_eq!(req.start_timeout_secs, None);
+    }
+
+    #[test]
+    fn render_status_has_single_canonical_block() {
+        let status = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Workflow,
+            target: "ci".to_string(),
+            state: "tracking".to_string(),
+            configured: true,
+            enabled: true,
+            run_id: Some(42),
+            reference: Some("develop".to_string()),
+            updated_at: "2026-03-08T00:00:00Z".to_string(),
+            message: Some("watching".to_string()),
+            config_source: None,
+            config_path: None,
+        };
+        let rendered = render_status(&status);
+        assert_eq!(rendered.matches("Team:").count(), 1);
+        assert_eq!(rendered.matches("Target:").count(), 1);
+        assert_eq!(rendered.matches("State:").count(), 1);
+    }
+
+    #[test]
+    fn render_health_has_single_canonical_block() {
+        let health = GhMonitorHealth {
+            team: "atm-dev".to_string(),
+            lifecycle_state: "running".to_string(),
+            availability_state: "healthy".to_string(),
+            configured: true,
+            enabled: true,
+            in_flight: 0,
+            updated_at: "2026-03-08T00:00:00Z".to_string(),
+            message: Some("ok".to_string()),
+            config_source: None,
+            config_path: None,
+        };
+        let rendered = render_health(&health);
+        assert_eq!(rendered.matches("Team:").count(), 1);
+        assert_eq!(rendered.matches("Lifecycle:").count(), 1);
+        assert_eq!(rendered.matches("Availability:").count(), 1);
     }
 }
