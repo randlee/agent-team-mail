@@ -1446,46 +1446,6 @@ the current tranche focused on onboarding contract closure.
 
 ---
 
-## 17.15 Phase AD: Cross-Platform Script Standardization
-
-**Goal**: remove product/runtime shell-script dependencies and standardize runtime
-script behavior on Python across macOS/Linux/Windows.
-
-**Integration branch**: `integrate/phase-AD`
-
-**Planning doc**: `docs/phase-ad-planning.md`
-
-### Sprint Summary
-| Sprint | Name | PR | Branch | Issues | Status |
-|--------|------|----|--------|--------|--------|
-| AD.1 | Python Runtime Policy + `atm init` Runtime Auto-Install Contract | — | `feature/pAD-s1-python-policy` | #500, #506 | PLANNED |
-| AD.2 | Runtime Config Discovery Parity | — | `feature/pAD-s2-config-discovery-parity` | #499 | PLANNED |
-| AD.3 | GH Status Surface Hardening | — | `feature/pAD-s3-gh-status-hardening` | #504, #507 | PLANNED |
-| AD.4 | Live State + Reload Reliability | — | `feature/pAD-s4-live-state-reload` | #502, #503, #505 | PLANNED |
-| AD.5 | Runtime Script Conversion + Init Absorption | — | `feature/pAD-s5-python-script-conversion` | #500 | PLANNED |
-| AD.6 | Remaining Wrapper Cleanup (Candidate Follow-On) | — | `feature/pAD-s6-wrapper-cleanup` | #499, #500 | PLANNED |
-
-### AD.1 — Python Runtime Policy + `atm init` Runtime Auto-Install Contract
-**Deliverables**
-1. Lock requirements: product/runtime scripts are Python-only; shell is dev/CI exception only.
-2. Define `atm init` runtime detection + auto-install contract for Claude/Codex/Gemini.
-3. Build violation inventory and map conversion work to follow-on AD sprints.
-4. Add deterministic test-plan coverage requirements (including pytest CI lane for hook/script behavior).
-
-**Acceptance Criteria**
-1. Requirements explicitly prohibit shell-required product runtime paths.
-2. `atm init` runtime auto-install behavior is specified and idempotent per runtime.
-3. Known shell violations are inventoried and scheduled.
-4. CI test expectations include pytest coverage for affected Python hook/script paths.
-
-### AD.2-AD.6 Notes
-1. DG-001/#497, DG-002/#498, and DG-005/#501 are pre-AD hotfix items and are not
-   implemented in AD sprints.
-2. AD.2-AD.4 close remaining dogfood findings DG-003, DG-006..DG-011.
-3. AD.5-AD.6 close runtime shell-script conversion and migration cleanup work.
-
----
-
 ## 17.11 Phase Z: Daemon SSoT + Observability Hardening
 
 **Goal**: Close daemon single-source-of-truth gaps for member/session state and make
@@ -1915,6 +1875,29 @@ for both project-local and global-install paths before Homebrew/global hook roll
 
 ---
 
+## 17.15 Phase AD: Cross-Platform Script Standardization
+
+**Goal**: remove product/runtime shell-script dependencies and standardize runtime
+script behavior on Python across macOS/Linux/Windows.
+
+**Requirements references**:
+- `docs/requirements.md` §4.9.3a (Python-only runtime script policy)
+- `docs/requirements.md` §4.9.5 (`atm init` runtime detection + install contract)
+
+**Integration branch**: `integrate/phase-AD`
+
+### Sprint Summary
+| Sprint | Name | PR | Branch | Issues | Status |
+|--------|------|----|--------|--------|--------|
+| AD.1 | Python Runtime Policy + atm init Auto-Install | — | `feature/pAD-s1-python-policy` | #500, #499 | PLANNED |
+| AD.2 | Gemini Hook Install | — | `feature/pAD-s2-gemini-hook` | #503 | PLANNED |
+| AD.3 | Relay Script Migration | — | `feature/pAD-s3-relay-migration` | #499 | PLANNED |
+| AD.4 | Spawn/Launch Script Python Rewrite | — | `feature/pAD-s4-spawn-python` | — | PLANNED |
+| AD.5 | setup-codex-hooks.sh Absorption | — | `feature/pAD-s5-codex-hooks` | — | PLANNED |
+| AD.6 | Bash Wrapper Removal | — | `feature/pAD-s6-bash-removal` | — | CANDIDATE |
+
+---
+
 ## 20. Phase Integration PRs
 
 | Phase | Integration PR | Status |
@@ -1942,6 +1925,7 @@ for both project-local and global-install paths before Homebrew/global hook roll
 | Phase Z | `integrate/phase-Z` → [#436](https://github.com/randlee/agent-team-mail/pull/436) | Merged |
 | Phase AA | `integrate/phase-AA` | Merged ([#459](https://github.com/randlee/agent-team-mail/pull/459)) |
 | Phase AB | `integrate/phase-AB` | [#469](https://github.com/randlee/agent-team-mail/pull/469) Pending merge |
+| Phase AD | `integrate/phase-AD` | Planned |
 
 ---
 
