@@ -72,6 +72,14 @@ daemon_dir = home / ".claude" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 state_path = daemon_dir / "gh-state.json"
 health_path = daemon_dir / "gh-health.json"
+configured = os.environ.get("ATM_FAKE_GH_CONFIGURED", "1") == "1"
+enabled = os.environ.get("ATM_FAKE_GH_ENABLED", "1") == "1"
+availability_state = "healthy" if configured and enabled else "disabled_config_error"
+availability_message = None
+if not configured:
+    availability_message = "gh_monitor plugin is not configured"
+elif not enabled:
+    availability_message = "gh_monitor plugin is disabled in configuration"
 
 sock_path = daemon_dir / "atm-daemon.sock"
 pid_path = daemon_dir / "atm-daemon.pid"
@@ -121,6 +129,8 @@ while running:
                 "target_kind": payload.get("target_kind", "workflow"),
                 "target": payload.get("target", "ci"),
                 "state": "tracking",
+                "configured": configured,
+                "enabled": enabled,
                 "run_id": 987654,
                 "reference": payload.get("reference"),
                 "updated_at": "2026-03-06T03:00:00Z",
@@ -137,6 +147,8 @@ while running:
                     "target_kind": payload.get("target_kind", "workflow"),
                     "target": payload.get("target", "ci"),
                     "state": "tracking",
+                    "configured": configured,
+                    "enabled": enabled,
                     "run_id": 987654,
                     "reference": "develop",
                     "updated_at": "2026-03-06T03:00:00Z",
@@ -149,28 +161,34 @@ while running:
                 health_payload = {
                     "team": payload.get("team", "test-team"),
                     "lifecycle_state": "stopped",
-                    "availability_state": "healthy",
+                    "availability_state": availability_state,
+                    "configured": configured,
+                    "enabled": enabled,
                     "in_flight": 0,
                     "updated_at": "2026-03-06T03:00:00Z",
-                    "message": "stopped",
+                    "message": availability_message or "stopped",
                 }
             elif action == "restart":
                 health_payload = {
                     "team": payload.get("team", "test-team"),
                     "lifecycle_state": "running",
-                    "availability_state": "healthy",
+                    "availability_state": availability_state,
+                    "configured": configured,
+                    "enabled": enabled,
                     "in_flight": 0,
                     "updated_at": "2026-03-06T03:00:00Z",
-                    "message": "restarted",
+                    "message": availability_message or "restarted",
                 }
             else:
                 health_payload = {
                     "team": payload.get("team", "test-team"),
                     "lifecycle_state": "running",
-                    "availability_state": "healthy",
+                    "availability_state": availability_state,
+                    "configured": configured,
+                    "enabled": enabled,
                     "in_flight": 0,
                     "updated_at": "2026-03-06T03:00:00Z",
-                    "message": "started",
+                    "message": availability_message or "started",
                 }
             health_path.write_text(json.dumps(health_payload))
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": health_payload}
@@ -181,10 +199,12 @@ while running:
                 health_payload = {
                     "team": payload.get("team", "test-team"),
                     "lifecycle_state": "running",
-                    "availability_state": "healthy",
+                    "availability_state": availability_state,
+                    "configured": configured,
+                    "enabled": enabled,
                     "in_flight": 0,
                     "updated_at": "2026-03-06T03:00:00Z",
-                    "message": None,
+                    "message": availability_message,
                 }
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": health_payload}
         elif command == "status":
@@ -251,8 +271,18 @@ fn wait_for_daemon_socket(home: &Path) {
 
 #[cfg(unix)]
 fn start_fake_gh_daemon(home: &Path) -> Child {
+    start_fake_gh_daemon_with_mode(home, true, true)
+}
+
+#[cfg(unix)]
+fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) -> Child {
     let script = write_fake_gh_daemon_script(home);
-    let child = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    let child = Command::new(&script)
+        .env("ATM_HOME", home)
+        .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
+        .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
+        .spawn()
+        .unwrap();
     wait_for_daemon_socket(home);
     child
 }
@@ -291,6 +321,8 @@ fn test_gh_monitor_workflow_roundtrip_json() {
     assert_eq!(monitor_json["reference"].as_str(), Some("develop"));
     assert_eq!(monitor_json["run_id"].as_u64(), Some(987654));
     assert_eq!(monitor_json["state"].as_str(), Some("tracking"));
+    assert_eq!(monitor_json["configured"].as_bool(), Some(true));
+    assert_eq!(monitor_json["enabled"].as_bool(), Some(true));
 
     let mut status = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut status, &temp_dir);
@@ -313,6 +345,8 @@ fn test_gh_monitor_workflow_roundtrip_json() {
     assert_eq!(status_json["target"].as_str(), Some("ci"));
     assert_eq!(status_json["run_id"].as_u64(), Some(987654));
     assert_eq!(status_json["state"].as_str(), Some("tracking"));
+    assert_eq!(status_json["configured"].as_bool(), Some(true));
+    assert_eq!(status_json["enabled"].as_bool(), Some(true));
 
     let _ = daemon.kill();
     let _ = daemon.wait();
@@ -371,6 +405,40 @@ fn test_gh_monitor_lifecycle_status_roundtrip_json() {
     let health_json: serde_json::Value = serde_json::from_slice(&health_output).unwrap();
     assert_eq!(health_json["team"].as_str(), Some("test-team"));
     assert_eq!(health_json["availability_state"].as_str(), Some("healthy"));
+    assert_eq!(health_json["configured"].as_bool(), Some(true));
+    assert_eq!(health_json["enabled"].as_bool(), Some(true));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon_with_mode(temp_dir.path(), false, false);
+
+    let mut status = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut status, &temp_dir);
+    let output = status
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("status")
+        .arg("workflow")
+        .arg("ci")
+        .output()
+        .expect("run atm gh status");
+
+    assert!(
+        !output.status.success(),
+        "status should fail when gh_monitor is not configured"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("gh_monitor plugin is not configured"));
+    assert!(stderr.contains("Remediation: run `atm gh init` and retry."));
 
     let _ = daemon.kill();
     let _ = daemon.wait();
