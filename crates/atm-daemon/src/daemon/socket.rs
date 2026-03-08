@@ -7429,6 +7429,73 @@ exit 1
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_uses_global_config_when_repo_config_absent() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let cwd_without_repo_config = temp.path().join("no-repo-config");
+        std::fs::create_dir_all(&cwd_without_repo_config).unwrap();
+
+        let req_json = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-global-context",
+            "command": "gh-monitor",
+            "payload": {
+                "team": "atm-dev",
+                "target_kind": "run",
+                "target": "24",
+                "config_cwd": cwd_without_repo_config.display().to_string()
+            }
+        })
+        .to_string();
+        let monitor_resp = handle_gh_monitor_command(&req_json, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+        let monitor = monitor_resp.payload.unwrap();
+        assert_eq!(monitor["config_source"].as_str(), Some("global"));
+        let monitor_path = monitor["config_path"].as_str().expect("config_path");
+        assert!(
+            monitor_path.ends_with("config.toml"),
+            "expected global config path, got {monitor_path}"
+        );
+
+        let status_req = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-status-global-context",
+            "command": "gh-status",
+            "payload": {
+                "team": "atm-dev",
+                "target_kind": "run",
+                "target": "24",
+                "config_cwd": cwd_without_repo_config.display().to_string()
+            }
+        })
+        .to_string();
+        let status_resp = handle_gh_status_command(&status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
+        let status = status_resp.payload.unwrap();
+        assert_eq!(status["config_source"].as_str(), Some("global"));
+        assert!(status["config_path"].as_str().is_some());
+
+        let health_req = serde_json::json!({
+            "version": 1,
+            "request_id": "r-gh-health-global-context",
+            "command": "gh-monitor-health",
+            "payload": {
+                "team": "atm-dev",
+                "config_cwd": cwd_without_repo_config.display().to_string()
+            }
+        })
+        .to_string();
+        let health_resp = handle_gh_monitor_health_command(&health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let health = health_resp.payload.unwrap();
+        assert_eq!(health["config_source"].as_str(), Some("global"));
+        assert!(health["config_path"].as_str().is_some());
+    }
+
+    #[tokio::test]
     #[cfg(not(unix))]
     async fn test_gh_monitor_non_unix_returns_unsupported_platform() {
         let req_json = r#"{"version":1,"request_id":"r-gh-stub","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"1"}}"#;
