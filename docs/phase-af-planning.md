@@ -37,7 +37,7 @@ gaps that impact operational correctness for multi-agent ATM usage.
 |---|---|---|---|---|---|
 | AF.1 | Lifecycle Correctness (Session + PID Liveness) | [#524](https://github.com/randlee/agent-team-mail/pull/524) | `feature/pAF-s1-lifecycle-correctness` | #448, #449 | COMPLETE |
 | AF.2 | Spawn Authorization + Preview UX | [#526](https://github.com/randlee/agent-team-mail/pull/526) | `feature/pAF-s2-spawn-auth-preview` | #394, #456 | COMPLETE |
-| AF.3 | Transient Agent Registration Controls | — | `feature/pAF-s3-transient-registration` | #393 | PLANNED |
+| AF.3 | Transient Agent Registration Controls | [#527](https://github.com/randlee/agent-team-mail/pull/527) | `feature/pAF-s3-transient-registration` | #393 | COMPLETE |
 | AF.4 | Cleanup Preview + tmux Sentinel | — | `feature/pAF-s4-cleanup-sentinel` | #373, #45 | PLANNED |
 | AF.5 | Reliability Regression + Documentation Closure | — | `feature/pAF-s5-reliability-closeout` | #448, #449, #393, #394, #456, #373, #45 | PLANNED |
 
