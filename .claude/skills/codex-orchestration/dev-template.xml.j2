@@ -1,0 +1,33 @@
+<atm-task id="{{ task_id }}" sprint="{{ sprint }}" assignee="arch-ctm">
+  <description>{{ description }}</description>
+
+  <worktree>{{ worktree_path }}</worktree>
+  <branch>{{ branch }}</branch>
+  <pr-target>{{ pr_target }}</pr-target>
+
+  <deliverables>
+    {% for item in deliverables %}
+    <item>{{ item }}</item>
+    {% endfor %}
+  </deliverables>
+
+  <acceptance-criteria>
+    {% for criterion in acceptance_criteria %}
+    <item>{{ criterion }}</item>
+    {% endfor %}
+  </acceptance-criteria>
+
+  <references>
+    {% for ref in references %}
+    <doc>{{ ref }}</doc>
+    {% endfor %}
+  </references>
+
+  <workflow>
+    <step id="a">Read this task. Ask questions if anything is unclear. Then ACK this message immediately.</step>
+    <step id="b">Before coding: run `git fetch origin && git merge origin/{{ pr_target }}` to include all prior sprint fixes. Then complete development work.</step>
+    <step id="c">Push your commit. Send me: branch name + commit hash. Do NOT wait — I will open the PR in parallel.</step>
+    <step id="d">Run cargo test. Report results (PASS or FAIL with details).</step>
+    <step id="e">Send task-complete announcement: commit hash, test summary, any notes.</step>
+  </workflow>
+</atm-task>

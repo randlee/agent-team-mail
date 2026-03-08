@@ -1,0 +1,63 @@
+<atm-qa-task id="{{ task_id }}" sprint="{{ sprint }}" assignee="quality-mgr">
+  <description>{{ description }}</description>
+
+  <pr-number>{{ pr_number }}</pr-number>
+  <branch>{{ branch }}</branch>
+  <worktree>{{ worktree_path }}</worktree>
+  <commits>{{ commits }}</commits>
+
+  <deliverables>
+    {% for item in deliverables %}
+    <item>{{ item }}</item>
+    {% endfor %}
+  </deliverables>
+
+  <references>
+    {% for ref in references %}
+    <doc>{{ ref }}</doc>
+    {% endfor %}
+  </references>
+
+  <workflow>
+    <step id="a">ACK this message immediately.</step>
+    <step id="b">
+      Spawn TWO background QA agents against the worktree.
+      MANDATORY: run_in_background=true on BOTH agents. NO exceptions.
+      PROHIBITED: running cargo, clippy, or any analysis yourself in the foreground.
+      PROHIBITED: spawning agents without run_in_background=true.
+      Use TaskOutput to retrieve results after agents complete.
+
+      Agent 1 — rust-qa-agent:
+        subagent_type: rust-qa-agent
+        run_in_background: true
+        prompt: Run full cargo test and cargo clippy on the worktree at {{ worktree_path }}.
+                Report: test results (pass/fail counts), clippy warnings, any failing test names and errors.
+
+      Agent 2 — atm-qa-agent:
+        subagent_type: atm-qa-agent
+        run_in_background: true
+        prompt: Validate sprint {{ sprint }} implementation against requirements and sprint spec.
+                Worktree: {{ worktree_path }}. Deliverables: {{ deliverables | join(', ') }}.
+                Reference docs: {{ references | join(', ') }}.
+                Report findings as BLOCKING or NON-BLOCKING with file:line references.
+    </step>
+    <step id="c">
+      Collect both agent reports. Send consolidated findings to team-lead:
+      - Overall verdict: PASS or FAIL
+      - Blocking findings (if any) with finding IDs
+      - Non-blocking findings
+      - rust-qa result summary
+      - atm-qa result summary
+    </step>
+    <step id="d">
+      If CI is NOT yet green on the PR: spawn rust-qa-agent to run targeted cargo test
+      for the failing platforms. Report results. Do NOT run cargo yourself.
+      Skip this step if CI is already green.
+    </step>
+    <step id="e">
+      Send final QA report to team-lead:
+      PASS → "PR #{{ pr_number }} ready to merge"
+      FAIL → list blocking findings with recommended fixes for arch-ctm
+    </step>
+  </workflow>
+</atm-qa-task>
