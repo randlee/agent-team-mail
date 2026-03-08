@@ -2822,6 +2822,28 @@ async fn handle_gh_monitor_control_command(
                 in_flight = count_in_flight_monitors(home, &control.team);
             }
 
+            // Re-evaluate config after the drain window so restart/reload picks
+            // up current on-disk config without requiring daemon restart.
+            let reloaded_config =
+                evaluate_gh_monitor_config(home, &control.team, control.config_cwd.as_deref());
+            if let Some(reason) = reloaded_config.error.as_deref() {
+                let message = format!("gh monitor restart blocked: {reason}");
+                let _ = set_gh_monitor_health_state(
+                    home,
+                    &control.team,
+                    Some("stopped"),
+                    Some("disabled_config_error"),
+                    Some(in_flight),
+                    Some(message),
+                    Some(&reloaded_config),
+                );
+                return make_error_response(
+                    &request.request_id,
+                    "CONFIG_ERROR",
+                    &format!("gh_monitor unavailable after reload: {reason}"),
+                );
+            }
+
             match set_gh_monitor_health_state(
                 home,
                 &control.team,
@@ -2836,7 +2858,7 @@ async fn handle_gh_monitor_control_command(
                         in_flight
                     )
                 }),
-                Some(&config_state),
+                Some(&reloaded_config),
             ) {
                 Ok(health) => health,
                 Err(e) => {
@@ -2913,11 +2935,9 @@ async fn handle_gh_monitor_health_command(
             health.enabled = config_state.enabled;
             health.config_source = config_state.config_source.clone();
             health.config_path = config_state.config_path.clone();
-            if config_state.error.is_some() {
+            if let Some(reason) = config_state.error.as_deref() {
                 health.availability_state = "disabled_config_error".to_string();
-                if health.message.is_none() {
-                    health.message = config_state.error.clone();
-                }
+                health.message = Some(reason.to_string());
             }
             health
         }
@@ -7371,6 +7391,72 @@ exit 1
         let health = health_resp.payload.unwrap();
         assert_eq!(health["team"].as_str(), Some("atm-dev"));
         assert_eq!(health["lifecycle_state"].as_str(), Some("running"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_restart_reloads_updated_config_without_daemon_restart() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+
+        let start_req = r#"{"version":1,"request_id":"r-gh-start-reload","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"start"}}"#;
+        let start_resp = handle_gh_monitor_control_command(start_req, temp.path()).await;
+        assert_eq!(start_resp.status, "ok");
+
+        // Edit config to invalid state, then ensure restart surfaces deterministic
+        // config error without requiring a daemon process restart.
+        write_invalid_gh_monitor_config(temp.path(), "atm-dev");
+        let restart_req = r#"{"version":1,"request_id":"r-gh-restart-invalid","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"restart","drain_timeout_secs":1}}"#;
+        let restart_resp = handle_gh_monitor_control_command(restart_req, temp.path()).await;
+        assert_eq!(restart_resp.status, "error");
+        let err = restart_resp
+            .error
+            .expect("restart should return config error");
+        assert_eq!(err.code, "CONFIG_ERROR");
+        assert!(
+            err.message.contains("gh_monitor unavailable after reload"),
+            "unexpected restart error: {}",
+            err.message
+        );
+
+        let health_req = r#"{"version":1,"request_id":"r-gh-health-invalid","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let health = health_resp.payload.unwrap();
+        assert_eq!(health["lifecycle_state"].as_str(), Some("stopped"));
+        assert_eq!(
+            health["availability_state"].as_str(),
+            Some("disabled_config_error")
+        );
+        assert!(
+            !health["message"].as_str().unwrap_or_default().is_empty(),
+            "expected actionable config error message in health payload"
+        );
+
+        // Repair config and restart again; health should recover to running/healthy.
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let restart_recover_req = r#"{"version":1,"request_id":"r-gh-restart-recover","command":"gh-monitor-control","payload":{"team":"atm-dev","action":"restart","drain_timeout_secs":1}}"#;
+        let restart_recover_resp =
+            handle_gh_monitor_control_command(restart_recover_req, temp.path()).await;
+        assert_eq!(restart_recover_resp.status, "ok");
+        let restart_recover = restart_recover_resp.payload.unwrap();
+        assert_eq!(restart_recover["lifecycle_state"].as_str(), Some("running"));
+        assert_eq!(
+            restart_recover["availability_state"].as_str(),
+            Some("healthy")
+        );
+
+        let health_recover_req = r#"{"version":1,"request_id":"r-gh-health-recover","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let health_recover_resp =
+            handle_gh_monitor_health_command(health_recover_req, temp.path()).await;
+        assert_eq!(health_recover_resp.status, "ok");
+        let health_recover = health_recover_resp.payload.unwrap();
+        assert_eq!(health_recover["lifecycle_state"].as_str(), Some("running"));
+        assert_eq!(
+            health_recover["availability_state"].as_str(),
+            Some("healthy")
+        );
     }
 
     #[tokio::test]
