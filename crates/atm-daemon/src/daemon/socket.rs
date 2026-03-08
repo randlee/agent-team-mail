@@ -8891,7 +8891,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r1","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-abc","process_id":0}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -8923,7 +8923,7 @@ exit 1
             tracker.set_state("team-lead", AgentState::Idle);
         }
         let req_json = r#"{"version":1,"request_id":"r2","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"sess-xyz","process_id":0}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         // State should remain Idle (not reset to Launching) — session_start only registers if not already tracked
         let tracker = store.lock().unwrap();
@@ -9009,7 +9009,7 @@ exit 1
             tracker.set_state("arch-ctm", AgentState::Active);
         }
         let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-1","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -9028,7 +9028,7 @@ exit 1
         let sr = make_sr();
         // Agent exists in payload but is not a member of the team config.
         let req_json = r#"{"version":1,"request_id":"r4","command":"hook-event","payload":{"event":"teammate_idle","agent":"new-agent","session_id":"sess-2","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -9175,7 +9175,7 @@ exit 1
                 .upsert_for_team("atm-dev", "team-lead", "sess-end", 1111);
         }
         let req_json = r#"{"version":1,"request_id":"r5","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-end","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -9207,7 +9207,7 @@ exit 1
             tracker.set_state("team-lead", AgentState::Idle);
         }
         let req_json = r#"{"version":1,"request_id":"r5-unknown","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-missing","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -9231,7 +9231,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r5-unknown-team","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-unknown","team":"unknown-team"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -9259,7 +9259,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r5-unknown-agent","command":"hook-event","payload":{"event":"session_end","agent":"arch-ctm","session_id":"sess-unknown-agent","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -9292,7 +9292,7 @@ exit 1
             reg.mark_dead_for_team("atm-dev", "team-lead");
         }
         let req_json = r#"{"version":1,"request_id":"r5-dead","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-dead","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -9325,7 +9325,7 @@ exit 1
                 .upsert_for_team("atm-dev", "team-lead", "sess-current", 1111);
         }
         let req_json = r#"{"version":1,"request_id":"r5-mismatch","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","session_id":"sess-other","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -9359,7 +9359,7 @@ exit 1
                 .upsert_for_team("atm-dev", "team-lead", "sess-current", 1111);
         }
         let req_json = r#"{"version":1,"request_id":"r5-no-session","command":"hook-event","payload":{"event":"session_end","agent":"team-lead","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -9382,7 +9382,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r6","command":"hook-event","payload":{"event":"some_future_event","agent":"team-lead","team":"atm-dev","session_id":"s1"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -9402,7 +9402,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r7","command":"hook-event","payload":{"event":"session_start","agent":"","team":"atm-dev","session_id":"sess-1"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -9415,7 +9415,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":99,"request_id":"r8","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"s1"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "error");
         assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
     }
@@ -9428,7 +9428,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-missing-team","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","session_id":"s1"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -9443,7 +9443,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-non-lead-start","command":"hook-event","payload":{"event":"session_start","agent":"arch-ctm","team":"atm-dev","session_id":"sess-x"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
@@ -9457,7 +9457,7 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         let req_json = r#"{"version":1,"request_id":"r-non-member-start","command":"hook-event","payload":{"event":"session_start","agent":"rogue-member","team":"atm-dev","session_id":"sess-rogue"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -9505,7 +9505,7 @@ exit 1
             "{{\"version\":1,\"request_id\":\"r-backend-mismatch\",\"command\":\"hook-event\",\"payload\":{{\"event\":\"session_start\",\"agent\":\"arch-ctm\",\"team\":\"atm-dev\",\"session_id\":\"sess-mismatch\",\"process_id\":{}}}}}",
             std::process::id()
         );
-        let resp = handle_hook_event_command(&req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(!payload["processed"].as_bool().unwrap());
@@ -9980,7 +9980,7 @@ exit 1
         };
         let req_str = serde_json::to_string(&request).unwrap();
 
-        let resp = handle_hook_event_command(&req_str, &state_store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &state_store, &sr).await;
 
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -10029,7 +10029,7 @@ exit 1
         };
         let req_str = serde_json::to_string(&request).unwrap();
 
-        let _resp = handle_hook_event_command(&req_str, &state_store, &sr).await;
+        let _resp = handle_hook_event_with_transient_retry(&req_str, &state_store, &sr).await;
 
         // Agent must NOT appear in the tracker after an empty-session_id event
         let tracker = state_store.lock().unwrap();
@@ -10175,7 +10175,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -10213,7 +10213,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -10244,7 +10244,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -10278,7 +10278,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -10310,7 +10310,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
@@ -10345,7 +10345,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
