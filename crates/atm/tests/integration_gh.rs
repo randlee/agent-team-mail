@@ -353,3 +353,64 @@ fn test_gh_monitor_lifecycle_status_roundtrip_json() {
     let _ = daemon.kill();
     let _ = daemon.wait();
 }
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_status_accepts_json_flag_after_subcommand() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut health = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut health, &temp_dir);
+    let health_output = health
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("status")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let health_json: serde_json::Value = serde_json::from_slice(&health_output).unwrap();
+    assert_eq!(health_json["team"].as_str(), Some("test-team"));
+    assert_eq!(health_json["lifecycle_state"].as_str(), Some("running"));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_status_human_output_is_single_block() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut health = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut health, &temp_dir);
+    let health_output = health
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(health_output).unwrap();
+    assert_eq!(stdout.matches("Team:").count(), 1);
+    assert_eq!(stdout.matches("Lifecycle:").count(), 1);
+    assert_eq!(stdout.matches("Availability:").count(), 1);
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
