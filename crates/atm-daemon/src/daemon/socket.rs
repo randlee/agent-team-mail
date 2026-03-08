@@ -6521,7 +6521,7 @@ poll_interval_secs = 1
         ));
 
         let req_json = r#"{"version":1,"request_id":"r-restart-idle","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-partial","team":"atm-dev"}}"#;
-        let resp = handle_hook_event_command(req_json, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(payload["processed"].as_bool().unwrap());
