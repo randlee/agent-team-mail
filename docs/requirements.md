@@ -1924,6 +1924,23 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 - Daemon MUST NOT remove an existing socket file unless lock ownership has already
   been acquired by the current process.
 
+#### Stale Daemon Recovery and Identity Validation
+
+- Daemon lock ownership metadata must include process identity sufficient to
+  validate staleness in the current ATM scope (at minimum PID and executable
+  identity metadata).
+- If lock ownership metadata references a dead PID, daemon startup may reclaim
+  lock ownership in the same scope.
+- CLI daemon-connect readiness checks must validate that the responding daemon
+  matches expected scope/identity for the current command context before
+  treating it as healthy.
+- If daemon identity validation fails (stale/mismatched daemon), CLI must fail
+  safely with actionable restart guidance and must not silently proceed.
+- Production startup must not perform broad cross-scope daemon kill sweeps; any
+  process reclamation behavior must remain scope-bound and explicit.
+- Test harness paths that spawn daemon processes must provide bounded cleanup so
+  repeated test runs do not accumulate stale daemons.
+
 #### Team/Repo Isolation Contract
 
 Single daemon process does not imply shared team behavior. Runtime behavior must

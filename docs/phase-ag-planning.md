@@ -42,6 +42,42 @@ The library skeleton is already in the workspace (v0.41.0) but `compose()` and
 
 ## Sprint Plan
 
+### AG.0 — Daemon Stale-Process Hygiene (Issue #539, pre-AG gate)
+
+**Goal:** prevent stale `atm-daemon` processes from test worktrees and ensure
+CLI auto-start/connect does not silently bind to stale/incorrect daemon
+instances.
+
+**Design decision (for implementation):**
+- Do **not** perform broad cross-scope/global process kill on production daemon
+  startup.
+- Enforce correctness in current ATM scope via lock-holder liveness + daemon
+  identity validation (PID/exe/home-scope) during client connect/startup.
+- Add explicit test-harness cleanup behavior for test-scoped daemon processes.
+
+**Deliverables:**
+- `atm-daemon` lock/identity hardening:
+  - lock metadata must include holder PID and executable path (or equivalent
+    process identity metadata) for stale lock recovery in same scope.
+  - startup must reclaim lock only when prior holder is confirmed dead.
+- CLI/daemon connect hardening:
+  - daemon-backed commands must validate that responding daemon matches current
+    expected scope/identity contract before accepting it as healthy.
+  - mismatch/stale daemon response must trigger actionable restart path.
+- Test lifecycle hardening:
+  - `DaemonProcessGuard` cleanup must cover panic/aborted test paths where
+    possible and register best-effort teardown hooks.
+  - add test-only stale-daemon sweep utility/fixture so new tests do not
+    accumulate detached daemon processes across runs.
+
+**Tests:**
+- same-scope stale lock PID dead -> startup recovers and starts one daemon.
+- same-scope stale/identity-mismatch daemon on socket -> CLI detect + restart.
+- test abort/panic paths do not leave unbounded daemon processes.
+- repeated test runs with isolated `ATM_HOME` do not accumulate stale daemons.
+
+---
+
 ### AG.1 — Library MVP: Frontmatter + Render (file mode)
 
 **Goal:** Implement working `compose()` and `validate()` for file-mode requests.
@@ -153,6 +189,8 @@ AG.1 (library MVP — working compose())
   └── AG.2 (resolver + includes)
         └── AG.3 (sc-compose binary)  ← also depends on AG.1 for core API
               └── AG.4 (atm teams spawn + integration tests)
+
+AG.0 (stale-daemon hygiene) runs as a pre-AG gate before AG.1.
 ```
 
 AG.3 can start after AG.1 (binary only needs file-mode compose); AG.2 and AG.3

@@ -1467,6 +1467,7 @@ the current tranche focused on onboarding contract closure.
 - Design/architecture: `docs/sc-composer/architecture.md`
 - Test plan: `docs/test-plan-phase-AG.md`
 - Execution plan: `docs/phase-ag-planning.md`
+- Pre-AG gate: AG.0 stale-daemon hygiene planning for issue [#539](https://github.com/randlee/agent-team-mail/issues/539)
 
 ---
 
