@@ -106,6 +106,13 @@ struct AvailabilityDeduper {
     seen_keys: HashSet<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeamMembership {
+    Member,
+    NonMember,
+    Unknown,
+}
+
 impl AvailabilityDeduper {
     fn should_process(&mut self, key: &str) -> bool {
         self.seen_keys.insert(key.to_string())
@@ -464,6 +471,15 @@ fn apply_hook_event(
                 warn!("agent-turn-complete event missing required availability fields, skipping");
                 return;
             };
+            let membership =
+                classify_team_membership(claude_root, Some(signal.team.as_str()), &signal.agent);
+            if matches!(membership, TeamMembership::NonMember) {
+                debug!(
+                    "Skipping transient availability signal for non-member {}/{}",
+                    signal.team, signal.agent
+                );
+                return;
+            }
             if signal.state != "idle" {
                 debug!(
                     "Skipping availability event with unsupported state '{}' for {}/{}",
@@ -494,15 +510,35 @@ fn apply_hook_event(
                     "hook_watcher",
                 );
             } else {
-                // Agent not yet registered — auto-register as Idle.
-                debug!("Auto-registering untracked agent {agent_id} as Idle");
-                tracker.register_agent(&agent_id);
-                tracker.set_state_with_context(
-                    &agent_id,
-                    AgentState::Idle,
-                    "agent-turn-complete hook (auto-register)",
-                    "hook_watcher",
-                );
+                match membership {
+                    TeamMembership::Member => {
+                        // Team member with no tracker row yet — bootstrap to Idle.
+                        debug!("Bootstrapping tracked team member {agent_id} as Idle");
+                        tracker.register_agent(&agent_id);
+                        tracker.set_state_with_context(
+                            &agent_id,
+                            AgentState::Idle,
+                            "agent-turn-complete hook (team-member bootstrap)",
+                            "hook_watcher",
+                        );
+                    }
+                    TeamMembership::Unknown => {
+                        // Preserve existing fail-open behavior when membership cannot be resolved.
+                        debug!(
+                            "Auto-registering untracked agent {agent_id} as Idle (membership unknown)"
+                        );
+                        tracker.register_agent(&agent_id);
+                        tracker.set_state_with_context(
+                            &agent_id,
+                            AgentState::Idle,
+                            "agent-turn-complete hook (auto-register, membership unknown)",
+                            "hook_watcher",
+                        );
+                    }
+                    TeamMembership::NonMember => {
+                        // Early return above handles this case.
+                    }
+                }
             }
         }
         "session-start" => {
@@ -524,6 +560,22 @@ fn apply_hook_event(
             debug!(
                 "SessionStart hook received for {agent_id} (session: {session_id}, pid: {process_id})"
             );
+            let membership =
+                classify_team_membership(claude_root, event.team.as_deref(), &agent_id);
+            if matches!(membership, TeamMembership::NonMember) {
+                if let Some(team) = event.team.as_deref() {
+                    debug!(
+                        "Skipping transient session-start for non-member {}@{}",
+                        agent_id, team
+                    );
+                } else {
+                    debug!(
+                        "Skipping transient session-start for non-member {}",
+                        agent_id
+                    );
+                }
+                return;
+            }
             if let Some(registry) = session_registry {
                 let mut reg = registry.lock().unwrap();
                 if let Some(team) = event.team.as_deref() {
@@ -601,6 +653,43 @@ fn apply_hook_event(
         unknown => {
             debug!("Unrecognised hook event type '{unknown}', ignoring");
         }
+    }
+}
+
+fn classify_team_membership(
+    claude_root: Option<&Path>,
+    team: Option<&str>,
+    agent_name: &str,
+) -> TeamMembership {
+    let Some(claude_root) = claude_root else {
+        return TeamMembership::Unknown;
+    };
+    let Some(team) = team.map(str::trim).filter(|t| !t.is_empty()) else {
+        return TeamMembership::Unknown;
+    };
+    let config_path = claude_root.join("teams").join(team).join("config.json");
+    if !config_path.is_file() {
+        return TeamMembership::Unknown;
+    }
+
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(_) => return TeamMembership::Unknown,
+    };
+    let team_config: TeamConfig = match serde_json::from_str(&content) {
+        Ok(config) => config,
+        Err(_) => return TeamMembership::Unknown,
+    };
+
+    let expected_agent_id = format!("{agent_name}@{team}");
+    if team_config
+        .members
+        .iter()
+        .any(|member| member.name == agent_name || member.agent_id == expected_agent_id)
+    {
+        TeamMembership::Member
+    } else {
+        TeamMembership::NonMember
     }
 }
 
@@ -717,6 +806,35 @@ mod tests {
         AvailabilityDeduper::default()
     }
 
+    fn write_team_config(root: &Path, team: &str, members: &[(&str, &str)]) -> std::path::PathBuf {
+        let team_dir = root.join("teams").join(team);
+        std::fs::create_dir_all(&team_dir).unwrap();
+        let members_json: Vec<serde_json::Value> = members
+            .iter()
+            .map(|(name, agent_type)| {
+                serde_json::json!({
+                    "agentId": format!("{name}@{team}"),
+                    "name": name,
+                    "agentType": agent_type,
+                    "model": "unknown",
+                    "joinedAt": 1739284800000i64,
+                    "cwd": ".",
+                    "subscriptions": []
+                })
+            })
+            .collect();
+        let config = serde_json::json!({
+            "name": team,
+            "createdAt": 1739284800000i64,
+            "leadAgentId": format!("team-lead@{team}"),
+            "leadSessionId": "lead-session",
+            "members": members_json
+        });
+        let config_path = team_dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        config_path
+    }
+
     // ── hook event parsing ────────────────────────────────────────────────
 
     #[test]
@@ -816,6 +934,38 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_turn_complete_non_member_with_team_config_is_ignored() {
+        let state = make_state();
+        let mut deduper = make_deduper();
+        let dir = tempfile::tempdir().unwrap();
+        write_team_config(dir.path(), "atm-dev", &[("arch-ctm", "codex")]);
+
+        let json = r#"{"type":"agent-turn-complete","agent":"transient-worker","team":"atm-dev","state":"idle","timestamp":"2026-03-01T00:00:00Z","idempotency_key":"k-non-member"}"#;
+        process_hook_line(json, &state, None, Some(dir.path()), &mut deduper);
+
+        assert!(
+            state.lock().unwrap().all_states().is_empty(),
+            "non-member transient hook should not auto-register tracker state"
+        );
+    }
+
+    #[test]
+    fn test_agent_turn_complete_team_member_bootstraps_tracker_state() {
+        let state = make_state();
+        let mut deduper = make_deduper();
+        let dir = tempfile::tempdir().unwrap();
+        write_team_config(dir.path(), "atm-dev", &[("arch-ctm", "codex")]);
+
+        let json = r#"{"type":"agent-turn-complete","agent":"arch-ctm","team":"atm-dev","state":"idle","timestamp":"2026-03-01T00:00:00Z","idempotency_key":"k-member"}"#;
+        process_hook_line(json, &state, None, Some(dir.path()), &mut deduper);
+
+        assert_eq!(
+            state.lock().unwrap().get_state("arch-ctm"),
+            Some(AgentState::Idle)
+        );
+    }
+
+    #[test]
     fn test_missing_agent_field_does_not_panic() {
         let state = make_state();
         let mut deduper = make_deduper();
@@ -854,6 +1004,30 @@ mod tests {
         assert_eq!(record.process_id, 4242);
         use crate::daemon::session_registry::SessionState;
         assert_eq!(record.state, SessionState::Active);
+    }
+
+    #[test]
+    fn test_session_start_non_member_with_team_config_skips_registry_upsert() {
+        let state = make_state();
+        let mut deduper = make_deduper();
+        let registry = new_session_registry();
+        let dir = tempfile::tempdir().unwrap();
+        write_team_config(dir.path(), "atm-dev", &[("arch-ctm", "codex")]);
+
+        let json = r#"{"type":"session-start","agent":"transient-worker","team":"atm-dev","sessionId":"sess-transient","processId":4242}"#;
+        process_hook_line(
+            json,
+            &state,
+            Some(&registry),
+            Some(dir.path()),
+            &mut deduper,
+        );
+
+        let reg = registry.lock().unwrap();
+        assert!(
+            reg.query_for_team("atm-dev", "transient-worker").is_none(),
+            "non-member transient session-start must not create session registry row"
+        );
     }
 
     #[test]
