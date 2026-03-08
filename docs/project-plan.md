@@ -2013,7 +2013,24 @@ observability/runtime gaps discovered during dogfooding.
 | AE.4 | Daemon Logging/Autostart/Plugin Isolation | [#522](https://github.com/randlee/agent-team-mail/pull/522) | `feature/pAE-s4-daemon-observability` | #472, #473, #474 | COMPLETE |
 | AE.5 | Identity Ambiguity + Phase Closeout | [#523](https://github.com/randlee/agent-team-mail/pull/523) | `feature/pAE-s5-identity-closeout` | #506 | COMPLETE |
 
-## 23. Scrum Master Agent Prompt
+## 23. Phase AF: Team Management Reliability + Lifecycle Hardening
+
+**Goal**: close team-member lifecycle, spawn authorization, and cleanup reliability
+gaps before transitioning to post-AF phase work.
+
+**Integration branch**: `integrate/phase-AF`
+
+### Sprint Summary
+
+| Sprint | Name | PR | Branch | Issues | Status |
+|---|---|---|---|---|---|
+| AF.1 | Lifecycle Correctness (Session + PID Liveness) | [#524](https://github.com/randlee/agent-team-mail/pull/524) | `feature/pAF-s1-lifecycle-correctness` | #448, #449 | COMPLETE |
+| AF.2 | Spawn Authorization + Preview UX | [#526](https://github.com/randlee/agent-team-mail/pull/526) | `feature/pAF-s2-spawn-auth-preview` | #394, #456 | COMPLETE |
+| AF.3 | Transient Agent Registration Controls | [#527](https://github.com/randlee/agent-team-mail/pull/527) *(pending)* | `feature/pAF-s3-transient-registration` | #393 | COMPLETE |
+| AF.4 | Cleanup Preview + tmux Sentinel | [#528](https://github.com/randlee/agent-team-mail/pull/528) *(pending)* | `feature/pAF-s4-cleanup-sentinel` | #373, #45 | COMPLETE |
+| AF.5 | Reliability Regression + Documentation Closure | [#529](https://github.com/randlee/agent-team-mail/pull/529) *(pending)* | `feature/pAF-s5-reliability-closeout` | #448, #449, #393, #394, #456, #373, #45 | COMPLETE |
+
+## 24. Scrum Master Agent Prompt
 
 ```
 You are the Scrum Master for the agent-team-mail (atm) project.
