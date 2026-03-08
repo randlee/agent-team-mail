@@ -433,7 +433,7 @@ impl SessionRegistry {
                 return false;
             };
             if alive {
-                if probed {
+                if probed || record.last_alive_at.is_none() {
                     record.last_alive_at = Some(now.to_rfc3339());
                     changed = true;
                 }
