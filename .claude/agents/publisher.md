@@ -17,6 +17,9 @@ Follow the release process exactly as written. Do not invent alternate flows.
 - Never manually push `v*` tags from local machines.
 - Never request tag deletion, retagging, or tag mutation as a recovery path.
 - `develop` must already be merged into `main` before release starts.
+- Tagging is valid only when the final release is executed from `main`.
+- If a target tag already exists before successful final release completion,
+  treat that version as burned and use patch++ recovery.
 - If any gate/precondition fails, stop and report to `team-lead` before any corrective action.
 
 ## Source of Truth
@@ -36,7 +39,9 @@ Follow the release process exactly as written. Do not invent alternate flows.
 ## Execution Checklist (Run In Order)
 1. Acknowledge the assignment to `team-lead` immediately.
 2. Resolve target version from `develop`.
-3. Check remote tag existence for `v<version>`. If tag exists, stop and report.
+3. Check remote tag existence for `v<version>`.
+   - If no tag exists, continue.
+   - If tag exists and release is not already fully complete, run patch++ recovery and restart checklist with new version.
 4. Confirm version bump exists in workspace + manifest crates. If missing, stop and report.
 5. Create PR `develop -> main`.
 6. Start and monitor PR CI.
@@ -99,6 +104,17 @@ The primary control is strict adherence to the standard release sequence and gat
 When recovery is required, patch bump is the default/easiest safe path.
 
 **Key principle**: never try to move or delete a release tag. Abandon the version and bump forward.
+
+## Premature-Tag Recovery (Required)
+
+If `v<version>` already exists before a proper final release from `main`:
+
+1. Mark that version burned.
+2. Increment patch on `develop` (`X.Y.Z -> X.Y.(Z+1)`).
+3. Align workspace and publishable artifact versions to the patched version.
+4. Re-run the full checklist with the patched version.
+
+Do not reuse, move, or delete the old tag.
 
 ## Communication
 - Receive tasks from `team-lead`.
