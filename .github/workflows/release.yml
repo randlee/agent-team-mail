@@ -253,6 +253,17 @@ jobs:
                           f"cargo search agent-team-mail-tui --limit 1 | grep -F 'agent-team-mail-tui = \"{version}\"'",
                       ],
                   },
+                  {
+                      "artifact": "sc-composer",
+                      "version": version,
+                      "sourceRef": f"refs/tags/{tag}",
+                      "publishTarget": "crates.io",
+                      "publish": True,
+                      "required": True,
+                      "verifyCommands": [
+                          f"cargo search sc-composer --limit 1 | grep -F 'sc-composer = \"{version}\"'",
+                      ],
+                  },
               ],
           }
           inventory["items"].sort(key=lambda x: x["artifact"])
@@ -517,6 +528,7 @@ jobs:
               "agent-team-mail-daemon",
               "agent-team-mail-mcp",
               "agent-team-mail-tui",
+              "sc-composer",
           ]
           item_by_artifact = {item.get("artifact"): item for item in inventory.get("items", [])}
           for artifact in dependency_order:

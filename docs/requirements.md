@@ -663,8 +663,12 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 - Absence of a daemon state record is NOT equivalent to staleness for external
   agents; these agents do not fire Claude Code lifecycle hooks and may be active
   without a session_registry entry.
-- When an external agent is skipped due to this guard, `--dry-run` output MUST
-  include a row noting the member was retained with reason `external-agent-no-state`.
+- When an external agent has no `session_id` but a recent heartbeat (younger
+  than staleness threshold), `--dry-run` output MUST include a retained row with
+  reason `external-agent-liveness-unknown`.
+- When an external agent has session metadata but no daemon state record and is
+  retained by the guard, `--dry-run` output MUST include reason
+  `external-agent-no-state`.
 
 **Command expectations**:
 - `atm cleanup --agent <name>`: non-destructive for active agents; applies teardown cleanup
@@ -674,11 +678,23 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
   then teardown cleanup invariant.
 - `atm teams cleanup <team> [agent] --dry-run`: non-mutating preview mode that MUST:
   1. render a table of candidate actions (roster removal, mailbox delete, session prune),
-  2. include a reason per row,
+  2. include a stable reason code per row (kebab-case),
   3. include total counts by action type, and
   4. exit `0` with no writes.
   If there are no candidates, output `Nothing to clean up for team <name>.`,
   do not print an empty table header, and still exit `0`.
+  Required reason-code vocabulary includes:
+  - `forced-cleanup`
+  - `daemon-session-dead`
+  - `daemon-no-session-record`
+  - `daemon-unreachable`
+  - `daemon-query-error`
+  - `external-agent-no-state`
+  - `external-agent-liveness-unknown`
+  - `external-agent-daemon-query-error`
+  - `stale-session-metadata`
+  - `orphan-mailbox`
+  - `team-lead-protected`
 
 ### 4.3.2 `atm teams spawn` (Claude Runtime Baseline)
 
@@ -727,20 +743,10 @@ Non-goal:
 
 ### 4.3.2b External Agent Cleanup Guard
 
-`atm teams cleanup` MUST NOT remove members with `external_backend_type` set (Codex, Gemini,
-or external agents) unless daemon explicitly confirms the session is dead.
-
-Required behavior:
-- If the member has **no `session_id`**: cleanup must skip the member with a warning indicating
-  liveness is unknown; the member is kept.
-- If the member has a `session_id`: cleanup queries daemon; only removes if daemon reports
-  `alive == false`.
-- If daemon is unreachable and no `--force` flag: external agent is skipped with warning.
-- `--force` bypasses liveness checks and removes unconditionally.
-- `--dry-run` must list skipped external agents with reason.
-
-Rationale: External agents (Codex, Gemini) do not fire Claude Code lifecycle hooks; the daemon
-may have no session record for them even when they are actively running.
+Canonical behavior for external-agent cleanup is defined in the
+**External-agent cleanup guard (REQUIRED)** section above (staleness-based
+guard with stable reason codes). This section is a reference anchor only and
+must not introduce alternate semantics.
 
 ### 4.3.2c `atm spawn` — Interactive Review-Panel Mode
 
@@ -790,6 +796,18 @@ it MUST enter interactive review-panel mode before executing any spawn side effe
 - Output MUST include: pane placement action, fully resolved launch command with
   all flags, and a description of the config registration step.
 - MUST print `No changes made (dry-run).` and exit 0.
+
+### 4.3.3 Tmux Sentinel Injection (Issue #45)
+
+When notifying tmux-based teammates about unread inbox messages, daemon nudges
+MUST inject a structured sentinel line (not the message payload itself):
+
+- Format: `[agent-team-msg:<tier>] unread=<count>`
+- Tier vocabulary: `info`, `urgent`, `blocked` (default: `urgent`)
+- Sentinel delivery MUST only occur for eligible idle-transition nudges
+  (idle-only + cooldown + watermark controls)
+- Actual message content remains mailbox-backed (`atm read`), and MUST NOT be
+  duplicated into tmux nudge payloads.
 
 **Non-goal**:
 - The interactive panel renders line-by-line to a standard terminal; full
@@ -1538,6 +1556,10 @@ AuthZ and validation should be source-aware in one handler, not split across
 multiple transport packet types.
 
 Lifecycle event semantics:
+- `session_start`: must only be accepted for known roster members of the
+  addressed team. Non-member `session_start` events must return
+  `processed=false` with reason `agent not in team` and must not mutate session
+  registry or roster-derived daemon state.
 - `permission_request`: indicates the agent is blocked waiting for user/tool
   approval and must transition activity to busy-equivalent state with explicit
   blocked-permission reason metadata.
@@ -1547,6 +1569,32 @@ Lifecycle event semantics:
   without changing liveness.
 - `teammate_idle`: compatibility idle signal and must remain supported as an
   idle transition event.
+
+#### Transient Registration Contract (Task-Tool Agents)
+
+Task-tool/background agents that are not explicit team members are transient and
+must not pollute persistent ATM roster/session state.
+
+Required behavior:
+- Team-scoped lifecycle signals (`agent-turn-complete`, `session-start`,
+  `session-end`) must be treated as **non-persistent** when `agent` is not
+  present in `config.json` for that team.
+- For non-members, daemon hook processors must ignore lifecycle updates without:
+  - creating `session_registry` rows,
+  - creating tracked state rows that surface as persistent team members, or
+  - mutating team roster/config files.
+- Existing team members must keep current behavior (state/session updates still
+  converge as before).
+- `send`/`read` operations by identities not in roster must remain fail-open for
+  messaging, but must not auto-add roster members as a side effect.
+
+Acceptance criteria:
+- Transient task-tool agents do not appear as persistent members in
+  `atm members`, `atm status`, or `atm doctor`.
+- Session/state updates for valid team members remain deterministic and
+  unchanged.
+- Regression tests cover transient non-member lifecycle events and
+  member-vs-non-member branching.
 
 #### Hook Artifact Parity and Install-Path Contract
 

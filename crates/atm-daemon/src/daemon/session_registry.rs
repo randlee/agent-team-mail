@@ -19,6 +19,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Lifecycle state of a tracked agent session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +58,9 @@ pub struct SessionRecord {
     pub state: SessionState,
     /// Last state update timestamp (RFC3339 UTC).
     pub updated_at: String,
+    /// Most recent timestamp where daemon liveness probe confirmed process alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_alive_at: Option<String>,
     /// Runtime kind (e.g., `codex`, `gemini`) when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -80,6 +84,12 @@ impl SessionRecord {
     }
 }
 
+#[derive(Debug, Clone)]
+struct LivenessCacheEntry {
+    alive: bool,
+    checked_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Registry mapping team-scoped keys to their session records.
 ///
 /// Wrap in `Arc<Mutex<SessionRegistry>>` for concurrent access.
@@ -87,14 +97,18 @@ impl SessionRecord {
 pub struct SessionRegistry {
     sessions: HashMap<String, SessionRecord>,
     persist_path: Option<PathBuf>,
+    liveness_cache: HashMap<u32, LivenessCacheEntry>,
 }
 
 impl SessionRegistry {
+    pub(crate) const PID_LIVENESS_TTL: Duration = Duration::from_secs(5);
+
     /// Create a new, empty registry.
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
             persist_path: None,
+            liveness_cache: HashMap::new(),
         }
     }
 
@@ -103,6 +117,7 @@ impl SessionRegistry {
         Self {
             sessions: HashMap::new(),
             persist_path: Some(persist_path),
+            liveness_cache: HashMap::new(),
         }
     }
 
@@ -113,6 +128,7 @@ impl SessionRegistry {
             Self {
                 sessions,
                 persist_path: Some(persist_path),
+                liveness_cache: HashMap::new(),
             }
         } else {
             Self::with_persist_path(persist_path)
@@ -161,7 +177,9 @@ impl SessionRegistry {
         pane_id: Option<String>,
         runtime_home: Option<String>,
     ) {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now_dt = chrono::Utc::now();
+        let now = now_dt.to_rfc3339();
+        let pid_alive = process_id > 1 && is_pid_alive(process_id);
         self.sessions.insert(
             make_key(team, name),
             SessionRecord {
@@ -171,12 +189,22 @@ impl SessionRegistry {
                 process_id,
                 state: SessionState::Active,
                 updated_at: now,
+                last_alive_at: pid_alive.then(|| now_dt.to_rfc3339()),
                 runtime,
                 runtime_session_id,
                 pane_id,
                 runtime_home,
             },
         );
+        if process_id > 1 {
+            self.liveness_cache.insert(
+                process_id,
+                LivenessCacheEntry {
+                    alive: pid_alive,
+                    checked_at: now_dt,
+                },
+            );
+        }
         self.persist_best_effort();
     }
 
@@ -203,12 +231,42 @@ impl SessionRegistry {
         self.sessions.get(&make_key(team, name))
     }
 
+    /// Query by agent name and reconcile liveness through the bounded cache.
+    pub fn query_with_liveness(&mut self, name: &str) -> Option<SessionRecord> {
+        if self.sessions.contains_key(name) {
+            return self.refresh_record_and_clone(name);
+        }
+        // Backward-compatible lookup by unique agent name.
+        let matches: Vec<String> = self
+            .sessions
+            .iter()
+            .filter_map(|(k, r)| {
+                (r.agent_name == name || make_key(&r.team, &r.agent_name) == name)
+                    .then_some(k.clone())
+            })
+            .collect();
+        if matches.len() != 1 {
+            return None;
+        }
+        self.refresh_record_and_clone(&matches[0])
+    }
+
+    /// Team-scoped query with liveness reconciliation.
+    pub fn query_for_team_with_liveness(
+        &mut self,
+        team: &str,
+        name: &str,
+    ) -> Option<SessionRecord> {
+        self.refresh_record_and_clone(&make_key(team, name))
+    }
+
     /// Mark the session for `name` as [`SessionState::Dead`].
     ///
     /// Does nothing if the agent is not registered.
     pub fn mark_dead(&mut self, name: &str) {
         if let Some(record) = self.sessions.get_mut(name) {
             record.state = SessionState::Dead;
+            self.liveness_cache.remove(&record.process_id);
             self.persist_best_effort();
             return;
         }
@@ -224,6 +282,7 @@ impl SessionRegistry {
             && let Some(record) = self.sessions.get_mut(&matches[0])
         {
             record.state = SessionState::Dead;
+            self.liveness_cache.remove(&record.process_id);
             self.persist_best_effort();
         }
     }
@@ -233,6 +292,7 @@ impl SessionRegistry {
         if let Some(record) = self.sessions.get_mut(&make_key(team, name)) {
             record.state = SessionState::Dead;
             record.updated_at = chrono::Utc::now().to_rfc3339();
+            self.liveness_cache.remove(&record.process_id);
             self.persist_best_effort();
         }
     }
@@ -260,13 +320,15 @@ impl SessionRegistry {
 
         record.state = SessionState::Dead;
         record.updated_at = chrono::Utc::now().to_rfc3339();
+        self.liveness_cache.remove(&record.process_id);
         self.persist_best_effort();
         MarkDeadForSessionOutcome::MarkedDead
     }
 
     /// Remove a team-scoped session record.
     pub fn remove_for_team(&mut self, team: &str, name: &str) {
-        if self.sessions.remove(&make_key(team, name)).is_some() {
+        if let Some(record) = self.sessions.remove(&make_key(team, name)) {
+            self.liveness_cache.remove(&record.process_id);
             self.persist_best_effort();
         }
     }
@@ -277,6 +339,28 @@ impl SessionRegistry {
             .values()
             .filter(|record| record.team == team)
             .cloned()
+            .collect()
+    }
+
+    /// Return all tracked session records for a team after bounded liveness
+    /// reconciliation.
+    pub fn sessions_for_team_with_liveness(&mut self, team: &str) -> Vec<SessionRecord> {
+        let keys: Vec<String> = self
+            .sessions
+            .iter()
+            .filter_map(|(k, v)| (v.team == team).then_some(k.clone()))
+            .collect();
+        let mut changed = false;
+        for key in &keys {
+            if self.refresh_record_liveness(key) {
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist_best_effort();
+        }
+        keys.into_iter()
+            .filter_map(|k| self.sessions.get(&k).cloned())
             .collect()
     }
 
@@ -309,6 +393,78 @@ impl SessionRegistry {
                 path.display()
             );
         }
+    }
+
+    fn refresh_record_and_clone(&mut self, key: &str) -> Option<SessionRecord> {
+        if !self.sessions.contains_key(key) {
+            return None;
+        }
+        let changed = self.refresh_record_liveness(key);
+        if changed {
+            self.persist_best_effort();
+        }
+        self.sessions.get(key).cloned()
+    }
+
+    fn refresh_record_liveness(&mut self, key: &str) -> bool {
+        let now = chrono::Utc::now();
+        let Some(existing) = self.sessions.get(key) else {
+            return false;
+        };
+        let process_id = existing.process_id;
+        let state = existing.state.clone();
+
+        if process_id <= 1 {
+            let Some(record) = self.sessions.get_mut(key) else {
+                return false;
+            };
+            if record.state != SessionState::Dead {
+                record.state = SessionState::Dead;
+                record.updated_at = now.to_rfc3339();
+                return true;
+            }
+            return false;
+        }
+
+        let (alive, probed) = self.pid_alive_cached(process_id, now);
+        let mut changed = false;
+        if state == SessionState::Active {
+            let Some(record) = self.sessions.get_mut(key) else {
+                return false;
+            };
+            if alive {
+                if probed || record.last_alive_at.is_none() {
+                    record.last_alive_at = Some(now.to_rfc3339());
+                    changed = true;
+                }
+            } else {
+                record.state = SessionState::Dead;
+                record.updated_at = now.to_rfc3339();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn pid_alive_cached(&mut self, pid: u32, now: chrono::DateTime<chrono::Utc>) -> (bool, bool) {
+        if let Some(entry) = self.liveness_cache.get(&pid) {
+            if now
+                .signed_duration_since(entry.checked_at)
+                .to_std()
+                .is_ok_and(|age| age < Self::PID_LIVENESS_TTL)
+            {
+                return (entry.alive, false);
+            }
+        }
+        let alive = is_pid_alive(pid);
+        self.liveness_cache.insert(
+            pid,
+            LivenessCacheEntry {
+                alive,
+                checked_at: now,
+            },
+        );
+        (alive, true)
     }
 }
 
@@ -594,6 +750,79 @@ mod tests {
         assert_eq!(rec.state, SessionState::Dead);
     }
 
+    #[test]
+    fn test_query_for_team_with_liveness_marks_dead_when_pid_is_not_alive() {
+        let mut reg = SessionRegistry::new();
+        let pid = i32::MAX as u32;
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-dead", pid);
+        if let Some(entry) = reg.liveness_cache.get_mut(&pid) {
+            entry.checked_at = chrono::Utc::now()
+                - chrono::Duration::from_std(SessionRegistry::PID_LIVENESS_TTL).unwrap()
+                - chrono::Duration::milliseconds(10);
+        }
+        let refreshed = reg
+            .query_for_team_with_liveness("atm-dev", "arch-ctm")
+            .expect("session should exist");
+        assert_eq!(refreshed.state, SessionState::Dead);
+    }
+
+    #[test]
+    fn test_query_for_team_with_liveness_updates_last_alive_timestamp() {
+        let mut reg = SessionRegistry::new();
+        let pid = std::process::id();
+        reg.upsert_for_team("atm-dev", "team-lead", "sess-live", pid);
+        if let Some(record) = reg.sessions.get_mut("atm-dev::team-lead") {
+            record.last_alive_at = None;
+        }
+        let refreshed = reg
+            .query_for_team_with_liveness("atm-dev", "team-lead")
+            .expect("session should exist");
+        assert_eq!(refreshed.state, SessionState::Active);
+        assert!(
+            refreshed.last_alive_at.is_some(),
+            "active liveness probe should refresh last_alive_at"
+        );
+    }
+
+    #[test]
+    fn test_liveness_cache_reprobe_after_ttl_reclassifies_dead() {
+        let mut reg = SessionRegistry::new();
+        let pid = i32::MAX as u32;
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-stale", pid);
+        // Force a fresh-but-incorrect cached alive result to verify bounded stale windows.
+        reg.liveness_cache.insert(
+            pid,
+            LivenessCacheEntry {
+                alive: true,
+                checked_at: chrono::Utc::now(),
+            },
+        );
+
+        let first = reg
+            .query_for_team_with_liveness("atm-dev", "arch-ctm")
+            .expect("session should exist");
+        assert_eq!(
+            first.state,
+            SessionState::Active,
+            "fresh cache entry should be honored within TTL"
+        );
+
+        if let Some(entry) = reg.liveness_cache.get_mut(&pid) {
+            entry.checked_at = chrono::Utc::now()
+                - chrono::Duration::from_std(SessionRegistry::PID_LIVENESS_TTL).unwrap()
+                - chrono::Duration::milliseconds(10);
+        }
+
+        let second = reg
+            .query_for_team_with_liveness("atm-dev", "arch-ctm")
+            .expect("session should exist");
+        assert_eq!(
+            second.state,
+            SessionState::Dead,
+            "expired cache entry must trigger re-probe and dead convergence"
+        );
+    }
+
     /// Liveness check: the current process must be alive.
     #[test]
     fn test_is_pid_alive_current_process() {
@@ -617,6 +846,7 @@ mod tests {
             process_id: std::process::id(),
             state: SessionState::Active,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            last_alive_at: Some(chrono::Utc::now().to_rfc3339()),
             runtime: None,
             runtime_session_id: None,
             pane_id: None,

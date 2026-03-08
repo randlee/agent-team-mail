@@ -85,6 +85,7 @@ import json
 import os
 import signal
 import socket
+import time
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
@@ -94,6 +95,8 @@ state_path = daemon_dir / "gh-state.json"
 health_path = daemon_dir / "gh-health.json"
 configured = os.environ.get("ATM_FAKE_GH_CONFIGURED", "1") == "1"
 enabled = os.environ.get("ATM_FAKE_GH_ENABLED", "1") == "1"
+monitor_delay_ms = int(os.environ.get("ATM_FAKE_GH_MONITOR_DELAY_MS", "0") or "0")
+control_delay_ms = int(os.environ.get("ATM_FAKE_GH_CONTROL_DELAY_MS", "0") or "0")
 availability_state = "healthy" if configured and enabled else "disabled_config_error"
 availability_message = None
 if not configured:
@@ -144,6 +147,8 @@ while running:
         payload = req.get("payload", {}) or {}
 
         if command == "gh-monitor":
+            if monitor_delay_ms > 0:
+                time.sleep(monitor_delay_ms / 1000.0)
             status_payload = {
                 "team": payload.get("team", "test-team"),
                 "configured": True,
@@ -184,6 +189,8 @@ while running:
                 }
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": status_payload}
         elif command == "gh-monitor-control":
+            if control_delay_ms > 0:
+                time.sleep(control_delay_ms / 1000.0)
             action = payload.get("action", "start")
             if action == "stop":
                 health_payload = {
@@ -315,11 +322,22 @@ fn wait_for_daemon_socket(home: &Path) {
 
 #[cfg(unix)]
 fn start_fake_gh_daemon(home: &Path) -> Child {
-    start_fake_gh_daemon_with_mode(home, true, true)
+    start_fake_gh_daemon_with_mode_and_delays(home, true, true, 0, 0)
 }
 
 #[cfg(unix)]
 fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) -> Child {
+    start_fake_gh_daemon_with_mode_and_delays(home, configured, enabled, 0, 0)
+}
+
+#[cfg(unix)]
+fn start_fake_gh_daemon_with_mode_and_delays(
+    home: &Path,
+    configured: bool,
+    enabled: bool,
+    monitor_delay_ms: u64,
+    control_delay_ms: u64,
+) -> Child {
     let script = write_fake_gh_daemon_script(home);
     // Retry on ETXTBUSY (code 26): Linux can transiently block execution of a
     // newly-written file on CI while kernel mappings settle.
@@ -330,6 +348,8 @@ fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) 
                 .env("ATM_HOME", home)
                 .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
                 .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
+                .env("ATM_FAKE_GH_MONITOR_DELAY_MS", monitor_delay_ms.to_string())
+                .env("ATM_FAKE_GH_CONTROL_DELAY_MS", control_delay_ms.to_string())
                 .spawn()
             {
                 Ok(child) => break child,
@@ -342,6 +362,62 @@ fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) 
     };
     wait_for_daemon_socket(home);
     child
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_and_control_allow_daemon_responses_over_500ms() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon =
+        start_fake_gh_daemon_with_mode_and_delays(temp_dir.path(), true, true, 750, 750);
+
+    let mut monitor = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut monitor, &temp_dir, "test-team", true);
+    let monitor_output = monitor
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("workflow")
+        .arg("ci")
+        .arg("--ref")
+        .arg("develop")
+        .arg("--start-timeout")
+        .arg("30")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let monitor_json: serde_json::Value = serde_json::from_slice(&monitor_output).unwrap();
+    assert_eq!(monitor_json["state"].as_str(), Some("tracking"));
+    assert_eq!(monitor_json["target_kind"].as_str(), Some("workflow"));
+
+    let mut stop = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut stop, &temp_dir, "test-team", true);
+    let stop_output = stop
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("stop")
+        .arg("--drain-timeout")
+        .arg("1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stop_json: serde_json::Value = serde_json::from_slice(&stop_output).unwrap();
+    assert_eq!(stop_json["lifecycle_state"].as_str(), Some("stopped"));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }
 
 #[test]
@@ -494,10 +570,8 @@ fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
         "status should fail when gh_monitor is not configured"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("gh_monitor") || stderr.contains("not configured"),
-        "expected config error in stderr: {stderr}"
-    );
+    assert!(stderr.contains("gh_monitor plugin is not configured"));
+    assert!(stderr.contains("Remediation: run `atm gh init` and retry."));
 
     let _ = daemon.kill();
     let _ = daemon.wait();
@@ -634,7 +708,7 @@ fn test_gh_monitor_fails_with_actionable_guidance_when_plugin_unconfigured() {
         .arg("123")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("Run `atm gh init`"));
+        .stderr(predicates::str::contains("atm gh init"));
 }
 
 #[test]

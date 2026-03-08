@@ -19,9 +19,9 @@ gaps that impact operational correctness for multi-agent ATM usage.
 
 ## Requirements References
 
-1. `docs/requirements.md` §4.5 (session lifecycle + hook semantics).
-2. `docs/requirements.md` §4.7 (daemon liveness and startup behavior).
-3. `docs/requirements.md` §4.9.5 (`atm init` + runtime install/reliability context).
+1. `docs/requirements.md` §4.3.1 (session lifecycle + hook semantics).
+2. `docs/requirements.md` §4.3.2 and §4.3.2b (spawn + cleanup semantics).
+3. `docs/requirements.md` §4.3.3 and §4.3.3d (`atm init` + runtime install/reliability context).
 
 ## Dependency Graph
 
@@ -35,11 +35,11 @@ gaps that impact operational correctness for multi-agent ATM usage.
 
 | Sprint | Name | PR | Branch | Issues | Status |
 |---|---|---|---|---|---|
-| AF.1 | Lifecycle Correctness (Session + PID Liveness) | — | `feature/pAF-s1-lifecycle-correctness` | #448, #449 | PLANNED |
-| AF.2 | Spawn Authorization + Preview UX | — | `feature/pAF-s2-spawn-auth-preview` | #394, #456 | PLANNED |
-| AF.3 | Transient Agent Registration Controls | — | `feature/pAF-s3-transient-registration` | #393 | PLANNED |
-| AF.4 | Cleanup Preview + tmux Sentinel | — | `feature/pAF-s4-cleanup-sentinel` | #373, #45 | PLANNED |
-| AF.5 | Reliability Regression + Documentation Closure | — | `feature/pAF-s5-reliability-closeout` | #448, #449, #393, #394, #456, #373, #45 | PLANNED |
+| AF.1 | Lifecycle Correctness (Session + PID Liveness) | [#524](https://github.com/randlee/agent-team-mail/pull/524) | `feature/pAF-s1-lifecycle-correctness` | #448, #449 | COMPLETE |
+| AF.2 | Spawn Authorization + Preview UX | [#526](https://github.com/randlee/agent-team-mail/pull/526) | `feature/pAF-s2-spawn-auth-preview` | #394, #456 | COMPLETE |
+| AF.3 | Transient Agent Registration Controls | [#527](https://github.com/randlee/agent-team-mail/pull/527) | `feature/pAF-s3-transient-registration` | #393 | COMPLETE |
+| AF.4 | Cleanup Preview + tmux Sentinel | [#528](https://github.com/randlee/agent-team-mail/pull/528) | `feature/pAF-s4-cleanup-sentinel` | #373, #45 | COMPLETE |
+| AF.5 | Reliability Regression + Documentation Closure | [#529](https://github.com/randlee/agent-team-mail/pull/529) | `feature/pAF-s5-reliability-closeout` | #448, #449, #393, #394, #456, #373, #45 | COMPLETE |
 
 ## AF.1 — Lifecycle Correctness (Session + PID Liveness)
 
@@ -104,7 +104,8 @@ Improve cleanup safety and tmux process observability.
 ### Deliverables
 
 1. Add non-mutating `atm teams cleanup --dry-run` preview output with reason codes.
-2. Implement tmux sentinel injection contract for lifecycle tracing.
+2. Implement tmux sentinel injection contract for lifecycle tracing
+   (`[agent-team-msg:<tier>] unread=<count>`, tiered `info|urgent|blocked`).
 3. Add tests for dry-run output parity with actual cleanup behavior.
 
 ### Acceptance Criteria
@@ -130,3 +131,14 @@ Finalize AF with a full regression pass and documentation alignment.
 1. AF issue scope is fully mapped to tests and implementation outcomes.
 2. Docs and behavior are consistent and reviewable by atm-qa.
 3. No unresolved blocking reliability gaps remain for next release tranche.
+
+### AF.5 Reliability Matrix (Scenario x Guarantee x Coverage)
+
+| Scenario | Guarantee | Coverage |
+|---|---|---|
+| Session lifecycle correctness (`#448`) | Deterministic session transitions; stale/non-member events rejected. | daemon socket lifecycle tests + `test_hook_event_session_start_rejects_non_member` |
+| PID liveness convergence (`#449`) | Daemon state converges to true process liveness (no stale alive drift). | daemon/core liveness unit tests + AF.1 QA regression pass |
+| Spawn authorization + preview UX (`#394`, `#456`) | Unauthorized callers fail before mutation; launch preview always emitted. | `commands::teams::tests::*authorization*` + `integration_spawn_folder` |
+| Cleanup/tmux reliability (`#373`, `#45`) | Dry-run parity + deterministic sentinel behavior across tiers. | `integration_teams_cleanup_dry_run` + daemon nudge/config tests |
+
+Full validation command list is maintained in [docs/test-plan-phase-AF.md](./test-plan-phase-AF.md).
