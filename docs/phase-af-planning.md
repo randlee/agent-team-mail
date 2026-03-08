@@ -19,9 +19,9 @@ gaps that impact operational correctness for multi-agent ATM usage.
 
 ## Requirements References
 
-1. `docs/requirements.md` §4.5 (session lifecycle + hook semantics).
-2. `docs/requirements.md` §4.7 (daemon liveness and startup behavior).
-3. `docs/requirements.md` §4.9.5 (`atm init` + runtime install/reliability context).
+1. `docs/requirements.md` §4.3.1 (session lifecycle + hook semantics).
+2. `docs/requirements.md` §4.3.2 and §4.3.2b (spawn + cleanup semantics).
+3. `docs/requirements.md` §4.3.3 and §4.3.3d (`atm init` + runtime install/reliability context).
 
 ## Dependency Graph
 

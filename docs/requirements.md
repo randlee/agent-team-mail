@@ -663,8 +663,12 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 - Absence of a daemon state record is NOT equivalent to staleness for external
   agents; these agents do not fire Claude Code lifecycle hooks and may be active
   without a session_registry entry.
-- When an external agent is skipped due to this guard, `--dry-run` output MUST
-  include a row noting the member was retained with reason `external-agent-no-state`.
+- When an external agent has no `session_id` but a recent heartbeat (younger
+  than staleness threshold), `--dry-run` output MUST include a retained row with
+  reason `external-agent-liveness-unknown`.
+- When an external agent has session metadata but no daemon state record and is
+  retained by the guard, `--dry-run` output MUST include reason
+  `external-agent-no-state`.
 
 **Command expectations**:
 - `atm cleanup --agent <name>`: non-destructive for active agents; applies teardown cleanup

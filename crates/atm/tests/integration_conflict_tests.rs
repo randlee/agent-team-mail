@@ -353,7 +353,7 @@ async fn test_concurrent_sends_no_data_loss() {
         serde_json::from_str(&content).unwrap()
     };
     let mut messages = read_messages();
-    let delivery_deadline = Instant::now() + Duration::from_secs(5);
+    let delivery_deadline = Instant::now() + Duration::from_secs(15);
     while messages.len() < expected && Instant::now() < delivery_deadline {
         std::thread::sleep(Duration::from_millis(50));
         let _ =

@@ -1867,7 +1867,7 @@ async fn handle_hook_event_command_with_dedup(
                     warn!(
                         team = %team,
                         agent = %agent,
-                        expected_session_id = %current_session_id,
+                        active_session_id = %current_session_id,
                         current_session_id = %current_session_id,
                         received_session_id = %session_id,
                         "hook_event session_end session_id mismatch; ignoring"

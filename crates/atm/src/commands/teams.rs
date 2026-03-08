@@ -1872,14 +1872,14 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     for member in &members_to_check {
         // Safety rule: never remove team-lead via cleanup.
         if member.name == "team-lead" {
+            if args.dry_run {
+                dry_run_rows.push(CleanupPreviewRow {
+                    agent: member.name.clone(),
+                    action: CleanupActionKind::Skip,
+                    reason: "team-lead-protected".to_string(),
+                });
+            }
             if args.agent.is_some() {
-                if args.dry_run {
-                    dry_run_rows.push(CleanupPreviewRow {
-                        agent: member.name.clone(),
-                        action: CleanupActionKind::Skip,
-                        reason: "team-lead-protected".to_string(),
-                    });
-                }
                 println!("Warning: team-lead is protected and cannot be removed by cleanup");
             }
             continue;
@@ -1973,7 +1973,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
                             dry_run_rows.push(CleanupPreviewRow {
                                 agent: member.name.clone(),
                                 action: CleanupActionKind::Skip,
-                                reason: "external-agent-no-state".to_string(),
+                                reason: "external-agent-liveness-unknown".to_string(),
                             });
                         }
                         warn!(
