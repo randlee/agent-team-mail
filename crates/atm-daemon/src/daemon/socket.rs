@@ -10186,7 +10186,7 @@ exit 1
             }),
         };
         let req_str = serde_json::to_string(&req).unwrap();
-        let resp = handle_hook_event_command(&req_str, &store, &sr).await;
+        let resp = handle_hook_event_with_transient_retry(&req_str, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert!(
