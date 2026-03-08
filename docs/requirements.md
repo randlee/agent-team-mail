@@ -739,20 +739,10 @@ Non-goal:
 
 ### 4.3.2b External Agent Cleanup Guard
 
-`atm teams cleanup` MUST NOT remove members with `external_backend_type` set (Codex, Gemini,
-or external agents) unless daemon explicitly confirms the session is dead.
-
-Required behavior:
-- If the member has **no `session_id`**: cleanup must skip the member with a warning indicating
-  liveness is unknown; the member is kept.
-- If the member has a `session_id`: cleanup queries daemon; only removes if daemon reports
-  `alive == false`.
-- If daemon is unreachable and no `--force` flag: external agent is skipped with warning.
-- `--force` bypasses liveness checks and removes unconditionally.
-- `--dry-run` must list skipped external agents with reason.
-
-Rationale: External agents (Codex, Gemini) do not fire Claude Code lifecycle hooks; the daemon
-may have no session record for them even when they are actively running.
+Canonical behavior for external-agent cleanup is defined in the
+**External-agent cleanup guard (REQUIRED)** section above (staleness-based
+guard with stable reason codes). This section is a reference anchor only and
+must not introduce alternate semantics.
 
 ### 4.3.2c `atm spawn` — Interactive Review-Panel Mode
 

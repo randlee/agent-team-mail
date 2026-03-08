@@ -417,7 +417,26 @@ pub fn ensure_daemon_running() -> anyhow::Result<()> {
 pub fn query_daemon(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
     #[cfg(unix)]
     {
-        query_daemon_unix(request)
+        query_daemon_unix(request, std::time::Duration::from_millis(500))
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(None)
+    }
+}
+
+/// Send a single request to the daemon with a caller-specified socket timeout.
+///
+/// Use this variant for commands that may legitimately wait on external I/O
+/// before returning (for example `gh-monitor` and `gh-monitor-control`).
+pub fn query_daemon_with_timeout(
+    request: &SocketRequest,
+    read_timeout: std::time::Duration,
+) -> anyhow::Result<Option<SocketResponse>> {
+    #[cfg(unix)]
+    {
+        query_daemon_unix(request, read_timeout)
     }
 
     #[cfg(not(unix))]
@@ -1084,7 +1103,10 @@ pub fn gh_monitor(request: &GhMonitorRequest) -> anyhow::Result<Option<GhMonitor
         payload: serde_json::to_value(request)?,
     };
 
-    let response = match query_daemon(&socket_request)? {
+    // `gh-monitor` may wait for CI run discovery up to start_timeout_secs.
+    let start_timeout_secs = request.start_timeout_secs.unwrap_or(120);
+    let read_timeout = std::time::Duration::from_secs((start_timeout_secs + 30).min(600));
+    let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
         Some(r) => r,
         None => return Ok(None),
     };
@@ -1126,7 +1148,10 @@ pub fn gh_monitor_control(
         payload: serde_json::to_value(request)?,
     };
 
-    let response = match query_daemon(&socket_request)? {
+    // Stop/restart can drain in-flight monitors for drain_timeout_secs.
+    let drain_timeout_secs = request.drain_timeout_secs.unwrap_or(30);
+    let read_timeout = std::time::Duration::from_secs((drain_timeout_secs + 30).min(600));
+    let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
         Some(r) => r,
         None => return Ok(None),
     };
@@ -1242,7 +1267,10 @@ fn new_request_id() -> String {
 // ── Unix implementation ──────────────────────────────────────────────────────
 
 #[cfg(unix)]
-fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
+fn query_daemon_unix(
+    request: &SocketRequest,
+    read_timeout: std::time::Duration,
+) -> anyhow::Result<Option<SocketResponse>> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
@@ -1278,10 +1306,12 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
         }
     };
 
-    // Set a short timeout so a stale/hung daemon does not block the CLI
-    let timeout = Duration::from_millis(500);
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(timeout)).ok();
+    // Keep writes short; allow caller-specific read timeout for long-running
+    // daemon operations such as gh monitor startup/drain paths.
+    stream.set_read_timeout(Some(read_timeout)).ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok();
 
     let request_line = serde_json::to_string(request)?;
 

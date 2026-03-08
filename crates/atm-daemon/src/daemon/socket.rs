@@ -1769,25 +1769,44 @@ async fn handle_hook_event_command_with_dedup(
             info!(agent = %agent, agent_pid = agent_pid, "hook_event teammate_idle");
         }
         "session_end" => {
-            if require_lead_for_session_end && !auth.is_team_lead {
-                emit_hook_failure(
-                    Some(event_type.as_str()),
-                    Some(team.as_str()),
-                    Some(agent.as_str()),
-                    Some(session_id.as_str()),
-                    process_id,
-                    "only team-lead may send session_end",
-                );
-                return make_ok_response(
-                    &request.request_id,
-                    serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
-                );
-            }
             let mark_dead_outcome = if session_id.trim().is_empty() {
                 MarkDeadForSessionOutcome::UnknownSession
             } else {
-                let mut registry = session_registry.lock().unwrap();
-                registry.mark_dead_for_team_session(&team, &agent, &session_id)
+                let current_record = {
+                    let registry = session_registry.lock().unwrap();
+                    registry.query_for_team(&team, &agent).cloned()
+                };
+                match current_record {
+                    None => MarkDeadForSessionOutcome::UnknownSession,
+                    Some(record) if record.session_id != session_id => {
+                        MarkDeadForSessionOutcome::SessionMismatch {
+                            current_session_id: record.session_id,
+                        }
+                    }
+                    Some(record)
+                        if record.state == crate::daemon::session_registry::SessionState::Dead =>
+                    {
+                        MarkDeadForSessionOutcome::AlreadyDead
+                    }
+                    Some(_) => {
+                        if require_lead_for_session_end && !auth.is_team_lead {
+                            emit_hook_failure(
+                                Some(event_type.as_str()),
+                                Some(team.as_str()),
+                                Some(agent.as_str()),
+                                Some(session_id.as_str()),
+                                process_id,
+                                "only team-lead may send session_end",
+                            );
+                            return make_ok_response(
+                                &request.request_id,
+                                serde_json::json!({"processed": false, "reason": "only team-lead may send session_end"}),
+                            );
+                        }
+                        let mut registry = session_registry.lock().unwrap();
+                        registry.mark_dead_for_team_session(&team, &agent, &session_id)
+                    }
+                }
             };
 
             match mark_dead_outcome {
@@ -1815,6 +1834,14 @@ async fn handle_hook_event_command_with_dedup(
                         Some(session_id.as_str()),
                         process_id,
                     );
+                    emit_hook_success(
+                        event_type.as_str(),
+                        &team,
+                        &agent,
+                        Some(session_id.as_str()),
+                        process_id,
+                    );
+                    info!(agent = %agent, agent_pid = agent_pid, "hook_event session_end");
                 }
                 MarkDeadForSessionOutcome::AlreadyDead => {
                     debug!(
@@ -1859,14 +1886,6 @@ async fn handle_hook_event_command_with_dedup(
                     });
                 }
             }
-            emit_hook_success(
-                event_type.as_str(),
-                &team,
-                &agent,
-                Some(session_id.as_str()),
-                process_id,
-            );
-            info!(agent = %agent, agent_pid = agent_pid, "hook_event session_end");
         }
         other => {
             debug!("hook_event unknown event type: {other}");
@@ -9319,6 +9338,36 @@ exit 1
         );
         let tracker = store.lock().unwrap();
         assert_eq!(tracker.get_state("team-lead"), Some(AgentState::Idle));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_session_end_non_lead_unknown_session_is_debug_noop() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+
+        let req_json = r#"{"version":1,"request_id":"r5-unknown-non-lead","command":"hook-event","payload":{"event":"session_end","agent":"arch-ctm","session_id":"sess-missing","team":"atm-dev"}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(
+            payload["processed"].as_bool().unwrap(),
+            "unknown-session no-op should not be rejected by team-lead gate"
+        );
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "unknown non-lead session_end must not create session registry rows"
+        );
+        let tracker = store.lock().unwrap();
+        assert!(
+            tracker.get_state("arch-ctm").is_none(),
+            "unknown non-lead session_end must not mutate activity tracker"
+        );
     }
 
     #[cfg(unix)]
