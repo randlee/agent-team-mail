@@ -237,7 +237,63 @@ After a monitored PR run reaches terminal state:
 
 ---
 
-## 11. Test Requirements
+## 11. Config Discovery and Initialization
+
+### GH-CI-FR-19 Config discovery parity (CLI and daemon)
+
+- CLI command paths (`atm gh`, `atm gh status`, `atm gh monitor ...`) and daemon
+  plugin bootstrap must resolve `gh_monitor` configuration from the same
+  location precedence and same team scope.
+- Status surfaces must report `configured`, `enabled`, `config_source`, and
+  `config_path` from that canonical resolution result.
+
+### GH-CI-FR-20 `atm gh init` config file selection
+
+- `atm gh init` must write to the canonical plugin config location:
+  - existing plugin config file when already present
+  - else repo `.atm.toml` at git root when available
+  - else existing global config (`~/.config/atm/config.toml`) when present
+  - else local `.atm.toml` in current directory
+- Command must create parent directories as needed.
+
+### GH-CI-FR-21 `atm gh init` prerequisites and failure contract
+
+- `atm gh init` must validate:
+  - `gh --version` is executable
+  - `gh auth status` succeeds
+- If prerequisites fail, command must exit with actionable remediation (install
+  `gh` or run `gh auth login`).
+
+### GH-CI-FR-22 `atm gh init` write contract
+
+- Non-dry-run init must ensure `[plugins.gh_monitor]` exists and write/retain:
+  - `enabled = true`
+  - `provider = "github"`
+  - `team = <team>`
+  - `agent = "gh-monitor"`
+  - `repo = <repo>`
+  - optional `owner = <owner>`
+  - default `poll_interval_secs = 60` when absent
+  - default `notify_target = "team-lead"` when absent
+- `--dry-run` must not mutate filesystem.
+
+### GH-CI-FR-23 `atm gh init` output contract
+
+- Text and JSON outputs must include deterministic setup summary:
+  - `team`, `config_path`, `dry_run`, `created`, `gh_installed`,
+    `gh_authenticated`, `owner`, `repo`, `notify_target`, `next_steps`
+- JSON output must be machine-readable and stable for automation.
+
+### GH-CI-FR-24 Plugin unavailability JSON error contract
+
+- For `--json` invocations of unavailable operations (for example
+  `atm gh monitor ... --json` when plugin is disabled/unconfigured), command
+  failure output must be structured JSON on stderr:
+  - `error_code = "PLUGIN_UNAVAILABLE"`
+  - `message` (specific unavailability reason)
+  - `hint` (must include `atm gh init`)
+
+## 12. Test Requirements
 
 ### GH-CI-TR-1 Availability transitions
 
@@ -294,3 +350,12 @@ Test:
 - deterministic drift alert emission for a run exceeding configured threshold
 - baseline/history persistence across plugin restart
 - run dedup persistence across restart (same run ID is not reprocessed)
+
+### GH-CI-TR-7 Config/init and JSON error contract
+
+Test:
+- CLI/daemon config-source parity for no-target status surfaces.
+- `atm gh init --dry-run` leaves config files unchanged.
+- `atm gh init` writes expected `gh_monitor` keys, including `notify_target`.
+- `--json` unavailable monitor/status operations emit structured
+  `PLUGIN_UNAVAILABLE` error payload on stderr.
