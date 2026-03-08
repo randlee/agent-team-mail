@@ -764,6 +764,10 @@ pub struct GhMonitorHealth {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
 }
 
 /// Daemon response payload for `gh-monitor`/`gh-status`.
@@ -780,6 +784,10 @@ pub struct GhMonitorStatus {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
 }
 
 /// Query the daemon for the session record of a named agent.
@@ -1052,11 +1060,13 @@ pub fn register_hint(
 /// - `Ok(None)` when daemon/socket is unavailable.
 /// - `Err` when daemon returns an explicit command error.
 pub fn gh_monitor(request: &GhMonitorRequest) -> anyhow::Result<Option<GhMonitorStatus>> {
+    let mut payload = serde_json::to_value(request)?;
+    inject_request_config_cwd(&mut payload);
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
         command: "gh-monitor".to_string(),
-        payload: serde_json::to_value(request)?,
+        payload,
     };
 
     let response = match query_daemon(&socket_request)? {
@@ -1074,11 +1084,13 @@ pub fn gh_monitor(request: &GhMonitorRequest) -> anyhow::Result<Option<GhMonitor
 /// - `Ok(None)` when daemon/socket is unavailable.
 /// - `Err` when daemon returns an explicit command error.
 pub fn gh_status(request: &GhStatusRequest) -> anyhow::Result<Option<GhMonitorStatus>> {
+    let mut payload = serde_json::to_value(request)?;
+    inject_request_config_cwd(&mut payload);
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
         command: "gh-status".to_string(),
-        payload: serde_json::to_value(request)?,
+        payload,
     };
 
     let response = match query_daemon(&socket_request)? {
@@ -1094,11 +1106,13 @@ pub fn gh_status(request: &GhStatusRequest) -> anyhow::Result<Option<GhMonitorSt
 pub fn gh_monitor_control(
     request: &GhMonitorControlRequest,
 ) -> anyhow::Result<Option<GhMonitorHealth>> {
+    let mut payload = serde_json::to_value(request)?;
+    inject_request_config_cwd(&mut payload);
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
         command: "gh-monitor-control".to_string(),
-        payload: serde_json::to_value(request)?,
+        payload,
     };
 
     let response = match query_daemon(&socket_request)? {
@@ -1112,11 +1126,13 @@ pub fn gh_monitor_control(
 /// Query daemon-routed GitHub monitor plugin health
 /// (`command: "gh-monitor-health"`).
 pub fn gh_monitor_health(team: &str) -> anyhow::Result<Option<GhMonitorHealth>> {
+    let mut payload = serde_json::json!({ "team": team });
+    inject_request_config_cwd(&mut payload);
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
         command: "gh-monitor-health".to_string(),
-        payload: serde_json::json!({ "team": team }),
+        payload,
     };
 
     let response = match query_daemon(&socket_request)? {
@@ -1146,6 +1162,18 @@ fn decode_gh_monitor_response(response: SocketResponse) -> anyhow::Result<GhMoni
 
     serde_json::from_value::<GhMonitorStatus>(payload)
         .map_err(|e| anyhow::anyhow!("Failed to parse GhMonitorStatus from daemon response: {e}"))
+}
+
+fn inject_request_config_cwd(payload: &mut serde_json::Value) {
+    let Some(cwd) = std::env::current_dir()
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_string))
+    else {
+        return;
+    };
+    if let serde_json::Value::Object(map) = payload {
+        map.insert("config_cwd".to_string(), serde_json::Value::String(cwd));
+    }
 }
 
 fn decode_gh_monitor_health_response(response: SocketResponse) -> anyhow::Result<GhMonitorHealth> {
