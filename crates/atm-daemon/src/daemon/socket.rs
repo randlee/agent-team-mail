@@ -6669,6 +6669,7 @@ poll_interval_secs = 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
     async fn test_gh_monitor_pr_timeout_zero_returns_ci_not_started_and_status_roundtrip() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -6691,6 +6692,7 @@ poll_interval_secs = 1
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial]
     async fn test_gh_monitor_workflow_requires_reference() {
         let temp = TempDir::new().unwrap();
         let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
