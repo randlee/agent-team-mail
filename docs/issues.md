@@ -1,6 +1,6 @@
 # Known Issues
 
-Last updated: 2026-03-07
+Last updated: 2026-03-08
 
 ## Phase AD Dogfood Blockers (GH Monitor Setup Session 2026-03-07)
 
@@ -17,6 +17,18 @@ Last updated: 2026-03-07
 | [#505](https://github.com/randlee/agent-team-mail/issues/505) | DG-009: inconsistent daemon reachability across `atm gh` commands | Bug | Closed (implemented) | Medium | AD.4 | Closed in AD.4 (reachability/state reporting parity across `atm gh`). |
 | [#506](https://github.com/randlee/agent-team-mail/issues/506) | DG-010: `disabled_config_error` has no actionable guidance | UX | Closed (implemented) | Low | AD.1 | Closed in AD.1 (unavailable states now include actionable init guidance). |
 | [#507](https://github.com/randlee/agent-team-mail/issues/507) | DG-011: duplicate daemon status output blocks in `atm gh` surfaces | UX | Closed (implemented) | Low | AD.3 | Closed in AD.3 (single canonical status output retained). |
+
+## Phase AF Reliability Mapping (Lifecycle + Spawn + Cleanup)
+
+| Issue | Summary | Type | Status | Priority | Planned Sprint | Notes |
+|---|---|---|---|---|---|---|
+| [#448](https://github.com/randlee/agent-team-mail/issues/448) | `session_end` session-id scoping + stale dead/alive drift | Bug | Open (implemented in AF.1) | Critical | AF.1 | Implemented in PR [#524](https://github.com/randlee/agent-team-mail/pull/524); pending GitHub issue closure |
+| [#449](https://github.com/randlee/agent-team-mail/issues/449) | PID liveness cache TTL + periodic re-probe | Enhancement | Open (implemented in AF.1) | High | AF.1 | Implemented in PR [#524](https://github.com/randlee/agent-team-mail/pull/524); pending GitHub issue closure |
+| [#394](https://github.com/randlee/agent-team-mail/issues/394) | Gate terminal spawn to team-lead/co-leaders | Enhancement | Open (implemented in AF.2) | High | AF.2 | Implemented in PR [#526](https://github.com/randlee/agent-team-mail/pull/526); pending GitHub issue closure |
+| [#456](https://github.com/randlee/agent-team-mail/issues/456) | Spawn auth-failure path must still print launch preview | Bug | Open (implemented in AF.2) | High | AF.2 | Implemented in PR [#526](https://github.com/randlee/agent-team-mail/pull/526); pending GitHub issue closure |
+| [#393](https://github.com/randlee/agent-team-mail/issues/393) | Task-tool transient agents must not auto-register to persistent roster | Bug | Open (implemented in AF.3) | High | AF.3 | Implemented in PR [#527](https://github.com/randlee/agent-team-mail/pull/527); ADR + non-member regression test added in AF.5 |
+| [#373](https://github.com/randlee/agent-team-mail/issues/373) | `atm teams cleanup --dry-run` preview mode | Enhancement | Open (implemented in AF.4) | Medium | AF.4 | Implemented in PR [#528](https://github.com/randlee/agent-team-mail/pull/528); reason-code parity hardened |
+| [#45](https://github.com/randlee/agent-team-mail/issues/45) | tmux sentinel injection | Enhancement | Open (implemented in AF.4) | Medium | AF.4 | Implemented in PR [#528](https://github.com/randlee/agent-team-mail/pull/528); nudge sentinel tier contract now documented |
 
 ## Phase V Issues (Doctor/Lifecycle — arch-ctm's V.0–V.7)
 

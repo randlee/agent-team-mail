@@ -1562,6 +1562,10 @@ AuthZ and validation should be source-aware in one handler, not split across
 multiple transport packet types.
 
 Lifecycle event semantics:
+- `session_start`: must only be accepted for known roster members of the
+  addressed team. Non-member `session_start` events must return
+  `processed=false` with reason `agent not in team` and must not mutate session
+  registry or roster-derived daemon state.
 - `permission_request`: indicates the agent is blocked waiting for user/tool
   approval and must transition activity to busy-equivalent state with explicit
   blocked-permission reason metadata.
