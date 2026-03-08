@@ -632,7 +632,7 @@ fn test_gh_monitor_fails_with_actionable_guidance_when_plugin_unconfigured() {
         .arg("123")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("Run `atm gh init`"));
+        .stderr(predicates::str::contains("atm gh init"));
 }
 
 #[test]

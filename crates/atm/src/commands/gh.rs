@@ -28,7 +28,7 @@ pub struct GhArgs {
     team: Option<String>,
 
     /// Output as JSON
-    #[arg(long)]
+    #[arg(long, global = true)]
     json: bool,
 
     #[command(subcommand)]
@@ -468,10 +468,16 @@ fn enforce_plugin_ready(plugin_state: &GhPluginState, json: bool) -> Result<()> 
         return Ok(());
     }
 
-    let reason = plugin_state
-        .message
-        .as_deref()
-        .unwrap_or("gh_monitor plugin is not configured/enabled for this team");
+    let reason = if !plugin_state.configured {
+        "gh_monitor plugin is not configured"
+    } else if !plugin_state.enabled {
+        "gh_monitor plugin is disabled in configuration"
+    } else {
+        plugin_state
+            .message
+            .as_deref()
+            .unwrap_or("gh_monitor plugin is not available for this team")
+    };
 
     if json {
         let payload = serde_json::json!({
@@ -482,7 +488,7 @@ fn enforce_plugin_ready(plugin_state: &GhPluginState, json: bool) -> Result<()> 
         bail!("{}", serde_json::to_string_pretty(&payload)?);
     }
 
-    bail!("{reason}\nRun `atm gh init` to configure and enable GitHub monitor for this team.")
+    bail!("{reason}\nRemediation: run `atm gh init` and retry.")
 }
 
 fn status_kind_to_wire(kind: StatusTargetKind) -> GhMonitorTargetKind {
