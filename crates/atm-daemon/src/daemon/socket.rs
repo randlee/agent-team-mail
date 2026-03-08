@@ -2912,7 +2912,10 @@ async fn handle_gh_monitor_control_command(
     } else {
         "healthy"
     };
-    let config_message = config_validation.error.clone();
+    let config_message = config_validation
+        .error
+        .clone()
+        .map(|reason| format!("gh_monitor unavailable: {reason}"));
 
     let mut health = match control.action {
         GhMonitorLifecycleAction::Start => match set_gh_monitor_health_state(
@@ -3043,7 +3046,7 @@ async fn handle_gh_monitor_control_command(
     if let Some(reason) = config_validation.error {
         health.availability_state = "disabled_config_error".to_string();
         if health.message.is_none() {
-            health.message = Some(reason);
+            health.message = Some(format!("gh_monitor unavailable: {reason}"));
         }
     }
     let _ = upsert_gh_monitor_health(home, health.clone());
@@ -6076,6 +6079,8 @@ poll_interval_secs = 60
     fn write_invalid_gh_monitor_config(home: &Path, team: &str) {
         let cfg_dir = home.join(".config/atm");
         std::fs::create_dir_all(&cfg_dir).unwrap();
+        // poll_interval_secs = 1 fails CiMonitorConfig::from_toml() validation,
+        // keeping configured=false, enabled=false (parse never completes).
         let config = format!(
             r#"[core]
 default_team = "{team}"
