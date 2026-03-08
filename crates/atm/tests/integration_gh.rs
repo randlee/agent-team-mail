@@ -1,6 +1,7 @@
 //! Integration tests for `atm gh ...` daemon-routed commands.
 
 use assert_cmd::cargo;
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -472,6 +473,32 @@ fn test_gh_monitor_fails_with_actionable_guidance_when_plugin_unconfigured() {
 
 #[test]
 #[cfg(unix)]
+fn test_gh_monitor_json_unavailable_emits_structured_error() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("run")
+        .arg("123")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "\"error_code\": \"PLUGIN_UNAVAILABLE\"",
+        ))
+        .stderr(predicates::str::contains("\"hint\":"))
+        .stderr(predicates::str::contains("atm gh init"))
+        .stderr(predicates::str::contains("Error:").not());
+}
+
+#[test]
+#[cfg(unix)]
 fn test_gh_init_dry_run_does_not_write_config() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -502,6 +529,7 @@ fn test_gh_init_dry_run_does_not_write_config() {
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["dry_run"].as_bool(), Some(true));
+    assert_eq!(json["notify_target"].as_str(), Some("team-lead"));
 
     let workdir = temp_dir.path().join("workdir");
     assert!(
@@ -541,6 +569,7 @@ fn test_gh_init_writes_plugin_config() {
     assert!(cfg.contains("enabled = true"));
     assert!(cfg.contains("team = \"test-team\""));
     assert!(cfg.contains("repo = \"agent-team-mail\""));
+    assert!(cfg.contains("notify_target = \"team-lead\""));
 }
 
 #[test]
