@@ -2160,6 +2160,17 @@ fn count_in_flight_monitors(home: &std::path::Path, team: &str) -> u64 {
 }
 
 #[cfg(unix)]
+fn resolve_live_lifecycle_state(home: &std::path::Path, team: &str, persisted: &str) -> String {
+    if count_in_flight_monitors(home, team) > 0 {
+        return "running".to_string();
+    }
+    if persisted == "stopped" {
+        return "stopped".to_string();
+    }
+    "unknown".to_string()
+}
+
+#[cfg(unix)]
 struct MonitorInFlightGuard {
     home: PathBuf,
     team: String,
@@ -2611,7 +2622,8 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         );
     }
 
-    // Lifecycle gate: monitor operations require running lifecycle state.
+    // Lifecycle gate: monitor operations are unavailable only when lifecycle is
+    // explicitly stopped.
     let current_health = match read_gh_monitor_health(home, &gh_request.team) {
         Ok(health) => health,
         Err(e) => {
@@ -2622,7 +2634,9 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
             );
         }
     };
-    if current_health.lifecycle_state != "running" {
+    let lifecycle_state =
+        resolve_live_lifecycle_state(home, &gh_request.team, &current_health.lifecycle_state);
+    if lifecycle_state == "stopped" {
         return make_error_response(
             &request.request_id,
             "MONITOR_STOPPED",
@@ -3078,6 +3092,8 @@ async fn handle_gh_monitor_health_command(
     let health = match read_gh_monitor_health(home, &team) {
         Ok(mut health) => {
             health.in_flight = count_in_flight_monitors(home, &team);
+            health.lifecycle_state =
+                resolve_live_lifecycle_state(home, &team, &health.lifecycle_state);
             health.availability_state = config_state.availability_state.to_string();
             if let Some(message) = config_state.message {
                 health.message = Some(message);
@@ -3221,7 +3237,9 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
             );
         }
     };
-    if current_health.lifecycle_state == "stopped" {
+    let lifecycle_state =
+        resolve_live_lifecycle_state(home, &gh_request.team, &current_health.lifecycle_state);
+    if lifecycle_state == "stopped" {
         return make_error_response(
             &request.request_id,
             "MONITOR_UNAVAILABLE",
@@ -7565,7 +7583,7 @@ exit 1
         assert_eq!(health_resp.status, "ok");
         let health = health_resp.payload.unwrap();
         assert_eq!(health["team"].as_str(), Some("atm-dev"));
-        assert_eq!(health["lifecycle_state"].as_str(), Some("running"));
+        assert_eq!(health["lifecycle_state"].as_str(), Some("unknown"));
     }
 
     #[tokio::test]
@@ -7588,6 +7606,55 @@ exit 1
         assert_eq!(resp.status, "error");
         let err = resp.error.unwrap();
         assert_eq!(err.code, "MONITOR_STOPPED");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_health_overlays_live_lifecycle_state() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let _ = set_gh_monitor_health_state(
+            temp.path(),
+            "atm-dev",
+            Some("running"),
+            Some("healthy"),
+            Some(0),
+            Some("seed".to_string()),
+        )
+        .unwrap();
+
+        let health_req = r#"{"version":1,"request_id":"r-gh-live-health","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+        let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+        assert_eq!(health_resp.status, "ok");
+        let payload = health_resp.payload.unwrap();
+        assert_eq!(payload["lifecycle_state"].as_str(), Some("unknown"));
+        assert_eq!(payload["in_flight"].as_u64(), Some(0));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_gh_monitor_and_status_reachability_consistent_when_lifecycle_unknown() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let _ = set_gh_monitor_health_state(
+            temp.path(),
+            "atm-dev",
+            Some("running"),
+            Some("healthy"),
+            Some(0),
+            Some("seed".to_string()),
+        )
+        .unwrap();
+
+        let monitor_req = r#"{"version":1,"request_id":"r-gh-unknown-monitor","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"42"}}"#;
+        let monitor_resp = handle_gh_monitor_command(monitor_req, temp.path()).await;
+        assert_eq!(monitor_resp.status, "ok");
+
+        let status_req = r#"{"version":1,"request_id":"r-gh-unknown-status","command":"gh-status","payload":{"team":"atm-dev","target_kind":"run","target":"42"}}"#;
+        let status_resp = handle_gh_status_command(status_req, temp.path()).await;
+        assert_eq!(status_resp.status, "ok");
     }
 
     #[tokio::test]
