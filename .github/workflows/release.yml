@@ -481,18 +481,9 @@ jobs:
             done
           done < "${publish_plan_path}"
 
-          # Phase 2: after root publish, validate non-root crates can package
-          mapfile -t locked_checks < <(
-            python3 scripts/release_artifacts.py list-preflight \
-              --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
-              --mode locked
-          )
-          for crate in "${locked_checks[@]}"; do
-            [[ -n "$crate" ]] || continue
-            echo "::group::cargo package -p ${crate} --locked (pre-publish validation)"
-            cargo package -p "${crate}" --locked
-            echo "::endgroup::"
-          done
+          # Phase 2 removed: pre-validating locked crates via cargo package before
+          # publishing their dependencies structurally fails (deps not on crates.io yet).
+          # cargo publish --locked in Phase 3 already validates before uploading.
 
           # Phase 3: publish non-core crates
           while IFS='|' read -r crate wait_seconds; do
