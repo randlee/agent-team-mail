@@ -122,7 +122,10 @@ jobs:
           set -euo pipefail
           VERSION='${{ needs.gate-and-tag.outputs.release_version }}'
           ARCHIVE="atm_${VERSION}_${{ matrix.target }}.tar.gz"
-          mapfile -t bins < <(python3 scripts/release_artifacts.py list-release-binaries --manifest "${RELEASE_ARTIFACT_MANIFEST}")
+          bins=()
+          while IFS= read -r bin; do
+            [[ -n "$bin" ]] && bins+=("$bin")
+          done < <(python3 scripts/release_artifacts.py list-release-binaries --manifest "${RELEASE_ARTIFACT_MANIFEST}")
           cd target/${{ matrix.target }}/release
           tar czf "../../../${ARCHIVE}" "${bins[@]}"
           cd ../../..
