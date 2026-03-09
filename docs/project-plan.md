@@ -1547,7 +1547,7 @@ local structured logging always-on and fail-open.
 ### Planned Sprint Map
 | Sprint | Focus | Primary Issues | Status |
 |---|---|---|---|
-| AK.1 | Contract reconciliation + schema hardening (`trace_id/span_id/subagent_id`, paths, health JSON keys) | ATM-QA-002, ATM-QA-003, ATM-QA-008, ATM-QA-010 | PLANNED |
+| AK.1 | Contract reconciliation + schema hardening (`trace_id/span_id/subagent_id`, paths, health JSON keys) | ATM-QA-004, ATM-QA-008, ATM-QA-007, ATM-QA-009 | PLANNED |
 | AK.2 | `sc-observability` mandatory OTel core (`default-on`, retry/fail-open, correlation contract) | OTel baseline | PLANNED |
 | AK.3 | Producer integration (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, `schook`, `sc-compose`, `sc-composer`) | OTel rollout | PLANNED |
 | AK.4 | Doctor/status observability health + runbook finalization | health/reporting | PLANNED |
