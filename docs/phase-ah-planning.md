@@ -24,8 +24,8 @@ Close AG deferred issues by extracting a shared observability crate and aligning
 
 ## Out of Scope (Deferred to AI)
 
-- #560 — `atm gh monitor list` PR dashboard
-- #561 — `atm gh monitor report <PR>` detailed reporting + template extension
+- #560 — `atm gh pr list` PR dashboard
+- #561 — `atm gh pr report <PR>` detailed reporting + template extension
 - See `docs/phase-ai-planning.md` for sprint sizing and design constraints.
 
 ## Phase Scope

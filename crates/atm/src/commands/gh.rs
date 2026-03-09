@@ -44,6 +44,8 @@ enum GhCommand {
     Init(InitArgs),
     /// Start CI monitoring
     Monitor(MonitorArgs),
+    /// One-shot PR query/report commands (no daemon monitor lifecycle control)
+    Pr(PrArgs),
     /// Query CI monitor status
     Status(StatusArgs),
 }
@@ -65,6 +67,12 @@ struct MonitorArgs {
     target: MonitorTarget,
 }
 
+#[derive(Args, Debug)]
+struct PrArgs {
+    #[command(subcommand)]
+    target: PrTarget,
+}
+
 #[derive(Subcommand, Debug)]
 enum MonitorTarget {
     /// Monitor a pull request for CI start + tracking
@@ -81,12 +89,16 @@ enum MonitorTarget {
     Restart(MonitorRestartArgs),
     /// Query gh_monitor plugin lifecycle/availability health
     Status(MonitorHealthArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum PrTarget {
     /// List open PRs with CI/merge/review rollups (one-shot; no daemon required)
-    List(MonitorListArgs),
+    List(PrListArgs),
     /// Show detailed check/review/merge report for a single PR (one-shot; no daemon required)
-    Report(MonitorReportArgs),
-    /// Scaffold a starter template for `atm gh monitor report --template`
-    InitReport(MonitorInitReportArgs),
+    Report(PrReportArgs),
+    /// Scaffold a starter template for `atm gh pr report --template`
+    InitReport(PrInitReportArgs),
 }
 
 #[derive(Args, Debug)]
@@ -140,14 +152,14 @@ struct MonitorRestartArgs {
 struct MonitorHealthArgs {}
 
 #[derive(Args, Debug)]
-struct MonitorListArgs {
+struct PrListArgs {
     /// Maximum number of open PRs to display (default 20)
     #[arg(long, default_value_t = 20)]
     limit: u32,
 }
 
 #[derive(Args, Debug)]
-struct MonitorReportArgs {
+struct PrReportArgs {
     /// Pull request number to report
     pr_number: u64,
 
@@ -157,7 +169,7 @@ struct MonitorReportArgs {
 }
 
 #[derive(Args, Debug)]
-struct MonitorInitReportArgs {
+struct PrInitReportArgs {
     /// Output path for starter template (default: ./gh-monitor-report-template.j2)
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
@@ -265,7 +277,7 @@ struct GhPrReportRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct GhMonitorListSummary {
+struct GhPrListSummary {
     team: String,
     repo: String,
     generated_at: String,
@@ -296,7 +308,7 @@ struct GhCiRollup {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct GhMonitorReportSummary {
+struct GhPrReportSummary {
     schema_version: String,
     team: String,
     repo: String,
@@ -357,7 +369,7 @@ struct GhMonitorReviewReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct GhMonitorInitReportSummary {
+struct GhPrInitReportSummary {
     output_path: String,
     created: bool,
     schema_version: String,
@@ -414,32 +426,18 @@ pub fn execute(args: GhArgs) -> Result<()> {
             })?;
             print_target_status(&status, args.json)
         }
-        Some(GhCommand::Monitor(monitor)) => {
-            if let MonitorTarget::Status(_status) = &monitor.target {
-                let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
-                return print_namespace_status(&health, args.json);
-            }
-            if let MonitorTarget::InitReport(init_report_args) = &monitor.target {
-                return execute_monitor_init_report(
-                    &current_dir,
-                    init_report_args.output.as_deref(),
-                    args.json,
-                );
-            }
-            if let MonitorTarget::List(list_args) = &monitor.target {
-                enforce_plugin_ready(&plugin_state, args.json)?;
-                return execute_monitor_list(
+        Some(GhCommand::Pr(pr)) => {
+            enforce_plugin_ready(&plugin_state, args.json)?;
+            match pr.target {
+                PrTarget::List(list_args) => execute_pr_list(
                     team,
                     &config,
                     &current_dir,
                     &home_dir,
                     list_args.limit,
                     args.json,
-                );
-            }
-            if let MonitorTarget::Report(report_args) = &monitor.target {
-                enforce_plugin_ready(&plugin_state, args.json)?;
-                return execute_monitor_report(
+                ),
+                PrTarget::Report(report_args) => execute_pr_report(
                     team,
                     &config,
                     &current_dir,
@@ -447,7 +445,18 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     report_args.pr_number,
                     report_args.template.as_deref(),
                     args.json,
-                );
+                ),
+                PrTarget::InitReport(init_report_args) => execute_pr_init_report(
+                    &current_dir,
+                    init_report_args.output.as_deref(),
+                    args.json,
+                ),
+            }
+        }
+        Some(GhCommand::Monitor(monitor)) => {
+            if let MonitorTarget::Status(_status) = &monitor.target {
+                let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
+                return print_namespace_status(&health, args.json);
             }
 
             enforce_plugin_ready(&plugin_state, args.json)?;
@@ -535,9 +544,6 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     })?)
                 }
                 MonitorTarget::Status(_status) => unreachable!("handled above"),
-                MonitorTarget::List(_list) => unreachable!("handled above"),
-                MonitorTarget::Report(_report) => unreachable!("handled above"),
-                MonitorTarget::InitReport(_init_report) => unreachable!("handled above"),
             };
 
             match output {
@@ -548,7 +554,7 @@ pub fn execute(args: GhArgs) -> Result<()> {
     }
 }
 
-fn execute_monitor_list(
+fn execute_pr_list(
     team: &str,
     config: &Config,
     current_dir: &Path,
@@ -594,7 +600,7 @@ fn execute_monitor_list(
         .collect();
     items.sort_by(|a, b| a.number.cmp(&b.number));
 
-    let summary = GhMonitorListSummary {
+    let summary = GhPrListSummary {
         team: team.to_string(),
         repo,
         generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -607,11 +613,11 @@ fn execute_monitor_list(
         return Ok(());
     }
 
-    print_monitor_list_summary(&summary);
+    print_pr_list_summary(&summary);
     Ok(())
 }
 
-fn execute_monitor_report(
+fn execute_pr_report(
     team: &str,
     config: &Config,
     current_dir: &Path,
@@ -664,7 +670,7 @@ fn execute_monitor_report(
         &review_decision,
     );
 
-    let report = GhMonitorReportSummary {
+    let report = GhPrReportSummary {
         schema_version: GH_MONITOR_REPORT_SCHEMA_VERSION.to_string(),
         team: team.to_string(),
         repo,
@@ -688,7 +694,7 @@ fn execute_monitor_report(
     }
 
     if let Some(path) = template_path {
-        let rendered = render_monitor_report_template(path, &report)?;
+        let rendered = render_pr_report_template(path, &report)?;
         print!("{rendered}");
         if !rendered.ends_with('\n') {
             println!();
@@ -696,7 +702,7 @@ fn execute_monitor_report(
         return Ok(());
     }
 
-    print_monitor_report_summary(&report);
+    print_pr_report_summary(&report);
     Ok(())
 }
 
@@ -760,7 +766,7 @@ fn query_merge_snapshot(repo: &str, pr_number: u64) -> Result<GhPrMergeProbe> {
         .with_context(|| "failed to parse merge probe JSON output")
 }
 
-fn execute_monitor_init_report(
+fn execute_pr_init_report(
     current_dir: &Path,
     output_override: Option<&Path>,
     json: bool,
@@ -794,7 +800,7 @@ fn execute_monitor_init_report(
         )
     })?;
 
-    let summary = GhMonitorInitReportSummary {
+    let summary = GhPrInitReportSummary {
         output_path: output_path.display().to_string(),
         created: true,
         schema_version: GH_MONITOR_REPORT_SCHEMA_VERSION.to_string(),
@@ -805,22 +811,19 @@ fn execute_monitor_init_report(
         return Ok(());
     }
 
-    println!("atm gh monitor init-report complete");
+    println!("atm gh pr init-report complete");
     println!("Template:          {}", summary.output_path);
     println!("Schema Version:    {}", summary.schema_version);
     println!();
     println!("Use with:");
     println!(
-        "  atm gh monitor report <pr-number> --template {}",
+        "  atm gh pr report <pr-number> --template {}",
         summary.output_path
     );
     Ok(())
 }
 
-fn render_monitor_report_template(
-    template_path: &Path,
-    report: &GhMonitorReportSummary,
-) -> Result<String> {
+fn render_pr_report_template(template_path: &Path, report: &GhPrReportSummary) -> Result<String> {
     let template = std::fs::read_to_string(template_path)
         .with_context(|| format!("failed to read template file {}", template_path.display()))?;
     let env = Environment::new();
@@ -834,7 +837,7 @@ fn render_monitor_report_template(
 }
 
 fn default_monitor_report_template() -> &'static str {
-    r#"GitHub Monitor Report (schema {{ schema_version }})
+    r#"GitHub PR Report (schema {{ schema_version }})
 Team: {{ team }}
 Repository: {{ repo }}
 Generated: {{ generated_at }}
@@ -947,8 +950,8 @@ fn resolve_monitor_repo_scope(
     );
 }
 
-fn print_monitor_list_summary(summary: &GhMonitorListSummary) {
-    println!("GitHub Monitor List: atm gh monitor list");
+fn print_pr_list_summary(summary: &GhPrListSummary) {
+    println!("GitHub PR List: atm gh pr list");
     println!("Team:              {}", summary.team);
     println!("Repository:        {}", summary.repo);
     println!("Open PRs:          {}", summary.total_open_prs);
@@ -974,8 +977,8 @@ fn print_monitor_list_summary(summary: &GhMonitorListSummary) {
     }
 }
 
-fn print_monitor_report_summary(report: &GhMonitorReportSummary) {
-    println!("GitHub Monitor Report: atm gh monitor report");
+fn print_pr_report_summary(report: &GhPrReportSummary) {
+    println!("GitHub PR Report: atm gh pr report");
     println!("Schema Version:    {}", report.schema_version);
     println!("Team:              {}", report.team);
     println!("Repository:        {}", report.repo);
@@ -1645,9 +1648,9 @@ fn namespace_actions(enabled: bool) -> Vec<&'static str> {
             "atm gh monitor pr <number>",
             "atm gh monitor workflow <name> --ref <ref>",
             "atm gh monitor run <run-id>",
-            "atm gh monitor list",
-            "atm gh monitor report <pr-number>",
-            "atm gh monitor init-report [--output <path>]",
+            "atm gh pr list",
+            "atm gh pr report <pr-number>",
+            "atm gh pr init-report [--output <path>]",
             "atm gh monitor start|stop|restart|status",
             "atm gh init",
         ]
@@ -1736,8 +1739,8 @@ fn execute_init(
             "atm gh".to_string(),
             "atm gh status".to_string(),
             "atm gh monitor pr <number>".to_string(),
-            "atm gh monitor list".to_string(),
-            "atm gh monitor report <pr-number>".to_string(),
+            "atm gh pr list".to_string(),
+            "atm gh pr report <pr-number>".to_string(),
         ],
     };
 
@@ -2126,9 +2129,9 @@ mod tests {
     }
 
     #[test]
-    fn execute_monitor_init_report_writes_default_template_file() {
+    fn execute_pr_init_report_writes_default_template_file() {
         let tmp = TempDir::new().expect("tempdir");
-        execute_monitor_init_report(tmp.path(), None, false).expect("init report");
+        execute_pr_init_report(tmp.path(), None, false).expect("init report");
         let template_path = tmp.path().join(GH_MONITOR_DEFAULT_TEMPLATE_FILENAME);
         assert!(template_path.exists());
         let content = std::fs::read_to_string(template_path).expect("read template");
@@ -2137,7 +2140,7 @@ mod tests {
     }
 
     #[test]
-    fn render_monitor_report_template_renders_report_payload() {
+    fn render_pr_report_template_renders_report_payload() {
         let tmp = TempDir::new().expect("tempdir");
         let template_path = tmp.path().join("custom-template.j2");
         std::fs::write(
@@ -2146,7 +2149,7 @@ mod tests {
         )
         .expect("write template");
 
-        let report = GhMonitorReportSummary {
+        let report = GhPrReportSummary {
             schema_version: GH_MONITOR_REPORT_SCHEMA_VERSION.to_string(),
             team: "atm-dev".to_string(),
             repo: "acme/repo".to_string(),
@@ -2178,8 +2181,7 @@ mod tests {
             },
         };
 
-        let rendered =
-            render_monitor_report_template(&template_path, &report).expect("render template");
+        let rendered = render_pr_report_template(&template_path, &report).expect("render template");
         assert_eq!(rendered, "team=atm-dev pr=42 schema=1.0.0");
     }
 }

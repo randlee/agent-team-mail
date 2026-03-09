@@ -95,9 +95,9 @@ Required commands:
 - `atm gh monitor pr <number>`
 - `atm gh monitor workflow <name> --ref <branch|sha|pr>` (`--ref` required)
 - `atm gh monitor run <run-id>`
-- `atm gh monitor list [--json] [--limit <N>]` (default limit: 20)
-- `atm gh monitor report <pr-number> [--json] [--template <path>]`
-- `atm gh monitor init-report [--output <path>]`
+- `atm gh pr list [--json] [--limit <N>]` (default limit: 20)
+- `atm gh pr report <pr-number> [--json] [--template <path>]`
+- `atm gh pr init-report [--output <path>]`
 - `atm gh status` (team/plugin health status; no target required)
 - `atm gh status <pr|run|workflow> <value>` (target-specific monitor state)
 
@@ -298,9 +298,9 @@ After a monitored PR run reaches terminal state:
 
 ### GH-CI-FR-25 Report and template rendering contracts
 
-`atm gh monitor report <pr-number>` one-shot reporting:
+`atm gh pr report <pr-number>` one-shot reporting:
 - In text mode: prints a human-readable PR status summary to stdout.
-- In `--json` mode: outputs a `GhMonitorReportSummary` JSON object to stdout
+- In `--json` mode: outputs a `GhPrReportSummary` JSON object to stdout
   with top-level `schema_version` field (current: `"1.0.0"`).
 - `--template <path>` renders the report using the specified Jinja2 template
   file with the same payload schema as `--json`.
@@ -309,7 +309,7 @@ After a monitored PR run reaches terminal state:
   with human-readable error on stderr.
 - `list` and `report` are one-shot read/report commands requiring no daemon.
 
-`atm gh monitor init-report [--output <path>]`:
+`atm gh pr init-report [--output <path>]`:
 - Writes a starter report template to the specified path (default:
   `gh-monitor-report-template.j2` in current directory).
 - If the output file already exists, the command fails with a non-zero exit and
@@ -317,7 +317,7 @@ After a monitored PR run reaches terminal state:
 
 ### GH-CI-FR-26 Report readiness semantics
 
-`atm gh monitor report <pr-number>` readiness classification must:
+`atm gh pr report <pr-number>` readiness classification must:
 - Treat `SKIPPED` checks as non-failing for aggregate CI state.
 - Include explicit skip count in report details (`skip=<N>` when non-zero).
 - If CI has `fail=0` and `pending=0`, aggregate CI state must be `pass` even
@@ -364,13 +364,13 @@ Test:
   - `atm gh status <target>` fails with actionable init guidance
   - `atm gh init` remains available and succeeds/fails deterministically
 - `status` output coherence during active and terminal runs
-- `monitor report` CI semantics:
+- `pr report` CI semantics:
   - pass + skip (no fail/pending) yields aggregate `pass`
   - skip count is emitted in report details
-- `monitor report` review semantics:
+- `pr report` review semantics:
   - no-review case emits `review_decision = none`
   - unknown review metadata does not hard-block by default
-- `monitor report` merge semantics:
+- `pr report` merge semantics:
   - unknown mergeability retried then surfaced as transient/indeterminate
   - hard blockers and advisory reasons are emitted in separate fields/sections
 

@@ -1219,6 +1219,28 @@ fn test_gh_monitor_status_json_has_stable_schema() {
 
 #[test]
 #[cfg(unix)]
+fn test_gh_monitor_namespace_rejects_removed_one_shot_commands() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    for removed in ["list", "report", "init-report"] {
+        let mut cmd = cargo::cargo_bin_cmd!("atm");
+        set_home_env(&mut cmd, &temp_dir, "test-team", true);
+        cmd.env("ATM_TEAM", "test-team")
+            .arg("gh")
+            .arg("monitor")
+            .arg(removed)
+            .assert()
+            .failure()
+            .stderr(
+                predicates::str::contains("unrecognized subcommand")
+                    .and(predicates::str::contains(removed)),
+            );
+    }
+}
+
+#[test]
+#[cfg(unix)]
 fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -1241,7 +1263,7 @@ fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
         .arg("--team")
         .arg("test-team")
         .arg("--json")
-        .arg("monitor")
+        .arg("pr")
         .arg("list")
         .assert()
         .success()
@@ -1286,7 +1308,7 @@ fn test_gh_monitor_list_human_output_has_one_line_rollups() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
-        .arg("monitor")
+        .arg("pr")
         .arg("list")
         .assert()
         .success()
@@ -1294,7 +1316,7 @@ fn test_gh_monitor_list_human_output_has_one_line_rollups() {
         .stdout
         .clone();
     let text = String::from_utf8(output).unwrap();
-    assert!(text.contains("GitHub Monitor List: atm gh monitor list"));
+    assert!(text.contains("GitHub PR List: atm gh pr list"));
     assert!(text.contains("#101 [ready] [ci:PENDING 1/2] [merge:clean] [review:approved]"));
     assert!(text.contains("#102 [draft] [ci:FAIL 0/1] [merge:dirty] [review:changes_requested]"));
 }
@@ -1323,7 +1345,7 @@ fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
         .arg("--team")
         .arg("test-team")
         .arg("--json")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("101")
         .assert()
@@ -1383,7 +1405,7 @@ fn test_gh_monitor_report_human_output_is_detailed() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("101")
         .assert()
@@ -1393,7 +1415,7 @@ fn test_gh_monitor_report_human_output_is_detailed() {
         .clone();
 
     let text = String::from_utf8(output).unwrap();
-    assert!(text.contains("GitHub Monitor Report: atm gh monitor report"));
+    assert!(text.contains("GitHub PR Report: atm gh pr report"));
     assert!(text.contains("Schema Version:    1.0.0"));
     assert!(text.contains("PR:                #101"));
     assert!(text.contains("Merge:             status=blocked"));
@@ -1430,7 +1452,7 @@ fn test_gh_monitor_report_json_no_reviews_and_skips_are_non_blocking() {
         .arg("--team")
         .arg("test-team")
         .arg("--json")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("103")
         .assert()
@@ -1494,7 +1516,7 @@ fn test_gh_monitor_report_template_renders_custom_output() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("101")
         .arg("--template")
@@ -1535,7 +1557,7 @@ fn test_gh_monitor_report_template_missing_file_is_actionable() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("101")
         .arg("--template")
@@ -1561,13 +1583,11 @@ fn test_gh_monitor_init_report_writes_starter_template() {
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
     cmd.env("ATM_TEAM", "test-team")
         .arg("gh")
-        .arg("monitor")
+        .arg("pr")
         .arg("init-report")
         .assert()
         .success()
-        .stdout(predicates::str::contains(
-            "atm gh monitor init-report complete",
-        ));
+        .stdout(predicates::str::contains("atm gh pr init-report complete"));
 
     let template_path = workdir.join("gh-monitor-report-template.j2");
     let template = fs::read_to_string(&template_path).unwrap();
@@ -1601,7 +1621,7 @@ fn test_gh_monitor_report_template_render_failure_is_actionable() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("101")
         .arg("--template")
