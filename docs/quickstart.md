@@ -148,7 +148,7 @@ file via `--vars-file <path>`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `SC_COMPOSE_LOG_LEVEL` | `warn` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
+| `SC_COMPOSE_LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
 | `SC_COMPOSE_LOG_FORMAT` | `jsonl` | Output format for log lines: `jsonl` or `human` |
 | `SC_COMPOSE_LOG_FILE` | _(stderr)_ | Redirect sc-compose logs to a file path |
 
