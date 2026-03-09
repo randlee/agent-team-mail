@@ -211,3 +211,30 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
 DEFERRED to Phase AJ or later. atm_core::logging::init_unified() is ratified as the
 integration surface for ATM binaries in this phase. The sc-observability crate does not
 export init(). No action required for AH.4 merge.
+
+## Phase AH Formal Deferrals (Post-QA)
+
+### AH-OBS-1 deferral: scmux and schook integration
+AH-OBS-1 requires all tools (including `scmux` and `schook`) to use `sc-observability`.
+These binaries are not part of the current workspace. Their `sc-observability` adoption
+is formally deferred to a future phase after v0.43.0 publish.
+Tracking: deferred per user decision post-AH QA review.
+
+### AH-OBS-2 deferral: sc_observability::init() zero-config API
+AH-OBS-2 specifies a canonical zero-config `sc_observability::init("<tool-name>")` entry
+point. This API is not exported in Phase AH. The AJ planning session will define the
+exact API surface and migration path. Tracking: deferred to Phase AJ.
+
+### AH-OBS-5 deferral: OpenTelemetry baseline
+AH-OBS-5 (and AH-OBS-5a/5b) require optional OTel export with feature gate. OTel support
+is entirely absent from the AH implementation. This is formally deferred to Phase AJ.
+The `docs/observability/requirements.md` and `docs/observability/architecture.md` OTel
+sections are stubs — implementation is a Phase AJ deliverable.
+Tracking: deferred per user decision post-AH QA review.
+
+### AJ forward requirement: log injection for library calls
+When ATM calls sc-compose/sc-composer as a library (e.g. `atm teams spawn` calling
+compose APIs), the library's log events must route into the host tool's log file rather
+than the companion tool's default log file. This design contract must be specified in
+Phase AJ requirements before implementation.
+Tracking: added to AJ requirements backlog.

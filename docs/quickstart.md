@@ -150,10 +150,10 @@ file via `--vars-file <path>`.
 |---|---|---|
 | `SC_COMPOSE_LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
 | `SC_COMPOSE_LOG_FORMAT` | `jsonl` | Output format for log lines: `jsonl` or `human` |
-| `SC_COMPOSE_LOG_FILE` | _(stderr)_ | Redirect sc-compose logs to a file path |
+| `SC_COMPOSE_LOG_FILE` | `~/.config/sc-compose/logs/sc-compose.log` | Override sc-compose log file path (`%APPDATA%\sc-compose\logs\sc-compose.log` on Windows) |
 
-To disable sc-compose structured log emission entirely:
+To suppress most log output, set the level to `error`:
 
 ```bash
-SC_COMPOSE_LOG_LEVEL=off atm compose render <template>
+SC_COMPOSE_LOG_LEVEL=error atm compose render <template>
 ```

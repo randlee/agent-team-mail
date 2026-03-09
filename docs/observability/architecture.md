@@ -69,6 +69,9 @@ Health evaluator is implemented once and reused by `atm doctor` and `atm status`
 
 ## 9. OpenTelemetry Baseline
 
+> **Status**: Deferred to Phase AJ. OTel support is not implemented in Phase AH.
+> The architecture below describes the planned Phase AJ design.
+
 When enabled:
 - Traces: `subagent.run`, `atm.send`, `atm.read`, `daemon.request`.
 - Metrics: `subagent_runs_total`, `subagent_run_duration_ms`,
