@@ -1484,10 +1484,10 @@ optional OpenTelemetry baseline with sub-agent-first trace coverage.
 | Sprint | Focus | Issues | Status |
 |---|---|---|---|
 | AH.1 | Shared crate foundation (`sc-observability`) + spool/size-guard/socket-error/L1a contracts | #556 | COMPLETE |
-| AH.2 | `sc-compose` migration to shared logging | #556 | PLANNED |
+| AH.2 | `sc-compose` migration to shared logging | #556 | COMPLETE |
 | AH.3 | Diagnostics + output derivation closure | #555, #557 | COMPLETE |
-| AH.4 | ATM/daemon/tui/mcp/scmux/schook integration + doctor/status health surfaces + OTel baseline | #556 | PLANNED |
-| AH.5 | Runbook + install/release docs closeout | #558 | PLANNED |
+| AH.4 | ATM/daemon/tui/mcp/scmux/schook integration + doctor/status health surfaces + OTel baseline | #556 | COMPLETE |
+| AH.5 | Runbook + install/release docs closeout | #558 | COMPLETE |
 
 ---
 

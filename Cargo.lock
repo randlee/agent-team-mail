@@ -1588,7 +1588,6 @@ dependencies = [
  "clap",
  "predicates",
  "sc-composer",
- "sc-observability",
  "serde",
  "serde_json",
  "serde_yaml",
