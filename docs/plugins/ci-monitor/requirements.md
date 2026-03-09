@@ -96,8 +96,6 @@ Required commands:
 - `atm gh monitor workflow <name> --ref <branch|sha|pr>` (`--ref` required)
 - `atm gh monitor run <run-id>`
 - `atm gh monitor list [--json] [--limit <N>]`
-- `atm gh monitor report <pr-number> [--json] [--template <path>]`
-- `atm gh monitor init-report [--output <path>]`
 - `atm gh status` (team/plugin health status; no target required)
 - `atm gh status <pr|run|workflow> <value>` (target-specific monitor state)
 
@@ -118,20 +116,6 @@ No-target status requirements:
   availability summary, and current issue note (when present).
 - This behavior must conform to the global plugin namespace gating contract in
   `docs/requirements.md` §5.8.
-- `atm gh monitor list` and `atm gh monitor report` are one-shot read/report
-  commands and must not require daemon availability.
-
-### GH-CI-FR-25 Report schema + template contract
-
-- `atm gh monitor report <pr-number> --json` must include a top-level
-  `schema_version` field.
-- `atm gh monitor report <pr-number> --template <path>` must render using the
-  same payload schema as `--json`.
-- `atm gh monitor init-report` must generate a starter template that references
-  supported fields and is immediately usable by
-  `atm gh monitor report --template`.
-- Template file read and render failures must return actionable errors with the
-  template path included in the message.
 
 ---
 
