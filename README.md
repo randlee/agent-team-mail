@@ -49,6 +49,9 @@ cargo install agent-team-mail-mcp
 
 # Install the TUI dashboard (optional)
 cargo install agent-team-mail-tui
+
+# Install sc-compose prompt composer CLI (optional)
+cargo install sc-compose
 ```
 
 ### Build from Source
@@ -66,6 +69,33 @@ cargo install --path crates/atm-agent-mcp
 The `atm`, `atm-daemon`, and `atm-agent-mcp` binaries will be available in your `$PATH`.
 
 ## Quick Start
+
+### Compose a prompt with `sc-compose`
+
+```bash
+# Validate a template (returns exit 2 on validation failure)
+sc-compose --root . validate .claude/agents/rust-dev.md.j2
+
+# Render template to stdout
+sc-compose --root . --var role=engineer render .claude/agents/rust-dev.md.j2
+
+# Render and derive output path from .j2 suffix (for example template.md.j2 -> template.md)
+sc-compose --root . --var role=engineer render .claude/agents/rust-dev.md.j2 --write
+```
+
+`sc-compose` logging controls:
+
+- `SC_COMPOSE_LOG_LEVEL` = `trace|debug|info|warn|error` (default: `info`)
+- `SC_COMPOSE_LOG_FORMAT` = `jsonl|human` (default: `jsonl`)
+- `SC_COMPOSE_LOG_FILE` = explicit log path override
+
+Default log path (when `SC_COMPOSE_LOG_FILE` is not set):
+- Linux/macOS: `${XDG_CONFIG_HOME:-$HOME/.config}/sc-compose/logs/sc-compose.log`
+- Windows: `%APPDATA%/sc-compose/logs/sc-compose.log` (fallback via home directory)
+
+Default spool path:
+- sibling `log-spool` directory next to the active log path
+  (for example `${XDG_CONFIG_HOME:-$HOME/.config}/sc-compose/log-spool`).
 
 ### Send a message
 

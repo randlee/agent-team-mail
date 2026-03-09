@@ -49,6 +49,11 @@ Both workflows are manual dispatch workflows.
 - Whether post-publish `cargo install` verification is required
 - Release binary list for archive packaging
 
+Mandatory order rule:
+- `sc-observability` must publish before `agent-team-mail-core` because core and
+  downstream tools consume the shared observability contract.
+- Enforce this only via manifest order; do not hardcode order in workflow YAML.
+
 ## Local Validation Commands
 
 ```bash

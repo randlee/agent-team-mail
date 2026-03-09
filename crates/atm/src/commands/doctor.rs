@@ -113,6 +113,8 @@ struct DoctorReport {
     recommendations: Vec<Recommendation>,
     log_window: LogWindow,
     env_overrides: EnvOverrides,
+    #[serde(default)]
+    logging: LoggingHealthSnapshot,
     #[serde(skip_serializing, skip_deserializing, default)]
     member_snapshot: Vec<MemberSnapshot>,
 }
@@ -138,6 +140,34 @@ struct DoctorState {
 struct DaemonStatusSnapshot {
     #[serde(default)]
     plugins: Vec<PluginStatusSnapshot>,
+    #[serde(default)]
+    logging: LoggingHealthSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct LoggingHealthSnapshot {
+    state: String,
+    dropped_counter: u64,
+    spool_path: String,
+    last_error: Option<String>,
+    canonical_log_path: String,
+    spool_count: u64,
+    oldest_spool_age: Option<u64>,
+}
+
+impl Default for LoggingHealthSnapshot {
+    fn default() -> Self {
+        Self {
+            state: "unavailable".to_string(),
+            dropped_counter: 0,
+            spool_path: String::new(),
+            last_error: None,
+            canonical_log_path: String::new(),
+            spool_count: 0,
+            oldest_spool_age: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -311,6 +341,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
                 .max(0) as u64,
         },
         env_overrides: active_env_overrides(),
+        logging: read_daemon_status(home_dir).logging,
         member_snapshot: build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent),
     })
 }
@@ -499,16 +530,7 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
 }
 
 fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
-    let status_path = home_dir.join(".claude/daemon/status.json");
-    let raw = match fs::read_to_string(&status_path) {
-        Ok(raw) => raw,
-        Err(_) => return Vec::new(),
-    };
-
-    let snapshot: DaemonStatusSnapshot = match serde_json::from_str(&raw) {
-        Ok(parsed) => parsed,
-        Err(_) => return Vec::new(),
-    };
+    let snapshot = read_daemon_status(home_dir);
 
     let mut findings = Vec::new();
     for plugin in snapshot.plugins {
@@ -529,6 +551,20 @@ fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
         ));
     }
     findings
+}
+
+fn read_daemon_status(home_dir: &Path) -> DaemonStatusSnapshot {
+    let status_path = home_dir.join(".claude/daemon/status.json");
+    let Ok(raw) = fs::read_to_string(&status_path) else {
+        return DaemonStatusSnapshot {
+            plugins: Vec::new(),
+            logging: LoggingHealthSnapshot::default(),
+        };
+    };
+    serde_json::from_str(&raw).unwrap_or(DaemonStatusSnapshot {
+        plugins: Vec::new(),
+        logging: LoggingHealthSnapshot::default(),
+    })
 }
 
 fn check_pid_session_reconciliation_with_query<F>(
@@ -1166,6 +1202,28 @@ fn render_human(report: &DoctorReport) -> String {
         "Log window: {}\n\n",
         render_log_window_human(&report.log_window)
     ));
+    out.push_str("Logging health:\n");
+    out.push_str(&format!("  state: {}\n", report.logging.state));
+    out.push_str(&format!(
+        "  dropped_counter: {}\n",
+        report.logging.dropped_counter
+    ));
+    out.push_str(&format!("  spool_path: {}\n", report.logging.spool_path));
+    out.push_str(&format!(
+        "  canonical_log_path: {}\n",
+        report.logging.canonical_log_path
+    ));
+    out.push_str(&format!("  spool_count: {}\n", report.logging.spool_count));
+    if let Some(oldest_spool_age) = report.logging.oldest_spool_age {
+        out.push_str(&format!("  oldest_spool_age: {oldest_spool_age}s\n"));
+    }
+    if let Some(last_error) = &report.logging.last_error {
+        out.push_str(&format!("  last_error: {last_error}\n"));
+    }
+    if let Some(remediation) = logging_remediation(&report.logging.state) {
+        out.push_str(&format!("  remediation: {remediation}\n"));
+    }
+    out.push('\n');
 
     if report.env_overrides.atm_home.is_some()
         || report.env_overrides.atm_team.is_some()
@@ -1245,6 +1303,21 @@ fn render_log_window_human(window: &LogWindow) -> String {
             .unwrap_or_else(|| fallback_log_window_human(window)),
         "full" => format!("since session start ({elapsed})"),
         _ => fallback_log_window_human(window),
+    }
+}
+
+fn logging_remediation(state: &str) -> Option<&'static str> {
+    match state {
+        "degraded_dropping" => {
+            Some("queue is dropping events; verify daemon health and reduce log burst load")
+        }
+        "degraded_spooling" => Some(
+            "events are spooling locally; verify daemon socket/path and allow merge to catch up",
+        ),
+        "unavailable" => Some(
+            "logging unavailable; check ATM_LOG value, daemon status, and log path permissions",
+        ),
+        _ => None,
     }
 }
 
@@ -2080,6 +2153,7 @@ mod tests {
                 elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
+            logging: LoggingHealthSnapshot::default(),
             member_snapshot: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
                 agent_type: "team-lead".to_string(),
@@ -2095,6 +2169,10 @@ mod tests {
         let members_idx = rendered.find("Members:").unwrap();
         let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
         assert!(members_idx < findings_idx);
+        assert!(
+            rendered.contains("remediation: logging unavailable"),
+            "human output should include logging remediation for unavailable state"
+        );
     }
 
     #[test]
@@ -2166,6 +2244,7 @@ mod tests {
                     value: "arch-ctm".to_string(),
                 }),
             },
+            logging: LoggingHealthSnapshot::default(),
             member_snapshot: vec![MemberSnapshot::default()],
         };
         let value = serde_json::to_value(report).unwrap();
@@ -2190,6 +2269,13 @@ mod tests {
             value["log_window"]["elapsed_secs"],
             serde_json::Value::Number(60u64.into())
         );
+        assert_eq!(
+            value["logging"]["state"],
+            serde_json::Value::String("unavailable".to_string())
+        );
+        assert!(value["logging"]["canonical_log_path"].is_string());
+        assert!(value["logging"]["spool_count"].is_u64());
+        assert!(value["logging"]["oldest_spool_age"].is_null());
     }
 
     #[test]
@@ -2254,6 +2340,7 @@ mod tests {
                     value: "arch-ctm".to_string(),
                 }),
             },
+            logging: LoggingHealthSnapshot::default(),
             member_snapshot: vec![],
         };
 

@@ -8,6 +8,7 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use anyhow::Result;
 use clap::Args;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -71,6 +72,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         .collect();
 
     let member_rows = build_status_member_rows(&team_config, &daemon_states);
+    let logging = read_daemon_logging_health(&home_dir);
 
     // Count unread messages for each member
     let inbox_counts = count_inbox_messages(&team_dir, &member_rows)?;
@@ -107,7 +109,16 @@ pub fn execute(args: StatusArgs) -> Result<()> {
             "tasks": {
                 "pending": pending_tasks,
                 "completed": completed_tasks,
-            }
+            },
+            "logging": json!({
+                "state": logging.state,
+                "dropped_counter": logging.dropped_counter,
+                "spool_path": logging.spool_path,
+                "last_error": logging.last_error,
+                "canonical_log_path": logging.canonical_log_path,
+                "spool_count": logging.spool_count,
+                "oldest_spool_age": logging.oldest_spool_age,
+            }),
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -139,6 +150,23 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         if pending_tasks > 0 || completed_tasks > 0 {
             println!();
             println!("Tasks: {pending_tasks} pending, {completed_tasks} completed");
+        }
+
+        println!();
+        println!("Logging:");
+        println!("  state:           {}", logging.state);
+        println!("  dropped_counter: {}", logging.dropped_counter);
+        println!("  spool_path:      {}", logging.spool_path);
+        println!("  canonical_log_path: {}", logging.canonical_log_path);
+        println!("  spool_count:     {}", logging.spool_count);
+        if let Some(oldest_spool_age) = logging.oldest_spool_age {
+            println!("  oldest_spool_age: {oldest_spool_age}s");
+        }
+        if let Some(last_error) = &logging.last_error {
+            println!("  last_error:      {last_error}");
+        }
+        if let Some(remediation) = logging_remediation(&logging.state) {
+            println!("  remediation:     {remediation}");
         }
     }
 
@@ -256,6 +284,63 @@ fn count_tasks(tasks_dir: &std::path::Path) -> Result<(usize, usize)> {
     Ok((pending, completed))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct LoggingHealth {
+    state: String,
+    dropped_counter: u64,
+    spool_path: String,
+    last_error: Option<String>,
+    canonical_log_path: String,
+    spool_count: u64,
+    oldest_spool_age: Option<u64>,
+}
+
+impl Default for LoggingHealth {
+    fn default() -> Self {
+        Self {
+            state: "unavailable".to_string(),
+            dropped_counter: 0,
+            spool_path: String::new(),
+            last_error: None,
+            canonical_log_path: String::new(),
+            spool_count: 0,
+            oldest_spool_age: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct DaemonStatusSnapshot {
+    #[serde(default)]
+    logging: LoggingHealth,
+}
+
+fn read_daemon_logging_health(home_dir: &std::path::Path) -> LoggingHealth {
+    let status_path = home_dir.join(".claude/daemon/status.json");
+    let Ok(content) = fs::read_to_string(status_path) else {
+        return LoggingHealth::default();
+    };
+    serde_json::from_str::<DaemonStatusSnapshot>(&content)
+        .map(|status| status.logging)
+        .unwrap_or_default()
+}
+
+fn logging_remediation(state: &str) -> Option<&'static str> {
+    match state {
+        "degraded_dropping" => {
+            Some("queue is dropping events; verify daemon health and reduce log burst load")
+        }
+        "degraded_spooling" => Some(
+            "events are spooling locally; verify daemon socket/path and allow merge to catch up",
+        ),
+        "unavailable" => Some(
+            "logging unavailable; check ATM_LOG value, daemon status, and log path permissions",
+        ),
+        _ => None,
+    }
+}
+
 /// Format age as human-readable string
 fn format_age(timestamp_ms: u64) -> String {
     use chrono::{DateTime, Utc};
@@ -358,5 +443,46 @@ mod tests {
         let rows = build_status_member_rows(&cfg, &daemon_states);
         assert!(rows.iter().any(|r| r.name == "team-lead" && r.in_config));
         assert!(rows.iter().any(|r| r.name == "arch-ctm" && !r.in_config));
+    }
+
+    #[test]
+    fn read_daemon_logging_health_parses_extended_fields() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let daemon_dir = tmp.path().join(".claude/daemon");
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let sys_tmp = std::env::temp_dir();
+        let spool_path = sys_tmp.join("spool").to_string_lossy().into_owned();
+        let log_path = sys_tmp.join("atm.log.jsonl").to_string_lossy().into_owned();
+        std::fs::write(
+            daemon_dir.join("status.json"),
+            serde_json::json!({
+                "logging": {
+                    "state": "degraded_spooling",
+                    "dropped_counter": 2,
+                    "spool_path": spool_path,
+                    "last_error": "spool backlog",
+                    "canonical_log_path": log_path,
+                    "spool_count": 3,
+                    "oldest_spool_age": 17
+                }
+            })
+            .to_string(),
+        )
+        .expect("write status");
+
+        let logging = read_daemon_logging_health(tmp.path());
+        assert_eq!(logging.state, "degraded_spooling");
+        assert_eq!(logging.dropped_counter, 2);
+        assert_eq!(logging.spool_count, 3);
+        assert_eq!(logging.oldest_spool_age, Some(17));
+        assert_eq!(logging.canonical_log_path, log_path);
+    }
+
+    #[test]
+    fn logging_remediation_returns_messages_for_degraded_and_unavailable() {
+        assert!(logging_remediation("healthy").is_none());
+        assert!(logging_remediation("degraded_spooling").is_some());
+        assert!(logging_remediation("degraded_dropping").is_some());
+        assert!(logging_remediation("unavailable").is_some());
     }
 }

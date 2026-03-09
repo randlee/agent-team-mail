@@ -2699,6 +2699,17 @@ Required acceptance tests:
 - Compatibility aliases (for example hyphenated legacy names) are optional and
   must be explicitly documented if supported.
 
+### 5.11 sc-compose Logging Path Contract
+
+- `sc-compose` default log path must be:
+  - Linux/macOS: `${XDG_CONFIG_HOME:-$HOME/.config}/sc-compose/logs/sc-compose.log`
+  - Windows: `%APPDATA%/sc-compose/logs/sc-compose.log` with home-directory fallback.
+- `SC_COMPOSE_LOG_FILE` must override the default log path.
+- `sc-compose` spool path must be derived from the active log path:
+  - if log parent is `.../logs`, spool is sibling `.../log-spool`,
+  - otherwise spool is `<log_parent>/log-spool`.
+- Path derivation behavior must be deterministic and covered by integration tests.
+
 ---
 
 ## 6. Planned Plugins
@@ -2927,6 +2938,14 @@ The core has no awareness of whether a team member is local or remote.
 - If a path is not permitted for the destination repo, `atm` must copy the file to a local share folder and rewrite the message to reference that copy, explicitly noting the rewrite.
 - Default share folder: `~/.config/atm/share/<team>/` (configurable).
 - Cross-computer transfer remains a plugin responsibility; the core only guarantees safe local references.
+
+### 8.8 sc-compose Runtime Logging Controls
+
+- `SC_COMPOSE_LOG_LEVEL` supports `trace|debug|info|warn|error` and defaults to `info`.
+- `SC_COMPOSE_LOG_FORMAT` supports `jsonl|human` and defaults to `jsonl`.
+- `SC_COMPOSE_LOG_FILE` overrides log file path for sc-compose.
+- Logging remains fail-open; composition/validation commands must not fail solely
+  because the configured logging write path is unavailable.
 
 ---
 
