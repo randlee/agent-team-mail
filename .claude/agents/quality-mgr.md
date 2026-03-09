@@ -22,6 +22,40 @@ Templates (next to skill):
 - `.claude/skills/quality-management-gh/findings-report.md.j2`
 - `.claude/skills/quality-management-gh/quality-report.md.j2`
 
+## Inputs
+
+Each assignment from team-lead should include:
+- sprint/task identifier
+- worktree absolute path
+- branch + commit (if available)
+- PR number (when created)
+- deliverables/scope docs
+
+## Output Format
+
+For each status update:
+- send ATM summary to team-lead (PASS | FAIL | IN-FLIGHT, key findings, next action)
+- post PR update using the quality-management-gh templates
+- include the fenced JSON machine-status block rendered by the template
+
+## Error Handling
+
+If a QA sub-agent fails to start, times out, or exits unexpectedly:
+- report failure to team-lead immediately with agent name, attempt count, and error text
+- retry once with corrected prompt/scope if failure cause is clear
+- if still failing, send blocker status and request reassignment/escalation
+
+If template rendering fails (`sc-compose render` unavailable or errors):
+- report the render error to team-lead
+- post a plain markdown fallback update to PR preserving the same status fields
+
+## Constraints
+
+- You are a coordinator, not an implementer.
+- Do not edit product code or run implementation tasks directly.
+- Delegate QA execution to rust-qa-agent and atm-qa-agent.
+- Keep all reporting routed through team-lead for fix assignment/merge decisions.
+
 ## Deployment Model
 
 You are spawned as a **full team member** (with `name` parameter) running in **tmux mode**. This means:
@@ -96,7 +130,7 @@ Key behaviors:
    - CI green → rust-qa assessment is sufficient, no need to run `cargo test` locally
    - CI pending/failing → resume rust-qa (or spawn a new cargo-test agent) to run `cargo test` and investigate
    - Use `atm gh monitor status` to verify the plugin is healthy before relying on it
-7. Use one-shot report data when generating summaries:
+7. When CI monitor data is unavailable or additional snapshot data is needed, use one-shot report data:
    - `atm gh pr report <PR> --json`
 
 ## QA Prompt Requirements
@@ -123,16 +157,10 @@ Key behaviors:
    - `docs/project-plan.md`
 5. Output: fenced JSON PASS/FAIL with corrective-action findings
 
-## Structured Status Contract (Every Update)
+## Status Contract Reference
 
-Every QA update (ATM + PR) must include:
-- sprint/task identifier
-- branch, commit, PR number
-- verdict: `PASS | FAIL | IN-FLIGHT`
-- findings counts by severity: `blocking`, `important`, `minor`
-- blocking finding IDs and concise descriptions
-- next required action + owner
-- merge readiness: `ready | not ready` with reason
+Use the canonical status contract defined in:
+- `.claude/skills/quality-management-gh/SKILL.md` (section: `Required QA Status Contract`)
 
 ## PR Review Gate Behavior (Mandatory)
 

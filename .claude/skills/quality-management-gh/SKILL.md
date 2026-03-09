@@ -97,6 +97,10 @@ Recommended flow:
 Suggested command (stream render and block merge via review decision):
 - `sc-compose render .claude/skills/quality-management-gh/findings-report.md.j2 --var-file <vars.json> | gh pr review <PR> --request-changes --body-file -`
 
+Fallback when `sc-compose render` is unavailable or fails:
+- post a plain markdown findings update with the same machine-status fields:
+  - `gh pr review <PR> --request-changes --body-file <fallback.md>`
+
 `<vars.json>` must be a flat JSON map (`string -> string`) for `sc-compose`:
 
 ```json
@@ -138,6 +142,10 @@ Recommended flow:
 
 Suggested command (stream render and clear blocking review with approval):
 - `sc-compose render .claude/skills/quality-management-gh/quality-report.md.j2 --var-file <vars.json> | gh pr review <PR> --approve --body-file -`
+
+Fallback when `sc-compose render` is unavailable or fails:
+- post a plain markdown closeout with the same machine-status fields:
+  - `gh pr review <PR> --approve --body-file <fallback.md>`
 
 Use final template only for `PASS` closeout.
 
