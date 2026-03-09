@@ -97,12 +97,29 @@ fn default_log_path() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(explicit));
     }
+    // ATM_HOME overrides all platform-specific paths when set.
+    if let Ok(home) = std::env::var("ATM_HOME")
+        && !home.trim().is_empty()
+    {
+        return Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("sc-compose")
+                .join("logs")
+                .join("sc-compose.log"),
+        );
+    }
     #[cfg(windows)]
     {
         if let Ok(app_data) = std::env::var("APPDATA")
             && !app_data.trim().is_empty()
         {
-            return Some(PathBuf::from(app_data).join("sc-compose/logs/sc-compose.log"));
+            return Some(
+                PathBuf::from(app_data)
+                    .join("sc-compose")
+                    .join("logs")
+                    .join("sc-compose.log"),
+            );
         }
     }
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
