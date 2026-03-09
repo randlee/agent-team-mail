@@ -144,12 +144,30 @@ struct DaemonStatusSnapshot {
     logging: LoggingHealthSnapshot,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct LoggingHealthSnapshot {
     state: String,
     dropped_counter: u64,
     spool_path: String,
     last_error: Option<String>,
+    canonical_log_path: String,
+    spool_count: u64,
+    oldest_spool_age: Option<u64>,
+}
+
+impl Default for LoggingHealthSnapshot {
+    fn default() -> Self {
+        Self {
+            state: "unavailable".to_string(),
+            dropped_counter: 0,
+            spool_path: String::new(),
+            last_error: None,
+            canonical_log_path: String::new(),
+            spool_count: 0,
+            oldest_spool_age: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1191,8 +1209,19 @@ fn render_human(report: &DoctorReport) -> String {
         report.logging.dropped_counter
     ));
     out.push_str(&format!("  spool_path: {}\n", report.logging.spool_path));
+    out.push_str(&format!(
+        "  canonical_log_path: {}\n",
+        report.logging.canonical_log_path
+    ));
+    out.push_str(&format!("  spool_count: {}\n", report.logging.spool_count));
+    if let Some(oldest_spool_age) = report.logging.oldest_spool_age {
+        out.push_str(&format!("  oldest_spool_age: {oldest_spool_age}s\n"));
+    }
     if let Some(last_error) = &report.logging.last_error {
         out.push_str(&format!("  last_error: {last_error}\n"));
+    }
+    if let Some(remediation) = logging_remediation(&report.logging.state) {
+        out.push_str(&format!("  remediation: {remediation}\n"));
     }
     out.push('\n');
 
@@ -1274,6 +1303,21 @@ fn render_log_window_human(window: &LogWindow) -> String {
             .unwrap_or_else(|| fallback_log_window_human(window)),
         "full" => format!("since session start ({elapsed})"),
         _ => fallback_log_window_human(window),
+    }
+}
+
+fn logging_remediation(state: &str) -> Option<&'static str> {
+    match state {
+        "degraded_dropping" => {
+            Some("queue is dropping events; verify daemon health and reduce log burst load")
+        }
+        "degraded_spooling" => Some(
+            "events are spooling locally; verify daemon socket/path and allow merge to catch up",
+        ),
+        "unavailable" => Some(
+            "logging unavailable; check ATM_LOG value, daemon status, and log path permissions",
+        ),
+        _ => None,
     }
 }
 
@@ -2125,6 +2169,10 @@ mod tests {
         let members_idx = rendered.find("Members:").unwrap();
         let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
         assert!(members_idx < findings_idx);
+        assert!(
+            rendered.contains("remediation: logging unavailable"),
+            "human output should include logging remediation for unavailable state"
+        );
     }
 
     #[test]
@@ -2221,6 +2269,13 @@ mod tests {
             value["log_window"]["elapsed_secs"],
             serde_json::Value::Number(60u64.into())
         );
+        assert_eq!(
+            value["logging"]["state"],
+            serde_json::Value::String("unavailable".to_string())
+        );
+        assert!(value["logging"]["canonical_log_path"].is_string());
+        assert!(value["logging"]["spool_count"].is_u64());
+        assert!(value["logging"]["oldest_spool_age"].is_null());
     }
 
     #[test]

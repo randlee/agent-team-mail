@@ -29,9 +29,10 @@ pub struct DaemonStatus {
 }
 
 /// Logging pipeline health snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LoggingHealth {
-    /// Logging state (`enabled` or `disabled`)
+    /// Logging health state (`healthy|degraded_spooling|degraded_dropping|unavailable`)
     pub state: String,
     /// Total dropped log events from daemon queue.
     pub dropped_counter: u64,
@@ -39,6 +40,26 @@ pub struct LoggingHealth {
     pub spool_path: String,
     /// Last logging error if known.
     pub last_error: Option<String>,
+    /// Canonical JSONL sink path.
+    pub canonical_log_path: String,
+    /// Number of pending spool files.
+    pub spool_count: u64,
+    /// Oldest spool file age in seconds (if spool files exist).
+    pub oldest_spool_age: Option<u64>,
+}
+
+impl Default for LoggingHealth {
+    fn default() -> Self {
+        Self {
+            state: "unavailable".to_string(),
+            dropped_counter: 0,
+            spool_path: String::new(),
+            last_error: None,
+            canonical_log_path: String::new(),
+            spool_count: 0,
+            oldest_spool_age: None,
+        }
+    }
 }
 
 /// Plugin status entry
@@ -190,10 +211,13 @@ mod tests {
 
     fn logging_health() -> LoggingHealth {
         LoggingHealth {
-            state: "enabled".to_string(),
+            state: "healthy".to_string(),
             dropped_counter: 0,
             spool_path: "log-spool".to_string(),
             last_error: None,
+            canonical_log_path: "atm.log.jsonl".to_string(),
+            spool_count: 0,
+            oldest_spool_age: None,
         }
     }
 
@@ -287,6 +311,9 @@ mod tests {
         assert_eq!(status.plugins[1].name, "issues");
         assert!(!status.plugins[1].enabled);
         assert_eq!(status.plugins[1].status, PluginStatusKind::Disabled);
+        assert_eq!(status.logging.state, "healthy");
+        assert_eq!(status.logging.spool_count, 0);
+        assert!(status.logging.canonical_log_path.contains("atm.log"));
     }
 
     #[test]

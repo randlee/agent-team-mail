@@ -285,7 +285,19 @@ mod tests {
         assert!(!logging_enabled());
 
         // SAFETY: test-scoped env mutation.
+        unsafe { std::env::set_var("ATM_LOG", "false") };
+        assert!(!logging_enabled());
+
+        // SAFETY: test-scoped env mutation.
         unsafe { std::env::set_var("ATM_LOG", "off") };
+        assert!(!logging_enabled());
+
+        // SAFETY: test-scoped env mutation.
+        unsafe { std::env::set_var("ATM_LOG", "disabled") };
+        assert!(!logging_enabled());
+
+        // SAFETY: test-scoped env mutation.
+        unsafe { std::env::set_var("ATM_LOG", "no") };
         assert!(!logging_enabled());
 
         // SAFETY: cleanup.
