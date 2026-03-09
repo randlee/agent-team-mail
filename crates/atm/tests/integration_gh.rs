@@ -1303,6 +1303,7 @@ fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"].as_str(), Some("1.0.0"));
     assert_eq!(json["team"].as_str(), Some("test-team"));
     assert_eq!(json["repo"].as_str(), Some("acme/agent-team-mail"));
     assert_eq!(json["pr"]["number"].as_u64(), Some(101));
@@ -1349,6 +1350,7 @@ fn test_gh_monitor_report_human_output_is_detailed() {
 
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("GitHub Monitor Report: atm gh monitor report"));
+    assert!(text.contains("Schema Version:    1.0.0"));
     assert!(text.contains("PR:                #101"));
     assert!(text.contains("Merge:             status=pending"));
     assert!(text.contains("Blocking Reasons:"));
@@ -1356,4 +1358,111 @@ fn test_gh_monitor_report_human_output_is_detailed() {
     assert!(text.contains("Reviews (2):"));
     assert!(text.contains("Checks (2):"));
     assert!(text.contains("clippy | status=completed"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_template_renders_custom_output() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let template_path = workdir.join("custom-report.j2");
+    fs::write(
+        &template_path,
+        "schema={{ schema_version }} pr={{ pr.number }} title={{ pr.title }}",
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("report")
+        .arg("101")
+        .arg("--template")
+        .arg(&template_path)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("schema=1.0.0"));
+    assert!(text.contains("pr=101"));
+    assert!(text.contains("title=Add monitor dashboard"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_template_missing_file_is_actionable() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let missing = workdir.join("missing-template.j2");
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("report")
+        .arg("101")
+        .arg("--template")
+        .arg(&missing)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("failed to read template file"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_init_report_writes_starter_template() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("monitor")
+        .arg("init-report")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "atm gh monitor init-report complete",
+        ));
+
+    let template_path = workdir.join("gh-monitor-report-template.j2");
+    let template = fs::read_to_string(&template_path).unwrap();
+    assert!(template.contains("schema {{ schema_version }}"));
+    assert!(template.contains("{{ pr.number }}"));
 }

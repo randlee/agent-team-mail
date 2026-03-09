@@ -22,6 +22,7 @@ sc-composer.workspace = true
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde_json.workspace = true
+minijinja.workspace = true
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
