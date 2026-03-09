@@ -34,12 +34,14 @@ poll_interval_secs = 60
 
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir, team: &str, with_plugin: bool) {
     let workdir = temp_dir.path().join("workdir");
+    let fake_daemon_bin = temp_dir.path().join("fake-gh-daemon.py");
     std::fs::create_dir_all(&workdir).ok();
     if with_plugin {
         write_repo_gh_monitor_config(&workdir, team);
     }
     cmd.env("ATM_HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
+        .env("ATM_DAEMON_BIN", &fake_daemon_bin)
         .env_remove("ATM_TEAM")
         .env_remove("ATM_CONFIG")
         .env_remove("CLAUDE_SESSION_ID")
@@ -97,6 +99,7 @@ configured = os.environ.get("ATM_FAKE_GH_CONFIGURED", "1") == "1"
 enabled = os.environ.get("ATM_FAKE_GH_ENABLED", "1") == "1"
 monitor_delay_ms = int(os.environ.get("ATM_FAKE_GH_MONITOR_DELAY_MS", "0") or "0")
 control_delay_ms = int(os.environ.get("ATM_FAKE_GH_CONTROL_DELAY_MS", "0") or "0")
+daemon_version = os.environ.get("ATM_FAKE_DAEMON_VERSION", "0.0.0")
 availability_state = "healthy" if configured and enabled else "disabled_config_error"
 availability_message = None
 if not configured:
@@ -106,9 +109,18 @@ elif not enabled:
 
 sock_path = daemon_dir / "atm-daemon.sock"
 pid_path = daemon_dir / "atm-daemon.pid"
+metadata_path = home / ".config" / "atm" / "daemon.lock.meta.json"
 if sock_path.exists():
     sock_path.unlink()
 pid_path.write_text(str(os.getpid()))
+metadata_path.parent.mkdir(parents=True, exist_ok=True)
+metadata_path.write_text(json.dumps({
+    "pid": os.getpid(),
+    "executable_path": str(Path(__file__).resolve()),
+    "home_scope": str(home.resolve()),
+    "version": daemon_version,
+    "written_at": "2026-03-09T00:00:00Z"
+}))
 
 running = True
 def _stop(_signum, _frame):
@@ -263,7 +275,10 @@ while running:
         else:
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": {}}
 
-        conn.sendall((json.dumps(resp) + "\n").encode())
+        try:
+            conn.sendall((json.dumps(resp) + "\n").encode())
+        except BrokenPipeError:
+            pass
 
 try:
     srv.close()
@@ -350,6 +365,7 @@ fn start_fake_gh_daemon_with_mode_and_delays(
                 .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
                 .env("ATM_FAKE_GH_MONITOR_DELAY_MS", monitor_delay_ms.to_string())
                 .env("ATM_FAKE_GH_CONTROL_DELAY_MS", control_delay_ms.to_string())
+                .env("ATM_FAKE_DAEMON_VERSION", env!("CARGO_PKG_VERSION"))
                 .spawn()
             {
                 Ok(child) => break child,
