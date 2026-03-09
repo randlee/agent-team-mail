@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-team-mail"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-core"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-daemon"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-mcp"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-tui"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "sc-compose"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "sc-composer"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "minijinja",
  "serde",
@@ -2727,18 +2727,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.40"
+version = "0.8.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a789c6e490b576db9f7e6b6d661bcc9799f7c0ac8352f56ea20193b2681532e5"
+checksum = "96e13bc581734df6250836c59a5f44f3c57db9f9acb9dc8e3eaabdaf6170254d"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.40"
+version = "0.8.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f65c489a7071a749c849713807783f70672b28094011623e200cb86dcb835953"
+checksum = "3545ea9e86d12ab9bba9fcd99b54c1556fd3199007def5a03c375623d05fac1c"
 dependencies = [
  "proc-macro2",
  "quote",
