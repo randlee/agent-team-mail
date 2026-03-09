@@ -52,3 +52,6 @@ Add operator-facing GH monitor reporting surfaces for fast triage:
 2. `atm gh monitor report <PR> [--json]` returns detailed check/report output with links/timing.
 3. No daemon requirement for one-shot reporting commands.
 4. Notification behavior is unchanged for daemon monitor mode.
+5. `atm gh monitor report <PR> --template <path>` renders using the same payload schema as `--json`.
+6. `atm gh monitor init-report [--output <path>]` writes a usable starter template for report customization.
+7. `atm gh monitor report <PR> --json` includes top-level `schema_version`.

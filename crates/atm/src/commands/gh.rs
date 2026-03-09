@@ -11,6 +11,7 @@ use agent_team_mail_core::daemon_client::{
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
+use minijinja::Environment;
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::io::Write;
@@ -82,6 +83,8 @@ enum MonitorTarget {
     List(MonitorListArgs),
     /// Show detailed check/review/merge report for a single PR (one-shot; no daemon required)
     Report(MonitorReportArgs),
+    /// Scaffold a starter template for `atm gh monitor report --template`
+    InitReport(MonitorInitReportArgs),
 }
 
 #[derive(Args, Debug)]
@@ -145,6 +148,17 @@ struct MonitorListArgs {
 struct MonitorReportArgs {
     /// Pull request number to report
     pr_number: u64,
+
+    /// Render output using a user template file (Jinja-compatible syntax)
+    #[arg(long, value_name = "PATH")]
+    template: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct MonitorInitReportArgs {
+    /// Output path for starter template (default: ./gh-monitor-report-template.j2)
+    #[arg(long, value_name = "PATH")]
+    output: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -280,6 +294,7 @@ struct GhCiRollup {
 
 #[derive(Debug, Clone, Serialize)]
 struct GhMonitorReportSummary {
+    schema_version: String,
     team: String,
     repo: String,
     generated_at: String,
@@ -328,6 +343,16 @@ struct GhMonitorReviewReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     submitted_at: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+struct GhMonitorInitReportSummary {
+    output_path: String,
+    created: bool,
+    schema_version: String,
+}
+
+const GH_MONITOR_REPORT_SCHEMA_VERSION: &str = "1.0.0";
+const GH_MONITOR_DEFAULT_TEMPLATE_FILENAME: &str = "gh-monitor-report-template.j2";
 
 pub fn execute(args: GhArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
@@ -380,6 +405,13 @@ pub fn execute(args: GhArgs) -> Result<()> {
                 let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
                 return print_namespace_status(&health, args.json);
             }
+            if let MonitorTarget::InitReport(init_report_args) = &monitor.target {
+                return execute_monitor_init_report(
+                    &current_dir,
+                    init_report_args.output.as_deref(),
+                    args.json,
+                );
+            }
             if let MonitorTarget::List(list_args) = &monitor.target {
                 enforce_plugin_ready(&plugin_state, args.json)?;
                 return execute_monitor_list(
@@ -399,6 +431,7 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     &current_dir,
                     &home_dir,
                     report_args.pr_number,
+                    report_args.template.as_deref(),
                     args.json,
                 );
             }
@@ -490,6 +523,7 @@ pub fn execute(args: GhArgs) -> Result<()> {
                 MonitorTarget::Status(_status) => unreachable!("handled above"),
                 MonitorTarget::List(_list) => unreachable!("handled above"),
                 MonitorTarget::Report(_report) => unreachable!("handled above"),
+                MonitorTarget::InitReport(_init_report) => unreachable!("handled above"),
             };
 
             match output {
@@ -569,8 +603,13 @@ fn execute_monitor_report(
     current_dir: &Path,
     home_dir: &Path,
     pr_number: u64,
+    template_path: Option<&Path>,
     json: bool,
 ) -> Result<()> {
+    if json && template_path.is_some() {
+        bail!("`--template` cannot be combined with `--json`");
+    }
+
     let repo = resolve_monitor_repo_scope(config, current_dir, home_dir, team)?;
     let gh_json_fields = "number,title,url,isDraft,reviewDecision,mergeStateStatus,mergeable,statusCheckRollup,reviews";
 
@@ -605,6 +644,7 @@ fn execute_monitor_report(
     );
 
     let report = GhMonitorReportSummary {
+        schema_version: GH_MONITOR_REPORT_SCHEMA_VERSION.to_string(),
         team: team.to_string(),
         repo,
         generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -626,8 +666,131 @@ fn execute_monitor_report(
         return Ok(());
     }
 
+    if let Some(path) = template_path {
+        let rendered = render_monitor_report_template(path, &report)?;
+        print!("{rendered}");
+        if !rendered.ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    }
+
     print_monitor_report_summary(&report);
     Ok(())
+}
+
+fn execute_monitor_init_report(
+    current_dir: &Path,
+    output_override: Option<&Path>,
+    json: bool,
+) -> Result<()> {
+    let output_path = match output_override {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => current_dir.join(path),
+        None => current_dir.join(GH_MONITOR_DEFAULT_TEMPLATE_FILENAME),
+    };
+
+    if output_path.exists() {
+        bail!(
+            "report template already exists at {} (choose another path or remove existing file)",
+            output_path.display()
+        );
+    }
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create parent directories for {}",
+                output_path.display()
+            )
+        })?;
+    }
+
+    std::fs::write(&output_path, default_monitor_report_template()).with_context(|| {
+        format!(
+            "failed to write starter report template to {}",
+            output_path.display()
+        )
+    })?;
+
+    let summary = GhMonitorInitReportSummary {
+        output_path: output_path.display().to_string(),
+        created: true,
+        schema_version: GH_MONITOR_REPORT_SCHEMA_VERSION.to_string(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    println!("atm gh monitor init-report complete");
+    println!("Template:          {}", summary.output_path);
+    println!("Schema Version:    {}", summary.schema_version);
+    println!();
+    println!("Use with:");
+    println!(
+        "  atm gh monitor report <pr-number> --template {}",
+        summary.output_path
+    );
+    Ok(())
+}
+
+fn render_monitor_report_template(
+    template_path: &Path,
+    report: &GhMonitorReportSummary,
+) -> Result<String> {
+    let template = std::fs::read_to_string(template_path)
+        .with_context(|| format!("failed to read template file {}", template_path.display()))?;
+    let env = Environment::new();
+    env.render_str(&template, report).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to render template {}: {}",
+            template_path.display(),
+            err
+        )
+    })
+}
+
+fn default_monitor_report_template() -> &'static str {
+    r#"GitHub Monitor Report (schema {{ schema_version }})
+Team: {{ team }}
+Repository: {{ repo }}
+Generated: {{ generated_at }}
+PR #{{ pr.number }}: {{ pr.title }}
+URL: {{ pr.url }}
+Draft: {{ "yes" if pr.draft else "no" }}
+CI: {{ pr.ci.state }} (pass={{ pr.ci.pass }} fail={{ pr.ci.fail }} pending={{ pr.ci.pending }} total={{ pr.ci.total }})
+Review Decision: {{ pr.review_decision }}
+Merge: status={{ pr.merge.status }} mergeable={{ pr.merge.mergeable }} mergeStateStatus={{ pr.merge.merge_state_status }}
+
+Blocking Reasons:
+{% if pr.merge.blocking_reasons|length == 0 -%}
+- none
+{% else -%}
+{% for reason in pr.merge.blocking_reasons -%}
+- {{ reason }}
+{% endfor -%}
+{% endif %}
+
+Reviews ({{ pr.reviews|length }}):
+{% if pr.reviews|length == 0 -%}
+- none
+{% else -%}
+{% for review in pr.reviews -%}
+- {{ review.reviewer }} [{{ review.state }}] submitted_at={{ review.submitted_at or "-" }}
+{% endfor -%}
+{% endif %}
+
+Checks ({{ pr.checks|length }}):
+{% if pr.checks|length == 0 -%}
+- none
+{% else -%}
+{% for check in pr.checks -%}
+- {{ check.name }} | status={{ check.status }} | conclusion={{ check.conclusion or "-" }} | started_at={{ check.started_at or "-" }} | completed_at={{ check.completed_at or "-" }} | run_url={{ check.run_url or "-" }}
+{% endfor -%}
+{% endif %}
+"#
 }
 
 fn resolve_monitor_repo_scope(
@@ -723,6 +886,7 @@ fn print_monitor_list_summary(summary: &GhMonitorListSummary) {
 
 fn print_monitor_report_summary(report: &GhMonitorReportSummary) {
     println!("GitHub Monitor Report: atm gh monitor report");
+    println!("Schema Version:    {}", report.schema_version);
     println!("Team:              {}", report.team);
     println!("Repository:        {}", report.repo);
     println!("Generated At:      {}", report.generated_at);
@@ -1330,6 +1494,7 @@ fn namespace_actions(enabled: bool) -> Vec<&'static str> {
             "atm gh monitor run <run-id>",
             "atm gh monitor list",
             "atm gh monitor report <pr-number>",
+            "atm gh monitor init-report [--output <path>]",
             "atm gh monitor start|stop|restart|status",
             "atm gh init",
         ]
@@ -1610,6 +1775,7 @@ fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn validate_status_args_accepts_no_target_form() {
@@ -1776,5 +1942,62 @@ mod tests {
     fn normalize_merge_status_maps_unknown_to_pending() {
         assert_eq!(normalize_merge_status(Some("UNKNOWN")), "pending");
         assert_eq!(normalize_merge_status(Some("unknown")), "pending");
+        assert_eq!(normalize_merge_status(Some("CLEAN")), "clean");
+    }
+
+    #[test]
+    fn execute_monitor_init_report_writes_default_template_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        execute_monitor_init_report(tmp.path(), None, false).expect("init report");
+        let template_path = tmp.path().join(GH_MONITOR_DEFAULT_TEMPLATE_FILENAME);
+        assert!(template_path.exists());
+        let content = std::fs::read_to_string(template_path).expect("read template");
+        assert!(content.contains("schema {{ schema_version }}"));
+        assert!(content.contains("{{ pr.number }}"));
+    }
+
+    #[test]
+    fn render_monitor_report_template_renders_report_payload() {
+        let tmp = TempDir::new().expect("tempdir");
+        let template_path = tmp.path().join("custom-template.j2");
+        std::fs::write(
+            &template_path,
+            "team={{ team }} pr={{ pr.number }} schema={{ schema_version }}",
+        )
+        .expect("write template");
+
+        let report = GhMonitorReportSummary {
+            schema_version: GH_MONITOR_REPORT_SCHEMA_VERSION.to_string(),
+            team: "atm-dev".to_string(),
+            repo: "acme/repo".to_string(),
+            generated_at: "2026-03-09T00:00:00Z".to_string(),
+            pr: GhMonitorReportPr {
+                number: 42,
+                title: "Title".to_string(),
+                url: "https://example.test/pr/42".to_string(),
+                draft: false,
+                ci: GhCiRollup {
+                    state: "pass".to_string(),
+                    total: 1,
+                    pass: 1,
+                    fail: 0,
+                    pending: 0,
+                    neutral: 0,
+                },
+                review_decision: "approved".to_string(),
+                merge: GhMergeReport {
+                    mergeable: "mergeable".to_string(),
+                    merge_state_status: "clean".to_string(),
+                    status: "ready".to_string(),
+                    blocking_reasons: vec![],
+                },
+                checks: vec![],
+                reviews: vec![],
+            },
+        };
+
+        let rendered =
+            render_monitor_report_template(&template_path, &report).expect("render template");
+        assert_eq!(rendered, "team=atm-dev pr=42 schema=1.0.0");
     }
 }
