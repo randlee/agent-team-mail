@@ -206,3 +206,8 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
 - Full line/column fidelity for missing variables may require parser-side instrumentation in addition to render-time strict undefined behavior.
 - Logging schema migration must preserve backward compatibility for existing log readers where required.
 - Keep release-artifact manifest as SSoT for publish/install artifacts while expanding docs for new CLI surface.
+
+## Team-lead Decision: QA-AH4-002 (sc_observability::init() wiring)
+DEFERRED to Phase AJ or later. atm_core::logging::init_unified() is ratified as the
+integration surface for ATM binaries in this phase. The sc-observability crate does not
+export init(). No action required for AH.4 merge.

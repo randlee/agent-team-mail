@@ -14,6 +14,7 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 agent-team-mail-core.workspace = true
 anyhow.workspace = true
+chrono = { version = "0.4", default-features = true }
 serde_json.workspace = true
 thiserror.workspace = true
 

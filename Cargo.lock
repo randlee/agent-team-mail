@@ -1540,7 +1540,6 @@ dependencies = [
  "agent-team-mail-core",
  "anyhow",
  "assert_cmd",
- "chrono",
  "clap",
  "predicates",
  "sc-composer",
@@ -1568,6 +1567,7 @@ version = "0.42.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
+ "chrono",
  "serde_json",
  "serial_test",
  "tempfile",
