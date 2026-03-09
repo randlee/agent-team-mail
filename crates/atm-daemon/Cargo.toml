@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 agent-team-mail-core.workspace = true
+sc-observability.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true

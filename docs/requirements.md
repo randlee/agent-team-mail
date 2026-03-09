@@ -6,6 +6,21 @@
 
 ---
 
+## 0. Secondary Requirements and Architecture Registry
+
+This primary requirements document registers secondary source-of-truth documents:
+
+- Observability requirements: `docs/observability/requirements.md`
+- Observability architecture: `docs/observability/architecture.md`
+- sc-composer requirements: `docs/sc-composer/requirements.md`
+- sc-composer architecture: `docs/sc-composer/architecture.md`
+
+All logging/OpenTelemetry requirements for ATM and companion tools are defined
+in the observability documents above. This file references that contract and
+must not duplicate or drift from it.
+
+---
+
 ## 1. Project Summary
 
 `atm` is a Rust workspace that provides mail-like messaging for Claude agent teams. It consists of a CLI for interactive use, a shared library for safe file I/O against the `~/.claude/teams/` file structure, and (post-MVP) an always-on daemon that hosts plugins for CI monitoring, cross-machine bridging, issue tracking, and human chat interfaces.
@@ -1708,192 +1723,18 @@ The `SessionEnd` hook deletes the session file for the terminating session:
 
 ### 4.6 Unified Event Logging
 
-`atm` must provide one structured event stream across `atm`, `atm-daemon`, `atm-tui`,
-and `atm-agent-mcp` so operators can reconstruct causality and filter by team/session.
+All detailed logging and OpenTelemetry requirements are defined in:
 
-Unified event logging uses a single daemon-owned write path with producer fan-in
-and spool fallback.
+- `docs/observability/requirements.md` (requirements source of truth)
+- `docs/observability/architecture.md` (architecture source of truth)
 
-#### Goals
-
-- One common sink across all binaries
-- Deterministic, schema-validated JSONL records
-- Team/session/request correlation by default
-- Fail-open behavior (logging must never block or fail core workflows)
-- Safe multi-process operation (no cross-process file append races)
-
-#### Canonical Architecture
-
-- Producers (`atm`, `atm-tui`, `atm-agent-mcp`) emit `log-event` messages to daemon over
-  the existing socket envelope.
-- `atm-daemon` is the only writer to canonical log files and the only component that
-  performs validation, redaction, queueing, and rotation.
-- If daemon is unavailable, producers spool locally and daemon merges spool on startup.
-
-#### Socket Contract (`command = "log-event"`)
-
-- Request envelope: existing `SocketRequest` with `version`, `request_id`, `command`,
-  and `payload`.
-- Command: `log-event`
-- Payload: `LogEventV1`
-- Success response: `status = "ok"` with payload `{ "accepted": true }`
-- Error response: `status = "error"` and code:
-  - `VERSION_MISMATCH`
-  - `INVALID_PAYLOAD`
-  - `INTERNAL_ERROR`
-
-#### Canonical Event Schema (`LogEventV1`)
-
-Required fields:
-- `v` (schema version)
-- `ts` (RFC3339 UTC)
-- `level` (`trace|debug|info|warn|error`)
-- `source_binary` (`atm|atm-daemon|atm-tui|atm-agent-mcp`)
-- `hostname`
-- `pid`
-- `target`
-- `action`
-
-Optional correlation fields:
-- `team`, `agent`, `session_id`
-- `request_id`, `correlation_id`
-- `outcome`, `error`
-- `fields` (structured map), `spans` (span refs)
-
-Validation rules:
-- Reject payloads missing required fields
-- Enforce serialized-size guard (`64 KiB` max per line, initial default)
-- Apply built-in redaction before enqueue/write
-- `action` MUST be stable snake_case. Canonical baseline action vocabulary is
-  defined in `docs/logging-l1a-spec.md` and is the source of truth for
-  dashboard/alert naming.
-
-#### Sink Paths and Files
-
-Canonical log file (daemon-writer mode):
-- `${home_dir}/.config/atm/atm.log.jsonl` where `home_dir` is resolved via `get_home_dir()`
-  (`ATM_HOME` when set, otherwise platform home directory)
-
-Producer fallback spool directory:
-- `${home_dir}/.config/atm/log-spool` where `home_dir` is resolved via `get_home_dir()`
-
-Spool filename convention:
-- `{source_binary}-{pid}-{unix_millis}.jsonl`
-
-#### Queue, Redaction, Rotation Defaults
-
-- Daemon in-memory queue capacity: `4096`
-- Overflow policy: `drop-new`
-- Overflow observability: increment dropped counter + rate-limited warning
-- Redaction v1 denylist keys (case-insensitive): `password`, `secret`, `token`,
-  `api_key`, `auth`; plus bearer-token value pattern
-- Rotation: size-based at `50 MiB`, retain `5` rotated files
-
-#### Failure and Merge Semantics
-
-- Logging failures never fail CLI command execution or daemon progress.
-- Producer path is non-blocking best-effort; if socket send fails, write to spool.
-- Daemon startup merges spool files via claim/rename then append; delete source file
-  only after successful merge.
-- Merge ordering: timestamp then file order, append-only.
-- Daemon startup spool merge and daemon runtime writer MUST target the same canonical
-  path resolved from `ATM_LOG_FILE` (or default `atm.log.jsonl`).
-  Divergent startup/runtime sink paths are forbidden.
-
-#### Default-On and Health State Requirements
-
-- Unified structured logging is enabled by default for all ATM binaries.
-- Logging health must be explicit and queryable with these states:
-  - `healthy` — events reaching canonical log sink
-  - `degraded_spooling` — daemon/sink unavailable, events spooled
-  - `degraded_dropping` — queue overflow or unrecoverable emit failures
-  - `unavailable` — no active sink and no successful spool fallback
-- Silent degradation is not allowed. State transitions into degraded/unavailable
-  must emit structured warning/error events.
-
-#### Logging Diagnostics Surface Requirements
-
-- `atm doctor --json` must include logging health summary with:
-  - current health state
-  - canonical log path
-  - spool directory path
-  - dropped-event counter
-  - spool-file count and oldest spool age
-  - last logging error (if any)
-- Human-readable `atm doctor` output must report degraded/unavailable logging as
-  actionable findings with remediation commands.
-- `atm status --json` must expose logging health state for operator visibility.
-- A runbook mapping each health state to remediation commands must be maintained
-  in `docs/logging-troubleshooting.md`.
-
-#### Shared Logging Health Evaluator Requirements
-
-- Logging health evaluation must be implemented once in a shared module used by
-  both `atm doctor` and `atm status` outputs.
-- Health state computation must not be duplicated across command handlers.
-- The shared evaluator must consume canonical inputs:
-  - daemon reachability
-  - canonical log/spool path resolution
-  - spool inventory/age
-  - dropped-event counters and last logging error metadata where available
-
-#### JSON Schema and Compatibility Requirements
-
-- Logging health JSON object shape must be stable and versioned.
-- `atm doctor --json` and `atm status --json` must use the same logging-health
-  schema fields for overlapping data.
-- Additive fields are allowed; field removal or semantic redefinition requires
-  an explicit compatibility note in release docs.
-- For one minor release after schema expansion, newly added fields should be
-  documented as optional for external consumers.
-
-#### Path Resolution Consistency Requirements
-
-- CLI producers and daemon writer must resolve the same canonical home/log/spool
-  paths under identical environment configuration.
-- Diagnostics must print resolved paths used by the current process to support
-  troubleshooting of path/env mismatches.
-
-#### Migration Bridge (Legacy `events.jsonl`) — REMOVED
-
-The `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var were removed.
-`emit_event_best_effort` now routes exclusively through the unified producer channel.
-No legacy `events.jsonl` sink code remains in any crate.
-
-#### Minimum Event Coverage
-
-- `atm`: `send`, `broadcast`, `request`, `read` outcomes, watermark updates, teams ops
-- `atm-daemon`: lifecycle, session registry transitions, plugin lifecycle/errors
-- `atm-agent-mcp`: tool-call audit + lifecycle context
-- `atm-tui`: startup/shutdown, stream attach/detach, control-send/ack summaries
-
-#### Lifecycle and Hook Event Requirements (Z.5)
-
-- Daemon must emit lifecycle transition events for canonical member state:
-  - `member_state_change` (INFO) for `Offline ↔ Online` transitions only.
-  - `member_activity_change` (DEBUG) for `Busy ↔ Idle` transitions only.
-  - Events must include `old`, `new`, `reason`, and `source="daemon"` fields.
-  - Emission must be exactly once per state change (no duplicate logs when state is unchanged).
-- Daemon must emit identity transition events when runtime identity changes:
-  - `session_id_change` (INFO) and `process_id_change` (INFO).
-  - Events must include `old`, `new`, `reason`, and `source="daemon"` fields.
-- Hook lifecycle signals must be first-class structured events:
-  - `hook.session_start` (INFO)
-  - `hook.pre_compact` (INFO)
-  - `hook.compact_complete` (INFO)
-  - `hook.session_end` (INFO)
-  - `hook.failure` (WARN)
-- Hook events must include, when available: `team`, `agent`, `session_id`, `pid`,
-  `outcome`, and `source="hook"`.
-- Hook lifecycle event emission is always-on and must not be suppressed by
-  normal stderr verbosity controls (`ATM_LOG`).
-
-#### Runtime Controls
-
-- `ATM_LOG=trace|debug|info|warn|error` controls stderr tracing verbosity.
-- `ATM_LOG_MSG=1` enables message preview text; unset (or legacy string values
-  `none|truncated|full`) disables preview text.
-- `ATM_LOG_FILE` may override file path for tests/ops.
+Integration requirements in this primary ATM spec:
+- ATM binaries (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`) must implement
+  the observability requirements without behavior drift.
+- `atm doctor --json` and `atm status --json` must expose logging health fields
+  exactly as defined in observability requirements.
+- Any schema or health-state semantics changes must update observability docs
+  before implementation and release.
 
 ### 4.7 Daemon Auto-Start and Single-Instance Guarantees
 

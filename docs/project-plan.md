@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
-**Version**: 0.6
-**Date**: 2026-03-05
-**Status**: Phase AG complete (v0.42.0, integration PR #554 pending merge to develop).
+**Version**: 0.7
+**Date**: 2026-03-09
+**Status**: Phase AG complete (v0.42.0). Phase AH planning in progress.
 
 ---
 
@@ -1463,10 +1463,48 @@ the current tranche focused on onboarding contract closure.
 | | AG.3 | `sc-compose` Binary + Logging Baseline | COMPLETE | [#552](https://github.com/randlee/agent-team-mail/pull/552) |
 | | AG.4 | ATM Spawn Integration (`--system-prompt .j2`) | COMPLETE | [#553](https://github.com/randlee/agent-team-mail/pull/553) |
 
-**Completed**: 128+ sprints across 29 phases (CI green)
+**Completed**: 133+ sprints across 29 phases (CI green)
 **Current version**: v0.42.0
-**Current phase**: Phase AG (integration stabilization)
-**Next planned phase**: Phase AH (observability extraction + logging unification)
+**Current phase**: Phase AG (COMPLETE)
+**Next planned phase**: Phase AH (observability unification + OTel baseline)
+
+---
+
+## 17.17 Phase AH: Observability Unification + OTel Baseline
+
+**Goal**: Extract `sc-observability` as a shared logging platform across ATM
+tools, close deferred AG observability/render/docs gaps, and ship a safe
+optional OpenTelemetry baseline with sub-agent-first trace coverage.
+
+**Planning doc**: `docs/phase-ah-planning.md`
+**Requirements doc**: `docs/observability/requirements.md`
+**Architecture doc**: `docs/observability/architecture.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Issues | Status |
+|---|---|---|---|
+| AH.1 | Shared crate foundation (`sc-observability`) + spool/size-guard/socket-error/L1a contracts | #556 | COMPLETE |
+| AH.2 | `sc-compose` migration to shared logging | #556 | PLANNED |
+| AH.3 | Diagnostics + output derivation closure | #555, #557 | PLANNED |
+| AH.4 | ATM/daemon/tui/mcp/scmux/schook integration + doctor/status health surfaces + OTel baseline | #556 | PLANNED |
+| AH.5 | Runbook + install/release docs closeout | #558 | PLANNED |
+
+---
+
+## 17.18 Phase AI: GH Monitor Reporting Surfaces
+
+**Goal**: Add GH monitor dashboard/report UX for PR triage without expanding AH
+observability scope.
+
+**Planning doc**: `docs/phase-ai-planning.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Issues | Status |
+|---|---|---|---|
+| AI.0 | `gh_monitor` cold-start init bug fix prerequisite | #564 | PLANNED |
+| AI.1 | `atm gh monitor list` rollup dashboard + `--json` | #560 | PLANNED |
+| AI.2 | `atm gh monitor report <PR>` built-in report + `--json` | #561 | PLANNED |
+| AI.3 | Template customization (`--template`) + optional `init-report` | #561 (follow-up) | PLANNED |
 
 ---
 
