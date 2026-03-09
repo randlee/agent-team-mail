@@ -7169,7 +7169,7 @@ exit 1
             target: "123".to_string(),
             reference: None,
             start_timeout_secs: Some(120),
-            config_cwd: Some(temp.path().to_path_buf()),
+            config_cwd: Some(temp.path().to_string_lossy().to_string()),
         };
 
         monitor_gh_run(temp.path(), &status_seed, &gh_request, "o/r", 42)
