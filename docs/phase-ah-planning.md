@@ -59,6 +59,9 @@ Close AG deferred issues by extracting a shared observability crate and aligning
 
 `sc-observability` is the single structured-logging implementation used by:
 - `atm`
+- `atm-daemon`
+- `atm-tui`
+- `atm-agent-mcp`
 - `scmux`
 - `schook`
 - `sc-compose`
@@ -142,10 +145,10 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
 
 | Sprint | Focus | Primary Issues | Deliverables |
 |---|---|---|---|
-| AH.1 | `sc-observability` crate skeleton + contracts | #556 | New workspace crate, stable event schema/types, sink trait; size guard (`64 KiB`); queue/rotation defaults; spool semantics (filename format, ordering, delete-after-merge); unit tests |
+| AH.1 | `sc-observability` crate skeleton + contracts | #556 | New workspace crate, stable event schema/types, sink trait; `docs/logging-l1a-spec.md` authoring/update; socket contract error codes (`VERSION_MISMATCH`, `INVALID_PAYLOAD`, `INTERNAL_ERROR`); size guard (`64 KiB`); queue/rotation defaults; spool semantics (filename format, ordering, delete-after-merge); unit tests |
 | AH.2 | `sc-compose` migration to shared observability | #556 | Remove local logger duplication, add level/output controls, integration tests |
 | AH.3 | Diagnostics + render behavior closure | #555, #557 | Missing-var diagnostic enrichment and output derivation behavior with tests |
-| AH.4 | ATM ecosystem integration + health surfaces + OTel baseline | #556 | Integrate `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, and `scmux` with shared crate; deliver `atm doctor --json` / `atm status --json` logging-health fields (state, dropped counter, spool path, last error); wire runtime env controls (`ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`); optional OTel baseline traces/metrics |
+| AH.4 | ATM ecosystem integration + health surfaces + OTel baseline | #556 | Integrate `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, and `schook` with shared crate; deliver `atm doctor --json` / `atm status --json` logging-health fields (state, dropped counter, spool path, last error); wire runtime env controls (`ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`); optional OTel baseline traces/metrics |
 | AH.5 | Docs + runbook + release/install closure | #558 | README/quickstart/PUBLISHING updates; `docs/logging-troubleshooting.md` runbook alignment to health states/remediations; final QA checklist |
 
 ## Sprint Dependency Graph

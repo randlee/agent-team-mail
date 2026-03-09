@@ -6,6 +6,11 @@ Add operator-facing GH monitor reporting surfaces for fast triage:
 - `atm gh monitor list`
 - `atm gh monitor report <PR>`
 
+## Delivery Target
+
+- Target version: `v0.44.0`
+- Integration branch: `integrate/phase-AI`
+
 ## Phase Fit Decision
 
 - #560 and #561 are classified as **Phase AI** work, not AH.

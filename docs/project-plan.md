@@ -1,7 +1,7 @@
 # agent-team-mail (`atm`) — Project Plan
 
-**Version**: 0.6
-**Date**: 2026-03-05
+**Version**: 0.7
+**Date**: 2026-03-09
 **Status**: Phase AG complete (v0.42.0). Phase AH planning in progress.
 
 ---
@@ -1483,10 +1483,10 @@ optional OpenTelemetry baseline with sub-agent-first trace coverage.
 ### Planned Sprint Map
 | Sprint | Focus | Issues | Status |
 |---|---|---|---|
-| AH.1 | Shared crate foundation (`sc-observability`) + spool/size-guard contracts | #556 | PLANNED |
+| AH.1 | Shared crate foundation (`sc-observability`) + spool/size-guard/socket-error/L1a contracts | #556 | PLANNED |
 | AH.2 | `sc-compose` migration to shared logging | #556 | PLANNED |
 | AH.3 | Diagnostics + output derivation closure | #555, #557 | PLANNED |
-| AH.4 | ATM/daemon/tui/mcp/scmux integration + doctor/status health surfaces + OTel baseline | #556 | PLANNED |
+| AH.4 | ATM/daemon/tui/mcp/scmux/schook integration + doctor/status health surfaces + OTel baseline | #556 | PLANNED |
 | AH.5 | Runbook + install/release docs closeout | #558 | PLANNED |
 
 ---
@@ -1504,7 +1504,7 @@ observability scope.
 | AI.0 | `gh_monitor` cold-start init bug fix prerequisite | #564 | PLANNED |
 | AI.1 | `atm gh monitor list` rollup dashboard + `--json` | #560 | PLANNED |
 | AI.2 | `atm gh monitor report <PR>` built-in report + `--json` | #561 | PLANNED |
-| AI.3 | Template customization (`--template`) + optional `init-report` | #561 | PLANNED |
+| AI.3 | Template customization (`--template`) + optional `init-report` | #561 (follow-up) | PLANNED |
 
 ---
 

@@ -115,6 +115,8 @@ Minimum required coverage:
 - `atm-daemon`: lifecycle, session-registry transitions, plugin lifecycle/errors.
 - `atm-agent-mcp`: tool-call audit + lifecycle context.
 - `atm-tui`: startup/shutdown, stream attach/detach, control-send/ack summaries.
+- `scmux`: team/orchestration lifecycle, message routing outcomes, and transport errors.
+- `schook`: hook invocation lifecycle (`session_start`, `session_end`, compact events), policy decision outcomes, and hook failures.
 
 Lifecycle and hook coverage:
 - `member_state_change` (INFO) for `Offline ↔ Online` only.
