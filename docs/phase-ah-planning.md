@@ -4,6 +4,11 @@
 
 Close AG deferred issues by extracting a shared observability crate and aligning logging/diagnostics behavior across `atm` and `sc-compose` with one implementation surface.
 
+## Delivery Target
+
+- Target version: `v0.43.0`
+- Integration branch: `integrate/phase-AH`
+
 ## Inputs
 
 - Deferred AG issues:
@@ -84,6 +89,11 @@ Schema, redaction, truncation, and envelope rules remain consistent across tools
 - Rotation is enabled by default.
 - Retention window is configurable per tool/project.
 - Logging must not silently disable itself when retention config is invalid.
+- Default queue/rotation constants (from observability requirements):
+  - queue capacity: `4096`
+  - max event size guard: `64 KiB`
+  - rotation threshold: `50 MiB`
+  - retained files: `5`
 
 ### AH-OBS-5: OpenTelemetry (optional)
 
@@ -132,11 +142,18 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
 
 | Sprint | Focus | Primary Issues | Deliverables |
 |---|---|---|---|
-| AH.1 | `sc-observability` crate skeleton + contracts | #556 | New workspace crate, stable event schema/types, sink trait, unit tests |
+| AH.1 | `sc-observability` crate skeleton + contracts | #556 | New workspace crate, stable event schema/types, sink trait; size guard (`64 KiB`); queue/rotation defaults; spool semantics (filename format, ordering, delete-after-merge); unit tests |
 | AH.2 | `sc-compose` migration to shared observability | #556 | Remove local logger duplication, add level/output controls, integration tests |
 | AH.3 | Diagnostics + render behavior closure | #555, #557 | Missing-var diagnostic enrichment and output derivation behavior with tests |
-| AH.4 | ATM + SCMUX integration + OTel baseline | #556 | ATM/scmux logging path parity via shared crate, optional OTel baseline traces/metrics |
-| AH.5 | Docs + release/install closure | #558 | README/quickstart/PUBLISHING updates + final QA checklist |
+| AH.4 | ATM ecosystem integration + health surfaces + OTel baseline | #556 | Integrate `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, and `scmux` with shared crate; deliver `atm doctor --json` / `atm status --json` logging-health fields (state, dropped counter, spool path, last error); wire runtime env controls (`ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`); optional OTel baseline traces/metrics |
+| AH.5 | Docs + runbook + release/install closure | #558 | README/quickstart/PUBLISHING updates; `docs/logging-troubleshooting.md` runbook alignment to health states/remediations; final QA checklist |
+
+## Sprint Dependency Graph
+
+- AH.2 depends on AH.1.
+- AH.3 depends on AH.1.
+- AH.4 depends on AH.1 and AH.2.
+- AH.5 depends on AH.3 and AH.4.
 
 ## Acceptance Criteria
 
@@ -146,7 +163,8 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
 4. Diagnostics for missing variables include actionable source details (path/include chain, position when available).
 5. Output-path derivation behavior is deterministic and covered by tests.
 6. End-user docs explicitly cover `sc-compose` install/use flows.
-7. OTel baseline export is available behind feature/config toggle and does not block local file logging.
+7. `atm doctor --json` and `atm status --json` expose logging health state and required diagnostics fields (`state`, canonical log path, spool path, dropped counter, oldest spool age/count, last error).
+8. OTel baseline export is available behind feature/config toggle and does not block local file logging.
 
 ## Test Plan (Phase AH)
 
@@ -155,6 +173,12 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
   - truncation behavior
   - redaction behavior
   - sink routing semantics
+  - serialized size guard (`64 KiB`)
+  - spool merge semantics:
+    - filename convention `{source_binary}-{pid}-{unix_millis}.jsonl`
+    - merge ordering (timestamp then file order)
+    - delete source spool file only after successful merge
+  - queue/rotation defaults (`4096`, `50 MiB`, retained files `5`)
 - `sc-compose` integration tests:
   - JSON vs human log modes
   - level-gated emission
@@ -164,6 +188,8 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
   - shared event schema parity checks for compose-related operations
   - no subprocess shell-outs for compose behavior
   - OTel baseline trace/metric emission smoke tests (toggle enabled/disabled)
+  - `doctor --json` and `status --json` logging-health payload presence and schema consistency
+  - runtime env control behavior: `ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`
 - SCMUX integration tests:
   - shared schema parity checks for status/message operations
   - sub-agent trace correlation (`subagent_id`) propagation checks
