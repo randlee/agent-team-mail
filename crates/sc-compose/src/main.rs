@@ -113,10 +113,14 @@ fn main() -> ExitCode {
     let json_output = cli.json;
     let result = run(&cli, &logger);
     match result {
-        Ok(()) => ExitCode::from(0),
+        Ok(()) => {
+            logger.emit("command_end", "success", json!({"code": 0}));
+            ExitCode::from(0)
+        }
         Err(err) => {
             let code = classify_error_code(&err);
             emit_error(&err, json_output);
+            emit_include_expansion_failure(&logger, &err);
             logger.emit(
                 "command_end",
                 "error",
@@ -156,6 +160,7 @@ fn run_render(
         json!({"mode": format!("{:?}", cli.mode), "kind": format!("{:?}", cli.kind)}),
     );
     let result = sc_composer::compose(&request)?;
+    emit_include_expansion_success(logger, &result.resolved_files);
     let output_path = output;
 
     if cli.json {
@@ -207,6 +212,57 @@ fn run_render(
     println!("{}", result.rendered_text);
     logger.emit("render_outcome", "success", json!({"output": "stdout"}));
     Ok(())
+}
+
+fn emit_include_expansion_success(logger: &observability::Logger, resolved_files: &[PathBuf]) {
+    let included_files: Vec<String> = resolved_files
+        .iter()
+        .skip(1)
+        .map(|path| path.display().to_string())
+        .collect();
+    logger.emit(
+        "include_expansion",
+        "success",
+        json!({
+            "includedCount": included_files.len(),
+            "includedFiles": included_files
+        }),
+    );
+}
+
+fn emit_include_expansion_failure(logger: &observability::Logger, err: &anyhow::Error) {
+    let Some(compose_err) = err.downcast_ref::<ComposerError>() else {
+        return;
+    };
+    match compose_err {
+        ComposerError::IncludeError { diagnostic } => {
+            logger.emit(
+                "include_expansion",
+                "error",
+                json!({
+                    "diagnostic": diagnostic,
+                }),
+            );
+        }
+        ComposerError::ValidationFailed { errors, .. } => {
+            let include_related: Vec<&sc_composer::Diagnostic> = errors
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.code.starts_with("INCLUDE_") || diagnostic.code == "ROOT_ESCAPE"
+                })
+                .collect();
+            if !include_related.is_empty() {
+                logger.emit(
+                    "include_expansion",
+                    "error",
+                    json!({
+                        "diagnostics": include_related,
+                    }),
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 fn run_resolve(cli: &Cli, target: Option<String>, logger: &observability::Logger) -> Result<()> {
