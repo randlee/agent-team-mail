@@ -2,7 +2,7 @@
 
 **Version**: 0.6
 **Date**: 2026-03-05
-**Status**: Phase AF complete (v0.41.0, integration PR #530 pending).
+**Status**: Phase AG in progress (v0.42.0, integration PR #554 pending).
 
 ---
 
@@ -1456,11 +1456,16 @@ the current tranche focused on onboarding contract closure.
 | | AF.3 | Transient Agent Registration Controls | COMPLETE | [#527](https://github.com/randlee/agent-team-mail/pull/527) |
 | | AF.4 | Cleanup Preview + tmux Sentinel | COMPLETE | [#528](https://github.com/randlee/agent-team-mail/pull/528) |
 | | AF.5 | Reliability Regression + Documentation Closure | COMPLETE | [#529](https://github.com/randlee/agent-team-mail/pull/529) |
+| **AG** | AG.0 | Stale Daemon Hygiene + CI Recovery | COMPLETE | [#540](https://github.com/randlee/agent-team-mail/pull/540) |
+| | AG.1 | `sc-composer` Library MVP | COMPLETE | [#547](https://github.com/randlee/agent-team-mail/pull/547) |
+| | AG.2 | Resolver + Include Expansion Hardening | COMPLETE | [#551](https://github.com/randlee/agent-team-mail/pull/551) |
+| | AG.3 | `sc-compose` Binary + Logging Baseline | COMPLETE | [#552](https://github.com/randlee/agent-team-mail/pull/552) |
+| | AG.4 | ATM Spawn Integration (`--system-prompt .j2`) | COMPLETE | [#553](https://github.com/randlee/agent-team-mail/pull/553) |
 
-**Completed**: 128+ sprints across 28 phases (CI green)
-**Current version**: v0.41.0
-**Current phase**: Phase AF (COMPLETE)
-**Next planned phase**: Phase AG (TBD)
+**Completed**: 128+ sprints across 29 phases (CI green)
+**Current version**: v0.42.0
+**Current phase**: Phase AG (integration stabilization)
+**Next planned phase**: Phase AH (observability extraction + logging unification)
 
 ---
 

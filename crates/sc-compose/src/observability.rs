@@ -59,9 +59,16 @@ fn default_log_path() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(xdg).join("sc-compose/logs/sc-compose.log"));
     }
-    std::env::var("HOME")
-        .ok()
-        .map(|home| PathBuf::from(home).join(".config/sc-compose/logs/sc-compose.log"))
+    #[cfg(not(windows))]
+    {
+        return std::env::var("HOME")
+            .ok()
+            .map(|home| PathBuf::from(home).join(".config/sc-compose/logs/sc-compose.log"));
+    }
+    #[cfg(windows)]
+    {
+        None
+    }
 }
 
 fn truncate_fields(value: serde_json::Value) -> serde_json::Value {

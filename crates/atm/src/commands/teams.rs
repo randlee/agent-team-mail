@@ -1134,7 +1134,7 @@ fn resolve_spawn_system_prompt(
         guidance_block: None,
         user_prompt: None,
         policy: ComposePolicy {
-            unknown_variable_policy: UnknownVariablePolicy::Warn,
+            unknown_variable_policy: UnknownVariablePolicy::Error,
             ..ComposePolicy::default()
         },
     };

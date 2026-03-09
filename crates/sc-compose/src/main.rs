@@ -1,6 +1,7 @@
 mod observability;
 
 use anyhow::{Context, Result};
+use clap::error::ErrorKind;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use sc_composer::{
     ComposeMode, ComposePolicy, ComposeRequest, ComposerError, ProfileKind, RuntimeKind,
@@ -99,8 +100,12 @@ fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
+            let code = match err.kind() {
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => 0,
+                _ => 3,
+            };
             let _ = err.print();
-            return ExitCode::from(3);
+            return ExitCode::from(code);
         }
     };
     let logger = observability::Logger::new();
