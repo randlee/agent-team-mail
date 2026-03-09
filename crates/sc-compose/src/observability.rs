@@ -61,9 +61,9 @@ fn default_log_path() -> Option<PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        return std::env::var("HOME")
+        std::env::var("HOME")
             .ok()
-            .map(|home| PathBuf::from(home).join(".config/sc-compose/logs/sc-compose.log"));
+            .map(|home| PathBuf::from(home).join(".config/sc-compose/logs/sc-compose.log"))
     }
     #[cfg(windows)]
     {
