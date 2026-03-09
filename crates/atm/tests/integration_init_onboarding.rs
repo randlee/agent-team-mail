@@ -140,6 +140,12 @@ fn test_init_fresh_repo_creates_atm_toml_team_and_global_hooks() {
         .stdout(predicate::str::contains("Hook scope: global"));
 
     assert!(repo.join(".atm.toml").exists());
+    assert!(repo.join(".prompts").exists());
+    let gitignore = fs::read_to_string(repo.join(".gitignore")).unwrap();
+    assert!(
+        gitignore.lines().any(|line| line.trim() == ".prompts/"),
+        "init should add .prompts/ to .gitignore"
+    );
     assert!(home.path().join(".claude/settings.json").exists());
     assert!(
         home.path()
@@ -172,6 +178,15 @@ fn test_init_is_idempotent_on_rerun() {
 
     let second = fs::read_to_string(&settings_path).unwrap();
     assert_eq!(first, second, "settings should be unchanged on rerun");
+    let gitignore = fs::read_to_string(repo.join(".gitignore")).unwrap();
+    let prompts_lines = gitignore
+        .lines()
+        .filter(|line| line.trim() == ".prompts/")
+        .count();
+    assert_eq!(
+        prompts_lines, 1,
+        "init rerun should not duplicate .prompts/ entry in .gitignore"
+    );
 
     let scripts_dir = home.path().join(".claude/scripts");
     let session_start_py = scripts_dir
@@ -637,6 +652,14 @@ fn test_init_dry_run_shows_planned_actions_without_writes() {
             .join(".claude/teams/my-team/config.json")
             .exists(),
         "dry-run must not create team config"
+    );
+    assert!(
+        !repo.join(".prompts").exists(),
+        "dry-run must not create .prompts directory"
+    );
+    assert!(
+        !repo.join(".gitignore").exists(),
+        "dry-run must not create .gitignore for compose bootstrap"
     );
 }
 
