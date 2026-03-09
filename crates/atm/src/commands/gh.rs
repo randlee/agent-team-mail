@@ -416,7 +416,9 @@ fn evaluate_plugin_state(
         .map(str::trim)
         .unwrap_or_default();
     if cfg_repo.is_empty() {
-        state.message = Some("gh_monitor configuration missing required field: repo".to_string());
+        state.message = Some(
+            "gh_monitor configuration missing required field: repo (run `atm gh init`)".to_string(),
+        );
         return state;
     }
 
@@ -428,12 +430,46 @@ fn resolve_namespace_health(
     current_dir: &Path,
     plugin_state: &GhPluginState,
 ) -> Result<GhMonitorHealth> {
+    if !plugin_state.is_usable() {
+        return Ok(GhMonitorHealth {
+            team: team.to_string(),
+            configured: plugin_state.configured,
+            enabled: plugin_state.enabled,
+            config_source: plugin_state.config_source.clone(),
+            config_path: plugin_state.config_path.clone(),
+            lifecycle_state: "unknown".to_string(),
+            availability_state: "disabled_config_error".to_string(),
+            in_flight: 0,
+            updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            message: Some(
+                plugin_state
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "gh_monitor plugin is not configured".to_string()),
+            ),
+        });
+    }
+
     let daemon_error = match agent_team_mail_core::daemon_client::ensure_daemon_running() {
         Ok(()) => {
-            if let Some(health) = gh_monitor_health_with_context(
+            if let Some(mut health) = gh_monitor_health_with_context(
                 team,
                 Some(current_dir.to_string_lossy().to_string()),
             )? {
+                if health.availability_state == "disabled_config_error" {
+                    if let Some(reason) = plugin_state.message.as_deref() {
+                        health.message = Some(reason.to_string());
+                    } else if health
+                        .message
+                        .as_deref()
+                        .is_none_or(|m| m.trim().is_empty())
+                    {
+                        health.message = Some(
+                            "gh_monitor configuration error: run `atm gh init` to repair setup"
+                                .to_string(),
+                        );
+                    }
+                }
                 return Ok(health);
             }
             Some("daemon is not reachable".to_string())
@@ -657,6 +693,8 @@ fn execute_init(
     gh.insert("repo".to_string(), toml::Value::String(repo.clone()));
     if let Some(owner) = owner.as_ref() {
         gh.insert("owner".to_string(), toml::Value::String(owner.clone()));
+    } else {
+        gh.remove("owner");
     }
     gh.entry("poll_interval_secs".to_string())
         .or_insert_with(|| toml::Value::Integer(60));
@@ -714,11 +752,7 @@ fn execute_init(
                 "updated"
             }
         );
-        if let Some(owner) = preview.owner.as_deref() {
-            println!("Repository:   {owner}/{}", preview.repo);
-        } else {
-            println!("Repository:   {}", preview.repo);
-        }
+        println!("Repository:   {}", preview.repo);
         println!("Notify:       {}", preview.notify_target);
         println!("Enabled:      yes");
         println!();
@@ -794,15 +828,19 @@ fn resolve_repo_coordinates(
             if owner.is_empty() || repo.is_empty() {
                 bail!("--repo must be `owner/repo` or `repo`");
             }
-            return Ok((Some(owner.to_string()), repo.to_string()));
+            return Ok((Some(owner.to_string()), format!("{owner}/{repo}")));
         }
 
         let owner = detected.map(|(owner, _)| owner.clone());
-        return Ok((owner, trimmed.to_string()));
+        let repo = owner
+            .as_ref()
+            .map(|owner| format!("{owner}/{trimmed}"))
+            .unwrap_or_else(|| trimmed.to_string());
+        return Ok((owner, repo));
     }
 
     if let Some((owner, repo)) = detected {
-        return Ok((Some(owner.clone()), repo.clone()));
+        return Ok((Some(owner.clone()), format!("{owner}/{repo}")));
     }
 
     bail!(
@@ -897,7 +935,7 @@ mod tests {
     fn resolve_repo_coordinates_accepts_owner_repo() {
         let coords = resolve_repo_coordinates(Some("acme/repo"), None).unwrap();
         assert_eq!(coords.0.as_deref(), Some("acme"));
-        assert_eq!(coords.1, "repo");
+        assert_eq!(coords.1, "acme/repo");
     }
 
     #[test]
@@ -905,6 +943,14 @@ mod tests {
         let detected = ("acme".to_string(), "agent-team-mail".to_string());
         let coords = resolve_repo_coordinates(Some("agent-team-mail"), Some(&detected)).unwrap();
         assert_eq!(coords.0.as_deref(), Some("acme"));
-        assert_eq!(coords.1, "agent-team-mail");
+        assert_eq!(coords.1, "acme/agent-team-mail");
+    }
+
+    #[test]
+    fn resolve_repo_coordinates_defaults_to_detected_owner_repo() {
+        let detected = ("acme".to_string(), "agent-team-mail".to_string());
+        let coords = resolve_repo_coordinates(None, Some(&detected)).unwrap();
+        assert_eq!(coords.0.as_deref(), Some("acme"));
+        assert_eq!(coords.1, "acme/agent-team-mail");
     }
 }

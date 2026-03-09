@@ -2164,7 +2164,7 @@ fn emit_gh_monitor_health_transition(
         ..Default::default()
     });
 
-    let (from_agent, targets) = resolve_ci_alert_routing(home, team);
+    let (from_agent, targets) = resolve_ci_alert_routing(home, team, None, None);
     let text = format!(
         "[gh_monitor] availability transition {} -> {}\nreason: {}",
         old_state, new_state, reason
@@ -2328,7 +2328,9 @@ fn evaluate_gh_monitor_config(
         .unwrap_or("")
         .is_empty()
     {
-        state.error = Some("gh_monitor configuration missing required field: repo".to_string());
+        state.error = Some(
+            "gh_monitor configuration missing required field: repo (run `atm gh init`)".to_string(),
+        );
         return state;
     }
 
@@ -2613,6 +2615,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
                             pr_view.url.as_deref(),
                             merge_state_status,
                             None,
+                            gh_request.config_cwd.as_deref(),
                         );
                         preflight_blocked = true;
                     }
@@ -2675,7 +2678,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
     }
 
     if status.state == "ci_not_started" {
-        emit_ci_not_started_alert(home, &status);
+        emit_ci_not_started_alert(home, &status, gh_request.config_cwd.as_deref());
     } else if let Some(run_id) = status.run_id {
         let home = home.to_path_buf();
         let status_seed = status.clone();
@@ -3360,7 +3363,6 @@ async fn monitor_gh_run(
     gh_request: &GhMonitorRequest,
     run_id: u64,
 ) -> Result<()> {
-    let (from_agent, targets) = resolve_ci_alert_routing(home, &status_seed.team);
     let mut seen_completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut pending_completed: Vec<GhRunJob> = Vec::new();
     let mut last_progress_emit: Option<std::time::Instant> = None;
@@ -3368,6 +3370,13 @@ async fn monitor_gh_run(
 
     loop {
         let run = fetch_run_view(run_id).await?;
+        let expected_repo = extract_repo_slug_from_url(&run.url);
+        let (from_agent, targets) = resolve_ci_alert_routing(
+            home,
+            &status_seed.team,
+            gh_request.config_cwd.as_deref(),
+            expected_repo.as_deref(),
+        );
         let completed_jobs: Vec<GhRunJob> = run
             .jobs
             .iter()
@@ -3492,6 +3501,7 @@ async fn monitor_gh_run(
                             pr_view.url.as_deref(),
                             merge_state_status,
                             run.conclusion.as_deref(),
+                            gh_request.config_cwd.as_deref(),
                         );
                     }
                 }
@@ -3868,6 +3878,20 @@ fn derive_repo_base_from_run_url(run_url: &str) -> Option<String> {
 }
 
 #[cfg(unix)]
+fn extract_repo_slug_from_url(url: &str) -> Option<String> {
+    let parts = url.split('/').collect::<Vec<_>>();
+    if parts.len() < 5 {
+        return None;
+    }
+    let owner = parts[3].trim();
+    let repo = parts[4].trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{}/{}", owner.to_lowercase(), repo.to_lowercase()))
+}
+
+#[cfg(unix)]
 fn derive_pr_url(
     run: &GhRunView,
     status_seed: &GhMonitorStatus,
@@ -3960,8 +3984,12 @@ fn upsert_gh_monitor_status(home: &std::path::Path, status: GhMonitorStatus) -> 
 }
 
 #[cfg(unix)]
-fn emit_ci_not_started_alert(home: &std::path::Path, status: &GhMonitorStatus) {
-    let (from_agent, targets) = resolve_ci_alert_routing(home, &status.team);
+fn emit_ci_not_started_alert(
+    home: &std::path::Path,
+    status: &GhMonitorStatus,
+    config_cwd: Option<&str>,
+) {
+    let (from_agent, targets) = resolve_ci_alert_routing(home, &status.team, config_cwd, None);
     let text = format!(
         "[ci_not_started] {} target '{}' did not produce a run in the start window.\n{}",
         match status.target_kind {
@@ -4007,8 +4035,11 @@ fn emit_merge_conflict_alert(
     pr_url: Option<&str>,
     merge_state_status: &str,
     run_conclusion: Option<&str>,
+    config_cwd: Option<&str>,
 ) {
-    let (from_agent, targets) = resolve_ci_alert_routing(home, &status.team);
+    let expected_repo = pr_url.and_then(extract_repo_slug_from_url);
+    let (from_agent, targets) =
+        resolve_ci_alert_routing(home, &status.team, config_cwd, expected_repo.as_deref());
     let target_kind = match status.target_kind {
         GhMonitorTargetKind::Pr => "pr",
         GhMonitorTargetKind::Workflow => "workflow",
@@ -4100,16 +4131,18 @@ fn emit_merge_conflict_alert(
 }
 
 #[cfg(unix)]
-fn resolve_ci_alert_routing(home: &std::path::Path, team: &str) -> (String, Vec<(String, String)>) {
-    let current_dir = match std::env::current_dir() {
-        Ok(dir) => dir,
-        Err(_) => {
-            return (
-                "gh-monitor".to_string(),
-                vec![("team-lead".to_string(), team.to_string())],
-            );
-        }
-    };
+fn resolve_ci_alert_routing(
+    home: &std::path::Path,
+    team: &str,
+    config_cwd: Option<&str>,
+    expected_repo_slug: Option<&str>,
+) -> (String, Vec<(String, String)>) {
+    let current_dir = config_cwd
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| home.to_path_buf());
     let config = match agent_team_mail_core::config::resolve_config(
         &agent_team_mail_core::config::ConfigOverrides {
             team: Some(team.to_string()),
@@ -4150,19 +4183,78 @@ fn resolve_ci_alert_routing(home: &std::path::Path, team: &str) -> (String, Vec<
     } else {
         parsed.agent
     };
+
+    if parsed.team.trim() != team {
+        warn!(
+            expected_team = %team,
+            configured_team = %parsed.team,
+            "gh monitor routing blocked: configured team does not match request team"
+        );
+        return (from_agent, Vec::new());
+    }
+
+    if let Some(expected) = expected_repo_slug
+        && !expected.trim().is_empty()
+    {
+        match normalize_repo_scope(parsed.owner.as_deref(), parsed.repo.as_deref()) {
+            Some(configured) if !repo_scope_matches(&configured, expected) => {
+                warn!(
+                    expected_repo = %expected,
+                    configured_repo = %configured,
+                    "gh monitor routing blocked: configured repo does not match event repo"
+                );
+                return (from_agent, Vec::new());
+            }
+            None => {
+                warn!(
+                    expected_repo = %expected,
+                    "gh monitor routing blocked: configured repo scope unavailable"
+                );
+                return (from_agent, Vec::new());
+            }
+            _ => {}
+        }
+    }
+
     let targets = if parsed.notify_target.is_empty() {
-        vec![("team-lead".to_string(), team.to_string())]
+        vec![("team-lead".to_string(), parsed.team.clone())]
     } else {
         parsed
             .notify_target
             .into_iter()
-            .map(|t| {
-                let target_team = t.team.unwrap_or_else(|| team.to_string());
-                (t.agent, target_team)
-            })
+            .map(|t| (t.agent, parsed.team.clone()))
             .collect()
     };
     (from_agent, targets)
+}
+
+#[cfg(unix)]
+fn normalize_repo_scope(owner: Option<&str>, repo: Option<&str>) -> Option<String> {
+    let repo = repo.map(str::trim).filter(|repo| !repo.is_empty())?;
+    if repo.contains('/') {
+        return Some(repo.to_lowercase());
+    }
+    owner
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty())
+        .map(|owner| format!("{}/{}", owner.to_lowercase(), repo.to_lowercase()))
+        .or_else(|| Some(repo.to_lowercase()))
+}
+
+#[cfg(unix)]
+fn repo_scope_matches(configured: &str, expected: &str) -> bool {
+    let configured = configured.trim().to_lowercase();
+    let expected = expected.trim().to_lowercase();
+    if configured == expected {
+        return true;
+    }
+    if configured.contains('/') {
+        return false;
+    }
+    expected
+        .split_once('/')
+        .map(|(_, repo)| repo == configured)
+        .unwrap_or(false)
 }
 
 /// Handle the `"control"` command asynchronously.
@@ -5879,7 +5971,7 @@ identity = "daemon-test"
 enabled = true
 team = "{team}"
 agent = "gh-monitor"
-repo = "agent-team-mail"
+repo = "o/r"
 poll_interval_secs = 60
 "#
         );
@@ -5897,7 +5989,7 @@ identity = "daemon-test"
 enabled = true
 team = "{team}"
 agent = "gh-monitor"
-repo = "agent-team-mail"
+repo = "o/r"
 poll_interval_secs = 60
 "#
         );
@@ -6062,6 +6154,63 @@ poll_interval_secs = 1
         }
         serde_json::from_str::<Vec<InboxMessage>>(&std::fs::read_to_string(path).unwrap())
             .unwrap_or_default()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_ci_alert_routing_enforces_team_and_repo_scope() {
+        let temp = TempDir::new().unwrap();
+        let repo_dir = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            r#"[core]
+default_team = "scmux-dev"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+team = "scmux-dev"
+agent = "gh-monitor"
+repo = "randlee/scmux"
+notify_target = "team-lead"
+"#,
+        )
+        .unwrap();
+
+        let (from_agent, targets) = resolve_ci_alert_routing(
+            temp.path(),
+            "scmux-dev",
+            Some(repo_dir.to_string_lossy().as_ref()),
+            Some("randlee/scmux"),
+        );
+        assert_eq!(from_agent, "gh-monitor");
+        assert_eq!(
+            targets,
+            vec![("team-lead".to_string(), "scmux-dev".to_string())]
+        );
+
+        let (_, wrong_repo_targets) = resolve_ci_alert_routing(
+            temp.path(),
+            "scmux-dev",
+            Some(repo_dir.to_string_lossy().as_ref()),
+            Some("randlee/agent-team-mail"),
+        );
+        assert!(
+            wrong_repo_targets.is_empty(),
+            "repo mismatch must block alert routing"
+        );
+
+        let (_, wrong_team_targets) = resolve_ci_alert_routing(
+            temp.path(),
+            "atm-dev",
+            Some(repo_dir.to_string_lossy().as_ref()),
+            Some("randlee/scmux"),
+        );
+        assert!(
+            wrong_team_targets.is_empty(),
+            "team mismatch must block alert routing"
+        );
     }
 
     fn set_member_backend(

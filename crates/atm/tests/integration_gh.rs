@@ -32,6 +32,24 @@ poll_interval_secs = 60
     fs::write(workdir.join(".atm.toml"), content).unwrap();
 }
 
+fn write_repo_gh_monitor_config_missing_repo(workdir: &Path, team: &str) {
+    std::fs::create_dir_all(workdir).unwrap();
+    let content = format!(
+        r#"[core]
+default_team = "{team}"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+provider = "github"
+team = "{team}"
+agent = "gh-monitor"
+poll_interval_secs = 60
+"#
+    );
+    fs::write(workdir.join(".atm.toml"), content).unwrap();
+}
+
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir, team: &str, with_plugin: bool) {
     let workdir = temp_dir.path().join("workdir");
     let fake_daemon_bin = temp_dir.path().join("fake-gh-daemon.py");
@@ -676,6 +694,23 @@ exit 1
     script
 }
 
+#[cfg(unix)]
+fn init_git_repo_with_origin(workdir: &Path, origin_url: &str) {
+    let init_status = Command::new("git")
+        .args(["init"])
+        .current_dir(workdir)
+        .status()
+        .expect("git init should run");
+    assert!(init_status.success(), "git init failed");
+
+    let remote_status = Command::new("git")
+        .args(["remote", "add", "origin", origin_url])
+        .current_dir(workdir)
+        .status()
+        .expect("git remote add origin should run");
+    assert!(remote_status.success(), "git remote add origin failed");
+}
+
 #[test]
 #[cfg(unix)]
 fn test_gh_namespace_status_no_subcommand_returns_json_status() {
@@ -824,8 +859,73 @@ fn test_gh_init_writes_plugin_config() {
     assert!(cfg.contains("[plugins.gh_monitor]"));
     assert!(cfg.contains("enabled = true"));
     assert!(cfg.contains("team = \"test-team\""));
-    assert!(cfg.contains("repo = \"agent-team-mail\""));
+    assert!(cfg.contains("repo = \"acme/agent-team-mail\""));
     assert!(cfg.contains("notify_target = \"team-lead\""));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_init_auto_populates_repo_from_git_remote() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let gh_path = install_fake_gh_cli(&temp_dir);
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    init_git_repo_with_origin(&workdir, "https://github.com/acme/agent-team-mail.git");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("PATH", path_env)
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("init")
+        .assert()
+        .success();
+
+    let cfg = fs::read_to_string(workdir.join(".atm.toml")).unwrap();
+    assert!(cfg.contains("repo = \"acme/agent-team-mail\""));
+    assert!(cfg.contains("owner = \"acme\""));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_namespace_status_missing_repo_is_actionable() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    write_repo_gh_monitor_config_missing_repo(&temp_dir.path().join("workdir"), "test-team");
+    let mut daemon = start_fake_gh_daemon_with_mode(temp_dir.path(), true, true);
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        status["availability_state"].as_str(),
+        Some("disabled_config_error")
+    );
+    let message = status["message"].as_str().unwrap_or_default();
+    assert!(message.contains("missing required field: repo"));
+    assert!(message.contains("atm gh init"));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }
 
 #[test]
