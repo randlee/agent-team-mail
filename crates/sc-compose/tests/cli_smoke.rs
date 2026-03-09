@@ -3,11 +3,20 @@ use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
 fn run_sc_compose() -> Command {
     Command::new(cargo::cargo_bin!("sc-compose"))
+}
+
+fn read_log_events(path: &Path) -> Vec<Value> {
+    fs::read_to_string(path)
+        .expect("log file should be readable")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("each log line must be valid json"))
+        .collect()
 }
 
 #[test]
@@ -121,4 +130,76 @@ fn profile_validate_includes_search_trace_in_json_error() {
         .and_then(Value::as_array)
         .expect("attemptedPaths array");
     assert!(!attempted.is_empty(), "search trace should be populated");
+}
+
+#[test]
+fn command_end_is_logged_on_success() {
+    let tmp = TempDir::new().expect("tempdir");
+    let template = tmp.path().join("template.md.j2");
+    let log_path = tmp.path().join("sc-compose.log");
+    fs::write(&template, "hello {{ name }}").expect("write");
+
+    run_sc_compose()
+        .env("SC_COMPOSE_LOG_FILE", &log_path)
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("--var")
+        .arg("name=Kai")
+        .arg("render")
+        .arg(&template)
+        .assert()
+        .success();
+
+    let events = read_log_events(&log_path);
+    assert!(
+        events
+            .iter()
+            .any(|event| event["action"] == "command_end" && event["result"] == "success"),
+        "command_end success event missing: {events:?}"
+    );
+}
+
+#[test]
+fn include_expansion_events_are_logged_for_success_and_failure() {
+    let tmp = TempDir::new().expect("tempdir");
+    let log_path = tmp.path().join("sc-compose.log");
+
+    let include = tmp.path().join("include.md.j2");
+    let success_template = tmp.path().join("success.md.j2");
+    fs::write(&include, "included text").expect("write include");
+    fs::write(&success_template, "@<include.md.j2>\nroot").expect("write template");
+
+    run_sc_compose()
+        .env("SC_COMPOSE_LOG_FILE", &log_path)
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("render")
+        .arg(&success_template)
+        .assert()
+        .success();
+
+    let failure_template = tmp.path().join("failure.md.j2");
+    fs::write(&failure_template, "@<missing.md.j2>\nroot").expect("write bad template");
+    run_sc_compose()
+        .env("SC_COMPOSE_LOG_FILE", &log_path)
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("render")
+        .arg(&failure_template)
+        .assert()
+        .code(2);
+
+    let events = read_log_events(&log_path);
+    assert!(
+        events
+            .iter()
+            .any(|event| event["action"] == "include_expansion" && event["result"] == "success"),
+        "include_expansion success event missing: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["action"] == "include_expansion" && event["result"] == "error"),
+        "include_expansion error event missing: {events:?}"
+    );
 }
