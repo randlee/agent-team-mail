@@ -21,6 +21,7 @@ pub struct PreparedTemplate {
     pub template_path: PathBuf,
     pub body: String,
     pub required_variables: Vec<String>,
+    pub required_variable_sources: BTreeMap<String, PathBuf>,
     pub declared_variables: BTreeSet<String>,
     pub defaults: BTreeMap<String, String>,
     pub warnings: Vec<Diagnostic>,
@@ -48,9 +49,11 @@ pub fn prepare_template(request: &ComposeRequest) -> Result<PreparedTemplate, Co
         request.policy.max_include_depth,
         &request.policy.allowed_roots,
     )?;
-    let (required_variables, defaults) = merge_frontmatter(
+    let (required_variables, defaults, required_variable_sources) = merge_frontmatter(
         parsed.frontmatter,
+        &resolved_path,
         &include_result.required_variables,
+        &include_result.required_variable_sources,
         &include_result.defaults,
     );
     let declared_variables: BTreeSet<String> =
@@ -82,6 +85,7 @@ pub fn prepare_template(request: &ComposeRequest) -> Result<PreparedTemplate, Co
         template_path: resolved_path,
         body: include_result.body,
         required_variables,
+        required_variable_sources,
         declared_variables,
         defaults,
         warnings,
@@ -96,7 +100,9 @@ pub fn evaluate_context(
 ) -> ContextMergeReport {
     merge_context(
         &prepared.template_path,
+        &prepared.resolved_files,
         &prepared.required_variables,
+        &prepared.required_variable_sources,
         &prepared.declared_variables,
         &prepared.defaults,
         &request.vars_env,

@@ -95,6 +95,9 @@ Required commands:
 - `atm gh monitor pr <number>`
 - `atm gh monitor workflow <name> --ref <branch|sha|pr>` (`--ref` required)
 - `atm gh monitor run <run-id>`
+- `atm gh pr list [--json] [--limit <N>]` (default limit: 20)
+- `atm gh pr report <pr-number> [--json] [--template <path>]`
+- `atm gh pr init-report [--output <path>]`
 - `atm gh status` (team/plugin health status; no target required)
 - `atm gh status <pr|run|workflow> <value>` (target-specific monitor state)
 
@@ -293,6 +296,47 @@ After a monitored PR run reaches terminal state:
   - `message` (specific unavailability reason)
   - `hint` (must include `atm gh init`)
 
+### GH-CI-FR-25 Report and template rendering contracts
+
+`atm gh pr report <pr-number>` one-shot reporting:
+- In text mode: prints a human-readable PR status summary to stdout.
+- In `--json` mode: outputs a `GhPrReportSummary` JSON object to stdout
+  with top-level `schema_version` field (current: `"1.0.0"`).
+- `--template <path>` renders the report using the specified Jinja2 template
+  file with the same payload schema as `--json`.
+- `--template` and `--json` are mutually exclusive; combining them is an error.
+- When template file is missing or rendering fails (text mode): non-zero exit
+  with human-readable error on stderr.
+- `list` and `report` are one-shot read/report commands requiring no daemon.
+
+`atm gh pr init-report [--output <path>]`:
+- Writes a starter report template to the specified path (default:
+  `gh-monitor-report-template.j2` in current directory).
+- If the output file already exists, the command fails with a non-zero exit and
+  a message indicating the path; the file is not overwritten.
+
+### GH-CI-FR-26 Report readiness semantics
+
+`atm gh pr report <pr-number>` readiness classification must:
+- Treat `SKIPPED` checks as non-failing for aggregate CI state.
+- Include explicit skip count in report details (`skip=<N>` when non-zero).
+- If CI has `fail=0` and `pending=0`, aggregate CI state must be `pass` even
+  when skips are present.
+- Distinguish review-state absence from unknown state:
+  - no review decision data and no reviews -> `review_decision = "none"`
+  - ambiguous/non-empty but unrecognized review data -> `review_decision = "unknown"`
+- Only explicit blocking review states (for example `changes_requested`) may
+  become hard merge blockers.
+- Query merge readiness defensively when GitHub returns transient unknown
+  mergeability:
+  - retry/poll mergeability briefly before final classification
+  - if mergeability remains unknown, classify as transient/indeterminate (not a
+    hard blocker by itself)
+- Separate hard blockers from transient/advisory reasons in both JSON and human
+  output:
+  - `blocking_reasons` for hard blockers only
+  - `advisory_reasons` for transient/informational notes
+
 ## 12. Test Requirements
 
 ### GH-CI-TR-1 Availability transitions
@@ -320,6 +364,15 @@ Test:
   - `atm gh status <target>` fails with actionable init guidance
   - `atm gh init` remains available and succeeds/fails deterministically
 - `status` output coherence during active and terminal runs
+- `pr report` CI semantics:
+  - pass + skip (no fail/pending) yields aggregate `pass`
+  - skip count is emitted in report details
+- `pr report` review semantics:
+  - no-review case emits `review_decision = none`
+  - unknown review metadata does not hard-block by default
+- `pr report` merge semantics:
+  - unknown mergeability retried then surfaced as transient/indeterminate
+  - hard blockers and advisory reasons are emitted in separate fields/sections
 
 ### GH-CI-TR-3 Reporting payload
 

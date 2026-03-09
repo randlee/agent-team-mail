@@ -10,6 +10,7 @@ pub struct IncludeExpansionResult {
     pub body: String,
     pub included_files: Vec<PathBuf>,
     pub required_variables: BTreeSet<String>,
+    pub required_variable_sources: BTreeMap<String, PathBuf>,
     pub defaults: BTreeMap<String, String>,
 }
 
@@ -58,6 +59,7 @@ impl<'a> IncludeState<'a> {
         let mut rendered = String::new();
         let mut included_files = Vec::new();
         let mut required_variables = BTreeSet::new();
+        let mut required_variable_sources = BTreeMap::new();
         let mut defaults = BTreeMap::new();
 
         for (line_index, segment) in body.split_inclusive('\n').enumerate() {
@@ -88,7 +90,12 @@ impl<'a> IncludeState<'a> {
                 })?;
                 let parsed = frontmatter::parse_document(&include_path, &text)?;
                 let fm = parsed.frontmatter.unwrap_or_default();
-                required_variables.extend(fm.required_variables);
+                for var in fm.required_variables {
+                    required_variables.insert(var.clone());
+                    required_variable_sources
+                        .entry(var)
+                        .or_insert_with(|| include_path.clone());
+                }
                 for (k, v) in fm.defaults {
                     defaults.entry(k).or_insert(v);
                 }
@@ -98,6 +105,9 @@ impl<'a> IncludeState<'a> {
                 stack.pop();
 
                 required_variables.extend(nested.required_variables);
+                for (k, v) in nested.required_variable_sources {
+                    required_variable_sources.entry(k).or_insert(v);
+                }
                 for (k, v) in nested.defaults {
                     defaults.entry(k).or_insert(v);
                 }
@@ -116,6 +126,7 @@ impl<'a> IncludeState<'a> {
             body: rendered,
             included_files,
             required_variables,
+            required_variable_sources,
             defaults,
         })
     }
@@ -198,10 +209,17 @@ fn canonical_or_original(path: &Path) -> PathBuf {
 
 pub fn merge_frontmatter(
     parent: Option<Frontmatter>,
+    parent_path: &Path,
     include_required: &BTreeSet<String>,
+    include_required_sources: &BTreeMap<String, PathBuf>,
     include_defaults: &BTreeMap<String, String>,
-) -> (Vec<String>, BTreeMap<String, String>) {
+) -> (
+    Vec<String>,
+    BTreeMap<String, String>,
+    BTreeMap<String, PathBuf>,
+) {
     let mut required = BTreeSet::new();
+    let mut required_sources = BTreeMap::new();
     let mut defaults = BTreeMap::new();
 
     for (k, v) in include_defaults {
@@ -210,17 +228,23 @@ pub fn merge_frontmatter(
     for var in include_required {
         required.insert(var.clone());
     }
+    for (k, v) in include_required_sources {
+        required_sources.insert(k.clone(), v.clone());
+    }
 
     if let Some(parent_fm) = parent {
         for (k, v) in parent_fm.defaults {
             defaults.insert(k, v);
         }
         for var in parent_fm.required_variables {
-            required.insert(var);
+            required.insert(var.clone());
+            required_sources
+                .entry(var)
+                .or_insert_with(|| parent_path.to_path_buf());
         }
     }
 
-    (required.into_iter().collect(), defaults)
+    (required.into_iter().collect(), defaults, required_sources)
 }
 
 #[cfg(test)]

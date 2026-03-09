@@ -2,6 +2,11 @@
 default_team = "atm-dev"
 identity = "team-lead"
 
+[plugins.gh_monitor]
+team = "atm-dev"
+repo = "randlee/agent-team-mail"
+notify_target = ["quality-mgr@atm-dev", "team-lead@atm-dev"]
+
 [plugins.atm-agent-mcp]
 codex_bin = "codex"
 identity = "arch-ctm"

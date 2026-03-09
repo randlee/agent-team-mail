@@ -32,6 +32,43 @@ poll_interval_secs = 60
     fs::write(workdir.join(".atm.toml"), content).unwrap();
 }
 
+fn write_repo_gh_monitor_config_with_owner(workdir: &Path, team: &str, owner: &str, repo: &str) {
+    let content = format!(
+        r#"[core]
+default_team = "{team}"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+provider = "github"
+team = "{team}"
+agent = "gh-monitor"
+owner = "{owner}"
+repo = "{repo}"
+poll_interval_secs = 60
+"#
+    );
+    fs::write(workdir.join(".atm.toml"), content).unwrap();
+}
+
+fn write_repo_gh_monitor_config_missing_repo(workdir: &Path, team: &str) {
+    std::fs::create_dir_all(workdir).unwrap();
+    let content = format!(
+        r#"[core]
+default_team = "{team}"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+provider = "github"
+team = "{team}"
+agent = "gh-monitor"
+poll_interval_secs = 60
+"#
+    );
+    fs::write(workdir.join(".atm.toml"), content).unwrap();
+}
+
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir, team: &str, with_plugin: bool) {
     let workdir = temp_dir.path().join("workdir");
     let fake_daemon_bin = temp_dir.path().join("fake-gh-daemon.py");
@@ -380,6 +417,166 @@ fn start_fake_gh_daemon_with_mode_and_delays(
     child
 }
 
+#[cfg(unix)]
+fn write_fake_gh_cli_script(home: &Path, expected_repo: &str) -> PathBuf {
+    let bin_dir = home.join("fake-bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let script = bin_dir.join("gh");
+    let body = format!(
+        r#"#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+
+if "--version" in args:
+    print("gh version 2.0.0")
+    sys.exit(0)
+
+if len(args) >= 2 and args[0] == "auth" and args[1] == "status":
+    print("Logged in to github.com")
+    sys.exit(0)
+
+if "pr" in args and "list" in args:
+    if "-R" not in args:
+        print("missing -R", file=sys.stderr)
+        sys.exit(2)
+    repo = args[args.index("-R") + 1]
+    if repo != "{expected_repo}":
+        print(f"unexpected repo scope: {{repo}}", file=sys.stderr)
+        sys.exit(2)
+
+    payload = [
+        {{
+            "number": 101,
+            "title": "Add monitor dashboard",
+            "url": "https://github.com/{expected_repo}/pull/101",
+            "isDraft": False,
+            "reviewDecision": "APPROVED",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [
+                {{"conclusion": "SUCCESS"}},
+                {{"status": "IN_PROGRESS"}}
+            ]
+        }},
+        {{
+            "number": 102,
+            "title": "Fix flaky monitor test",
+            "url": "https://github.com/{expected_repo}/pull/102",
+            "isDraft": True,
+            "reviewDecision": "CHANGES_REQUESTED",
+            "mergeStateStatus": "DIRTY",
+            "statusCheckRollup": [
+                {{"conclusion": "FAILURE"}}
+            ]
+        }}
+    ]
+    print(json.dumps(payload))
+    sys.exit(0)
+
+if "pr" in args and "view" in args:
+    if "-R" not in args:
+        print("missing -R", file=sys.stderr)
+        sys.exit(2)
+    repo = args[args.index("-R") + 1]
+    if repo != "{expected_repo}":
+        print(f"unexpected repo scope: {{repo}}", file=sys.stderr)
+        sys.exit(2)
+
+    pr_number = None
+    if "view" in args:
+        view_idx = args.index("view")
+        if view_idx + 1 < len(args):
+            pr_number = args[view_idx + 1]
+    if pr_number not in ("101", "103"):
+        print(f"unexpected PR: {{pr_number}}", file=sys.stderr)
+        sys.exit(2)
+
+    if pr_number == "101":
+        payload = {{
+            "number": 101,
+            "title": "Add monitor dashboard",
+            "url": "https://github.com/{expected_repo}/pull/101",
+            "isDraft": False,
+            "reviewDecision": "APPROVED",
+            "mergeStateStatus": "CLEAN",
+            "mergeable": "UNKNOWN",
+            "statusCheckRollup": [
+                {{
+                    "name": "clippy",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "startedAt": "2026-03-09T01:00:00Z",
+                    "completedAt": "2026-03-09T01:02:00Z",
+                    "detailsUrl": "https://github.com/{expected_repo}/actions/runs/1"
+                }},
+                {{
+                    "context": "required-review",
+                    "state": "PENDING",
+                    "targetUrl": "https://github.com/{expected_repo}/checks/2"
+                }}
+            ],
+            "reviews": [
+                {{
+                    "author": {{"login": "alice"}},
+                    "state": "APPROVED",
+                    "submittedAt": "2026-03-09T02:00:00Z"
+                }},
+                {{
+                    "author": {{"login": "bob"}},
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-03-09T02:30:00Z"
+                }}
+            ]
+        }}
+    else:
+        payload = {{
+            "number": 103,
+            "title": "Skipped checks should still pass",
+            "url": "https://github.com/{expected_repo}/pull/103",
+            "isDraft": False,
+            "reviewDecision": "",
+            "mergeStateStatus": "UNKNOWN",
+            "mergeable": "UNKNOWN",
+            "statusCheckRollup": [
+                {{
+                    "name": "fmt",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "startedAt": "2026-03-09T03:00:00Z",
+                    "completedAt": "2026-03-09T03:01:00Z",
+                    "detailsUrl": "https://github.com/{expected_repo}/actions/runs/3"
+                }},
+                {{
+                    "name": "optional-check",
+                    "status": "COMPLETED",
+                    "conclusion": "SKIPPED",
+                    "startedAt": "2026-03-09T03:00:00Z",
+                    "completedAt": "2026-03-09T03:01:00Z",
+                    "detailsUrl": "https://github.com/{expected_repo}/actions/runs/4"
+                }}
+            ],
+            "reviews": []
+        }}
+    print(json.dumps(payload))
+    sys.exit(0)
+
+print("unsupported gh invocation: " + " ".join(args), file=sys.stderr)
+sys.exit(1)
+"#
+    );
+
+    {
+        let mut file = fs::File::create(&script).unwrap();
+        file.write_all(body.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    bin_dir
+}
+
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_and_control_allow_daemon_responses_over_500ms() {
@@ -676,6 +873,23 @@ exit 1
     script
 }
 
+#[cfg(unix)]
+fn init_git_repo_with_origin(workdir: &Path, origin_url: &str) {
+    let init_status = Command::new("git")
+        .args(["init"])
+        .current_dir(workdir)
+        .status()
+        .expect("git init should run");
+    assert!(init_status.success(), "git init failed");
+
+    let remote_status = Command::new("git")
+        .args(["remote", "add", "origin", origin_url])
+        .current_dir(workdir)
+        .status()
+        .expect("git remote add origin should run");
+    assert!(remote_status.success(), "git remote add origin failed");
+}
+
 #[test]
 #[cfg(unix)]
 fn test_gh_namespace_status_no_subcommand_returns_json_status() {
@@ -824,8 +1038,73 @@ fn test_gh_init_writes_plugin_config() {
     assert!(cfg.contains("[plugins.gh_monitor]"));
     assert!(cfg.contains("enabled = true"));
     assert!(cfg.contains("team = \"test-team\""));
-    assert!(cfg.contains("repo = \"agent-team-mail\""));
+    assert!(cfg.contains("repo = \"acme/agent-team-mail\""));
     assert!(cfg.contains("notify_target = \"team-lead\""));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_init_auto_populates_repo_from_git_remote() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let gh_path = install_fake_gh_cli(&temp_dir);
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    init_git_repo_with_origin(&workdir, "https://github.com/acme/agent-team-mail.git");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("PATH", path_env)
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("init")
+        .assert()
+        .success();
+
+    let cfg = fs::read_to_string(workdir.join(".atm.toml")).unwrap();
+    assert!(cfg.contains("repo = \"acme/agent-team-mail\""));
+    assert!(cfg.contains("owner = \"acme\""));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_namespace_status_missing_repo_is_actionable() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    write_repo_gh_monitor_config_missing_repo(&temp_dir.path().join("workdir"), "test-team");
+    let mut daemon = start_fake_gh_daemon_with_mode(temp_dir.path(), true, true);
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        status["availability_state"].as_str(),
+        Some("disabled_config_error")
+    );
+    let message = status["message"].as_str().unwrap_or_default();
+    assert!(message.contains("missing required field: repo"));
+    assert!(message.contains("atm gh init"));
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }
 
 #[test]
@@ -936,4 +1215,421 @@ fn test_gh_monitor_status_json_has_stable_schema() {
 
     let _ = daemon.kill();
     let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_namespace_rejects_removed_one_shot_commands() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    for removed in ["list", "report", "init-report"] {
+        let mut cmd = cargo::cargo_bin_cmd!("atm");
+        set_home_env(&mut cmd, &temp_dir, "test-team", true);
+        cmd.env("ATM_TEAM", "test-team")
+            .arg("gh")
+            .arg("monitor")
+            .arg(removed)
+            .assert()
+            .failure()
+            .stderr(
+                predicates::str::contains("unrecognized subcommand")
+                    .and(predicates::str::contains(removed)),
+            );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("pr")
+        .arg("list")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["team"].as_str(), Some("test-team"));
+    assert_eq!(json["repo"].as_str(), Some("acme/agent-team-mail"));
+    assert_eq!(json["total_open_prs"].as_u64(), Some(2));
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items[0]["number"].as_u64(), Some(101));
+    assert_eq!(items[0]["ci"]["state"].as_str(), Some("pending"));
+    assert_eq!(items[0]["merge"].as_str(), Some("clean"));
+    assert_eq!(items[0]["review"].as_str(), Some("approved"));
+    assert_eq!(items[1]["number"].as_u64(), Some(102));
+    assert_eq!(items[1]["ci"]["state"].as_str(), Some("fail"));
+    assert_eq!(items[1]["draft"].as_bool(), Some(true));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_list_human_output_has_one_line_rollups() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("pr")
+        .arg("list")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("GitHub PR List: atm gh pr list"));
+    assert!(text.contains("#101 [ready] [ci:PENDING 1/2] [merge:clean] [review:approved]"));
+    assert!(text.contains("#102 [draft] [ci:FAIL 0/1] [merge:dirty] [review:changes_requested]"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("pr")
+        .arg("report")
+        .arg("101")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"].as_str(), Some("1.0.0"));
+    assert_eq!(json["team"].as_str(), Some("test-team"));
+    assert_eq!(json["repo"].as_str(), Some("acme/agent-team-mail"));
+    assert_eq!(json["pr"]["number"].as_u64(), Some(101));
+    assert_eq!(json["pr"]["ci"]["state"].as_str(), Some("pending"));
+    assert_eq!(json["pr"]["merge"]["mergeable"].as_str(), Some("unknown"));
+    assert_eq!(json["pr"]["merge"]["status"].as_str(), Some("blocked"));
+    assert!(
+        json["pr"]["merge"]["blocking_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("CI checks still pending"))
+    );
+    assert!(
+        json["pr"]["merge"]["advisory_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("mergeability is UNKNOWN (transient)"))
+    );
+    assert!(json["pr"]["checks"].is_array());
+    assert_eq!(json["pr"]["checks"].as_array().unwrap().len(), 2);
+    assert!(json["pr"]["reviews"].is_array());
+    assert_eq!(json["pr"]["reviews"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_human_output_is_detailed() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("pr")
+        .arg("report")
+        .arg("101")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("GitHub PR Report: atm gh pr report"));
+    assert!(text.contains("Schema Version:    1.0.0"));
+    assert!(text.contains("PR:                #101"));
+    assert!(text.contains("Merge:             status=blocked"));
+    assert!(text.contains("Blocking Reasons:"));
+    assert!(text.contains("CI checks still pending"));
+    assert!(text.contains("Advisory Reasons:"));
+    assert!(text.contains("mergeability is UNKNOWN (transient)"));
+    assert!(text.contains("Reviews (2):"));
+    assert!(text.contains("Checks (2):"));
+    assert!(text.contains("clippy | status=completed"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_json_no_reviews_and_skips_are_non_blocking() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("pr")
+        .arg("report")
+        .arg("103")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["pr"]["number"].as_u64(), Some(103));
+    assert_eq!(json["pr"]["ci"]["state"].as_str(), Some("pass"));
+    assert_eq!(json["pr"]["ci"]["pass"].as_u64(), Some(1));
+    assert_eq!(json["pr"]["ci"]["skip"].as_u64(), Some(1));
+    assert_eq!(json["pr"]["review_decision"].as_str(), Some("none"));
+    assert_eq!(
+        json["pr"]["merge"]["status"].as_str(),
+        Some("indeterminate")
+    );
+    assert!(
+        json["pr"]["merge"]["blocking_reasons"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        json["pr"]["merge"]["advisory_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("no explicit review decision"))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_template_renders_custom_output() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let template_path = workdir.join("custom-report.j2");
+    fs::write(
+        &template_path,
+        "schema={{ schema_version }} pr={{ pr.number }} title={{ pr.title }}",
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("pr")
+        .arg("report")
+        .arg("101")
+        .arg("--template")
+        .arg(&template_path)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("schema=1.0.0"));
+    assert!(text.contains("pr=101"));
+    assert!(text.contains("title=Add monitor dashboard"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_template_missing_file_is_actionable() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let missing = workdir.join("missing-template.j2");
+    let missing_display = missing.display().to_string();
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("pr")
+        .arg("report")
+        .arg("101")
+        .arg("--template")
+        .arg(&missing)
+        .assert()
+        .failure()
+        .stderr(
+            predicates::str::contains("failed to read template file")
+                .and(predicates::str::contains(missing_display)),
+        );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_init_report_writes_starter_template() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("pr")
+        .arg("init-report")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("atm gh pr init-report complete"));
+
+    let template_path = workdir.join("gh-monitor-report-template.j2");
+    let template = fs::read_to_string(&template_path).unwrap();
+    assert!(template.contains("schema {{ schema_version }}"));
+    assert!(template.contains("{{ pr.number }}"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_template_render_failure_is_actionable() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let template_path = workdir.join("invalid-template.j2");
+    fs::write(&template_path, "{{ unclosed").unwrap();
+    let template_display = template_path.display().to_string();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("pr")
+        .arg("report")
+        .arg("101")
+        .arg("--template")
+        .arg(&template_path)
+        .assert()
+        .failure()
+        .stderr(
+            predicates::str::contains("failed to render template")
+                .and(predicates::str::contains(template_display)),
+        );
 }

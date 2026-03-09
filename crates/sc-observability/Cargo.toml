@@ -1,0 +1,23 @@
+[package]
+name = "sc-observability"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Shared structured observability primitives for ATM ecosystem tools"
+keywords = ["logging", "observability", "jsonl", "telemetry"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+agent-team-mail-core.workspace = true
+anyhow.workspace = true
+chrono = { version = "0.4", default-features = true }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serial_test = "3"
+tempfile = "3.13"

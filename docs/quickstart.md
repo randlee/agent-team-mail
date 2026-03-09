@@ -109,3 +109,51 @@ atm init <team>
 This is idempotent — it overwrites only the ATM-managed hook scripts and leaves
 all other settings intact. Failure to re-run `atm init` after an upgrade may result
 in outdated hook behavior (for example incorrect PID reporting or missing lifecycle events).
+
+## sc-compose: Structured Compose Logging
+
+`sc-compose` is the shared composition library used by ATM tools for templated
+output generation. It ships as part of the `agent-team-mail` workspace and is
+available after the standard install steps above.
+
+### Install
+
+`sc-compose` is included in the `agent-team-mail` Cargo workspace. No separate
+install step is required — it is available once `agent-team-mail` is installed.
+
+If using `sc-compose` as a library dependency in your own crate:
+
+```toml
+[dependencies]
+sc-compose = { version = "0.42", registry = "crates-io" }
+```
+
+### Validate, Render, and Write Workflow
+
+```bash
+# Validate a template (dry-run, no output written)
+atm compose validate <template.md.j2>
+
+# Render a template to stdout
+atm compose render <template.md.j2> --vars key=value
+
+# Render and write output to a file
+atm compose write <template.md.j2> --output <out.md> --vars key=value
+```
+
+All three commands accept `--vars key=value` pairs (repeatable) or a JSON vars
+file via `--vars-file <path>`.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `SC_COMPOSE_LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
+| `SC_COMPOSE_LOG_FORMAT` | `jsonl` | Output format for log lines: `jsonl` or `human` |
+| `SC_COMPOSE_LOG_FILE` | `~/.config/sc-compose/logs/sc-compose.log` | Override sc-compose log file path (`%APPDATA%\sc-compose\logs\sc-compose.log` on Windows) |
+
+To suppress most log output, set the level to `error`:
+
+```bash
+SC_COMPOSE_LOG_LEVEL=error atm compose render <template>
+```
