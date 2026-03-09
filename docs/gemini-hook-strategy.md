@@ -65,25 +65,14 @@ If required routing values are unavailable, relay exits `0` and emits nothing.
 - `session_id` should come from Gemini hook payload (`session_id`).
 - Daemon remains authoritative for liveness checks and stale-PID handling.
 
-### Session JSONL Log Location and Naming
+### Session Source Clarification
 
-Observed runtime log location (validated in dogfooding):
-
-- Base directory: `~/.claude/projects/`
-- Workspace folder naming: absolute project path with `/` mapped to `-`
-  (example: `/Users/randlee/Documents/github/agent-team-mail` ->
-  `-Users-randlee-Documents-github-agent-team-mail`)
-- Session file naming: `<session_id>.jsonl`
-
-Example:
-
-- `/Users/randlee/.claude/projects/-Users-randlee-Documents-github-agent-team-mail/09ab30b4-a04f-42cf-a8a8-de1434bec38c.jsonl`
-
-Operational rule:
-
-- `atm doctor` session identifiers for active Gemini/Claude-managed sessions
-  must map to this JSONL filename convention (`session_id` == JSONL basename
-  without `.jsonl`) for the same workspace.
+- `~/.claude/projects/.../<session_id>.jsonl` files are Claude Code transcript
+  logs, not Gemini-native session logs.
+- For Gemini runtime identity, ATM must treat Gemini hook payload `session_id`
+  (and daemon `runtime_session_id`) as authoritative.
+- Gemini runtime state/log roots should be resolved from `GEMINI_CLI_HOME`
+  (or Gemini defaults when unset), not from `.claude/projects`.
 
 ## Hook Outcome Policy for ATM Relays
 
