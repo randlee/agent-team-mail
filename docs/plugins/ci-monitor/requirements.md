@@ -95,7 +95,9 @@ Required commands:
 - `atm gh monitor pr <number>`
 - `atm gh monitor workflow <name> --ref <branch|sha|pr>` (`--ref` required)
 - `atm gh monitor run <run-id>`
-- `atm gh monitor list [--json] [--limit <N>]`
+- `atm gh monitor list [--json] [--limit <N>]` (default limit: 20)
+- `atm gh monitor report <pr-number> [--json] [--template <path>]`
+- `atm gh monitor init-report [--output <path>]`
 - `atm gh status` (team/plugin health status; no target required)
 - `atm gh status <pr|run|workflow> <value>` (target-specific monitor state)
 
@@ -293,6 +295,25 @@ After a monitored PR run reaches terminal state:
   - `error_code = "PLUGIN_UNAVAILABLE"`
   - `message` (specific unavailability reason)
   - `hint` (must include `atm gh init`)
+
+### GH-CI-FR-25 Report and template rendering contracts
+
+`atm gh monitor report <pr-number>` one-shot reporting:
+- In text mode: prints a human-readable PR status summary to stdout.
+- In `--json` mode: outputs a `GhMonitorReportSummary` JSON object to stdout
+  with top-level `schema_version` field (current: `"1.0.0"`).
+- `--template <path>` renders the report using the specified Jinja2 template
+  file with the same payload schema as `--json`.
+- `--template` and `--json` are mutually exclusive; combining them is an error.
+- When template file is missing or rendering fails (text mode): non-zero exit
+  with human-readable error on stderr.
+- `list` and `report` are one-shot read/report commands requiring no daemon.
+
+`atm gh monitor init-report [--output <path>]`:
+- Writes a starter report template to the specified path (default:
+  `gh-monitor-report.md.j2` in current directory).
+- If the output file already exists, the command fails with a non-zero exit and
+  a message indicating the path; the file is not overwritten.
 
 ## 12. Test Requirements
 
