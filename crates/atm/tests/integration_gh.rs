@@ -1423,6 +1423,7 @@ fn test_gh_monitor_report_template_missing_file_is_actionable() {
     );
 
     let missing = workdir.join("missing-template.j2");
+    let missing_display = missing.display().to_string();
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
     cmd.env("ATM_TEAM", "test-team")
@@ -1437,7 +1438,10 @@ fn test_gh_monitor_report_template_missing_file_is_actionable() {
         .arg(&missing)
         .assert()
         .failure()
-        .stderr(predicates::str::contains("failed to read template file"));
+        .stderr(
+            predicates::str::contains("failed to read template file")
+                .and(predicates::str::contains(missing_display)),
+        );
 }
 
 #[test]
@@ -1465,4 +1469,43 @@ fn test_gh_monitor_init_report_writes_starter_template() {
     let template = fs::read_to_string(&template_path).unwrap();
     assert!(template.contains("schema {{ schema_version }}"));
     assert!(template.contains("{{ pr.number }}"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_template_render_failure_is_actionable() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let template_path = workdir.join("invalid-template.j2");
+    fs::write(&template_path, "{{ unclosed").unwrap();
+    let template_display = template_path.display().to_string();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("report")
+        .arg("101")
+        .arg("--template")
+        .arg(&template_path)
+        .assert()
+        .failure()
+        .stderr(
+            predicates::str::contains("failed to render template")
+                .and(predicates::str::contains(template_display)),
+        );
 }
