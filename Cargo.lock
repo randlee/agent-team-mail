@@ -1538,6 +1538,7 @@ dependencies = [
  "assert_cmd",
  "chrono",
  "clap",
+ "dirs",
  "predicates",
  "sc-composer",
  "sc-observability",
