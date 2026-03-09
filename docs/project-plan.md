@@ -533,7 +533,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - Remove `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var support from all crates.
 - Remove legacy `events.jsonl` sink code from CLI, daemon, MCP proxy, and TUI.
 - Remove legacy bridge log surface (surface 6) from `.claude/agents/log-monitor.md`.
-- Update `docs/logging-l1a-spec.md` and `docs/requirements.md` to mark bridge as removed.
+- Update `docs/logging-l1a-spec.md` and `docs/observability/requirements.md` to mark bridge as removed.
 - Verify no external consumers depend on the old format before removal.
 
 **M.2-M.7 scope (Codex parity)**:

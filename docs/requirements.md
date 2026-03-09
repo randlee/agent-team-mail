@@ -995,19 +995,12 @@ Current required `DoctorReport` shape:
   - `value`: resolved non-empty value
 
 Logging-health expansion contract:
-- Target shape adds `logging` object with at least:
-  - `health_state` (`healthy|degraded_spooling|degraded_dropping|unavailable`)
-  - `log_path`
-  - `spool_path`
-  - `dropped_count`
-  - `spool_file_count`
-  - `oldest_spool_age_secs`
-  - `last_error` (nullable)
-- Until this object is implemented, diagnostics may infer logging state from
-  findings/recommendations. This is temporary and must be replaced by explicit
-  `logging` fields once available.
-- Field additions must be backward-compatible (additive-only); existing fields
-  above are required and must not be removed or repurposed.
+- Canonical `logging` field names, value semantics, and backward-compatibility
+  rules are defined in:
+  - `docs/observability/requirements.md`
+  - `docs/observability/architecture.md`
+- This primary ATM requirements document references that contract and must not
+  duplicate or drift from it.
 
 **Last-doctor-call persistence**:
 - Path: `~/.config/atm/doctor-state.json`.
@@ -1522,15 +1515,15 @@ co_leaders = ["arch-atm", "quality-mgr"]
 | `ATM_NO_COLOR` | Disable colored output |
 | `ATM_DAEMON_AUTOSTART` | Daemon autostart toggle (`1/true/yes` enables, `0/false/no` disables); defaults to enabled when unset |
 | `ATM_DAEMON_BIN` | Optional daemon binary override for test/ops harnesses |
-| `ATM_LOG` | Stderr log level (`trace|debug|info|warn|error`), default `info` |
-| `ATM_LOG_MSG` | Message preview toggle: `1` enables 20-char preview; unset/other values disable preview |
-| `ATM_LOG_FILE` | Canonical unified log file path override for test/ops |
 
 Environment value rules:
 - Empty/whitespace-only values for `ATM_TEAM` and `ATM_IDENTITY` are ignored
   and must not erase config/default values.
 - `ATM_DAEMON_BIN` and `ATM_DAEMON_AUTOSTART` are operational/test controls and
   must not be required for normal production usage.
+- Observability environment controls (`ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`)
+  are defined in `docs/observability/requirements.md` and are not duplicated
+  in this primary ATM requirements document.
 
 ### 4.5 Recommended Hooks (Agent Teams)
 
