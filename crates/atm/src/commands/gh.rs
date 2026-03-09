@@ -1117,7 +1117,7 @@ fn summarize_ci_rollup(entries: &[serde_json::Value]) -> GhCiRollup {
         "fail"
     } else if pending > 0 {
         "pending"
-    } else if pass == total {
+    } else if pass + neutral == total {
         "pass"
     } else {
         "mixed"
@@ -1858,6 +1858,22 @@ mod tests {
         assert_eq!(rollup.state, "pass");
         assert_eq!(rollup.total, 2);
         assert_eq!(rollup.pass, 2);
+        assert_eq!(rollup.fail, 0);
+        assert_eq!(rollup.pending, 0);
+    }
+
+    #[test]
+    fn summarize_ci_rollup_marks_pass_when_neutral_skipped_checks_present() {
+        // 15 pass + 1 neutral (SKIPPED) should be "pass", not "mixed"
+        let mut entries: Vec<serde_json::Value> = (0..15)
+            .map(|_| serde_json::json!({"conclusion":"SUCCESS"}))
+            .collect();
+        entries.push(serde_json::json!({"conclusion":"SKIPPED"}));
+        let rollup = summarize_ci_rollup(&entries);
+        assert_eq!(rollup.state, "pass");
+        assert_eq!(rollup.total, 16);
+        assert_eq!(rollup.pass, 15);
+        assert_eq!(rollup.neutral, 1);
         assert_eq!(rollup.fail, 0);
         assert_eq!(rollup.pending, 0);
     }
