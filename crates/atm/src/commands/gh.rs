@@ -17,6 +17,8 @@ use std::io::ErrorKind;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 use tempfile::NamedTempFile;
 
 use crate::util::settings::get_home_dir;
@@ -42,6 +44,8 @@ enum GhCommand {
     Init(InitArgs),
     /// Start CI monitoring
     Monitor(MonitorArgs),
+    /// One-shot PR query/report commands (no daemon monitor lifecycle control)
+    Pr(PrArgs),
     /// Query CI monitor status
     Status(StatusArgs),
 }
@@ -63,6 +67,12 @@ struct MonitorArgs {
     target: MonitorTarget,
 }
 
+#[derive(Args, Debug)]
+struct PrArgs {
+    #[command(subcommand)]
+    target: PrTarget,
+}
+
 #[derive(Subcommand, Debug)]
 enum MonitorTarget {
     /// Monitor a pull request for CI start + tracking
@@ -79,12 +89,16 @@ enum MonitorTarget {
     Restart(MonitorRestartArgs),
     /// Query gh_monitor plugin lifecycle/availability health
     Status(MonitorHealthArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum PrTarget {
     /// List open PRs with CI/merge/review rollups (one-shot; no daemon required)
-    List(MonitorListArgs),
+    List(PrListArgs),
     /// Show detailed check/review/merge report for a single PR (one-shot; no daemon required)
-    Report(MonitorReportArgs),
-    /// Scaffold a starter template for `atm gh monitor report --template`
-    InitReport(MonitorInitReportArgs),
+    Report(PrReportArgs),
+    /// Scaffold a starter template for `atm gh pr report --template`
+    InitReport(PrInitReportArgs),
 }
 
 #[derive(Args, Debug)]
@@ -138,14 +152,14 @@ struct MonitorRestartArgs {
 struct MonitorHealthArgs {}
 
 #[derive(Args, Debug)]
-struct MonitorListArgs {
+struct PrListArgs {
     /// Maximum number of open PRs to display (default 20)
     #[arg(long, default_value_t = 20)]
     limit: u32,
 }
 
 #[derive(Args, Debug)]
-struct MonitorReportArgs {
+struct PrReportArgs {
     /// Pull request number to report
     pr_number: u64,
 
@@ -155,7 +169,7 @@ struct MonitorReportArgs {
 }
 
 #[derive(Args, Debug)]
-struct MonitorInitReportArgs {
+struct PrInitReportArgs {
     /// Output path for starter template (default: ./gh-monitor-report-template.j2)
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
@@ -263,7 +277,7 @@ struct GhPrReportRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct GhMonitorListSummary {
+struct GhPrListSummary {
     team: String,
     repo: String,
     generated_at: String,
@@ -289,11 +303,12 @@ struct GhCiRollup {
     pass: u64,
     fail: u64,
     pending: u64,
+    skip: u64,
     neutral: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct GhMonitorReportSummary {
+struct GhPrReportSummary {
     schema_version: String,
     team: String,
     repo: String,
@@ -320,6 +335,15 @@ struct GhMergeReport {
     merge_state_status: String,
     status: String,
     blocking_reasons: Vec<String>,
+    advisory_reasons: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPrMergeProbe {
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(rename = "mergeStateStatus", default)]
+    merge_state_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -345,7 +369,7 @@ struct GhMonitorReviewReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct GhMonitorInitReportSummary {
+struct GhPrInitReportSummary {
     output_path: String,
     created: bool,
     schema_version: String,
@@ -353,6 +377,8 @@ struct GhMonitorInitReportSummary {
 
 const GH_MONITOR_REPORT_SCHEMA_VERSION: &str = "1.0.0";
 const GH_MONITOR_DEFAULT_TEMPLATE_FILENAME: &str = "gh-monitor-report-template.j2";
+const GH_MONITOR_MERGE_RETRY_ATTEMPTS: u8 = 3;
+const GH_MONITOR_MERGE_RETRY_DELAY_MS: u64 = 250;
 
 pub fn execute(args: GhArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
@@ -400,32 +426,18 @@ pub fn execute(args: GhArgs) -> Result<()> {
             })?;
             print_target_status(&status, args.json)
         }
-        Some(GhCommand::Monitor(monitor)) => {
-            if let MonitorTarget::Status(_status) = &monitor.target {
-                let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
-                return print_namespace_status(&health, args.json);
-            }
-            if let MonitorTarget::InitReport(init_report_args) = &monitor.target {
-                return execute_monitor_init_report(
-                    &current_dir,
-                    init_report_args.output.as_deref(),
-                    args.json,
-                );
-            }
-            if let MonitorTarget::List(list_args) = &monitor.target {
-                enforce_plugin_ready(&plugin_state, args.json)?;
-                return execute_monitor_list(
+        Some(GhCommand::Pr(pr)) => {
+            enforce_plugin_ready(&plugin_state, args.json)?;
+            match pr.target {
+                PrTarget::List(list_args) => execute_pr_list(
                     team,
                     &config,
                     &current_dir,
                     &home_dir,
                     list_args.limit,
                     args.json,
-                );
-            }
-            if let MonitorTarget::Report(report_args) = &monitor.target {
-                enforce_plugin_ready(&plugin_state, args.json)?;
-                return execute_monitor_report(
+                ),
+                PrTarget::Report(report_args) => execute_pr_report(
                     team,
                     &config,
                     &current_dir,
@@ -433,7 +445,18 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     report_args.pr_number,
                     report_args.template.as_deref(),
                     args.json,
-                );
+                ),
+                PrTarget::InitReport(init_report_args) => execute_pr_init_report(
+                    &current_dir,
+                    init_report_args.output.as_deref(),
+                    args.json,
+                ),
+            }
+        }
+        Some(GhCommand::Monitor(monitor)) => {
+            if let MonitorTarget::Status(_status) = &monitor.target {
+                let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
+                return print_namespace_status(&health, args.json);
             }
 
             enforce_plugin_ready(&plugin_state, args.json)?;
@@ -521,9 +544,6 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     })?)
                 }
                 MonitorTarget::Status(_status) => unreachable!("handled above"),
-                MonitorTarget::List(_list) => unreachable!("handled above"),
-                MonitorTarget::Report(_report) => unreachable!("handled above"),
-                MonitorTarget::InitReport(_init_report) => unreachable!("handled above"),
             };
 
             match output {
@@ -534,7 +554,7 @@ pub fn execute(args: GhArgs) -> Result<()> {
     }
 }
 
-fn execute_monitor_list(
+fn execute_pr_list(
     team: &str,
     config: &Config,
     current_dir: &Path,
@@ -580,7 +600,7 @@ fn execute_monitor_list(
         .collect();
     items.sort_by(|a, b| a.number.cmp(&b.number));
 
-    let summary = GhMonitorListSummary {
+    let summary = GhPrListSummary {
         team: team.to_string(),
         repo,
         generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -593,11 +613,11 @@ fn execute_monitor_list(
         return Ok(());
     }
 
-    print_monitor_list_summary(&summary);
+    print_pr_list_summary(&summary);
     Ok(())
 }
 
-fn execute_monitor_report(
+fn execute_pr_report(
     team: &str,
     config: &Config,
     current_dir: &Path,
@@ -634,16 +654,23 @@ fn execute_monitor_report(
     let checks = extract_check_reports(&row.status_check_rollup);
     let reviews = extract_review_reports(&row.reviews);
     let ci = summarize_ci_rollup(&row.status_check_rollup);
-    let review_decision = normalize_review_status(row.review_decision.as_deref());
+    let review_decision =
+        normalize_report_review_decision(row.review_decision.as_deref(), &reviews);
+    let (mergeable, merge_state_status) = resolve_merge_snapshot_with_retry(
+        &repo,
+        pr_number,
+        row.mergeable.clone(),
+        row.merge_state_status.clone(),
+    );
     let merge = build_merge_report(
-        row.mergeable.as_deref(),
-        row.merge_state_status.as_deref(),
+        mergeable.as_deref(),
+        merge_state_status.as_deref(),
         row.is_draft,
         &ci,
         &review_decision,
     );
 
-    let report = GhMonitorReportSummary {
+    let report = GhPrReportSummary {
         schema_version: GH_MONITOR_REPORT_SCHEMA_VERSION.to_string(),
         team: team.to_string(),
         repo,
@@ -667,7 +694,7 @@ fn execute_monitor_report(
     }
 
     if let Some(path) = template_path {
-        let rendered = render_monitor_report_template(path, &report)?;
+        let rendered = render_pr_report_template(path, &report)?;
         print!("{rendered}");
         if !rendered.ends_with('\n') {
             println!();
@@ -675,11 +702,71 @@ fn execute_monitor_report(
         return Ok(());
     }
 
-    print_monitor_report_summary(&report);
+    print_pr_report_summary(&report);
     Ok(())
 }
 
-fn execute_monitor_init_report(
+fn resolve_merge_snapshot_with_retry(
+    repo: &str,
+    pr_number: u64,
+    initial_mergeable: Option<String>,
+    initial_merge_state_status: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let mut mergeable = initial_mergeable;
+    let mut merge_state_status = initial_merge_state_status;
+
+    if !should_retry_mergeability(mergeable.as_deref(), merge_state_status.as_deref()) {
+        return (mergeable, merge_state_status);
+    }
+
+    for _ in 0..GH_MONITOR_MERGE_RETRY_ATTEMPTS {
+        thread::sleep(Duration::from_millis(GH_MONITOR_MERGE_RETRY_DELAY_MS));
+        let Ok(snapshot) = query_merge_snapshot(repo, pr_number) else {
+            break;
+        };
+
+        mergeable = snapshot.mergeable;
+        merge_state_status = snapshot.merge_state_status;
+
+        if !should_retry_mergeability(mergeable.as_deref(), merge_state_status.as_deref()) {
+            break;
+        }
+    }
+
+    (mergeable, merge_state_status)
+}
+
+fn should_retry_mergeability(mergeable: Option<&str>, merge_state_status: Option<&str>) -> bool {
+    let mergeable_normalized = normalize_mergeable(mergeable);
+    let merge_state_status_normalized = normalize_merge_status(merge_state_status);
+    mergeable_normalized == "unknown"
+        || matches!(
+            merge_state_status_normalized.as_str(),
+            "unknown" | "pending"
+        )
+}
+
+fn query_merge_snapshot(repo: &str, pr_number: u64) -> Result<GhPrMergeProbe> {
+    let output = Command::new("gh")
+        .args(["-R", repo, "pr", "view", &pr_number.to_string()])
+        .args(["--json", "mergeStateStatus,mergeable"])
+        .output()
+        .with_context(|| format!("failed to invoke `gh pr view` merge probe for {repo}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "failed to query merge probe for PR #{} via gh CLI: {}",
+            pr_number,
+            stderr.trim()
+        );
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .with_context(|| "failed to parse merge probe JSON output")
+}
+
+fn execute_pr_init_report(
     current_dir: &Path,
     output_override: Option<&Path>,
     json: bool,
@@ -713,7 +800,7 @@ fn execute_monitor_init_report(
         )
     })?;
 
-    let summary = GhMonitorInitReportSummary {
+    let summary = GhPrInitReportSummary {
         output_path: output_path.display().to_string(),
         created: true,
         schema_version: GH_MONITOR_REPORT_SCHEMA_VERSION.to_string(),
@@ -724,22 +811,19 @@ fn execute_monitor_init_report(
         return Ok(());
     }
 
-    println!("atm gh monitor init-report complete");
+    println!("atm gh pr init-report complete");
     println!("Template:          {}", summary.output_path);
     println!("Schema Version:    {}", summary.schema_version);
     println!();
     println!("Use with:");
     println!(
-        "  atm gh monitor report <pr-number> --template {}",
+        "  atm gh pr report <pr-number> --template {}",
         summary.output_path
     );
     Ok(())
 }
 
-fn render_monitor_report_template(
-    template_path: &Path,
-    report: &GhMonitorReportSummary,
-) -> Result<String> {
+fn render_pr_report_template(template_path: &Path, report: &GhPrReportSummary) -> Result<String> {
     let template = std::fs::read_to_string(template_path)
         .with_context(|| format!("failed to read template file {}", template_path.display()))?;
     let env = Environment::new();
@@ -753,14 +837,14 @@ fn render_monitor_report_template(
 }
 
 fn default_monitor_report_template() -> &'static str {
-    r#"GitHub Monitor Report (schema {{ schema_version }})
+    r#"GitHub PR Report (schema {{ schema_version }})
 Team: {{ team }}
 Repository: {{ repo }}
 Generated: {{ generated_at }}
 PR #{{ pr.number }}: {{ pr.title }}
 URL: {{ pr.url }}
 Draft: {{ "yes" if pr.draft else "no" }}
-CI: {{ pr.ci.state }} (pass={{ pr.ci.pass }} fail={{ pr.ci.fail }} pending={{ pr.ci.pending }} total={{ pr.ci.total }})
+CI: {{ pr.ci.state }} (pass={{ pr.ci.pass }}{% if pr.ci.fail > 0 %} fail={{ pr.ci.fail }}{% endif %}{% if pr.ci.pending > 0 %} pending={{ pr.ci.pending }}{% endif %}{% if pr.ci.skip > 0 %} skip={{ pr.ci.skip }}{% endif %}{% if pr.ci.neutral > 0 %} neutral={{ pr.ci.neutral }}{% endif %} total={{ pr.ci.total }})
 Review Decision: {{ pr.review_decision }}
 Merge: status={{ pr.merge.status }} mergeable={{ pr.merge.mergeable }} mergeStateStatus={{ pr.merge.merge_state_status }}
 
@@ -769,6 +853,15 @@ Blocking Reasons:
 - none
 {% else -%}
 {% for reason in pr.merge.blocking_reasons -%}
+- {{ reason }}
+{% endfor -%}
+{% endif %}
+
+Advisory Reasons:
+{% if pr.merge.advisory_reasons|length == 0 -%}
+- none
+{% else -%}
+{% for reason in pr.merge.advisory_reasons -%}
 - {{ reason }}
 {% endfor -%}
 {% endif %}
@@ -857,8 +950,8 @@ fn resolve_monitor_repo_scope(
     );
 }
 
-fn print_monitor_list_summary(summary: &GhMonitorListSummary) {
-    println!("GitHub Monitor List: atm gh monitor list");
+fn print_pr_list_summary(summary: &GhPrListSummary) {
+    println!("GitHub PR List: atm gh pr list");
     println!("Team:              {}", summary.team);
     println!("Repository:        {}", summary.repo);
     println!("Open PRs:          {}", summary.total_open_prs);
@@ -875,7 +968,7 @@ fn print_monitor_list_summary(summary: &GhMonitorListSummary) {
             "{} {}/{}",
             item.ci.state.to_uppercase(),
             item.ci.pass,
-            item.ci.total
+            ci_effective_total(&item.ci)
         );
         println!(
             "#{} [{}] [ci:{}] [merge:{}] [review:{}] {}",
@@ -884,8 +977,8 @@ fn print_monitor_list_summary(summary: &GhMonitorListSummary) {
     }
 }
 
-fn print_monitor_report_summary(report: &GhMonitorReportSummary) {
-    println!("GitHub Monitor Report: atm gh monitor report");
+fn print_pr_report_summary(report: &GhPrReportSummary) {
+    println!("GitHub PR Report: atm gh pr report");
     println!("Schema Version:    {}", report.schema_version);
     println!("Team:              {}", report.team);
     println!("Repository:        {}", report.repo);
@@ -898,22 +991,25 @@ fn print_monitor_report_summary(report: &GhMonitorReportSummary) {
         if report.pr.draft { "yes" } else { "no" }
     );
     println!();
-    println!(
-        "CI:                {} (pass={} fail={} pending={} total={})",
-        report.pr.ci.state,
-        report.pr.ci.pass,
-        report.pr.ci.fail,
-        report.pr.ci.pending,
-        report.pr.ci.total
-    );
+    println!("CI:                {}", render_ci_summary(&report.pr.ci));
     println!("Review Decision:   {}", report.pr.review_decision);
     println!(
         "Merge:             status={} mergeable={} mergeStateStatus={}",
         report.pr.merge.status, report.pr.merge.mergeable, report.pr.merge.merge_state_status
     );
-    if !report.pr.merge.blocking_reasons.is_empty() {
-        println!("Blocking Reasons:");
+    println!("Blocking Reasons:");
+    if report.pr.merge.blocking_reasons.is_empty() {
+        println!("  - none");
+    } else {
         for reason in &report.pr.merge.blocking_reasons {
+            println!("  - {reason}");
+        }
+    }
+    println!("Advisory Reasons:");
+    if report.pr.merge.advisory_reasons.is_empty() {
+        println!("  - none");
+    } else {
+        for reason in &report.pr.merge.advisory_reasons {
             println!("  - {reason}");
         }
     }
@@ -949,6 +1045,35 @@ fn print_monitor_report_summary(report: &GhMonitorReportSummary) {
             );
         }
     }
+}
+
+fn ci_effective_total(ci: &GhCiRollup) -> u64 {
+    ci.total.saturating_sub(ci.skip)
+}
+
+fn render_ci_summary(ci: &GhCiRollup) -> String {
+    let mut parts = vec![format!("pass={}", ci.pass)];
+    if ci.fail > 0 {
+        parts.push(format!("fail={}", ci.fail));
+    }
+    if ci.pending > 0 {
+        parts.push(format!("pending={}", ci.pending));
+    }
+    if ci.skip > 0 {
+        parts.push(format!("skip={}", ci.skip));
+    }
+    if ci.neutral > 0 {
+        parts.push(format!("neutral={}", ci.neutral));
+    }
+    parts.push(format!("total={}", ci.total));
+    let details = parts.join(" ");
+    format!(
+        "{} {}/{} ({})",
+        ci.state,
+        ci.pass,
+        ci_effective_total(ci),
+        details
+    )
 }
 
 fn extract_check_reports(entries: &[serde_json::Value]) -> Vec<GhMonitorCheckReport> {
@@ -1039,12 +1164,13 @@ fn build_merge_report(
     let mergeable_normalized = normalize_mergeable(mergeable);
     let merge_state_status_normalized = normalize_merge_status(merge_state_status);
     let mut blocking_reasons: Vec<String> = Vec::new();
+    let mut advisory_reasons: Vec<String> = Vec::new();
 
     if draft {
         blocking_reasons.push("PR is draft".to_string());
     }
     if mergeable_normalized == "unknown" {
-        blocking_reasons.push("mergeability is UNKNOWN (pending)".to_string());
+        advisory_reasons.push("mergeability is UNKNOWN (transient)".to_string());
     } else if mergeable_normalized == "conflicting" {
         blocking_reasons.push("mergeability is CONFLICTING".to_string());
     }
@@ -1056,6 +1182,14 @@ fn build_merge_report(
             "mergeStateStatus={}",
             merge_state_status_normalized.to_ascii_uppercase()
         ));
+    } else if matches!(
+        merge_state_status_normalized.as_str(),
+        "pending" | "unknown"
+    ) {
+        advisory_reasons.push(format!(
+            "mergeStateStatus={}",
+            merge_state_status_normalized.to_ascii_uppercase()
+        ));
     }
     if ci.fail > 0 {
         blocking_reasons.push("CI has failing checks".to_string());
@@ -1064,16 +1198,20 @@ fn build_merge_report(
     }
     if review_decision == "changes_requested" {
         blocking_reasons.push("review decision is CHANGES_REQUESTED".to_string());
-    } else if matches!(review_decision, "review_required" | "unknown") {
-        blocking_reasons.push("review approval still required".to_string());
+    } else if review_decision == "review_required" {
+        advisory_reasons.push("review approval still required".to_string());
+    } else if review_decision == "unknown" {
+        advisory_reasons.push("review decision unavailable".to_string());
+    } else if review_decision == "none" {
+        advisory_reasons.push("no explicit review decision".to_string());
     }
 
-    let status = if mergeable_normalized == "unknown" {
-        "pending"
-    } else if blocking_reasons.is_empty() {
-        "ready"
-    } else {
+    let status = if !blocking_reasons.is_empty() {
         "blocked"
+    } else if mergeable_normalized == "unknown" {
+        "indeterminate"
+    } else {
+        "ready"
     };
 
     GhMergeReport {
@@ -1081,6 +1219,7 @@ fn build_merge_report(
         merge_state_status: merge_state_status_normalized,
         status: status.to_string(),
         blocking_reasons,
+        advisory_reasons,
     }
 }
 
@@ -1089,6 +1228,7 @@ enum GhCheckOutcome {
     Pass,
     Fail,
     Pending,
+    Skip,
     Neutral,
 }
 
@@ -1097,6 +1237,7 @@ fn summarize_ci_rollup(entries: &[serde_json::Value]) -> GhCiRollup {
     let mut pass = 0_u64;
     let mut fail = 0_u64;
     let mut pending = 0_u64;
+    let mut skip = 0_u64;
     let mut neutral = 0_u64;
 
     for entry in entries {
@@ -1106,6 +1247,7 @@ fn summarize_ci_rollup(entries: &[serde_json::Value]) -> GhCiRollup {
                 GhCheckOutcome::Pass => pass += 1,
                 GhCheckOutcome::Fail => fail += 1,
                 GhCheckOutcome::Pending => pending += 1,
+                GhCheckOutcome::Skip => skip += 1,
                 GhCheckOutcome::Neutral => neutral += 1,
             }
         }
@@ -1117,7 +1259,7 @@ fn summarize_ci_rollup(entries: &[serde_json::Value]) -> GhCiRollup {
         "fail"
     } else if pending > 0 {
         "pending"
-    } else if pass + neutral == total {
+    } else if pass + skip + neutral == total {
         "pass"
     } else {
         "mixed"
@@ -1129,6 +1271,7 @@ fn summarize_ci_rollup(entries: &[serde_json::Value]) -> GhCiRollup {
         pass,
         fail,
         pending,
+        skip,
         neutral,
     }
 }
@@ -1143,7 +1286,8 @@ fn classify_check_outcome(entry: &serde_json::Value) -> Option<GhCheckOutcome> {
         return Some(match conclusion {
             "success" => GhCheckOutcome::Pass,
             "failure" | "timed_out" | "startup_failure" | "action_required" => GhCheckOutcome::Fail,
-            "cancelled" | "neutral" | "skipped" => GhCheckOutcome::Neutral,
+            "skipped" => GhCheckOutcome::Skip,
+            "cancelled" | "neutral" => GhCheckOutcome::Neutral,
             _ => GhCheckOutcome::Neutral,
         });
     }
@@ -1166,8 +1310,9 @@ fn classify_check_outcome(entry: &serde_json::Value) -> Option<GhCheckOutcome> {
             GhCheckOutcome::Fail
         }
         "queued" | "in_progress" | "pending" | "requested" | "waiting" => GhCheckOutcome::Pending,
+        "skipped" => GhCheckOutcome::Skip,
         "completed" => GhCheckOutcome::Neutral,
-        "cancelled" | "neutral" | "skipped" => GhCheckOutcome::Neutral,
+        "cancelled" | "neutral" => GhCheckOutcome::Neutral,
         _ => GhCheckOutcome::Neutral,
     })
 }
@@ -1182,6 +1327,17 @@ fn normalize_review_status(value: Option<&str>) -> String {
         },
         None => "unknown".to_string(),
     }
+}
+
+fn normalize_report_review_decision(
+    value: Option<&str>,
+    reviews: &[GhMonitorReviewReport],
+) -> String {
+    let normalized = normalize_review_status(value);
+    if normalized == "unknown" && reviews.is_empty() {
+        return "none".to_string();
+    }
+    normalized
 }
 
 fn normalize_mergeable(value: Option<&str>) -> String {
@@ -1492,9 +1648,9 @@ fn namespace_actions(enabled: bool) -> Vec<&'static str> {
             "atm gh monitor pr <number>",
             "atm gh monitor workflow <name> --ref <ref>",
             "atm gh monitor run <run-id>",
-            "atm gh monitor list",
-            "atm gh monitor report <pr-number>",
-            "atm gh monitor init-report [--output <path>]",
+            "atm gh pr list",
+            "atm gh pr report <pr-number>",
+            "atm gh pr init-report [--output <path>]",
             "atm gh monitor start|stop|restart|status",
             "atm gh init",
         ]
@@ -1583,8 +1739,8 @@ fn execute_init(
             "atm gh".to_string(),
             "atm gh status".to_string(),
             "atm gh monitor pr <number>".to_string(),
-            "atm gh monitor list".to_string(),
-            "atm gh monitor report <pr-number>".to_string(),
+            "atm gh pr list".to_string(),
+            "atm gh pr report <pr-number>".to_string(),
         ],
     };
 
@@ -1864,39 +2020,50 @@ mod tests {
 
     #[test]
     fn summarize_ci_rollup_marks_pass_when_neutral_skipped_checks_present() {
-        // 15 pass + 1 neutral (SKIPPED) should be "pass", not "mixed"
+        // 15 pass + 1 skipped + 1 neutral should be "pass", not "mixed"
         let mut entries: Vec<serde_json::Value> = (0..15)
             .map(|_| serde_json::json!({"conclusion":"SUCCESS"}))
             .collect();
         entries.push(serde_json::json!({"conclusion":"SKIPPED"}));
+        entries.push(serde_json::json!({"conclusion":"CANCELLED"}));
         let rollup = summarize_ci_rollup(&entries);
         assert_eq!(rollup.state, "pass");
-        assert_eq!(rollup.total, 16);
+        assert_eq!(rollup.total, 17);
         assert_eq!(rollup.pass, 15);
+        assert_eq!(rollup.skip, 1);
         assert_eq!(rollup.neutral, 1);
         assert_eq!(rollup.fail, 0);
         assert_eq!(rollup.pending, 0);
     }
 
     #[test]
-    fn build_merge_report_unknown_mergeability_is_pending() {
+    fn build_merge_report_unknown_mergeability_is_indeterminate_not_blocking() {
         let ci = GhCiRollup {
             state: "pass".to_string(),
             total: 2,
             pass: 2,
             fail: 0,
             pending: 0,
+            skip: 0,
             neutral: 0,
         };
         let merge = build_merge_report(Some("UNKNOWN"), Some("CLEAN"), false, &ci, "approved");
-        assert_eq!(merge.status, "pending");
+        assert_eq!(merge.status, "indeterminate");
         assert_eq!(merge.mergeable, "unknown");
+        assert!(merge.blocking_reasons.is_empty());
         assert!(
             merge
-                .blocking_reasons
+                .advisory_reasons
                 .iter()
                 .any(|reason| reason.contains("UNKNOWN"))
         );
+    }
+
+    #[test]
+    fn normalize_report_review_decision_maps_empty_to_none_when_no_reviews() {
+        let reviews: Vec<GhMonitorReviewReport> = vec![];
+        assert_eq!(normalize_report_review_decision(None, &reviews), "none");
+        assert_eq!(normalize_report_review_decision(Some(""), &reviews), "none");
     }
 
     #[test]
@@ -1962,9 +2129,9 @@ mod tests {
     }
 
     #[test]
-    fn execute_monitor_init_report_writes_default_template_file() {
+    fn execute_pr_init_report_writes_default_template_file() {
         let tmp = TempDir::new().expect("tempdir");
-        execute_monitor_init_report(tmp.path(), None, false).expect("init report");
+        execute_pr_init_report(tmp.path(), None, false).expect("init report");
         let template_path = tmp.path().join(GH_MONITOR_DEFAULT_TEMPLATE_FILENAME);
         assert!(template_path.exists());
         let content = std::fs::read_to_string(template_path).expect("read template");
@@ -1973,7 +2140,7 @@ mod tests {
     }
 
     #[test]
-    fn render_monitor_report_template_renders_report_payload() {
+    fn render_pr_report_template_renders_report_payload() {
         let tmp = TempDir::new().expect("tempdir");
         let template_path = tmp.path().join("custom-template.j2");
         std::fs::write(
@@ -1982,7 +2149,7 @@ mod tests {
         )
         .expect("write template");
 
-        let report = GhMonitorReportSummary {
+        let report = GhPrReportSummary {
             schema_version: GH_MONITOR_REPORT_SCHEMA_VERSION.to_string(),
             team: "atm-dev".to_string(),
             repo: "acme/repo".to_string(),
@@ -1998,6 +2165,7 @@ mod tests {
                     pass: 1,
                     fail: 0,
                     pending: 0,
+                    skip: 0,
                     neutral: 0,
                 },
                 review_decision: "approved".to_string(),
@@ -2006,14 +2174,14 @@ mod tests {
                     merge_state_status: "clean".to_string(),
                     status: "ready".to_string(),
                     blocking_reasons: vec![],
+                    advisory_reasons: vec![],
                 },
                 checks: vec![],
                 reviews: vec![],
             },
         };
 
-        let rendered =
-            render_monitor_report_template(&template_path, &report).expect("render template");
+        let rendered = render_pr_report_template(&template_path, &report).expect("render template");
         assert_eq!(rendered, "team=atm-dev pr=42 schema=1.0.0");
     }
 }

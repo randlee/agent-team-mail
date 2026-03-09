@@ -173,7 +173,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AF | External Agent Lifecycle Hardening | Close lifecycle, cleanup, transient registration, and reliability/documentation hardening | COMPLETE |
 | AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | COMPLETE |
 | AH | sc-observability Unification + ATM Ecosystem Logging | Unified JSONL logging pipeline via `sc-observability` crate; extended logging health schema in `atm status`/`atm doctor` | COMPLETE |
-| AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh monitor list`, `atm gh monitor report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | COMPLETE |
+| AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | COMPLETE |
 | AJ | OpenTelemetry Baseline + Observability API Completion | OTel feature gate, sc_observability::init() API, log injection for library calls, scmux/schook integration | PLANNED |
 
 ---
@@ -1505,9 +1505,10 @@ observability scope.
 | Sprint | Focus | Issues | Status |
 |---|---|---|---|
 | AI.0 | `gh_monitor` cold-start init bug fix prerequisite | #564 | COMPLETE |
-| AI.1 | `atm gh monitor list` rollup dashboard + `--json` | #560 | COMPLETE |
-| AI.2 | `atm gh monitor report <PR>` built-in report + `--json` | #561 | COMPLETE |
+| AI.1 | `atm gh pr list` rollup dashboard + `--json` | #560 | COMPLETE |
+| AI.2 | `atm gh pr report <PR>` built-in report + `--json` | #561 | COMPLETE |
 | AI.3 | Template customization (`--template`) + optional `init-report` | #561 (follow-up) | COMPLETE |
+| AI.4 | Report semantics hardening (`skip` pass semantics, review none, mergeability retry, blocker/advisory split) | #582 | COMPLETE |
 
 ---
 

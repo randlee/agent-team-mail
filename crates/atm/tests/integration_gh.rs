@@ -488,46 +488,76 @@ if "pr" in args and "view" in args:
         view_idx = args.index("view")
         if view_idx + 1 < len(args):
             pr_number = args[view_idx + 1]
-    if pr_number != "101":
+    if pr_number not in ("101", "103"):
         print(f"unexpected PR: {{pr_number}}", file=sys.stderr)
         sys.exit(2)
 
-    payload = {{
-        "number": 101,
-        "title": "Add monitor dashboard",
-        "url": "https://github.com/{expected_repo}/pull/101",
-        "isDraft": False,
-        "reviewDecision": "APPROVED",
-        "mergeStateStatus": "CLEAN",
-        "mergeable": "UNKNOWN",
-        "statusCheckRollup": [
-            {{
-                "name": "clippy",
-                "status": "COMPLETED",
-                "conclusion": "SUCCESS",
-                "startedAt": "2026-03-09T01:00:00Z",
-                "completedAt": "2026-03-09T01:02:00Z",
-                "detailsUrl": "https://github.com/{expected_repo}/actions/runs/1"
-            }},
-            {{
-                "context": "required-review",
-                "state": "PENDING",
-                "targetUrl": "https://github.com/{expected_repo}/checks/2"
-            }}
-        ],
-        "reviews": [
-            {{
-                "author": {{"login": "alice"}},
-                "state": "APPROVED",
-                "submittedAt": "2026-03-09T02:00:00Z"
-            }},
-            {{
-                "author": {{"login": "bob"}},
-                "state": "COMMENTED",
-                "submittedAt": "2026-03-09T02:30:00Z"
-            }}
-        ]
-    }}
+    if pr_number == "101":
+        payload = {{
+            "number": 101,
+            "title": "Add monitor dashboard",
+            "url": "https://github.com/{expected_repo}/pull/101",
+            "isDraft": False,
+            "reviewDecision": "APPROVED",
+            "mergeStateStatus": "CLEAN",
+            "mergeable": "UNKNOWN",
+            "statusCheckRollup": [
+                {{
+                    "name": "clippy",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "startedAt": "2026-03-09T01:00:00Z",
+                    "completedAt": "2026-03-09T01:02:00Z",
+                    "detailsUrl": "https://github.com/{expected_repo}/actions/runs/1"
+                }},
+                {{
+                    "context": "required-review",
+                    "state": "PENDING",
+                    "targetUrl": "https://github.com/{expected_repo}/checks/2"
+                }}
+            ],
+            "reviews": [
+                {{
+                    "author": {{"login": "alice"}},
+                    "state": "APPROVED",
+                    "submittedAt": "2026-03-09T02:00:00Z"
+                }},
+                {{
+                    "author": {{"login": "bob"}},
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-03-09T02:30:00Z"
+                }}
+            ]
+        }}
+    else:
+        payload = {{
+            "number": 103,
+            "title": "Skipped checks should still pass",
+            "url": "https://github.com/{expected_repo}/pull/103",
+            "isDraft": False,
+            "reviewDecision": "",
+            "mergeStateStatus": "UNKNOWN",
+            "mergeable": "UNKNOWN",
+            "statusCheckRollup": [
+                {{
+                    "name": "fmt",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "startedAt": "2026-03-09T03:00:00Z",
+                    "completedAt": "2026-03-09T03:01:00Z",
+                    "detailsUrl": "https://github.com/{expected_repo}/actions/runs/3"
+                }},
+                {{
+                    "name": "optional-check",
+                    "status": "COMPLETED",
+                    "conclusion": "SKIPPED",
+                    "startedAt": "2026-03-09T03:00:00Z",
+                    "completedAt": "2026-03-09T03:01:00Z",
+                    "detailsUrl": "https://github.com/{expected_repo}/actions/runs/4"
+                }}
+            ],
+            "reviews": []
+        }}
     print(json.dumps(payload))
     sys.exit(0)
 
@@ -1189,6 +1219,28 @@ fn test_gh_monitor_status_json_has_stable_schema() {
 
 #[test]
 #[cfg(unix)]
+fn test_gh_monitor_namespace_rejects_removed_one_shot_commands() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    for removed in ["list", "report", "init-report"] {
+        let mut cmd = cargo::cargo_bin_cmd!("atm");
+        set_home_env(&mut cmd, &temp_dir, "test-team", true);
+        cmd.env("ATM_TEAM", "test-team")
+            .arg("gh")
+            .arg("monitor")
+            .arg(removed)
+            .assert()
+            .failure()
+            .stderr(
+                predicates::str::contains("unrecognized subcommand")
+                    .and(predicates::str::contains(removed)),
+            );
+    }
+}
+
+#[test]
+#[cfg(unix)]
 fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -1211,7 +1263,7 @@ fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
         .arg("--team")
         .arg("test-team")
         .arg("--json")
-        .arg("monitor")
+        .arg("pr")
         .arg("list")
         .assert()
         .success()
@@ -1256,7 +1308,7 @@ fn test_gh_monitor_list_human_output_has_one_line_rollups() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
-        .arg("monitor")
+        .arg("pr")
         .arg("list")
         .assert()
         .success()
@@ -1264,7 +1316,7 @@ fn test_gh_monitor_list_human_output_has_one_line_rollups() {
         .stdout
         .clone();
     let text = String::from_utf8(output).unwrap();
-    assert!(text.contains("GitHub Monitor List: atm gh monitor list"));
+    assert!(text.contains("GitHub PR List: atm gh pr list"));
     assert!(text.contains("#101 [ready] [ci:PENDING 1/2] [merge:clean] [review:approved]"));
     assert!(text.contains("#102 [draft] [ci:FAIL 0/1] [merge:dirty] [review:changes_requested]"));
 }
@@ -1293,7 +1345,7 @@ fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
         .arg("--team")
         .arg("test-team")
         .arg("--json")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("101")
         .assert()
@@ -1309,7 +1361,21 @@ fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
     assert_eq!(json["pr"]["number"].as_u64(), Some(101));
     assert_eq!(json["pr"]["ci"]["state"].as_str(), Some("pending"));
     assert_eq!(json["pr"]["merge"]["mergeable"].as_str(), Some("unknown"));
-    assert_eq!(json["pr"]["merge"]["status"].as_str(), Some("pending"));
+    assert_eq!(json["pr"]["merge"]["status"].as_str(), Some("blocked"));
+    assert!(
+        json["pr"]["merge"]["blocking_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("CI checks still pending"))
+    );
+    assert!(
+        json["pr"]["merge"]["advisory_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("mergeability is UNKNOWN (transient)"))
+    );
     assert!(json["pr"]["checks"].is_array());
     assert_eq!(json["pr"]["checks"].as_array().unwrap().len(), 2);
     assert!(json["pr"]["reviews"].is_array());
@@ -1339,7 +1405,7 @@ fn test_gh_monitor_report_human_output_is_detailed() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("101")
         .assert()
@@ -1349,15 +1415,75 @@ fn test_gh_monitor_report_human_output_is_detailed() {
         .clone();
 
     let text = String::from_utf8(output).unwrap();
-    assert!(text.contains("GitHub Monitor Report: atm gh monitor report"));
+    assert!(text.contains("GitHub PR Report: atm gh pr report"));
     assert!(text.contains("Schema Version:    1.0.0"));
     assert!(text.contains("PR:                #101"));
-    assert!(text.contains("Merge:             status=pending"));
+    assert!(text.contains("Merge:             status=blocked"));
     assert!(text.contains("Blocking Reasons:"));
-    assert!(text.contains("mergeability is UNKNOWN (pending)"));
+    assert!(text.contains("CI checks still pending"));
+    assert!(text.contains("Advisory Reasons:"));
+    assert!(text.contains("mergeability is UNKNOWN (transient)"));
     assert!(text.contains("Reviews (2):"));
     assert!(text.contains("Checks (2):"));
     assert!(text.contains("clippy | status=completed"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_json_no_reviews_and_skips_are_non_blocking() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("pr")
+        .arg("report")
+        .arg("103")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["pr"]["number"].as_u64(), Some(103));
+    assert_eq!(json["pr"]["ci"]["state"].as_str(), Some("pass"));
+    assert_eq!(json["pr"]["ci"]["pass"].as_u64(), Some(1));
+    assert_eq!(json["pr"]["ci"]["skip"].as_u64(), Some(1));
+    assert_eq!(json["pr"]["review_decision"].as_str(), Some("none"));
+    assert_eq!(
+        json["pr"]["merge"]["status"].as_str(),
+        Some("indeterminate")
+    );
+    assert!(
+        json["pr"]["merge"]["blocking_reasons"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        json["pr"]["merge"]["advisory_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("no explicit review decision"))
+    );
 }
 
 #[test]
@@ -1390,7 +1516,7 @@ fn test_gh_monitor_report_template_renders_custom_output() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("101")
         .arg("--template")
@@ -1431,7 +1557,7 @@ fn test_gh_monitor_report_template_missing_file_is_actionable() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("101")
         .arg("--template")
@@ -1457,13 +1583,11 @@ fn test_gh_monitor_init_report_writes_starter_template() {
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
     cmd.env("ATM_TEAM", "test-team")
         .arg("gh")
-        .arg("monitor")
+        .arg("pr")
         .arg("init-report")
         .assert()
         .success()
-        .stdout(predicates::str::contains(
-            "atm gh monitor init-report complete",
-        ));
+        .stdout(predicates::str::contains("atm gh pr init-report complete"));
 
     let template_path = workdir.join("gh-monitor-report-template.j2");
     let template = fs::read_to_string(&template_path).unwrap();
@@ -1497,7 +1621,7 @@ fn test_gh_monitor_report_template_render_failure_is_actionable() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
-        .arg("monitor")
+        .arg("pr")
         .arg("report")
         .arg("101")
         .arg("--template")
