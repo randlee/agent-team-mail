@@ -2398,6 +2398,11 @@ Core command contract:
 - `atm gh status` (no target) returns GitHub monitor health/availability status for the team.
 - `atm gh status <pr|run|workflow> <value>` returns current monitor state for a specific target.
 
+One-shot PR query commands (no daemon required):
+- `atm gh pr list [--json] [--limit <N>]` returns CI/merge/review rollup for open PRs.
+- `atm gh pr report <pr-number> [--json] [--template <path>]` returns detailed per-PR check report.
+- `atm gh pr init-report [--output <path>]` writes a starter report template for customization.
+
 Operator status UX contract:
 - `atm gh` must not fail argument parsing and must always return a concise status
   summary for the namespace.
