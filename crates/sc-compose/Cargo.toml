@@ -11,13 +11,9 @@ description = "CLI for composing AI prompts with sc-composer"
 
 [dependencies]
 anyhow.workspace = true
-<<<<<<< HEAD
 agent-team-mail-core.workspace = true
 sc-composer = { path = "../sc-composer", version = "=0.43.0" }
 sc-observability.workspace = true
-=======
-sc-composer = { path = "../sc-composer", version = "=0.43.0" }
->>>>>>> origin/develop
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json.workspace = true
