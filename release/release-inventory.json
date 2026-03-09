@@ -1,85 +1,85 @@
 {
-  "releaseVersion": "0.42.0",
-  "releaseTag": "v0.42.0",
-  "releaseCommit": "14ff0b7fca2e785e3dee9e8ed53f4ebcca11ef6b",
-  "generatedAt": "2026-03-09T04:18:55.919385+00:00",
+  "releaseVersion": "0.42.1",
+  "releaseTag": "v0.42.1",
+  "releaseCommit": "c55062769c100f3219b606a9bc08c46621ac04b6",
+  "generatedAt": "2026-03-09T04:42:21.212515+00:00",
   "items": [
     {
-      "artifact": "agent-team-mail-core",
-      "version": "0.42.0",
-      "sourceRef": "refs/tags/v0.42.0",
+      "artifact": "sc-composer",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search agent-team-mail-core --limit 1 | grep -F 'agent-team-mail-core = \"0.42.0\"'"
+        "cargo search sc-composer --limit 1 | grep -F 'sc-composer = \"0.42.1\"'"
+      ]
+    },
+    {
+      "artifact": "agent-team-mail-core",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
+      "publishTarget": "crates.io",
+      "publish": true,
+      "required": true,
+      "verifyCommands": [
+        "cargo search agent-team-mail-core --limit 1 | grep -F 'agent-team-mail-core = \"0.42.1\"'"
       ]
     },
     {
       "artifact": "agent-team-mail",
-      "version": "0.42.0",
-      "sourceRef": "refs/tags/v0.42.0",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search agent-team-mail --limit 1 | grep -F 'agent-team-mail = \"0.42.0\"'",
-        "cargo install agent-team-mail --version 0.42.0 --locked --force"
+        "cargo search agent-team-mail --limit 1 | grep -F 'agent-team-mail = \"0.42.1\"'",
+        "cargo install agent-team-mail --version 0.42.1 --locked --force"
       ]
     },
     {
       "artifact": "agent-team-mail-daemon",
-      "version": "0.42.0",
-      "sourceRef": "refs/tags/v0.42.0",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search agent-team-mail-daemon --limit 1 | grep -F 'agent-team-mail-daemon = \"0.42.0\"'"
+        "cargo search agent-team-mail-daemon --limit 1 | grep -F 'agent-team-mail-daemon = \"0.42.1\"'"
       ]
     },
     {
       "artifact": "agent-team-mail-mcp",
-      "version": "0.42.0",
-      "sourceRef": "refs/tags/v0.42.0",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search agent-team-mail-mcp --limit 1 | grep -F 'agent-team-mail-mcp = \"0.42.0\"'"
+        "cargo search agent-team-mail-mcp --limit 1 | grep -F 'agent-team-mail-mcp = \"0.42.1\"'"
       ]
     },
     {
       "artifact": "agent-team-mail-tui",
-      "version": "0.42.0",
-      "sourceRef": "refs/tags/v0.42.0",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search agent-team-mail-tui --limit 1 | grep -F 'agent-team-mail-tui = \"0.42.0\"'"
-      ]
-    },
-    {
-      "artifact": "sc-composer",
-      "version": "0.42.0",
-      "sourceRef": "refs/tags/v0.42.0",
-      "publishTarget": "crates.io",
-      "publish": true,
-      "required": true,
-      "verifyCommands": [
-        "cargo search sc-composer --limit 1 | grep -F 'sc-composer = \"0.42.0\"'"
+        "cargo search agent-team-mail-tui --limit 1 | grep -F 'agent-team-mail-tui = \"0.42.1\"'"
       ]
     },
     {
       "artifact": "sc-compose",
-      "version": "0.42.0",
-      "sourceRef": "refs/tags/v0.42.0",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search sc-compose --limit 1 | grep -F 'sc-compose = \"0.42.0\"'"
+        "cargo search sc-compose --limit 1 | grep -F 'sc-compose = \"0.42.1\"'"
       ]
     }
   ]
