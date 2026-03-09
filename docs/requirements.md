@@ -382,6 +382,9 @@ GH subcommands (plugin-owned):
   gh monitor pr <number> [--start-timeout <duration>] [--notify <agent[@team],...>]
   gh monitor workflow <name> --ref <branch|sha|pr>
   gh monitor run <run-id>
+  gh monitor list [--json] [--limit <N>]
+  gh monitor report <pr-number> [--json] [--template <path>]
+  gh monitor init-report [--output <path>]
   gh status
   gh status <pr|run|workflow> <value>
 ```

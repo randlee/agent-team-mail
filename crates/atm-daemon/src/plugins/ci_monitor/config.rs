@@ -147,15 +147,44 @@ impl CiMonitorConfig {
             });
         }
 
-        let owner = table
+        let mut owner = table
             .get("owner")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
-        let repo = table
+        let mut repo = table
             .get("repo")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        // Support canonical `repo = "owner/name"` values written by `atm gh init`,
+        // while remaining backward-compatible with legacy split owner/repo fields.
+        if let Some(repo_value) = repo.as_deref()
+            && let Some((slug_owner, slug_repo)) = repo_value.split_once('/')
+        {
+            let slug_owner = slug_owner.trim();
+            let slug_repo = slug_repo.trim();
+            if slug_owner.is_empty() || slug_repo.is_empty() {
+                return Err(PluginError::Config {
+                    message: "repo must be in the format `owner/repo` when using `/`".to_string(),
+                });
+            }
+
+            match owner.as_deref() {
+                Some(existing_owner) if existing_owner != slug_owner => {
+                    return Err(PluginError::Config {
+                        message: format!(
+                            "owner/repo mismatch: owner='{}' repo='{}'",
+                            existing_owner, repo_value
+                        ),
+                    });
+                }
+                _ => owner = Some(slug_owner.to_string()),
+            }
+            repo = Some(slug_repo.to_string());
+        }
 
         let team = table
             .get("team")
@@ -465,6 +494,36 @@ alert_cooldown = 45
         assert_eq!(config.runtime_drift_min_samples, 4);
         assert_eq!(config.runtime_history_limit, 120);
         assert_eq!(config.alert_cooldown_secs, 45);
+    }
+
+    #[test]
+    fn test_config_repo_slug_populates_owner_and_repo() {
+        let toml_str = r#"
+team = "qa-team"
+repo = "myorg/myrepo"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let config = CiMonitorConfig::from_toml(&table).unwrap();
+        assert_eq!(config.owner.as_deref(), Some("myorg"));
+        assert_eq!(config.repo.as_deref(), Some("myrepo"));
+    }
+
+    #[test]
+    fn test_config_repo_slug_rejects_owner_mismatch() {
+        let toml_str = r#"
+team = "qa-team"
+owner = "org-a"
+repo = "org-b/myrepo"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let result = CiMonitorConfig::from_toml(&table);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("owner/repo mismatch")
+        );
     }
 
     #[test]
