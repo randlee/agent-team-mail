@@ -1,7 +1,7 @@
 //! Main daemon event loop
 
 use crate::daemon::pid_backend_validation::{roster_process_id, validate_pid_backend};
-use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
+use crate::daemon::status::{LoggingHealth, PluginStatus, PluginStatusKind, StatusWriter};
 use crate::daemon::{
     InboxEvent, InboxEventKind, LogEventQueue, SharedDedupeStore, SharedPubSubStore,
     SharedSessionRegistry, SharedStateStore, SharedStreamEventSender, graceful_shutdown,
@@ -173,7 +173,7 @@ pub async fn run(
         dedup_store,
         stream_state_store,
         stream_event_sender,
-        log_event_queue,
+        log_event_queue.clone(),
         &daemon_lock,
         socket_cancel,
     )
@@ -388,12 +388,14 @@ pub async fn run(
     let status_plugins = plugins.clone();
     let status_failed_plugins = init_failed_plugins.clone();
     let status_ctx = ctx.clone();
+    let status_log_event_queue = log_event_queue.clone();
     let status_task = tokio::spawn(async move {
         status_writer_loop(
             status_writer_clone,
             status_plugins,
             status_failed_plugins,
             status_ctx,
+            status_log_event_queue,
             status_cancel,
         )
         .await;
@@ -1328,6 +1330,7 @@ async fn status_writer_loop(
     plugins: Vec<(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)>,
     init_failed_plugins: Vec<FailedPluginInit>,
     ctx: PluginContext,
+    log_event_queue: LogEventQueue,
     cancel: CancellationToken,
 ) {
     info!("Status writer loop started (interval: 30s)");
@@ -1335,7 +1338,8 @@ async fn status_writer_loop(
     // Write initial status at startup
     let plugin_statuses = build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
     let teams = get_active_teams(&ctx).await;
-    if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone()) {
+    let logging = build_logging_health(&ctx, &log_event_queue).await;
+    if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging) {
         error!("Failed to write initial daemon status: {}", e);
     }
 
@@ -1354,8 +1358,9 @@ async fn status_writer_loop(
                 let plugin_statuses =
                     build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
                 let teams = get_active_teams(&ctx).await;
+                let logging = build_logging_health(&ctx, &log_event_queue).await;
 
-                if let Err(e) = status_writer.write_status(plugin_statuses, teams) {
+                if let Err(e) = status_writer.write_status(plugin_statuses, teams, logging) {
                     error!("Failed to write daemon status: {}", e);
                 }
             }
@@ -1363,6 +1368,43 @@ async fn status_writer_loop(
     }
 
     info!("Status writer loop stopped");
+}
+
+async fn build_logging_health(
+    ctx: &PluginContext,
+    log_event_queue: &LogEventQueue,
+) -> LoggingHealth {
+    let queue = log_event_queue.lock().await;
+    let dropped_counter = queue.dropped();
+    drop(queue);
+
+    let home_dir = ctx
+        .system
+        .claude_root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let spool_path = agent_team_mail_core::logging_event::configured_spool_dir(&home_dir);
+
+    LoggingHealth {
+        state: if logging_disabled_by_env() {
+            "disabled".to_string()
+        } else {
+            "enabled".to_string()
+        },
+        dropped_counter,
+        spool_path: spool_path.display().to_string(),
+        last_error: None,
+    }
+}
+
+fn logging_disabled_by_env() -> bool {
+    matches!(
+        std::env::var("ATM_LOG")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase()),
+        Some(ref v) if v == "0" || v == "false" || v == "off" || v == "disabled" || v == "no"
+    )
 }
 
 /// Build plugin status list from running plugins

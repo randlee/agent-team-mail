@@ -8,6 +8,7 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use anyhow::Result;
 use clap::Args;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -71,6 +72,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         .collect();
 
     let member_rows = build_status_member_rows(&team_config, &daemon_states);
+    let logging = read_daemon_logging_health(&home_dir);
 
     // Count unread messages for each member
     let inbox_counts = count_inbox_messages(&team_dir, &member_rows)?;
@@ -107,7 +109,13 @@ pub fn execute(args: StatusArgs) -> Result<()> {
             "tasks": {
                 "pending": pending_tasks,
                 "completed": completed_tasks,
-            }
+            },
+            "logging": json!({
+                "state": logging.state,
+                "dropped_counter": logging.dropped_counter,
+                "spool_path": logging.spool_path,
+                "last_error": logging.last_error,
+            }),
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -139,6 +147,15 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         if pending_tasks > 0 || completed_tasks > 0 {
             println!();
             println!("Tasks: {pending_tasks} pending, {completed_tasks} completed");
+        }
+
+        println!();
+        println!("Logging:");
+        println!("  state:           {}", logging.state);
+        println!("  dropped_counter: {}", logging.dropped_counter);
+        println!("  spool_path:      {}", logging.spool_path);
+        if let Some(last_error) = &logging.last_error {
+            println!("  last_error:      {last_error}");
         }
     }
 
@@ -254,6 +271,30 @@ fn count_tasks(tasks_dir: &std::path::Path) -> Result<(usize, usize)> {
     }
 
     Ok((pending, completed))
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LoggingHealth {
+    state: String,
+    dropped_counter: u64,
+    spool_path: String,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct DaemonStatusSnapshot {
+    #[serde(default)]
+    logging: LoggingHealth,
+}
+
+fn read_daemon_logging_health(home_dir: &std::path::Path) -> LoggingHealth {
+    let status_path = home_dir.join(".claude/daemon/status.json");
+    let Ok(content) = fs::read_to_string(status_path) else {
+        return LoggingHealth::default();
+    };
+    serde_json::from_str::<DaemonStatusSnapshot>(&content)
+        .map(|status| status.logging)
+        .unwrap_or_default()
 }
 
 /// Format age as human-readable string

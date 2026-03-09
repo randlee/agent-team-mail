@@ -40,6 +40,15 @@ fn forward_to_unified(event: crate::logging_event::LogEventV1) {
     }
 }
 
+fn logging_enabled() -> bool {
+    !matches!(
+        std::env::var("ATM_LOG")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase()),
+        Some(ref v) if v == "0" || v == "false" || v == "off" || v == "disabled" || v == "no"
+    )
+}
+
 /// Map [`EventFields`] to a [`LogEventV1`] for the unified pipeline.
 fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1 {
     use crate::logging_event::LogEventV1;
@@ -175,6 +184,10 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
 /// The legacy `events.jsonl` dual-write path was removed in Phase M.1b.
 /// Events flow exclusively through the unified producer channel.
 pub fn emit_event_best_effort(mut fields: EventFields) {
+    if !logging_enabled() {
+        return;
+    }
+
     if fields.level.is_empty() || fields.source.is_empty() || fields.action.is_empty() {
         return;
     }
@@ -262,6 +275,22 @@ mod tests {
             !event.fields.contains_key("message_text"),
             "message_text should be intentionally omitted from persisted log fields"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_logging_enabled_honors_disabled_values() {
+        // SAFETY: test-scoped env mutation.
+        unsafe { std::env::set_var("ATM_LOG", "0") };
+        assert!(!logging_enabled());
+
+        // SAFETY: test-scoped env mutation.
+        unsafe { std::env::set_var("ATM_LOG", "off") };
+        assert!(!logging_enabled());
+
+        // SAFETY: cleanup.
+        unsafe { std::env::remove_var("ATM_LOG") };
+        assert!(logging_enabled());
     }
 
     #[test]

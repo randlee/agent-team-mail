@@ -113,6 +113,8 @@ struct DoctorReport {
     recommendations: Vec<Recommendation>,
     log_window: LogWindow,
     env_overrides: EnvOverrides,
+    #[serde(default)]
+    logging: LoggingHealthSnapshot,
     #[serde(skip_serializing, skip_deserializing, default)]
     member_snapshot: Vec<MemberSnapshot>,
 }
@@ -138,6 +140,16 @@ struct DoctorState {
 struct DaemonStatusSnapshot {
     #[serde(default)]
     plugins: Vec<PluginStatusSnapshot>,
+    #[serde(default)]
+    logging: LoggingHealthSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct LoggingHealthSnapshot {
+    state: String,
+    dropped_counter: u64,
+    spool_path: String,
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -311,6 +323,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
                 .max(0) as u64,
         },
         env_overrides: active_env_overrides(),
+        logging: read_daemon_status(home_dir).logging,
         member_snapshot: build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent),
     })
 }
@@ -499,16 +512,7 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
 }
 
 fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
-    let status_path = home_dir.join(".claude/daemon/status.json");
-    let raw = match fs::read_to_string(&status_path) {
-        Ok(raw) => raw,
-        Err(_) => return Vec::new(),
-    };
-
-    let snapshot: DaemonStatusSnapshot = match serde_json::from_str(&raw) {
-        Ok(parsed) => parsed,
-        Err(_) => return Vec::new(),
-    };
+    let snapshot = read_daemon_status(home_dir);
 
     let mut findings = Vec::new();
     for plugin in snapshot.plugins {
@@ -529,6 +533,20 @@ fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
         ));
     }
     findings
+}
+
+fn read_daemon_status(home_dir: &Path) -> DaemonStatusSnapshot {
+    let status_path = home_dir.join(".claude/daemon/status.json");
+    let Ok(raw) = fs::read_to_string(&status_path) else {
+        return DaemonStatusSnapshot {
+            plugins: Vec::new(),
+            logging: LoggingHealthSnapshot::default(),
+        };
+    };
+    serde_json::from_str(&raw).unwrap_or(DaemonStatusSnapshot {
+        plugins: Vec::new(),
+        logging: LoggingHealthSnapshot::default(),
+    })
 }
 
 fn check_pid_session_reconciliation_with_query<F>(
@@ -1166,6 +1184,17 @@ fn render_human(report: &DoctorReport) -> String {
         "Log window: {}\n\n",
         render_log_window_human(&report.log_window)
     ));
+    out.push_str("Logging health:\n");
+    out.push_str(&format!("  state: {}\n", report.logging.state));
+    out.push_str(&format!(
+        "  dropped_counter: {}\n",
+        report.logging.dropped_counter
+    ));
+    out.push_str(&format!("  spool_path: {}\n", report.logging.spool_path));
+    if let Some(last_error) = &report.logging.last_error {
+        out.push_str(&format!("  last_error: {last_error}\n"));
+    }
+    out.push('\n');
 
     if report.env_overrides.atm_home.is_some()
         || report.env_overrides.atm_team.is_some()
@@ -2080,6 +2109,7 @@ mod tests {
                 elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
+            logging: LoggingHealthSnapshot::default(),
             member_snapshot: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
                 agent_type: "team-lead".to_string(),
@@ -2166,6 +2196,7 @@ mod tests {
                     value: "arch-ctm".to_string(),
                 }),
             },
+            logging: LoggingHealthSnapshot::default(),
             member_snapshot: vec![MemberSnapshot::default()],
         };
         let value = serde_json::to_value(report).unwrap();
@@ -2254,6 +2285,7 @@ mod tests {
                     value: "arch-ctm".to_string(),
                 }),
             },
+            logging: LoggingHealthSnapshot::default(),
             member_snapshot: vec![],
         };
 

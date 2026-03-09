@@ -429,6 +429,15 @@ fn execute_status(args: StatusArgs) -> Result<()> {
                 println!();
             }
         }
+
+        println!();
+        println!("Logging:");
+        println!("  state:           {}", status.logging.state);
+        println!("  dropped_counter: {}", status.logging.dropped_counter);
+        println!("  spool_path:      {}", status.logging.spool_path);
+        if let Some(last_error) = &status.logging.last_error {
+            println!("  last_error:      {last_error}");
+        }
     }
 
     // Exit with error code if stale
@@ -487,6 +496,8 @@ struct DaemonStatus {
     uptime_secs: u64,
     plugins: Vec<PluginStatus>,
     teams: Vec<String>,
+    #[serde(default)]
+    logging: LoggingHealth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -506,6 +517,14 @@ enum PluginStatusKind {
     Disabled,
     #[serde(rename = "disabled_init_error")]
     DisabledInitError,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LoggingHealth {
+    state: String,
+    dropped_counter: u64,
+    spool_path: String,
+    last_error: Option<String>,
 }
 
 #[cfg(test)]
