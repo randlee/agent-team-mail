@@ -1502,7 +1502,7 @@ observability scope.
 | Sprint | Focus | Issues | Status |
 |---|---|---|---|
 | AI.0 | `gh_monitor` cold-start init bug fix prerequisite | #564 | COMPLETE |
-| AI.1 | `atm gh monitor list` rollup dashboard + `--json` | #560 | COMPLETE |
+| AI.1 | `atm gh monitor list` rollup dashboard + `--json` | #560 | IN-PROGRESS |
 | AI.2 | `atm gh monitor report <PR>` built-in report + `--json` | #561 | PLANNED |
 | AI.3 | Template customization (`--template`) + optional `init-report` | #561 (follow-up) | PLANNED |
 

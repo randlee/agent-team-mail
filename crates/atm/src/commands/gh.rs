@@ -665,11 +665,11 @@ fn normalize_review_status(value: Option<&str>) -> String {
 }
 
 fn normalize_merge_status(value: Option<&str>) -> String {
-    value
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_ascii_lowercase())
-        .unwrap_or_else(|| "unknown".to_string())
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) if raw.eq_ignore_ascii_case("unknown") => "pending".to_string(),
+        Some(raw) => raw.to_ascii_lowercase(),
+        None => "unknown".to_string(),
+    }
 }
 
 fn validate_status_args(args: &StatusArgs) -> Result<()> {
@@ -1324,5 +1324,11 @@ mod tests {
         assert_eq!(rollup.pass, 2);
         assert_eq!(rollup.fail, 0);
         assert_eq!(rollup.pending, 0);
+    }
+
+    #[test]
+    fn normalize_merge_status_maps_unknown_to_pending() {
+        assert_eq!(normalize_merge_status(Some("UNKNOWN")), "pending");
+        assert_eq!(normalize_merge_status(Some("unknown")), "pending");
     }
 }
