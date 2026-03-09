@@ -7,6 +7,7 @@ members = [
     "crates/atm-agent-mcp",
     "crates/atm-tui",
     "crates/sc-composer",
+    "crates/sc-compose",
 ]
 exclude = [
     "examples/provider-stub",
