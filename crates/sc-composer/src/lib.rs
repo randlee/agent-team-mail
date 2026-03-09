@@ -4,15 +4,23 @@
 //! and non-ATM tools.
 
 mod context;
+mod diagnostics;
 mod frontmatter;
+mod include;
+mod pipeline;
 mod render;
+mod resolver;
+mod validate;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use context::merge_context;
-use frontmatter::{extract_template_variables, frontmatter_missing_warning, parse_document};
+use pipeline::compose_blocks;
 use render::render_template;
+use validate::{evaluate_context, prepare_template, validate_request};
+
+pub use diagnostics::Diagnostic;
+pub use validate::ValidationReport;
 
 /// Supported runtime profiles for default agent file resolution policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +30,21 @@ pub enum RuntimeKind {
     Gemini,
     Opencode,
     Custom,
+}
+
+/// Request mode for composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeMode {
+    File,
+    Profile,
+}
+
+/// Profile kind for profile-mode resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileKind {
+    Agent,
+    Command,
+    Skill,
 }
 
 /// How unknown input variables should be handled.
@@ -52,7 +75,7 @@ impl Default for ComposePolicy {
     fn default() -> Self {
         Self {
             unknown_variable_policy: UnknownVariablePolicy::Error,
-            max_include_depth: 16,
+            max_include_depth: 8,
             allowed_roots: Vec::new(),
         }
     }
@@ -62,6 +85,8 @@ impl Default for ComposePolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposeRequest {
     pub runtime: RuntimeKind,
+    pub mode: ComposeMode,
+    pub kind: Option<ProfileKind>,
     pub root: PathBuf,
     pub agent: Option<String>,
     pub template_path: Option<PathBuf>,
@@ -72,29 +97,14 @@ pub struct ComposeRequest {
     pub policy: ComposePolicy,
 }
 
-/// Non-fatal note produced during resolution/validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Diagnostic {
-    pub code: String,
-    pub message: String,
-    pub path: Option<PathBuf>,
-}
-
 /// Result of a successful compose operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposeResult {
     pub rendered_text: String,
     pub resolved_files: Vec<PathBuf>,
+    pub search_trace: Vec<PathBuf>,
     pub variable_sources: BTreeMap<String, VariableSource>,
     pub warnings: Vec<Diagnostic>,
-}
-
-/// Result of validate-only operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidationReport {
-    pub ok: bool,
-    pub warnings: Vec<Diagnostic>,
-    pub errors: Vec<Diagnostic>,
 }
 
 /// Stable error surface for composition failures.
@@ -102,6 +112,19 @@ pub struct ValidationReport {
 pub enum ComposerError {
     #[error("template path is required for compose/validate in file mode")]
     MissingTemplatePath,
+    #[error("profile kind is required in profile mode")]
+    MissingProfileKind,
+    #[error("profile name (--agent) is required in profile mode")]
+    MissingProfileName,
+    #[error(
+        "profile resolution failed for runtime={runtime:?} kind={kind:?} name={name}; attempted={attempted_paths:?}"
+    )]
+    ProfileResolutionFailed {
+        runtime: RuntimeKind,
+        kind: ProfileKind,
+        name: String,
+        attempted_paths: Box<Vec<PathBuf>>,
+    },
     #[error("failed to read template at {path}: {source}")]
     TemplateRead {
         path: PathBuf,
@@ -110,57 +133,48 @@ pub enum ComposerError {
     },
     #[error("invalid frontmatter in {path}: {message}")]
     FrontmatterParse { path: PathBuf, message: String },
+    #[error("include processing failed: {diagnostic:?}")]
+    IncludeError { diagnostic: Box<Diagnostic> },
     #[error("template parse/render failed in {path}: {message}")]
     TemplateRender { path: PathBuf, message: String },
     #[error("validation failed with {error_count} error(s)")]
     ValidationFailed {
-        errors: Vec<Diagnostic>,
-        warnings: Vec<Diagnostic>,
+        errors: Box<Vec<Diagnostic>>,
+        warnings: Box<Vec<Diagnostic>>,
         error_count: usize,
     },
 }
 
 /// Compose a final prompt output.
 pub fn compose(request: &ComposeRequest) -> Result<ComposeResult, ComposerError> {
-    let template_path = resolve_template_path(request)?;
-    let raw =
-        std::fs::read_to_string(&template_path).map_err(|source| ComposerError::TemplateRead {
-            path: template_path.clone(),
-            source,
-        })?;
+    let prepared = prepare_template(request)?;
+    let merge = evaluate_context(request, &prepared);
 
-    let parsed = parse_document(&template_path, &raw)?;
-    let (required_variables, declared_variables, defaults, mut warnings) =
-        effective_schema(&template_path, &parsed.frontmatter, &parsed.body);
-
-    let merge = merge_context(
-        &template_path,
-        &required_variables,
-        &declared_variables,
-        &defaults,
-        &request.vars_env,
-        &request.vars_input,
-        request.policy.unknown_variable_policy,
-    );
+    let mut warnings = prepared.warnings;
     warnings.extend(merge.warnings);
-
     if !merge.errors.is_empty() {
         return Err(ComposerError::ValidationFailed {
             error_count: merge.errors.len(),
-            errors: merge.errors,
-            warnings,
+            errors: Box::new(merge.errors),
+            warnings: Box::new(warnings),
         });
     }
 
-    let rendered_text = if frontmatter::is_template_file(&template_path) {
-        render_template(&template_path, &parsed.body, &merge.context)?
+    let profile_body = if frontmatter::is_template_file(&prepared.template_path) {
+        render_template(&prepared.template_path, &prepared.body, &merge.context)?
     } else {
-        parsed.body
+        prepared.body
     };
+    let rendered_text = compose_blocks(
+        &profile_body,
+        request.guidance_block.as_deref(),
+        request.user_prompt.as_deref(),
+    );
 
     Ok(ComposeResult {
         rendered_text,
-        resolved_files: vec![template_path],
+        resolved_files: prepared.resolved_files,
+        search_trace: prepared.search_trace,
         variable_sources: merge.variable_sources,
         warnings,
     })
@@ -168,77 +182,7 @@ pub fn compose(request: &ComposeRequest) -> Result<ComposeResult, ComposerError>
 
 /// Validate a compose request without producing output.
 pub fn validate(request: &ComposeRequest) -> Result<ValidationReport, ComposerError> {
-    let template_path = resolve_template_path(request)?;
-    let raw =
-        std::fs::read_to_string(&template_path).map_err(|source| ComposerError::TemplateRead {
-            path: template_path.clone(),
-            source,
-        })?;
-
-    let parsed = parse_document(&template_path, &raw)?;
-    let (required_variables, declared_variables, defaults, mut warnings) =
-        effective_schema(&template_path, &parsed.frontmatter, &parsed.body);
-
-    let merge = merge_context(
-        &template_path,
-        &required_variables,
-        &declared_variables,
-        &defaults,
-        &request.vars_env,
-        &request.vars_input,
-        request.policy.unknown_variable_policy,
-    );
-    warnings.extend(merge.warnings);
-
-    Ok(ValidationReport {
-        ok: merge.errors.is_empty(),
-        warnings,
-        errors: merge.errors,
-    })
-}
-
-fn resolve_template_path(request: &ComposeRequest) -> Result<PathBuf, ComposerError> {
-    let template_path = request
-        .template_path
-        .as_ref()
-        .ok_or(ComposerError::MissingTemplatePath)?;
-    if template_path.is_absolute() {
-        Ok(template_path.clone())
-    } else {
-        Ok(request.root.join(template_path))
-    }
-}
-
-fn effective_schema(
-    template_path: &Path,
-    frontmatter: &Option<frontmatter::Frontmatter>,
-    body: &str,
-) -> (
-    Vec<String>,
-    BTreeSet<String>,
-    BTreeMap<String, String>,
-    Vec<Diagnostic>,
-) {
-    if let Some(fm) = frontmatter {
-        let mut declared = BTreeSet::new();
-        declared.extend(fm.required_variables.iter().cloned());
-        declared.extend(fm.defaults.keys().cloned());
-        return (
-            fm.required_variables.clone(),
-            declared,
-            fm.defaults.clone(),
-            Vec::new(),
-        );
-    }
-
-    if frontmatter::is_template_file(template_path) {
-        let discovered = extract_template_variables(body);
-        let required = discovered.iter().cloned().collect::<Vec<_>>();
-        let warning = frontmatter_missing_warning(template_path);
-        return (required, discovered, BTreeMap::new(), vec![warning]);
-    }
-
-    (Vec::new(), BTreeSet::new(), BTreeMap::new(), Vec::new())
+    validate_request(request)
 }
 
 #[cfg(test)]
@@ -249,12 +193,15 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ComposePolicy, ComposeRequest, ComposerError, RuntimeKind, UnknownVariablePolicy, compose,
-        validate,
+        ComposeMode, ComposePolicy, ComposeRequest, ComposerError, ProfileKind, RuntimeKind,
+        UnknownVariablePolicy, compose, validate,
     };
 
     fn write_file(root: &TempDir, rel_path: &str, content: &str) -> PathBuf {
         let path = root.path().join(rel_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
         std::fs::write(&path, content).expect("write file");
         path
     }
@@ -262,6 +209,8 @@ mod tests {
     fn request(root: &TempDir, rel_path: &str) -> ComposeRequest {
         ComposeRequest {
             runtime: RuntimeKind::Claude,
+            mode: ComposeMode::File,
+            kind: None,
             root: root.path().to_path_buf(),
             agent: None,
             template_path: Some(PathBuf::from(rel_path)),
@@ -371,5 +320,81 @@ mod tests {
         let report = validate(&request(&tmp, "template.md.j2")).expect("validate");
         assert!(!report.ok);
         assert!(report.errors.iter().any(|d| d.code == "MISSING_VAR"));
+    }
+
+    #[test]
+    fn compose_profile_mode_resolves_and_applies_pipeline_order() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_file(&tmp, ".codex/agents/rust-dev.md.j2", "role={{ role }}");
+
+        let mut req = ComposeRequest {
+            runtime: RuntimeKind::Codex,
+            mode: ComposeMode::Profile,
+            kind: Some(ProfileKind::Agent),
+            root: tmp.path().to_path_buf(),
+            agent: Some("rust-dev".to_string()),
+            template_path: None,
+            vars_input: BTreeMap::from([("role".to_string(), "coder".to_string())]),
+            vars_env: BTreeMap::new(),
+            guidance_block: Some("guidance".to_string()),
+            user_prompt: Some("prompt".to_string()),
+            policy: ComposePolicy::default(),
+        };
+
+        let result = compose(&req).expect("compose");
+        assert_eq!(result.rendered_text, "role=coder\n\nguidance\n\nprompt");
+        assert!(!result.search_trace.is_empty());
+
+        req.template_path = Some(PathBuf::from("explicit.md.j2"));
+        write_file(&tmp, "explicit.md.j2", "explicit");
+        let explicit = compose(&req).expect("compose");
+        assert_eq!(explicit.rendered_text, "explicit\n\nguidance\n\nprompt");
+    }
+
+    #[test]
+    fn validate_profile_resolution_failure_reports_search_trace() {
+        let tmp = TempDir::new().expect("tempdir");
+        let req = ComposeRequest {
+            runtime: RuntimeKind::Gemini,
+            mode: ComposeMode::Profile,
+            kind: Some(ProfileKind::Agent),
+            root: tmp.path().to_path_buf(),
+            agent: Some("missing-agent".to_string()),
+            template_path: None,
+            vars_input: BTreeMap::new(),
+            vars_env: BTreeMap::new(),
+            guidance_block: None,
+            user_prompt: None,
+            policy: ComposePolicy::default(),
+        };
+
+        let err = validate(&req).expect_err("missing profile should fail");
+        match err {
+            ComposerError::ProfileResolutionFailed {
+                attempted_paths, ..
+            } => {
+                assert!(!attempted_paths.is_empty());
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn compose_expands_includes_and_merges_include_frontmatter() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_file(
+            &tmp,
+            "base.md.j2",
+            "---\nrequired_variables:\n  - name\n---\n@<partials/greet.md.j2>\n",
+        );
+        write_file(
+            &tmp,
+            "partials/greet.md.j2",
+            "---\ndefaults:\n  salutation: Hello\nrequired_variables:\n  - salutation\n---\n{{ salutation }} {{ name }}",
+        );
+        let mut req = request(&tmp, "base.md.j2");
+        req.vars_input.insert("name".to_string(), "Kai".to_string());
+        let result = compose(&req).expect("compose");
+        assert_eq!(result.rendered_text.trim(), "Hello Kai");
     }
 }
