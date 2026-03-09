@@ -457,6 +457,47 @@ pub fn spool_dir(home_dir: &Path) -> PathBuf {
     home_dir.join(".config/atm/log-spool")
 }
 
+/// Return the canonical log file path with environment override support.
+///
+/// Resolution order:
+/// 1. `ATM_LOG_FILE`
+/// 2. `ATM_LOG_PATH` (compat alias)
+/// 3. `{home_dir}/.config/atm/atm.log.jsonl`
+pub fn configured_log_path(home_dir: &Path) -> PathBuf {
+    std::env::var("ATM_LOG_FILE")
+        .or_else(|_| std::env::var("ATM_LOG_PATH"))
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir.join(".config/atm/atm.log.jsonl"))
+}
+
+/// Derive the spool directory from the canonical log file path.
+///
+/// If the log path parent ends with `logs/`, spool is a sibling at
+/// `../log-spool`; otherwise spool is `<log_parent>/log-spool`.
+pub fn spool_dir_from_log_path(log_path: &Path) -> PathBuf {
+    let parent = log_path.parent().unwrap_or_else(|| Path::new("."));
+    if parent
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("logs"))
+        .unwrap_or(false)
+    {
+        parent
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("log-spool")
+    } else {
+        parent.join("log-spool")
+    }
+}
+
+/// Return the configured spool directory based on canonical log-path resolution.
+pub fn configured_spool_dir(home_dir: &Path) -> PathBuf {
+    spool_dir_from_log_path(&configured_log_path(home_dir))
+}
+
 /// Return the default spool directory by resolving the home directory via
 /// [`crate::home::get_home_dir`].
 ///
@@ -465,7 +506,7 @@ pub fn spool_dir(home_dir: &Path) -> PathBuf {
 /// Returns an error if the home directory cannot be determined.
 pub fn default_spool_dir() -> anyhow::Result<PathBuf> {
     let home = crate::home::get_home_dir()?;
-    Ok(spool_dir(&home))
+    Ok(configured_spool_dir(&home))
 }
 
 /// Write `event` to an explicit spool `dir` (does not resolve home directory).
@@ -551,6 +592,7 @@ pub fn write_to_spool(event: &LogEventV1, home_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     fn make_valid_event() -> LogEventV1 {
@@ -897,6 +939,24 @@ mod tests {
         let home = TempDir::new().expect("temp dir");
         let expected = home.path().join(".config/atm/log-spool");
         assert_eq!(spool_dir(home.path()), expected);
+    }
+
+    #[test]
+    #[serial]
+    fn test_configured_spool_dir_tracks_atm_log_file_parent() {
+        let home = TempDir::new().expect("temp dir");
+        let custom_log = home.path().join("custom/logs/custom.log");
+        // SAFETY: test-scoped environment override.
+        unsafe {
+            std::env::set_var("ATM_LOG_FILE", &custom_log);
+            std::env::remove_var("ATM_LOG_PATH");
+        }
+        let spool = configured_spool_dir(home.path());
+        assert_eq!(spool, home.path().join("custom/log-spool"));
+        // SAFETY: cleanup after test.
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+        }
     }
 
     #[test]

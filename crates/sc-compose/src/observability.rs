@@ -1,9 +1,6 @@
 use agent_team_mail_core::home::get_home_dir;
-use chrono::{SecondsFormat, Utc};
 use sc_observability::{LogConfig as SharedLogConfig, LogLevel, Logger as SharedLogger};
 use serde_json::Value;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -29,7 +26,6 @@ impl LogFormat {
 #[derive(Debug, Clone)]
 pub struct Logger {
     inner: SharedLogger,
-    log_path: PathBuf,
     threshold: LogLevel,
     format: LogFormat,
 }
@@ -39,11 +35,9 @@ impl Logger {
         let mut cfg = sc_compose_config();
         let threshold = parse_level_env().unwrap_or(cfg.level);
         cfg.level = threshold;
-        let log_path = cfg.log_path.clone();
         let format = LogFormat::from_env();
         Self {
             inner: SharedLogger::new(cfg),
-            log_path,
             threshold,
             format,
         }
@@ -67,7 +61,10 @@ impl Logger {
                 );
             }
             LogFormat::Human => {
-                let _ = append_human_line(&self.log_path, level, action, result, &fields);
+                // Logging is fail-open by contract.
+                let _ = self
+                    .inner
+                    .emit_human(level.as_str(), action, result, &fields);
             }
         }
     }
@@ -175,27 +172,4 @@ fn level_rank(level: LogLevel) -> u8 {
         LogLevel::Warn => 3,
         LogLevel::Error => 4,
     }
-}
-
-fn append_human_line(
-    log_path: &Path,
-    level: LogLevel,
-    action: &str,
-    result: &str,
-    fields: &Value,
-) -> std::io::Result<()> {
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)?;
-    let ts = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let fields_json = serde_json::to_string(fields).unwrap_or_else(|_| "{}".to_string());
-    writeln!(
-        file,
-        "{ts} level={} action={action} outcome={result} fields={fields_json}",
-        level.as_str(),
-    )
 }

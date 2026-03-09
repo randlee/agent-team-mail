@@ -429,6 +429,23 @@ fn execute_status(args: StatusArgs) -> Result<()> {
                 println!();
             }
         }
+
+        println!();
+        println!("Logging:");
+        println!("  state:           {}", status.logging.state);
+        println!("  dropped_counter: {}", status.logging.dropped_counter);
+        println!("  spool_path:      {}", status.logging.spool_path);
+        println!(
+            "  canonical_log_path: {}",
+            status.logging.canonical_log_path
+        );
+        println!("  spool_count:     {}", status.logging.spool_count);
+        if let Some(oldest_spool_age) = status.logging.oldest_spool_age {
+            println!("  oldest_spool_age: {oldest_spool_age}s");
+        }
+        if let Some(last_error) = &status.logging.last_error {
+            println!("  last_error:      {last_error}");
+        }
     }
 
     // Exit with error code if stale
@@ -487,6 +504,8 @@ struct DaemonStatus {
     uptime_secs: u64,
     plugins: Vec<PluginStatus>,
     teams: Vec<String>,
+    #[serde(default)]
+    logging: LoggingHealth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -506,6 +525,32 @@ enum PluginStatusKind {
     Disabled,
     #[serde(rename = "disabled_init_error")]
     DisabledInitError,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct LoggingHealth {
+    state: String,
+    dropped_counter: u64,
+    spool_path: String,
+    last_error: Option<String>,
+    canonical_log_path: String,
+    spool_count: u64,
+    oldest_spool_age: Option<u64>,
+}
+
+impl Default for LoggingHealth {
+    fn default() -> Self {
+        Self {
+            state: "unavailable".to_string(),
+            dropped_counter: 0,
+            spool_path: String::new(),
+            last_error: None,
+            canonical_log_path: String::new(),
+            spool_count: 0,
+            oldest_spool_age: None,
+        }
+    }
 }
 
 #[cfg(test)]

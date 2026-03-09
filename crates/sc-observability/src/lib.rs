@@ -177,6 +177,32 @@ impl Logger {
         event.fields = value_to_map(fields);
         self.emit(&event)
     }
+    /// Write a human-readable log line to the canonical log path.
+    ///
+    /// Produces `<timestamp> level=<level> action=<action> outcome=<outcome> fields=<json>`
+    /// format, sharing the same file-path and directory-creation logic as
+    /// [`Self::emit`]. This routes Human-mode output through SharedLogger rather
+    /// than a parallel per-tool implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when directory creation or file appending fails.
+    pub fn emit_human(
+        &self,
+        level: &str,
+        action: &str,
+        outcome: &str,
+        fields: &serde_json::Value,
+    ) -> Result<(), LoggerError> {
+        use chrono::{SecondsFormat, Utc};
+        let ts = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let fields_json = serde_json::to_string(fields).unwrap_or_else(|_| "{}".to_string());
+        let line =
+            format!("{ts} level={level} action={action} outcome={outcome} fields={fields_json}");
+        self.append_line_to_canonical(&line)?;
+        Ok(())
+    }
+
     /// Write one event to a per-source spool file for deferred fan-in merge.
     ///
     /// # Errors
