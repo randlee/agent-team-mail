@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-09
-**Status**: Phase AG complete (v0.42.0). Phase AH planning in progress.
+**Status**: Phases AH and AI complete (v0.43.0 pending). Phase AJ next.
 
 ---
 
@@ -171,7 +171,9 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AD | Cross-Platform Script Standardization | Python-first script conversion and runtime policy hardening across ATM tooling | COMPLETE |
 | AE | GH Monitor Reliability + Daemon Logging | Stabilize gh-monitor status/lifecycle contracts and daemon observability behavior | COMPLETE |
 | AF | External Agent Lifecycle Hardening | Close lifecycle, cleanup, transient registration, and reliability/documentation hardening | COMPLETE |
-| AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | PLANNED |
+| AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | COMPLETE |
+| AH | sc-observability Unification + ATM Ecosystem Logging | Unified JSONL logging pipeline via `sc-observability` crate; extended logging health schema in `atm status`/`atm doctor` | COMPLETE |
+| AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh monitor list`, `atm gh monitor report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | COMPLETE |
 
 ---
 
@@ -1501,8 +1503,8 @@ observability scope.
 ### Planned Sprint Map
 | Sprint | Focus | Issues | Status |
 |---|---|---|---|
-| AI.0 | `gh_monitor` cold-start init bug fix prerequisite | #564 | PLANNED |
-| AI.1 | `atm gh monitor list` rollup dashboard + `--json` | #560 | PLANNED |
+| AI.0 | `gh_monitor` cold-start init bug fix prerequisite | #564 | COMPLETE |
+| AI.1 | `atm gh monitor list` rollup dashboard + `--json` | #560 | IN-PROGRESS |
 | AI.2 | `atm gh monitor report <PR>` built-in report + `--json` | #561 | PLANNED |
 | AI.3 | Template customization (`--template`) + optional `init-report` | #561 (follow-up) | PLANNED |
 
