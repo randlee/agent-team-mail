@@ -1534,12 +1534,14 @@ dependencies = [
 name = "sc-compose"
 version = "0.42.1"
 dependencies = [
+ "agent-team-mail-core",
  "anyhow",
  "assert_cmd",
  "chrono",
  "clap",
  "predicates",
  "sc-composer",
+ "sc-observability",
  "serde",
  "serde_json",
  "serde_yaml",
