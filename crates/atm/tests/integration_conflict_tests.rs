@@ -1332,7 +1332,10 @@ fn test_identity_mismatch_socket_is_detected_and_restarted() {
     write_lock_metadata(
         &temp_dir,
         old_pid,
-        "/tmp/atm-mismatch-home".to_string(),
+        std::env::temp_dir()
+            .join("atm-mismatch-home")
+            .to_string_lossy()
+            .to_string(),
         daemon_binary_path().to_string_lossy().to_string(),
     );
 

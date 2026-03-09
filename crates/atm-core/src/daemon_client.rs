@@ -2499,7 +2499,10 @@ sleep 2
         fs::write(home.join(".claude/daemon/atm-daemon.pid"), "999999\n").unwrap();
         let stale = DaemonLockMetadata {
             pid: 999999,
-            executable_path: "/tmp/old-atm-daemon".to_string(),
+            executable_path: std::env::temp_dir()
+                .join("old-atm-daemon")
+                .to_string_lossy()
+                .to_string(),
             home_scope: home.to_string_lossy().to_string(),
             version: "0.0.1".to_string(),
             written_at: chrono::Utc::now().to_rfc3339(),
