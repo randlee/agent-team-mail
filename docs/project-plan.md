@@ -171,6 +171,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AD | Cross-Platform Script Standardization | Python-first script conversion and runtime policy hardening across ATM tooling | COMPLETE |
 | AE | GH Monitor Reliability + Daemon Logging | Stabilize gh-monitor status/lifecycle contracts and daemon observability behavior | COMPLETE |
 | AF | External Agent Lifecycle Hardening | Close lifecycle, cleanup, transient registration, and reliability/documentation hardening | COMPLETE |
+| AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | PLANNED |
 
 ---
 

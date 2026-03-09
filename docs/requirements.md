@@ -701,6 +701,26 @@ team roster (`config.json`) and mailbox (`inboxes/<agent>.json`) do not drift.
 `atm teams spawn` must provide a first-class CLI path equivalent to the current
 `scripts/spawn-teammate.sh` behavior for Claude teammates.
 
+`atm` spawn requirements in this section define ATM integration behavior only.
+Template composition engine behavior (resolver order, frontmatter semantics,
+include expansion, diagnostics, CLI command contracts) is specified in:
+- `docs/sc-composer/requirements.md` (normative requirements)
+- `docs/sc-composer/architecture.md` (normative design)
+
+When ATM consumes `sc-composer`, ATM must not redefine or fork those semantics
+in `docs/requirements.md`; ATM requirements here are limited to call-site
+contracts (inputs passed to composer, error propagation, and spawn fallback UX).
+
+ATM integration parity requirements:
+- `atm teams spawn` composition behavior must match `sc-compose` CLI semantics
+  for resolution, include expansion, variable validation, and diagnostics.
+- ATM must invoke `sc-composer` library APIs directly in-process.
+- ATM must not invoke composition through shell commands or subprocess wrappers
+  (for example, no `bash -> sc-compose` execution path for core spawn behavior).
+- For current ATM packaging mode, `sc-composer` and `sc-compose` are
+  version-locked to ATM and must be installed/upgraded together through ATM
+  distribution channels.
+
 Required baseline behavior:
 - Resolve agent runtime metadata from `.claude/agents/<agent>.md` frontmatter
   (at minimum `model`, `color`; prompt body used for initial instruction delivery).
@@ -1904,6 +1924,23 @@ If daemon is unreachable, CLI attempts auto-start once per command invocation.
 - Daemon MUST NOT remove an existing socket file unless lock ownership has already
   been acquired by the current process.
 
+#### Stale Daemon Recovery and Identity Validation
+
+- Daemon lock ownership metadata must include process identity sufficient to
+  validate staleness in the current ATM scope (at minimum PID and executable
+  identity metadata).
+- If lock ownership metadata references a dead PID, daemon startup may reclaim
+  lock ownership in the same scope.
+- CLI daemon-connect readiness checks must validate that the responding daemon
+  matches expected scope/identity for the current command context before
+  treating it as healthy.
+- If daemon identity validation fails (stale/mismatched daemon), CLI must fail
+  safely with actionable restart guidance and must not silently proceed.
+- Production startup must not perform broad cross-scope daemon kill sweeps; any
+  process reclamation behavior must remain scope-bound and explicit.
+- Test harness paths that spawn daemon processes must provide bounded cleanup so
+  repeated test runs do not accumulate stale daemons.
+
 #### Team/Repo Isolation Contract
 
 Single daemon process does not imply shared team behavior. Runtime behavior must
@@ -2337,6 +2374,8 @@ atm init <team> --skip-team
   1. Create `.atm.toml` in cwd when missing (writes `identity`, `default_team`).
   2. Create team (`~/.claude/teams/<team>/`) when missing, unless `--skip-team`.
   3. Install hooks (global by default, or local with `--local`).
+  4. Apply compose-init-equivalent repo bootstrap (`.prompts/` plus `.gitignore`
+     entry) via the same shared helper semantics used by `sc-compose init`.
 - Default install writes/merges hook entries in `~/.claude/settings.json` (global scope).
 - `--local` install writes/merges hook entries in project `.claude/settings.json`.
 - Installs are idempotent: reruns preserve unrelated settings and avoid duplicate entries.
