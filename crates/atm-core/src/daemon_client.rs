@@ -37,6 +37,24 @@ use std::path::PathBuf;
 /// Protocol version for the socket JSON protocol.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Lock metadata written by the daemon after acquiring the singleton lock.
+///
+/// This metadata is used by CLI autostart/health paths to validate daemon
+/// identity (PID/home scope/executable) before trusting a pre-existing process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonLockMetadata {
+    /// Daemon PID that currently owns the lock.
+    pub pid: u32,
+    /// Canonicalized executable path of the daemon process when available.
+    pub executable_path: String,
+    /// Canonicalized ATM home scope used by the daemon instance.
+    pub home_scope: String,
+    /// Daemon version string.
+    pub version: String,
+    /// RFC3339 UTC timestamp for metadata write.
+    pub written_at: String,
+}
+
 /// Identifies the origin of a lifecycle event sent via the `hook-event` command.
 ///
 /// The `source` field is optional in the hook-event payload for backward
@@ -359,6 +377,56 @@ pub fn daemon_socket_path() -> anyhow::Result<PathBuf> {
 pub fn daemon_pid_path() -> anyhow::Result<PathBuf> {
     let home = crate::home::get_home_dir()?;
     Ok(home.join(".claude/daemon/atm-daemon.pid"))
+}
+
+/// Compute the daemon singleton lock path.
+///
+/// The path is `${ATM_HOME}/.config/atm/daemon.lock`.
+pub fn daemon_lock_path() -> anyhow::Result<PathBuf> {
+    let home = crate::home::get_home_dir()?;
+    Ok(home.join(".config/atm/daemon.lock"))
+}
+
+/// Compute the daemon singleton lock metadata path.
+///
+/// The path is `${ATM_HOME}/.config/atm/daemon.lock.meta.json`.
+pub fn daemon_lock_metadata_path() -> anyhow::Result<PathBuf> {
+    let home = crate::home::get_home_dir()?;
+    Ok(home.join(".config/atm/daemon.lock.meta.json"))
+}
+
+/// Write daemon lock metadata atomically for the current process.
+///
+/// Called by `atm-daemon` after lock acquisition so CLI identity checks can
+/// validate PID/home-scope/executable coherence.
+pub fn write_daemon_lock_metadata(home: &std::path::Path, version: &str) -> anyhow::Result<()> {
+    let metadata_path = home.join(".config/atm/daemon.lock.meta.json");
+    if let Some(parent) = metadata_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let executable_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let home_scope = std::fs::canonicalize(home)
+        .unwrap_or_else(|_| home.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+
+    let metadata = DaemonLockMetadata {
+        pid: std::process::id(),
+        executable_path,
+        home_scope,
+        version: version.to_string(),
+        written_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let json = serde_json::to_vec_pretty(&metadata)?;
+    let tmp = metadata_path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(tmp, metadata_path)?;
+    Ok(())
 }
 
 /// Check whether the daemon appears to be running by reading its PID file and
@@ -1382,11 +1450,17 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    if daemon_is_running() {
-        return Ok(());
+    let home = crate::home::get_home_dir()?;
+    let daemon_running = daemon_is_running();
+    let socket_connectable = daemon_socket_connectable(&home);
+    if daemon_running || socket_connectable {
+        if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
+            restart_mismatched_daemon(&home, &reason)?;
+        } else {
+            return Ok(());
+        }
     }
 
-    let home = crate::home::get_home_dir()?;
     cleanup_stale_daemon_runtime_files(&home);
 
     let startup_lock_path = home.join(".config/atm/daemon-start.lock");
@@ -1422,8 +1496,14 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         ),
     };
 
-    if daemon_is_running() || daemon_socket_connectable(&home) {
-        return Ok(());
+    let daemon_running = daemon_is_running();
+    let socket_connectable = daemon_socket_connectable(&home);
+    if daemon_running || socket_connectable {
+        if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
+            restart_mismatched_daemon(&home, &reason)?;
+        } else {
+            return Ok(());
+        }
     }
 
     let daemon_bin = resolve_daemon_binary();
@@ -1605,6 +1685,235 @@ fn read_daemon_pid_state(pid_path: &std::path::Path) -> PidState {
     } else {
         PidState::Dead
     }
+}
+
+#[cfg(unix)]
+fn detect_daemon_identity_mismatch(
+    home: &std::path::Path,
+    socket_connectable: bool,
+) -> Option<String> {
+    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    let status_path = home.join(".claude/daemon/status.json");
+    let metadata_path = home.join(".config/atm/daemon.lock.meta.json");
+
+    let pid_from_file = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    let status_json = std::fs::read_to_string(&status_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
+    let pid_from_status = status_json
+        .as_ref()
+        .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+        .map(|pid| pid as u32);
+    let version_from_status = status_json
+        .as_ref()
+        .and_then(|json| json.get("version").and_then(serde_json::Value::as_str))
+        .map(std::string::ToString::to_string);
+    let mut metadata = std::fs::read_to_string(&metadata_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());
+
+    if metadata.is_none() && !socket_connectable {
+        return None;
+    }
+
+    if metadata.is_none()
+        && let Some(candidate_pid) = pid_from_file.or(pid_from_status)
+        && pid_alive(candidate_pid as i32)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        metadata = std::fs::read_to_string(&metadata_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());
+    }
+
+    if metadata.is_none() {
+        return Some(
+            "daemon identity mismatch: lock metadata missing (soft mismatch, restart required)"
+                .to_string(),
+        );
+    }
+
+    let pid = metadata
+        .as_ref()
+        .map(|m| m.pid)
+        .or(pid_from_file)
+        .or(pid_from_status);
+
+    let pid = pid?;
+    if !pid_alive(pid as i32) {
+        return Some(format!("daemon identity mismatch: pid {pid} is not alive"));
+    }
+
+    if let Some(meta) = &metadata {
+        if let Some(file_pid) = pid_from_file
+            && file_pid != meta.pid
+        {
+            return Some(format!(
+                "daemon identity mismatch: pid file ({file_pid}) != lock metadata ({})",
+                meta.pid
+            ));
+        }
+
+        let expected_home = std::fs::canonicalize(home)
+            .unwrap_or_else(|_| home.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        if !meta.home_scope.is_empty() && meta.home_scope != expected_home {
+            return Some(format!(
+                "daemon identity mismatch: home scope '{}' != expected '{}'",
+                meta.home_scope, expected_home
+            ));
+        }
+
+        if let Some(cmdline) = pid_command_line(pid as i32)
+            && let Some(matches) =
+                pid_command_matches_expected_binary(&cmdline, &resolve_daemon_binary())
+            && !matches
+        {
+            return Some(format!(
+                "daemon identity mismatch: running command '{}' != expected daemon binary '{}'",
+                cmdline,
+                std::path::PathBuf::from(resolve_daemon_binary()).display()
+            ));
+        }
+    }
+
+    if let Some(ver) = version_from_status
+        && ver != env!("CARGO_PKG_VERSION")
+    {
+        return Some(format!(
+            "daemon version mismatch: running={ver} expected={}",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+
+    None
+}
+
+#[cfg(unix)]
+fn pid_command_line(pid: i32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-o")
+        .arg("command=")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+#[cfg(unix)]
+fn pid_command_matches_expected_binary(
+    cmdline: &str,
+    expected_bin: &std::ffi::OsStr,
+) -> Option<bool> {
+    let actual = cmdline.split_whitespace().next()?;
+    let expected = std::path::PathBuf::from(expected_bin);
+    let actual_path = std::path::PathBuf::from(actual);
+
+    if expected.as_os_str().is_empty() {
+        return None;
+    }
+
+    if expected.components().count() > 1 {
+        let expected_canon = std::fs::canonicalize(&expected).unwrap_or(expected.clone());
+        let actual_canon = std::fs::canonicalize(&actual_path).unwrap_or(actual_path.clone());
+        Some(expected_canon == actual_canon)
+    } else {
+        let expected_name = expected.file_name()?;
+        Some(actual_path.file_name() == Some(expected_name))
+    }
+}
+
+#[cfg(unix)]
+fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Result<()> {
+    use crate::event_log::{EventFields, emit_event_best_effort};
+    use std::time::Duration;
+
+    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    let pid = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+
+    emit_event_best_effort(EventFields {
+        level: "warn",
+        source: "atm",
+        action: "daemon_identity_restart",
+        result: Some("restart_attempt".to_string()),
+        error: Some(reason.to_string()),
+        ..Default::default()
+    });
+
+    if let Some(pid) = pid
+        && pid_alive(pid)
+    {
+        send_signal(pid, 15);
+        for _ in 0..20 {
+            if !pid_alive(pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if pid_alive(pid) {
+            send_signal(pid, 9);
+            for _ in 0..20 {
+                if !pid_alive(pid) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        if pid_alive(pid) {
+            emit_event_best_effort(EventFields {
+                level: "warn",
+                source: "atm",
+                action: "daemon_identity_restart",
+                result: Some("kill_incomplete".to_string()),
+                error: Some(format!(
+                    "stale daemon pid {pid} still alive after SIGTERM/SIGKILL; proceeding with runtime file replacement"
+                )),
+                ..Default::default()
+            });
+        }
+    }
+
+    let lock_path = home.join(".config/atm/daemon.lock");
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _lock_guard = crate::io::lock::acquire_lock(&lock_path, 5).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to acquire daemon lock at {} before runtime cleanup: {e}",
+            lock_path.display()
+        )
+    })?;
+
+    // Replace runtime files aggressively for identity-mismatch recovery. This is
+    // scope-local and avoids broad process sweeps while allowing a fresh daemon
+    // to bind canonical paths.
+    let daemon_dir = home.join(".claude/daemon");
+    let _ = std::fs::remove_file(daemon_dir.join("atm-daemon.sock"));
+    let _ = std::fs::remove_file(daemon_dir.join("atm-daemon.pid"));
+    let _ = std::fs::remove_file(daemon_dir.join("status.json"));
+    cleanup_stale_daemon_runtime_files(home);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn send_signal(pid: i32, sig: i32) {
+    // SAFETY: kill is invoked with a specific PID and signal; errors are ignored
+    // by design because this is a best-effort stale-daemon cleanup path.
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: FFI call to libc kill; inputs are plain integers.
+    let _ = unsafe { kill(pid, sig) };
 }
 
 #[cfg(unix)]
@@ -2132,6 +2441,279 @@ sleep 2
             count, 1,
             "concurrent startup attempts should spawn at most one daemon process"
         );
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_write_daemon_lock_metadata_contains_identity_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        write_daemon_lock_metadata(home, "9.9.9-test").expect("write lock metadata");
+
+        let path = home.join(".config/atm/daemon.lock.meta.json");
+        let raw = std::fs::read_to_string(&path).expect("read lock metadata");
+        let meta: DaemonLockMetadata = serde_json::from_str(&raw).expect("parse lock metadata");
+
+        assert_eq!(meta.pid, std::process::id());
+        assert_eq!(meta.version, "9.9.9-test");
+        assert!(
+            !meta.executable_path.trim().is_empty(),
+            "executable path must be populated"
+        );
+        assert!(
+            !meta.home_scope.trim().is_empty(),
+            "home scope must be populated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_recovers_from_dead_pid_metadata() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        fs::create_dir_all(home.join(".claude/daemon")).unwrap();
+        fs::create_dir_all(home.join(".config/atm")).unwrap();
+
+        // Simulate stale metadata from a dead prior daemon instance.
+        fs::write(home.join(".claude/daemon/atm-daemon.pid"), "999999\n").unwrap();
+        let stale = DaemonLockMetadata {
+            pid: 999999,
+            executable_path: std::env::temp_dir()
+                .join("old-atm-daemon")
+                .to_string_lossy()
+                .to_string(),
+            home_scope: home.to_string_lossy().to_string(),
+            version: "0.0.1".to_string(),
+            written_at: chrono::Utc::now().to_rfc3339(),
+        };
+        fs::write(
+            home.join(".config/atm/daemon.lock.meta.json"),
+            serde_json::to_string_pretty(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let script_path = home.join("fake-daemon-start.sh");
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+home="${{ATM_HOME:?}}"
+mkdir -p "$home/.claude/daemon"
+pid=$$
+echo "$pid" > "$home/.claude/daemon/atm-daemon.pid"
+cat > "$home/.claude/daemon/status.json" <<'JSON'
+{{"timestamp":"2026-01-01T00:00:00Z","pid":0,"version":"{}","uptime_secs":1,"plugins":[],"teams":[]}}
+JSON
+python3 - <<'PY'
+import json, os
+home=os.environ["ATM_HOME"]
+path=os.path.join(home, ".claude", "daemon", "status.json")
+with open(path, "r", encoding="utf-8") as f:
+    obj=json.load(f)
+obj["pid"]=os.getpid()
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(obj, f)
+open(os.path.join(home, "started-ok"), "w").write("ok")
+PY
+sleep 8
+"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_BIN", &script_path);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+
+        ensure_daemon_running_unix().expect("must recover from dead stale pid metadata");
+        let marker = home.join("started-ok");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && !marker.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(marker.exists(), "expected replacement daemon to start");
+
+        if let Ok(pid_str) = std::fs::read_to_string(home.join(".claude/daemon/atm-daemon.pid"))
+            && let Ok(pid) = pid_str.trim().parse::<i32>()
+            && pid_alive(pid)
+        {
+            send_signal(pid, 15);
+        }
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_restarts_identity_mismatch_daemon() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        fs::create_dir_all(home.join(".claude/daemon")).unwrap();
+        fs::create_dir_all(home.join(".config/atm")).unwrap();
+
+        let stale_script = home.join("stale-daemon.sh");
+        let stale = r#"#!/bin/sh
+set -eu
+home="${ATM_HOME:?}"
+mkdir -p "$home/.claude/daemon"
+pid=$$
+echo "$pid" > "$home/.claude/daemon/atm-daemon.pid"
+cat > "$home/.claude/daemon/status.json" <<'JSON'
+{"timestamp":"2026-01-01T00:00:00Z","pid":0,"version":"0.0.1","uptime_secs":1,"plugins":[],"teams":[]}
+JSON
+python3 - <<'PY'
+import json, os
+home=os.environ["ATM_HOME"]
+path=os.path.join(home, ".claude", "daemon", "status.json")
+with open(path, "r", encoding="utf-8") as f:
+    obj=json.load(f)
+obj["pid"]=os.getpid()
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(obj, f)
+PY
+exec python3 - "$home/.claude/daemon/atm-daemon.sock" <<'PY'
+import os, signal, socket, sys, time
+path=sys.argv[1]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+srv=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(path)
+srv.listen(1)
+def shutdown(*_):
+    try:
+        srv.close()
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    sys.exit(0)
+signal.signal(signal.SIGTERM, shutdown)
+signal.signal(signal.SIGINT, shutdown)
+while True:
+    time.sleep(1)
+PY
+"#;
+        fs::write(&stale_script, stale).unwrap();
+        let mut stale_perms = fs::metadata(&stale_script).unwrap().permissions();
+        stale_perms.set_mode(0o755);
+        fs::set_permissions(&stale_script, stale_perms).unwrap();
+
+        let expected_script = home.join("expected-daemon.sh");
+        let expected = format!(
+            r#"#!/bin/sh
+set -eu
+home="${{ATM_HOME:?}}"
+mkdir -p "$home/.claude/daemon"
+pid=$$
+echo "$pid" > "$home/.claude/daemon/atm-daemon.pid"
+cat > "$home/.claude/daemon/status.json" <<'JSON'
+{{"timestamp":"2026-01-01T00:00:00Z","pid":0,"version":"{}","uptime_secs":1,"plugins":[],"teams":[]}}
+JSON
+python3 - <<'PY'
+import json, os
+home=os.environ["ATM_HOME"]
+path=os.path.join(home, ".claude", "daemon", "status.json")
+with open(path, "r", encoding="utf-8") as f:
+    obj=json.load(f)
+obj["pid"]=os.getpid()
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(obj, f)
+open(os.path.join(home, "replacement-started"), "w").write("ok")
+PY
+sleep 8
+"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        fs::write(&expected_script, expected).unwrap();
+        let mut expected_perms = fs::metadata(&expected_script).unwrap().permissions();
+        expected_perms.set_mode(0o755);
+        fs::set_permissions(&expected_script, expected_perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "0");
+        }
+        let mut stale_child = std::process::Command::new(&stale_script)
+            .env("ATM_HOME", &home)
+            .spawn()
+            .expect("spawn stale daemon");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        unsafe {
+            std::env::set_var("ATM_DAEMON_BIN", &expected_script);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+        ensure_daemon_running_unix().expect("mismatch daemon should be restarted");
+
+        assert!(
+            home.join("replacement-started").exists(),
+            "replacement daemon marker missing"
+        );
+        let new_pid: i32 = std::fs::read_to_string(home.join(".claude/daemon/atm-daemon.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        if stale_child.try_wait().ok().flatten().is_none() {
+            let _ = stale_child.kill();
+            let _ = stale_child.wait();
+        }
+        assert!(new_pid > 1, "replacement daemon pid must be valid");
+
+        if pid_alive(new_pid) {
+            send_signal(new_pid, 15);
+        }
 
         unsafe {
             match old_home {
