@@ -58,8 +58,9 @@ Publisher does not invent alternate flows.
 5. While PR CI is running, run **Release Preflight** workflow via `workflow_dispatch` with:
    - `version=<X.Y.Z or vX.Y.Z>`
    - `run_by_agent=publisher`
-6. Monitor PR CI with: `gh pr checks --watch --timeout 3600`
-   Monitor preflight run with: `gh run watch --exit-status <run-id>`
+6. Monitor PR CI with: `atm gh monitor pr <PR_NUMBER>` — reports merge_conflict, CI start, pass/fail automatically
+   Monitor preflight run with: `atm gh monitor run <run-id>` — or fallback `gh run watch --exit-status <run-id>`
+   Check for merge conflicts first: if `atm gh monitor pr` returns `merge_conflict`, stop and report to team-lead before proceeding.
    Treat preflight + PR CI as parallel tracks (no serial waiting unless one fails).
 7. If the inline audit or preflight finds gaps, immediately report to `team-lead` and pause release progression.
 8. Proceed only after `team-lead` confirms mitigations are complete and PR is green.
