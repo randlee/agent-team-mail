@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,7 @@ pub struct SpawnSpec {
     pub resume: bool,
     pub resume_session_id: Option<String>,
     pub system_prompt: Option<PathBuf>,
+    pub prompt_vars: BTreeMap<String, String>,
 }
 
 /// Runtime adapter trait for spawn command construction.
@@ -201,6 +203,7 @@ mod tests {
             resume: false,
             resume_session_id: None,
             system_prompt: None,
+            prompt_vars: BTreeMap::new(),
         }
     }
 
