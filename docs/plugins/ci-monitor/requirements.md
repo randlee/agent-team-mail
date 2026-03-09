@@ -95,34 +95,9 @@ Required commands:
 - `atm gh monitor pr <number>`
 - `atm gh monitor workflow <name> --ref <branch|sha|pr>` (`--ref` required)
 - `atm gh monitor run <run-id>`
-- `atm gh monitor report <pr-number> [--json]` (one-shot, no-daemon; see below)
-- `atm gh monitor list [--json] [--limit N]` (one-shot, no-daemon; see below)
+- `atm gh monitor list [--json] [--limit <N>]`
 - `atm gh status` (team/plugin health status; no target required)
 - `atm gh status <pr|run|workflow> <value>` (target-specific monitor state)
-
-One-shot / no-daemon commands:
-
-`atm gh monitor report <pr-number> [--json]`:
-- Fetches current CI state for the given PR without starting a long-running monitor.
-- Per-check details: check name, status, conclusion, timing (queued/started/completed
-  timestamps), and HTML run URL.
-- Review summary: number of required/approved/blocking reviews, overall review state.
-- Merge diagnostics: mergeable state, conflicts, branch protection gates not yet
-  satisfied.
-- Human-readable output by default; `--json` emits a machine-readable object with
-  fields `pr`, `checks` (array), `reviews` (object), `merge_diagnostics` (object),
-  and `timestamp` (ISO 8601).
-- Must work whether or not the gh_monitor daemon session is active.
-- Exits 0 when all required checks pass and PR is mergeable; exits 1 otherwise.
-
-`atm gh monitor list [--json] [--limit N]`:
-- Lists active and recently completed monitor sessions tracked by the plugin.
-- Default limit: 20 entries; `--limit N` overrides.
-- Human-readable table includes: PR/run/workflow target, start time, current state,
-  and ATM recipient(s).
-- `--json` emits an array of objects with fields `target`, `target_id`, `started_at`,
-  `state`, and `recipients`.
-- Exits 0 always (empty list is not an error).
 
 No-target status requirements:
 - `atm gh` and `atm gh status` must report the same canonical enablement and
