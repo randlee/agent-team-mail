@@ -1,74 +1,85 @@
 {
-  "releaseVersion": "0.41.0",
-  "releaseTag": "v0.41.0",
-  "releaseCommit": "034efb7457e54ffff6aafb074e98d83fe2e30191",
-  "generatedAt": "2026-03-08T21:57:40.622500Z",
+  "releaseVersion": "0.42.1",
+  "releaseTag": "v0.42.1",
+  "releaseCommit": "c55062769c100f3219b606a9bc08c46621ac04b6",
+  "generatedAt": "2026-03-09T04:42:21.212515+00:00",
   "items": [
     {
-      "artifact": "agent-team-mail",
-      "version": "0.41.0",
-      "sourceRef": "refs/tags/v0.41.0",
+      "artifact": "sc-composer",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search agent-team-mail --limit 1 | grep -F 'agent-team-mail = \"0.41.0\"'",
-        "cargo install agent-team-mail --version 0.41.0 --locked --force"
+        "cargo search sc-composer --limit 1 | grep -F 'sc-composer = \"0.42.1\"'"
       ]
     },
     {
       "artifact": "agent-team-mail-core",
-      "version": "0.41.0",
-      "sourceRef": "refs/tags/v0.41.0",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search agent-team-mail-core --limit 1 | grep -F 'agent-team-mail-core = \"0.41.0\"'"
+        "cargo search agent-team-mail-core --limit 1 | grep -F 'agent-team-mail-core = \"0.42.1\"'"
+      ]
+    },
+    {
+      "artifact": "agent-team-mail",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
+      "publishTarget": "crates.io",
+      "publish": true,
+      "required": true,
+      "verifyCommands": [
+        "cargo search agent-team-mail --limit 1 | grep -F 'agent-team-mail = \"0.42.1\"'",
+        "cargo install agent-team-mail --version 0.42.1 --locked --force"
       ]
     },
     {
       "artifact": "agent-team-mail-daemon",
-      "version": "0.41.0",
-      "sourceRef": "refs/tags/v0.41.0",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search agent-team-mail-daemon --limit 1 | grep -F 'agent-team-mail-daemon = \"0.41.0\"'"
+        "cargo search agent-team-mail-daemon --limit 1 | grep -F 'agent-team-mail-daemon = \"0.42.1\"'"
       ]
     },
     {
       "artifact": "agent-team-mail-mcp",
-      "version": "0.41.0",
-      "sourceRef": "refs/tags/v0.41.0",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search agent-team-mail-mcp --limit 1 | grep -F 'agent-team-mail-mcp = \"0.41.0\"'"
+        "cargo search agent-team-mail-mcp --limit 1 | grep -F 'agent-team-mail-mcp = \"0.42.1\"'"
       ]
     },
     {
       "artifact": "agent-team-mail-tui",
-      "version": "0.41.0",
-      "sourceRef": "refs/tags/v0.41.0",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search agent-team-mail-tui --limit 1 | grep -F 'agent-team-mail-tui = \"0.41.0\"'"
+        "cargo search agent-team-mail-tui --limit 1 | grep -F 'agent-team-mail-tui = \"0.42.1\"'"
       ]
     },
     {
-      "artifact": "sc-composer",
-      "version": "0.41.0",
-      "sourceRef": "refs/tags/v0.41.0",
+      "artifact": "sc-compose",
+      "version": "0.42.1",
+      "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
       "required": true,
       "verifyCommands": [
-        "cargo search sc-composer --limit 1 | grep -F 'sc-composer = \"0.41.0\"'"
+        "cargo search sc-compose --limit 1 | grep -F 'sc-compose = \"0.42.1\"'"
       ]
     }
   ]

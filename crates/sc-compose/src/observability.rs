@@ -1,4 +1,5 @@
 use chrono::{SecondsFormat, Utc};
+use agent_team_mail_core::home::get_home_dir;
 use sc_observability::{LogConfig as SharedLogConfig, LogLevel, Logger as SharedLogger};
 use serde_json::Value;
 use std::fs::OpenOptions;
@@ -87,12 +88,7 @@ fn sc_compose_config() -> SharedLogConfig {
 }
 
 fn resolve_home_dir() -> Option<PathBuf> {
-    if let Ok(atm_home) = std::env::var("ATM_HOME")
-        && !atm_home.trim().is_empty()
-    {
-        return Some(PathBuf::from(atm_home));
-    }
-    dirs::home_dir()
+    get_home_dir().ok()
 }
 
 fn default_log_path() -> Option<PathBuf> {
