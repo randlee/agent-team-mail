@@ -26,7 +26,7 @@ This primary architecture document registers observability architecture details 
 
 Core modules:
 - `frontmatter`: YAML frontmatter parse + typed metadata.
-- `resolver`: runtime-aware profile file search (`.claude`, `.codex`, `.gemini`, `.opencode`, `.agents`).
+- `resolver`: runtime-aware profile file search (`.claude`, `.codex`, `.gemini`, `.opencode`, `.agents/agents` + legacy `.agents`).
 - `include`: `@<path>` expansion with cycle/depth guards.
 - `context`: variable merge + precedence + source tracking.
 - `render`: Jinja2 rendering facade (strict undefined).
@@ -60,6 +60,7 @@ Commands:
 - `resolve`
 - `validate`
 - `frontmatter-init`
+- `init`
 
 CLI uses library APIs directly and only handles argument parsing, output
 formatting, and exit codes.
@@ -107,11 +108,17 @@ All command execution paths emit structured events through `observability`.
    - input > env > defaults
 5. Validate:
    - extract referenced template variables (when frontmatter requirements absent),
+   - emit undeclared-token warnings (or errors in strict mode),
    - required variables,
    - unknown variable policy.
 6. Render template in strict mode.
 7. Compose final output blocks in fixed order.
 8. Return rendered output + diagnostics + trace metadata.
+
+Output target policy:
+- file mode render-to-file defaults to replacing `.j2` suffix beside template.
+- profile mode render-to-file defaults to `.prompts/<name>-<ulid>.md` to avoid
+  polluting version-controlled template directories.
 
 Dry-run path:
 - For write-capable operations, planner computes target paths + diff summary,
@@ -148,3 +155,5 @@ CLI:
 - Keep `sc-composer` runtime-agnostic and ATM-independent.
 - ATM integrates via library API wrappers.
 - Other tools can use `sc-compose` directly in CI/dev workflows.
+- `atm init` should call the same compose-initialization helper used by
+  `sc-compose init` for `.prompts/` and `.gitignore` bootstrap behavior.

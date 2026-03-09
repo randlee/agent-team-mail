@@ -25,6 +25,20 @@ validation.
 
 The library is runtime-agnostic and reusable by ATM and non-ATM tooling.
 
+Current packaging/release mode (required for this phase):
+- `sc-composer` and `sc-compose` are part of the ATM workspace and are
+  version-locked to the ATM release version.
+- They are released together in one ATM publish cycle (no independent versioning
+  during this mode).
+- ATM distribution install/upgrade paths must install/upgrade both the
+  `sc-composer` crate release and `sc-compose` CLI together.
+
+ATM integration contract:
+- ATM is a first-class consumer of `sc-composer` and must use the same
+  composition semantics exposed by `sc-compose`.
+- ATM integration must call `sc-composer` APIs directly; shell/subprocess
+  invocation of `sc-compose` is not an acceptable core integration path.
+
 ## 3. Functional Requirements
 
 ### FR-1: Template Inputs
@@ -63,10 +77,19 @@ The library is runtime-agnostic and reusable by ATM and non-ATM tooling.
   2. environment variables,
   3. frontmatter defaults.
 - Required variables from frontmatter must resolve after merge.
-- If frontmatter is absent, engine must extract referenced template variables
-  from the template/include graph and treat all extracted variables as required.
-- Missing required variables must fail render.
-- Missing referenced template variables must fail render (strict undefined).
+- If frontmatter is absent:
+  - engine must extract referenced template variables from the template/include graph,
+  - `validate` must emit a generated-frontmatter recommendation,
+  - diagnostics must include a fix command:
+    `sc-compose frontmatter-init <file>.j2`.
+- Tokens referenced in template/include graph but not declared in frontmatter must:
+  - be preserved in rendered output by default,
+  - emit warnings in `validate` and `render` diagnostics.
+- Missing frontmatter-declared required variables must fail render.
+- Strict mode (`--strict`) must fail render/validate on undeclared referenced tokens.
+- Undefined-variable render failures (template engine strict undefined) and
+  undeclared-token validation warnings/errors are distinct diagnostics and must
+  use distinct stable diagnostic codes.
 - Missing-variable errors must include:
   - full list of missing variable names,
   - the template/include file where each variable was referenced,
@@ -87,6 +110,9 @@ The library is runtime-agnostic and reusable by ATM and non-ATM tooling.
   - cycle detection,
   - bounded max depth,
   - deterministic expansion order.
+- Included files ending in `.j2` must be rendered using the same context/policy
+  pipeline as the parent template.
+- Include expansion must run in both file-output and stdout/stream render modes.
 - Include failures must return actionable diagnostics with include chain.
 
 ### FR-4: Safety Constraints
@@ -111,21 +137,36 @@ Resolution precedence applies only in `profile` mode.
 
 In `profile` mode, resolver must support runtime-specific search paths.
 Default order:
-- `claude`: `.claude/agents/<agent>.md` -> `.agents/<agent>.md`
-- `codex`: `.codex/agents/<agent>.md` -> `.agents/<agent>.md` -> `.claude/agents/<agent>.md`
-- `gemini`: `.gemini/agents/<agent>.md` -> `.agents/<agent>.md` -> `.claude/agents/<agent>.md`
-- `opencode`: `.opencode/agents/<agent>.md` -> `.agents/<agent>.md` -> `.claude/agents/<agent>.md`
+- `claude`: `.claude/agents/<agent>.md` -> `.agents/agents/<agent>.md` -> `.agents/<agent>.md`
+- `codex`: `.codex/agents/<agent>.md` -> `.agents/agents/<agent>.md` -> `.claude/agents/<agent>.md` -> `.agents/<agent>.md`
+- `gemini`: `.gemini/agents/<agent>.md` -> `.agents/agents/<agent>.md` -> `.claude/agents/<agent>.md` -> `.agents/<agent>.md`
+- `opencode`: `.opencode/agents/<agent>.md` -> `.agents/agents/<agent>.md` -> `.claude/agents/<agent>.md` -> `.agents/<agent>.md`
+
+Ambiguity contract:
+- When `--ai` (runtime selector) is provided, only that runtime precedence chain
+  is used.
+- When `--ai` is omitted, resolver must scan all runtime/shared roots; if more
+  than one candidate matches, command must fail with actionable ambiguity error
+  requiring `--ai`.
+- If exactly one candidate is found across all roots, it may be selected without
+  `--ai`.
 
 Profile-kind path conventions:
 - `kind=agent`:
-  - runtime-specific `<runtime>/agents/<name>.md` then shared `.agents/<name>.md`
+  - runtime-specific `<runtime>/agents/<name>.md` then shared `.agents/agents/<name>.md`
 - `kind=command`:
-  - runtime-specific `<runtime>/commands/<name>.md` then shared `.commands/<name>.md`
+  - runtime-specific `<runtime>/commands/<name>.md` then shared `.agents/commands/<name>.md`
 - `kind=skill`:
-  - runtime-specific `<runtime>/skills/<name>/SKILL.md` then shared `.skills/<name>/SKILL.md`
+  - runtime-specific `<runtime>/skills/<name>/` probe order:
+    1. `SKILL.md.j2`
+    2. `SKILL.md`
+    3. `SKILL.j2`
+  - then shared `.agents/skills/<name>/` with the same probe order.
 
 For ATM repository compatibility, `.claude/<kind>/...` remains a valid fallback
 for all runtimes when runtime-specific/shared paths are absent.
+For backwards compatibility with older shared layouts, resolver may also check
+legacy `.agents/<name>.md` for `kind=agent` after `.agents/agents/<name>.md`.
 
 The path policy must be configurable by callers.
 
@@ -145,10 +186,13 @@ Each block may be empty; output order is fixed.
 - `resolve`: print winning profile path and search trace.
 - `validate`: validate variables/includes without emitting full output.
 - `frontmatter-init`: generate default YAML frontmatter for a template/profile file.
+- `init`: repository bootstrap (`.prompts/`, `.gitignore` entry, template scan + recommendations).
 
 CLI must support:
 - `--mode <profile|file>` (default: `file`),
 - `--kind <agent|command|skill>` (required when `--mode profile`),
+- `--agent-type <name>` (profile-mode selector; alias to `--agent`),
+- `--ai <claude|codex|gemini|opencode>` (runtime selector; alias to `--runtime`),
 - `--var key=value` (repeatable),
 - `--var-file <json|yaml>`,
 - `--env-prefix <PREFIX_>`,
@@ -177,11 +221,14 @@ CLI must support:
 Render output path rules:
 - If `render` writes to stdout (default), no output filename transform is applied.
 - If `render` writes to a file without explicit `--output`, default output path is
-  derived from template filename:
-  - `<name>.xml.j2` -> `<name>.xml`
-  - `<name>.md.j2` -> `<name>.md`
-  - `<name>.txt.j2` -> `<name>.txt`
-  - `<name>.j2` -> `<name>`
+  mode-dependent:
+  - file mode: derived from template filename:
+    - `<name>.xml.j2` -> `<name>.xml`
+    - `<name>.md.j2` -> `<name>.md`
+    - `<name>.txt.j2` -> `<name>.txt`
+    - `<name>.j2` -> `<name>`
+  - profile mode (`kind=agent|command|skill`): `.prompts/<prompt-name>-<ulid>.md`
+    to avoid writing generated prompts beside version-controlled templates.
 - If `--output <path>` is provided, it overrides derived output path.
 
 `frontmatter-init` behavior:
@@ -191,6 +238,20 @@ Render output path rules:
   - `metadata` (empty map).
 - Must preserve existing body content and prepend frontmatter at file start.
 - Must fail unless `--force` is provided when frontmatter already exists.
+
+`init` behavior:
+- Create `.prompts/` at repo root.
+- Ensure `.prompts/` is present in `.gitignore` (idempotent).
+- Scan repository for `*.j2` templates and run validation.
+- Print recommendations for missing/weak frontmatter with direct fix commands.
+- CLI help for `validate` and `frontmatter-init` must include frontmatter edit
+  guidance and the direct fix command form:
+  `sc-compose frontmatter-init <file>.j2`.
+
+ATM init integration:
+- `atm init` must run compose-init-equivalent setup automatically (or call the
+  same underlying library helper) so `.prompts/` + `.gitignore` policy is
+  enforced without extra user steps.
 
 ### FR-8: Determinism and Diagnostics
 

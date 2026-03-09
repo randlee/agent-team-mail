@@ -80,6 +80,11 @@ async fn main() -> Result<()> {
             ),
         },
     )?;
+    agent_team_mail_core::daemon_client::write_daemon_lock_metadata(
+        &home_dir,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .context("Failed to write daemon lock metadata")?;
 
     // Resolve canonical log writer config once and reuse for startup merge + writer task.
     let log_writer_config = LogWriterConfig::from_env(&home_dir);

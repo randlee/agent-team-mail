@@ -79,9 +79,11 @@ Key behaviors:
      prompt: <QA prompt with fenced JSON input, scope, phase docs>
    ```
 5. Both agents run in parallel and report findings **immediately on completion** — do NOT wait for the sibling before reporting to team-lead
-5. **Check CI status** on the PR (if one exists):
+5. **Check CI status** on the PR using `atm gh monitor pr <NUMBER>` (if one exists):
+   - Reports `merge_conflict` immediately if the branch has conflicts — block QA and report to team-lead
    - CI green → rust-qa assessment is sufficient, no need to run `cargo test` locally
    - CI pending/failing → resume rust-qa (or spawn a new cargo-test agent) to run `cargo test` and investigate
+   - Use `atm gh monitor status` to verify the plugin is healthy before relying on it
 6. Report to team-lead via SendMessage as each agent completes — early findings enable faster fix cycles
 
 ### QA Prompt Requirements

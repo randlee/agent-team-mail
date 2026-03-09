@@ -296,6 +296,152 @@ fn test_spawn_claude_echoes_full_launch_command_on_failure() {
 }
 
 #[test]
+fn test_spawn_system_prompt_template_renders_before_daemon_probe() {
+    let temp_dir = TempDir::new().unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    let folder = workdir.join("templated-spawn");
+    fs::create_dir_all(&folder).unwrap();
+
+    let template = folder.join("system.md.j2");
+    fs::write(
+        &template,
+        r#"---
+required_variables:
+  - team
+  - agent
+  - runtime
+  - cwd
+  - custom
+defaults:
+  model: "unset"
+---
+team={{ team }}
+agent={{ agent }}
+runtime={{ runtime }}
+cwd={{ cwd }}
+model={{ model }}
+custom={{ custom }}
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_IDENTITY", "team-lead")
+        .args([
+            "teams",
+            "spawn",
+            "templated-agent",
+            "--team",
+            "atm-dev",
+            "--runtime",
+            "gemini",
+            "--folder",
+            folder.to_str().unwrap(),
+            "--system-prompt",
+            "system.md.j2",
+            "--model",
+            "gemini-2.5-pro",
+            "--var",
+            "custom=hello",
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("Daemon is not running")
+    );
+
+    let rendered_path = temp_dir
+        .path()
+        .join(".claude/runtime/compose/atm-dev/templated-agent/gemini-system.md");
+    assert!(
+        rendered_path.exists(),
+        "templated system prompt should be rendered before daemon readiness check"
+    );
+
+    let rendered = fs::read_to_string(&rendered_path).unwrap();
+    let canonical_folder = fs::canonicalize(&folder).unwrap();
+    assert!(rendered.contains("team=atm-dev"));
+    assert!(rendered.contains("agent=templated-agent"));
+    assert!(rendered.contains("runtime=gemini"));
+    assert!(rendered.contains(&format!("cwd={}", canonical_folder.to_string_lossy())));
+    assert!(rendered.contains("model=gemini-2.5-pro"));
+    assert!(rendered.contains("custom=hello"));
+}
+
+#[test]
+fn test_spawn_system_prompt_plain_markdown_does_not_create_composed_prompt_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let workdir = temp_dir.path().join("workdir");
+    let folder = workdir.join("plain-spawn");
+    fs::create_dir_all(&folder).unwrap();
+
+    fs::write(folder.join("system.md"), "plain system prompt").unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_IDENTITY", "team-lead")
+        .args([
+            "teams",
+            "spawn",
+            "plain-agent",
+            "--team",
+            "atm-dev",
+            "--runtime",
+            "gemini",
+            "--folder",
+            folder.to_str().unwrap(),
+            "--system-prompt",
+            "system.md",
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let rendered_path = temp_dir
+        .path()
+        .join(".claude/runtime/compose/atm-dev/plain-agent/gemini-system.md");
+    assert!(
+        !rendered_path.exists(),
+        "plain markdown system prompt should bypass compose rendering path"
+    );
+}
+
+#[test]
+fn test_spawn_var_requires_key_value_format() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("workdir").join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.args([
+        "teams",
+        "spawn",
+        "agent-invalid-var",
+        "--team",
+        "atm-dev",
+        "--runtime",
+        "gemini",
+        "--folder",
+        folder.to_str().unwrap(),
+        "--var",
+        "NOT_A_PAIR",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("Invalid --var value"));
+}
+
+#[test]
 fn test_spawn_env_team_mismatch_requires_override_team() {
     let temp_dir = TempDir::new().unwrap();
     let folder = temp_dir.path().join("spawn-folder");
