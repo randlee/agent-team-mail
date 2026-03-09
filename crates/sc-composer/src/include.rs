@@ -274,4 +274,25 @@ mod tests {
             other => panic!("unexpected error: {other}"),
         }
     }
+
+    #[test]
+    fn include_depth_limit_returns_error() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let max_depth = 2usize;
+
+        std::fs::write(root.join("a.md.j2"), "@<b.md.j2>\n").expect("write a");
+        std::fs::write(root.join("b.md.j2"), "@<c.md.j2>\n").expect("write b");
+        std::fs::write(root.join("c.md.j2"), "@<d.md.j2>\n").expect("write c");
+        std::fs::write(root.join("d.md.j2"), "done\n").expect("write d");
+
+        let err = expand_includes(root, &root.join("a.md.j2"), "@<b.md.j2>\n", max_depth, &[])
+            .expect_err("depth limit should fail");
+        match err {
+            ComposerError::IncludeError { diagnostic } => {
+                assert_eq!(diagnostic.code, "INCLUDE_DEPTH_EXCEEDED");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
 }

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::diagnostics::Diagnostic;
 use crate::{ComposeMode, ComposeRequest, ComposerError, ProfileKind, RuntimeKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,6 +12,20 @@ pub struct ResolveResult {
 pub fn resolve_input_path(request: &ComposeRequest) -> Result<ResolveResult, ComposerError> {
     if let Some(template_path) = &request.template_path {
         let resolved = absolutize(&request.root, template_path);
+        if !is_path_allowed(request, &resolved) {
+            return Err(ComposerError::IncludeError {
+                diagnostic: Box::new(
+                    Diagnostic::new(
+                        "ROOT_ESCAPE",
+                        format!(
+                            "explicit template path '{}' escapes allowed roots",
+                            resolved.display()
+                        ),
+                    )
+                    .with_path(resolved),
+                ),
+            });
+        }
         return Ok(ResolveResult {
             resolved_path: resolved.clone(),
             attempted_paths: vec![resolved],
@@ -114,6 +129,35 @@ fn absolutize(root: &std::path::Path, candidate: &std::path::Path) -> PathBuf {
     }
 }
 
+fn canonical_or_original(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_path_allowed(request: &ComposeRequest, candidate: &std::path::Path) -> bool {
+    if candidate.starts_with(&request.root) {
+        return true;
+    }
+    if request
+        .policy
+        .allowed_roots
+        .iter()
+        .any(|root| candidate.starts_with(root))
+    {
+        return true;
+    }
+
+    let candidate = canonical_or_original(candidate);
+    let mut roots = vec![canonical_or_original(&request.root)];
+    roots.extend(
+        request
+            .policy
+            .allowed_roots
+            .iter()
+            .map(|p| canonical_or_original(p)),
+    );
+    roots.into_iter().any(|root| candidate.starts_with(root))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -194,5 +238,33 @@ mod tests {
             tmp.path().join("templates/direct.md.j2")
         );
         assert_eq!(resolved.attempted_paths.len(), 1);
+    }
+
+    #[test]
+    fn explicit_template_path_outside_root_returns_root_escape() {
+        let tmp = TempDir::new().expect("tempdir");
+        let outside = TempDir::new().expect("outside");
+        std::fs::write(outside.path().join("escape.md.j2"), "escape").expect("write");
+        let request = ComposeRequest {
+            runtime: RuntimeKind::Claude,
+            mode: ComposeMode::File,
+            kind: None,
+            root: tmp.path().to_path_buf(),
+            agent: None,
+            template_path: Some(outside.path().join("escape.md.j2")),
+            vars_input: BTreeMap::new(),
+            vars_env: BTreeMap::new(),
+            guidance_block: None,
+            user_prompt: None,
+            policy: ComposePolicy::default(),
+        };
+
+        let err = resolve_input_path(&request).expect_err("root escape should fail");
+        match err {
+            ComposerError::IncludeError { diagnostic } => {
+                assert_eq!(diagnostic.code, "ROOT_ESCAPE");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }
