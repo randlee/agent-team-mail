@@ -37,3 +37,4 @@ anyhow = "1.0"
 
 # Internal dependencies
 agent-team-mail-core = { path = "crates/atm-core", version = "=0.41.0" }
+sc-composer = { path = "crates/sc-composer", version = "=0.41.0" }

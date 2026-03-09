@@ -16,6 +16,7 @@ dependencies = [
  "libc",
  "notify",
  "predicates",
+ "sc-composer",
  "serde",
  "serde_json",
  "serial_test",
