@@ -71,6 +71,7 @@ fn status_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("status")
         .arg("--team")
         .arg("atm-dev")
@@ -100,6 +101,7 @@ fn doctor_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
         .arg("--team")
         .arg("atm-dev")
