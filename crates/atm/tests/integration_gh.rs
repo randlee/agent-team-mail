@@ -32,6 +32,25 @@ poll_interval_secs = 60
     fs::write(workdir.join(".atm.toml"), content).unwrap();
 }
 
+fn write_repo_gh_monitor_config_with_owner(workdir: &Path, team: &str, owner: &str, repo: &str) {
+    let content = format!(
+        r#"[core]
+default_team = "{team}"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+provider = "github"
+team = "{team}"
+agent = "gh-monitor"
+owner = "{owner}"
+repo = "{repo}"
+poll_interval_secs = 60
+"#
+    );
+    fs::write(workdir.join(".atm.toml"), content).unwrap();
+}
+
 fn write_repo_gh_monitor_config_missing_repo(workdir: &Path, team: &str) {
     std::fs::create_dir_all(workdir).unwrap();
     let content = format!(
@@ -396,6 +415,79 @@ fn start_fake_gh_daemon_with_mode_and_delays(
     };
     wait_for_daemon_socket(home);
     child
+}
+
+#[cfg(unix)]
+fn write_fake_gh_cli_script(home: &Path, expected_repo: &str) -> PathBuf {
+    let bin_dir = home.join("fake-bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let script = bin_dir.join("gh");
+    let body = format!(
+        r#"#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+
+if "--version" in args:
+    print("gh version 2.0.0")
+    sys.exit(0)
+
+if len(args) >= 2 and args[0] == "auth" and args[1] == "status":
+    print("Logged in to github.com")
+    sys.exit(0)
+
+if "pr" in args and "list" in args:
+    if "-R" not in args:
+        print("missing -R", file=sys.stderr)
+        sys.exit(2)
+    repo = args[args.index("-R") + 1]
+    if repo != "{expected_repo}":
+        print(f"unexpected repo scope: {{repo}}", file=sys.stderr)
+        sys.exit(2)
+
+    payload = [
+        {{
+            "number": 101,
+            "title": "Add monitor dashboard",
+            "url": "https://github.com/{expected_repo}/pull/101",
+            "isDraft": False,
+            "reviewDecision": "APPROVED",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [
+                {{"conclusion": "SUCCESS"}},
+                {{"status": "IN_PROGRESS"}}
+            ]
+        }},
+        {{
+            "number": 102,
+            "title": "Fix flaky monitor test",
+            "url": "https://github.com/{expected_repo}/pull/102",
+            "isDraft": True,
+            "reviewDecision": "CHANGES_REQUESTED",
+            "mergeStateStatus": "DIRTY",
+            "statusCheckRollup": [
+                {{"conclusion": "FAILURE"}}
+            ]
+        }}
+    ]
+    print(json.dumps(payload))
+    sys.exit(0)
+
+print("unsupported gh invocation: " + " ".join(args), file=sys.stderr)
+sys.exit(1)
+"#
+    );
+
+    {
+        let mut file = fs::File::create(&script).unwrap();
+        file.write_all(body.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    bin_dir
 }
 
 #[test]
@@ -1036,4 +1128,86 @@ fn test_gh_monitor_status_json_has_stable_schema() {
 
     let _ = daemon.kill();
     let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("list")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["team"].as_str(), Some("test-team"));
+    assert_eq!(json["repo"].as_str(), Some("acme/agent-team-mail"));
+    assert_eq!(json["total_open_prs"].as_u64(), Some(2));
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items[0]["number"].as_u64(), Some(101));
+    assert_eq!(items[0]["ci"]["state"].as_str(), Some("pending"));
+    assert_eq!(items[0]["merge"].as_str(), Some("clean"));
+    assert_eq!(items[0]["review"].as_str(), Some("approved"));
+    assert_eq!(items[1]["number"].as_u64(), Some(102));
+    assert_eq!(items[1]["ci"]["state"].as_str(), Some("fail"));
+    assert_eq!(items[1]["draft"].as_bool(), Some(true));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_list_human_output_has_one_line_rollups() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("list")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("GitHub Monitor List: atm gh monitor list"));
+    assert!(text.contains("#101 [ready] [ci:PENDING 1/2] [merge:clean] [review:approved]"));
+    assert!(text.contains("#102 [draft] [ci:FAIL 0/1] [merge:dirty] [review:changes_requested]"));
 }

@@ -11,7 +11,7 @@ use agent_team_mail_core::daemon_client::{
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -78,6 +78,8 @@ enum MonitorTarget {
     Restart(MonitorRestartArgs),
     /// Query gh_monitor plugin lifecycle/availability health
     Status(MonitorHealthArgs),
+    /// List open PRs with CI/merge/review rollups (one-shot; no daemon required)
+    List(MonitorListArgs),
 }
 
 #[derive(Args, Debug)]
@@ -129,6 +131,13 @@ struct MonitorRestartArgs {
 
 #[derive(Args, Debug)]
 struct MonitorHealthArgs {}
+
+#[derive(Args, Debug)]
+struct MonitorListArgs {
+    /// Maximum number of open PRs to display (default 20)
+    #[arg(long, default_value_t = 20)]
+    limit: u32,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum StatusTargetKind {
@@ -197,6 +206,51 @@ struct GhNamespaceStatus {
     actions: Vec<&'static str>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GhPrListRow {
+    number: u64,
+    title: String,
+    url: String,
+    #[serde(rename = "isDraft", default)]
+    is_draft: bool,
+    #[serde(rename = "reviewDecision", default)]
+    review_decision: Option<String>,
+    #[serde(rename = "mergeStateStatus", default)]
+    merge_state_status: Option<String>,
+    #[serde(rename = "statusCheckRollup", default)]
+    status_check_rollup: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GhMonitorListSummary {
+    team: String,
+    repo: String,
+    generated_at: String,
+    total_open_prs: usize,
+    items: Vec<GhMonitorListItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GhMonitorListItem {
+    number: u64,
+    title: String,
+    url: String,
+    draft: bool,
+    ci: GhCiRollup,
+    merge: String,
+    review: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GhCiRollup {
+    state: String,
+    total: u64,
+    pass: u64,
+    fail: u64,
+    pending: u64,
+    neutral: u64,
+}
+
 pub fn execute(args: GhArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -247,6 +301,17 @@ pub fn execute(args: GhArgs) -> Result<()> {
             if let MonitorTarget::Status(_status) = &monitor.target {
                 let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
                 return print_namespace_status(&health, args.json);
+            }
+            if let MonitorTarget::List(list_args) = &monitor.target {
+                enforce_plugin_ready(&plugin_state, args.json)?;
+                return execute_monitor_list(
+                    team,
+                    &config,
+                    &current_dir,
+                    &home_dir,
+                    list_args.limit,
+                    args.json,
+                );
             }
 
             enforce_plugin_ready(&plugin_state, args.json)?;
@@ -334,6 +399,7 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     })?)
                 }
                 MonitorTarget::Status(_status) => unreachable!("handled above"),
+                MonitorTarget::List(_list) => unreachable!("handled above"),
             };
 
             match output {
@@ -341,6 +407,268 @@ pub fn execute(args: GhArgs) -> Result<()> {
                 GhOutput::MonitorHealth(health) => print_namespace_status(&health, args.json),
             }
         }
+    }
+}
+
+fn execute_monitor_list(
+    team: &str,
+    config: &Config,
+    current_dir: &Path,
+    home_dir: &Path,
+    limit: u32,
+    json: bool,
+) -> Result<()> {
+    let repo = resolve_monitor_repo_scope(config, current_dir, home_dir, team)?;
+    let request_limit = limit.clamp(1, 200);
+    let gh_json_fields =
+        "number,title,url,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup";
+
+    let output = Command::new("gh")
+        .args(["-R", &repo, "pr", "list", "--state", "open"])
+        .args(["--limit", &request_limit.to_string()])
+        .args(["--json", gh_json_fields])
+        .output()
+        .with_context(|| format!("failed to invoke `gh pr list` for repository {repo}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "failed to query open PRs for {} via gh CLI: {}",
+            repo,
+            stderr.trim()
+        );
+    }
+
+    let rows: Vec<GhPrListRow> = serde_json::from_slice(&output.stdout)
+        .with_context(|| "failed to parse `gh pr list` JSON output")?;
+
+    let mut items: Vec<GhMonitorListItem> = rows
+        .iter()
+        .map(|row| GhMonitorListItem {
+            number: row.number,
+            title: row.title.clone(),
+            url: row.url.clone(),
+            draft: row.is_draft,
+            ci: summarize_ci_rollup(&row.status_check_rollup),
+            merge: normalize_merge_status(row.merge_state_status.as_deref()),
+            review: normalize_review_status(row.review_decision.as_deref()),
+        })
+        .collect();
+    items.sort_by(|a, b| a.number.cmp(&b.number));
+
+    let summary = GhMonitorListSummary {
+        team: team.to_string(),
+        repo,
+        generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        total_open_prs: items.len(),
+        items,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    print_monitor_list_summary(&summary);
+    Ok(())
+}
+
+fn resolve_monitor_repo_scope(
+    config: &Config,
+    current_dir: &Path,
+    home_dir: &Path,
+    team: &str,
+) -> Result<String> {
+    let location = resolve_plugin_config_location("gh_monitor", current_dir, home_dir);
+    let Some(table) = config.plugin_config("gh_monitor") else {
+        bail!("gh_monitor plugin is not configured (run `atm gh init`)");
+    };
+
+    let cfg_team = table
+        .get("team")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+    if cfg_team.is_empty() {
+        bail!("gh_monitor configuration missing required field: team");
+    }
+    if cfg_team != team {
+        bail!(
+            "gh_monitor configured for team '{}' but command is using team '{}'",
+            cfg_team,
+            team
+        );
+    }
+
+    let repo = table
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+    if repo.is_empty() {
+        bail!("gh_monitor configuration missing required field: repo");
+    }
+
+    if repo.contains('/') {
+        return Ok(repo.to_string());
+    }
+
+    if let Some(owner) = table
+        .get("owner")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty())
+    {
+        return Ok(format!("{owner}/{repo}"));
+    }
+
+    if let Some((owner, _)) = detect_github_remote(current_dir) {
+        return Ok(format!("{owner}/{repo}"));
+    }
+
+    let cfg_path = location
+        .as_ref()
+        .map(|l| l.path.display().to_string())
+        .unwrap_or_else(|| "<unknown config>".to_string());
+    bail!(
+        "gh_monitor repo is '{}' but owner is missing and could not be inferred from git remote (config: {}). Set [plugins.gh_monitor].owner or [plugins.gh_monitor].repo as owner/repo.",
+        repo,
+        cfg_path
+    );
+}
+
+fn print_monitor_list_summary(summary: &GhMonitorListSummary) {
+    println!("GitHub Monitor List: atm gh monitor list");
+    println!("Team:              {}", summary.team);
+    println!("Repository:        {}", summary.repo);
+    println!("Open PRs:          {}", summary.total_open_prs);
+    println!("Generated At:      {}", summary.generated_at);
+    println!();
+    if summary.items.is_empty() {
+        println!("No open pull requests found.");
+        return;
+    }
+
+    for item in &summary.items {
+        let draft = if item.draft { "draft" } else { "ready" };
+        let ci_label = format!(
+            "{} {}/{}",
+            item.ci.state.to_uppercase(),
+            item.ci.pass,
+            item.ci.total
+        );
+        println!(
+            "#{} [{}] [ci:{}] [merge:{}] [review:{}] {}",
+            item.number, draft, ci_label, item.merge, item.review, item.title
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhCheckOutcome {
+    Pass,
+    Fail,
+    Pending,
+    Neutral,
+}
+
+fn summarize_ci_rollup(entries: &[serde_json::Value]) -> GhCiRollup {
+    let mut total = 0_u64;
+    let mut pass = 0_u64;
+    let mut fail = 0_u64;
+    let mut pending = 0_u64;
+    let mut neutral = 0_u64;
+
+    for entry in entries {
+        if let Some(outcome) = classify_check_outcome(entry) {
+            total += 1;
+            match outcome {
+                GhCheckOutcome::Pass => pass += 1,
+                GhCheckOutcome::Fail => fail += 1,
+                GhCheckOutcome::Pending => pending += 1,
+                GhCheckOutcome::Neutral => neutral += 1,
+            }
+        }
+    }
+
+    let state = if total == 0 {
+        "none"
+    } else if fail > 0 {
+        "fail"
+    } else if pending > 0 {
+        "pending"
+    } else if pass == total {
+        "pass"
+    } else {
+        "mixed"
+    };
+
+    GhCiRollup {
+        state: state.to_string(),
+        total,
+        pass,
+        fail,
+        pending,
+        neutral,
+    }
+}
+
+fn classify_check_outcome(entry: &serde_json::Value) -> Option<GhCheckOutcome> {
+    let conclusion = entry
+        .get("conclusion")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    if let Some(conclusion) = conclusion.as_deref() {
+        return Some(match conclusion {
+            "success" => GhCheckOutcome::Pass,
+            "failure" | "timed_out" | "startup_failure" | "action_required" => GhCheckOutcome::Fail,
+            "cancelled" | "neutral" | "skipped" => GhCheckOutcome::Neutral,
+            _ => GhCheckOutcome::Neutral,
+        });
+    }
+
+    let status = entry
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            entry
+                .get("state")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+        });
+    status.as_deref().map(|status| match status {
+        "success" => GhCheckOutcome::Pass,
+        "failure" | "error" | "timed_out" | "startup_failure" | "action_required" => {
+            GhCheckOutcome::Fail
+        }
+        "queued" | "in_progress" | "pending" | "requested" | "waiting" => GhCheckOutcome::Pending,
+        "completed" => GhCheckOutcome::Neutral,
+        "cancelled" | "neutral" | "skipped" => GhCheckOutcome::Neutral,
+        _ => GhCheckOutcome::Neutral,
+    })
+}
+
+fn normalize_review_status(value: Option<&str>) -> String {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => match raw.to_ascii_uppercase().as_str() {
+            "APPROVED" => "approved".to_string(),
+            "CHANGES_REQUESTED" => "changes_requested".to_string(),
+            "REVIEW_REQUIRED" => "review_required".to_string(),
+            _ => raw.to_ascii_lowercase(),
+        },
+        None => "unknown".to_string(),
+    }
+}
+
+fn normalize_merge_status(value: Option<&str>) -> String {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) if raw.eq_ignore_ascii_case("unknown") => "pending".to_string(),
+        Some(raw) => raw.to_ascii_lowercase(),
+        None => "unknown".to_string(),
     }
 }
 
@@ -632,6 +960,7 @@ fn namespace_actions(enabled: bool) -> Vec<&'static str> {
             "atm gh monitor pr <number>",
             "atm gh monitor workflow <name> --ref <ref>",
             "atm gh monitor run <run-id>",
+            "atm gh monitor list",
             "atm gh monitor start|stop|restart|status",
             "atm gh init",
         ]
@@ -720,6 +1049,7 @@ fn execute_init(
             "atm gh".to_string(),
             "atm gh status".to_string(),
             "atm gh monitor pr <number>".to_string(),
+            "atm gh monitor list".to_string(),
         ],
     };
 
@@ -952,5 +1282,53 @@ mod tests {
         let coords = resolve_repo_coordinates(None, Some(&detected)).unwrap();
         assert_eq!(coords.0.as_deref(), Some("acme"));
         assert_eq!(coords.1, "acme/agent-team-mail");
+    }
+
+    #[test]
+    fn summarize_ci_rollup_marks_fail_when_any_check_fails() {
+        let entries = vec![
+            serde_json::json!({"conclusion":"SUCCESS"}),
+            serde_json::json!({"conclusion":"FAILURE"}),
+            serde_json::json!({"status":"queued"}),
+        ];
+        let rollup = summarize_ci_rollup(&entries);
+        assert_eq!(rollup.state, "fail");
+        assert_eq!(rollup.total, 3);
+        assert_eq!(rollup.pass, 1);
+        assert_eq!(rollup.fail, 1);
+        assert_eq!(rollup.pending, 1);
+    }
+
+    #[test]
+    fn summarize_ci_rollup_marks_pending_without_failures() {
+        let entries = vec![
+            serde_json::json!({"conclusion":"SUCCESS"}),
+            serde_json::json!({"status":"in_progress"}),
+        ];
+        let rollup = summarize_ci_rollup(&entries);
+        assert_eq!(rollup.state, "pending");
+        assert_eq!(rollup.total, 2);
+        assert_eq!(rollup.pass, 1);
+        assert_eq!(rollup.pending, 1);
+    }
+
+    #[test]
+    fn summarize_ci_rollup_marks_pass_when_all_success() {
+        let entries = vec![
+            serde_json::json!({"conclusion":"SUCCESS"}),
+            serde_json::json!({"state":"success"}),
+        ];
+        let rollup = summarize_ci_rollup(&entries);
+        assert_eq!(rollup.state, "pass");
+        assert_eq!(rollup.total, 2);
+        assert_eq!(rollup.pass, 2);
+        assert_eq!(rollup.fail, 0);
+        assert_eq!(rollup.pending, 0);
+    }
+
+    #[test]
+    fn normalize_merge_status_maps_unknown_to_pending() {
+        assert_eq!(normalize_merge_status(Some("UNKNOWN")), "pending");
+        assert_eq!(normalize_merge_status(Some("unknown")), "pending");
     }
 }
