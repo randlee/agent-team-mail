@@ -298,10 +298,13 @@ mod tests {
                     .iter()
                     .find(|d| d.code == "MISSING_VAR")
                     .expect("expected MISSING_VAR");
-                assert_eq!(
-                    missing.path.as_ref(),
-                    Some(&tmp.path().join("base.md.j2")),
-                    "diagnostic path should point to resolved root template"
+                let diagnostic_path = missing
+                    .path
+                    .as_ref()
+                    .expect("missing diagnostic path should be present");
+                assert!(
+                    diagnostic_path.ends_with("partials/need_name.md.j2"),
+                    "diagnostic path should point to declaring include file: {missing:?}"
                 );
                 assert!(
                     missing.include_chain.len() >= 2,

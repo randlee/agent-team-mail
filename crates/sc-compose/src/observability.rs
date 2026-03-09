@@ -1,3 +1,4 @@
+use agent_team_mail_core::logging_event::LogEventV1;
 use sc_observability::{LogConfig as SharedLogConfig, Logger as SharedLogger};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -16,14 +17,13 @@ impl Logger {
     }
 
     pub fn emit(&self, action: &str, result: &str, fields: Value) {
+        let mut event = LogEventV1::builder("sc-compose", action, "sc_compose::cli")
+            .level("info")
+            .build();
+        event.outcome = Some(result.to_string());
+        event.fields = value_to_map(fields);
         // Logging is fail-open by contract.
-        let _ = self.inner.emit_action(
-            "sc-compose",
-            "sc_compose::cli",
-            action,
-            Some(result),
-            fields,
-        );
+        let _ = self.inner.emit(&event);
     }
 }
 
@@ -91,5 +91,16 @@ fn default_spool_dir(log_path: &Path) -> PathBuf {
             .join("log-spool")
     } else {
         parent.join("log-spool")
+    }
+}
+
+fn value_to_map(value: Value) -> serde_json::Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), other);
+            map
+        }
     }
 }

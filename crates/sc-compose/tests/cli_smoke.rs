@@ -42,9 +42,11 @@ fn render_write_derives_output_path_for_common_j2_suffixes() {
     let tmp = TempDir::new().expect("tempdir");
     let template_md = tmp.path().join("template.md.j2");
     let template_xml = tmp.path().join("layout.xml.j2");
+    let template_txt = tmp.path().join("notes.txt.j2");
     let template_plain = tmp.path().join("note.j2");
     fs::write(&template_md, "hello {{ name }}").expect("write md");
     fs::write(&template_xml, "<r>{{ name }}</r>").expect("write xml");
+    fs::write(&template_txt, "{{ name }} text").expect("write txt");
     fs::write(&template_plain, "{{ name }}").expect("write plain");
 
     run_sc_compose()
@@ -73,6 +75,16 @@ fn render_write_derives_output_path_for_common_j2_suffixes() {
         .arg("--var")
         .arg("name=Kai")
         .arg("render")
+        .arg(&template_txt)
+        .arg("--write")
+        .assert()
+        .success();
+    run_sc_compose()
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("--var")
+        .arg("name=Kai")
+        .arg("render")
         .arg(&template_plain)
         .arg("--write")
         .assert()
@@ -85,6 +97,10 @@ fn render_write_derives_output_path_for_common_j2_suffixes() {
     assert_eq!(
         fs::read_to_string(tmp.path().join("layout.xml")).expect("read xml output"),
         "<r>Kai</r>"
+    );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("notes.txt")).expect("read txt output"),
+        "Kai text"
     );
     assert_eq!(
         fs::read_to_string(tmp.path().join("note")).expect("read plain output"),
@@ -216,6 +232,13 @@ fn json_missing_var_diagnostic_includes_path_and_include_chain() {
     assert!(
         missing["path"].is_string(),
         "diagnostic path missing: {missing:?}"
+    );
+    let diagnostic_path = missing["path"]
+        .as_str()
+        .expect("diagnostic path should be string");
+    assert!(
+        Path::new(diagnostic_path).ends_with(Path::new("partials/need_name.md.j2")),
+        "diagnostic path should identify declaring include file: {missing:?}"
     );
     let include_chain = missing["include_chain"]
         .as_array()

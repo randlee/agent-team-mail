@@ -61,9 +61,9 @@ package = "sc-composer"
 cargo_toml = "crates/sc-composer/Cargo.toml"
 required = true
 publish = true
-publish_order = 60
-preflight_check = "locked"
-wait_after_publish_seconds = 0
+publish_order = 5
+preflight_check = "full"
+wait_after_publish_seconds = 60
 verify_install = false
 
 [[crates]]
