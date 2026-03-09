@@ -19,6 +19,14 @@ fn read_log_events(path: &Path) -> Vec<Value> {
         .collect()
 }
 
+fn read_log_lines(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .expect("log file should be readable")
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 #[test]
 fn render_round_trip() {
     let tmp = TempDir::new().expect("tempdir");
@@ -370,5 +378,106 @@ fn include_expansion_events_are_logged_for_success_and_failure() {
             .iter()
             .any(|event| event["action"] == "include_expansion" && event["outcome"] == "error"),
         "include_expansion error event missing: {events:?}"
+    );
+}
+
+#[test]
+fn sc_compose_log_level_warn_suppresses_debug_and_info_events() {
+    let tmp = TempDir::new().expect("tempdir");
+    let log_path = tmp.path().join("sc-compose.log");
+    let template = tmp.path().join("template.md.j2");
+    fs::write(
+        &template,
+        "---\nrequired_variables:\n  - name\n---\nhello {{ name }}",
+    )
+    .expect("write");
+
+    run_sc_compose()
+        .env("SC_COMPOSE_LOG_FILE", &log_path)
+        .env("SC_COMPOSE_LOG_LEVEL", "warn")
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("validate")
+        .arg(&template)
+        .assert()
+        .code(2);
+
+    let events = read_log_events(&log_path);
+    assert!(
+        events.iter().all(|event| event["level"] != "debug"),
+        "debug events must be suppressed at warn level: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["action"] == "command_end" && event["outcome"] == "error"),
+        "error events should still be logged at warn level: {events:?}"
+    );
+}
+
+#[test]
+fn sc_compose_log_format_human_writes_human_readable_lines() {
+    let tmp = TempDir::new().expect("tempdir");
+    let log_path = tmp.path().join("sc-compose-human.log");
+    let template = tmp.path().join("template.md.j2");
+    fs::write(&template, "hello {{ name }}").expect("write");
+
+    run_sc_compose()
+        .env("SC_COMPOSE_LOG_FILE", &log_path)
+        .env("SC_COMPOSE_LOG_FORMAT", "human")
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("--var")
+        .arg("name=Kai")
+        .arg("render")
+        .arg(&template)
+        .assert()
+        .success();
+
+    let lines = read_log_lines(&log_path);
+    assert!(
+        !lines.is_empty(),
+        "human log should contain at least one line"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("action=command_start")),
+        "human lines should include action fields: {lines:?}"
+    );
+    assert!(
+        serde_json::from_str::<Value>(&lines[0]).is_err(),
+        "human mode should not emit JSONL: {}",
+        lines[0]
+    );
+}
+
+#[test]
+fn sc_compose_config_prefers_atm_home_for_default_log_path() {
+    let tmp = TempDir::new().expect("tempdir");
+    let atm_home = tmp.path().join("atm-home");
+    let fake_home = tmp.path().join("fake-home");
+    let fake_userprofile = tmp.path().join("fake-userprofile");
+    let template = tmp.path().join("template.md.j2");
+    fs::write(&template, "hello {{ name }}").expect("write");
+
+    run_sc_compose()
+        .env("ATM_HOME", &atm_home)
+        .env("HOME", &fake_home)
+        .env("USERPROFILE", &fake_userprofile)
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("--var")
+        .arg("name=Kai")
+        .arg("render")
+        .arg(&template)
+        .assert()
+        .success();
+
+    let expected = atm_home.join(".config/sc-compose/logs/sc-compose.log");
+    assert!(
+        expected.exists(),
+        "ATM_HOME-derived log path should exist: {}",
+        expected.display()
     );
 }
