@@ -6,7 +6,7 @@
   "items": [
     {
       "artifact": "sc-composer",
-      "version": "0.42.1",
+      "version": "0.43.0",
       "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
@@ -17,7 +17,7 @@
     },
     {
       "artifact": "agent-team-mail-core",
-      "version": "0.42.1",
+      "version": "0.43.0",
       "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
@@ -28,7 +28,7 @@
     },
     {
       "artifact": "agent-team-mail",
-      "version": "0.42.1",
+      "version": "0.43.0",
       "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
@@ -40,7 +40,7 @@
     },
     {
       "artifact": "agent-team-mail-daemon",
-      "version": "0.42.1",
+      "version": "0.43.0",
       "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
@@ -51,7 +51,7 @@
     },
     {
       "artifact": "agent-team-mail-mcp",
-      "version": "0.42.1",
+      "version": "0.43.0",
       "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
@@ -62,7 +62,7 @@
     },
     {
       "artifact": "agent-team-mail-tui",
-      "version": "0.42.1",
+      "version": "0.43.0",
       "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
@@ -73,7 +73,7 @@
     },
     {
       "artifact": "sc-compose",
-      "version": "0.42.1",
+      "version": "0.43.0",
       "sourceRef": "refs/tags/v0.42.1",
       "publishTarget": "crates.io",
       "publish": true,
