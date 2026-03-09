@@ -22,6 +22,8 @@ Add operator-facing GH monitor reporting surfaces for fast triage:
 - Issue #564: `gh_monitor init` failure on daemon cold start (bug fix prerequisite).
 - Issue #560: `atm gh monitor list` one-line PR dashboard with CI/merge/review roll-up.
 - Issue #561: `atm gh monitor report <PR#>` detailed per-check report with matrix/timing/review/merge.
+- Issue #582: report readiness semantics hardening (`SKIPPED` handling, review
+  none vs unknown, transient mergeability retries, hard vs advisory reasons).
 
 ## Sprint Sizing
 
@@ -45,6 +47,11 @@ Add operator-facing GH monitor reporting surfaces for fast triage:
 - Mergeability can be transient (`UNKNOWN`); treat as pending until stable.
 - Matrix grouping should be deterministic with fallback to flat check list when grouping is ambiguous.
 - Report payload schema should be versioned before exposing template extension points.
+- Follow-up semantics hardening (#582):
+  - classify pass+skip (no fail/pending) as aggregate pass
+  - report no-review as `none`
+  - separate hard blocking reasons from advisory/transient reasons
+  - retry mergeability briefly before final report classification
 
 ## Acceptance Targets
 
@@ -55,3 +62,8 @@ Add operator-facing GH monitor reporting surfaces for fast triage:
 5. `atm gh monitor report <PR> --template <path>` renders using the same payload schema as `--json`.
 6. `atm gh monitor init-report [--output <path>]` writes a usable starter template for report customization.
 7. `atm gh monitor report <PR> --json` includes top-level `schema_version`.
+8. `atm gh monitor report <PR>` reports pass+skip as CI pass and includes skip
+   count explicitly.
+9. No-review state is emitted as `review_decision = none` and does not create a
+   hard merge blocker by itself.
+10. Report output separates hard blockers from advisory/transient reasons.

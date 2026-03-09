@@ -311,9 +311,31 @@ After a monitored PR run reaches terminal state:
 
 `atm gh monitor init-report [--output <path>]`:
 - Writes a starter report template to the specified path (default:
-  `gh-monitor-report.md.j2` in current directory).
+  `gh-monitor-report-template.j2` in current directory).
 - If the output file already exists, the command fails with a non-zero exit and
   a message indicating the path; the file is not overwritten.
+
+### GH-CI-FR-26 Report readiness semantics
+
+`atm gh monitor report <pr-number>` readiness classification must:
+- Treat `SKIPPED` checks as non-failing for aggregate CI state.
+- Include explicit skip count in report details (`skip=<N>` when non-zero).
+- If CI has `fail=0` and `pending=0`, aggregate CI state must be `pass` even
+  when skips are present.
+- Distinguish review-state absence from unknown state:
+  - no review decision data and no reviews -> `review_decision = "none"`
+  - ambiguous/non-empty but unrecognized review data -> `review_decision = "unknown"`
+- Only explicit blocking review states (for example `changes_requested`) may
+  become hard merge blockers.
+- Query merge readiness defensively when GitHub returns transient unknown
+  mergeability:
+  - retry/poll mergeability briefly before final classification
+  - if mergeability remains unknown, classify as transient/indeterminate (not a
+    hard blocker by itself)
+- Separate hard blockers from transient/advisory reasons in both JSON and human
+  output:
+  - `blocking_reasons` for hard blockers only
+  - `advisory_reasons` for transient/informational notes
 
 ## 12. Test Requirements
 
@@ -342,6 +364,15 @@ Test:
   - `atm gh status <target>` fails with actionable init guidance
   - `atm gh init` remains available and succeeds/fails deterministically
 - `status` output coherence during active and terminal runs
+- `monitor report` CI semantics:
+  - pass + skip (no fail/pending) yields aggregate `pass`
+  - skip count is emitted in report details
+- `monitor report` review semantics:
+  - no-review case emits `review_decision = none`
+  - unknown review metadata does not hard-block by default
+- `monitor report` merge semantics:
+  - unknown mergeability retried then surfaced as transient/indeterminate
+  - hard blockers and advisory reasons are emitted in separate fields/sections
 
 ### GH-CI-TR-3 Reporting payload
 
