@@ -6,6 +6,7 @@ members = [
     "crates/atm-daemon",
     "crates/atm-agent-mcp",
     "crates/atm-tui",
+    "crates/sc-observability",
     "crates/sc-composer",
     "crates/sc-compose",
 ]
@@ -38,3 +39,4 @@ anyhow = "1.0"
 # Internal dependencies
 agent-team-mail-core = { path = "crates/atm-core", version = "=0.42.0" }
 sc-composer = { path = "crates/sc-composer", version = "=0.42.0" }
+sc-observability = { path = "crates/sc-observability", version = "=0.42.0" }

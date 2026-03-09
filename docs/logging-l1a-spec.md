@@ -1,6 +1,6 @@
 # Logging Overhaul L.1a/L.1b Spec (Issue #188)
 
-Status: Implemented (L.1a/L.1b delivered, Phase L follow-on hardening complete)
+Status: Implemented (L.1a/L.1b delivered, Phase L follow-on hardening complete; AH.1 constants/contracts refreshed)
 Owner: `arch-ctm`
 Scope: Unified structured logging fan-in design for `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`
 
@@ -67,6 +67,12 @@ Error codes:
 - `VERSION_MISMATCH`
 - `INVALID_PAYLOAD`
 - `INTERNAL_ERROR`
+
+Code ownership:
+- Canonical error-code constants are exported by `crates/sc-observability`:
+  - `SOCKET_ERROR_VERSION_MISMATCH`
+  - `SOCKET_ERROR_INVALID_PAYLOAD`
+  - `SOCKET_ERROR_INTERNAL_ERROR`
 
 ## Canonical Event Schema
 

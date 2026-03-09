@@ -34,6 +34,9 @@ use agent_team_mail_core::logging_event::LogEventV1;
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
+use sc_observability::{
+    SOCKET_ERROR_INTERNAL_ERROR, SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH,
+};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
@@ -497,7 +500,7 @@ async fn handle_connection(
                 error!("Failed to dispatch socket request: {e}");
                 make_error_response(
                     "unknown",
-                    "INTERNAL_ERROR",
+                    SOCKET_ERROR_INTERNAL_ERROR,
                     &format!("Internal server error: {e}"),
                 )
             }
@@ -707,7 +710,7 @@ async fn handle_stream_event_command(
     if request.version != PROTOCOL_VERSION {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported protocol version {}; server supports {}",
                 request.version, PROTOCOL_VERSION
@@ -724,7 +727,7 @@ async fn handle_stream_event_command(
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INVALID_PAYLOAD",
+                SOCKET_ERROR_INVALID_PAYLOAD,
                 &format!("Failed to parse DaemonStreamEvent: {e}"),
             );
         }
@@ -830,13 +833,14 @@ async fn handle_log_event_command(
     log_event_queue: &LogEventQueue,
 ) -> SocketResponse {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+    use sc_observability::{SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH};
 
     let request: SocketRequest = match serde_json::from_str(request_str) {
         Ok(r) => r,
         Err(e) => {
             return make_error_response(
                 "unknown",
-                "INVALID_PAYLOAD",
+                SOCKET_ERROR_INVALID_PAYLOAD,
                 &format!("Failed to parse log-event request: {e}"),
             );
         }
@@ -845,7 +849,7 @@ async fn handle_log_event_command(
     if request.version != PROTOCOL_VERSION {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported protocol version {}; server supports {}",
                 request.version, PROTOCOL_VERSION
@@ -858,7 +862,7 @@ async fn handle_log_event_command(
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INVALID_PAYLOAD",
+                SOCKET_ERROR_INVALID_PAYLOAD,
                 &format!("Failed to parse LogEventV1: {e}"),
             );
         }
@@ -867,7 +871,7 @@ async fn handle_log_event_command(
     if event.v != 1 {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported log event schema version {}; expected 1",
                 event.v
@@ -878,7 +882,7 @@ async fn handle_log_event_command(
     if let Err(e) = event.validate() {
         return make_error_response(
             &request.request_id,
-            "INVALID_PAYLOAD",
+            SOCKET_ERROR_INVALID_PAYLOAD,
             &format!("Log event validation failed: {e}"),
         );
     }
@@ -1301,7 +1305,7 @@ async fn handle_hook_event_command_with_dedup(
     if request.version != PROTOCOL_VERSION {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             "unsupported version",
         );
     }
@@ -1952,7 +1956,7 @@ async fn handle_launch_command(request_str: &str, launch_tx: &LaunchSender) -> S
     if request.version != PROTOCOL_VERSION {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported protocol version {}; server supports {}",
                 request.version, PROTOCOL_VERSION
@@ -1966,7 +1970,7 @@ async fn handle_launch_command(request_str: &str, launch_tx: &LaunchSender) -> S
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INVALID_PAYLOAD",
+                SOCKET_ERROR_INVALID_PAYLOAD,
                 &format!("Failed to parse launch payload: {e}"),
             );
         }
@@ -2452,7 +2456,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
     if request.version != PROTOCOL_VERSION {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported protocol version {}; server supports {}",
                 request.version, PROTOCOL_VERSION
@@ -2465,7 +2469,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INVALID_PAYLOAD",
+                SOCKET_ERROR_INVALID_PAYLOAD,
                 &format!("Failed to parse gh-monitor payload: {e}"),
             );
         }
@@ -2493,7 +2497,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INTERNAL_ERROR",
+                SOCKET_ERROR_INTERNAL_ERROR,
                 &format!("Failed to read gh monitor health: {e}"),
             );
         }
@@ -2588,7 +2592,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
                 _ => {
                     return make_error_response(
                         &request.request_id,
-                        "INVALID_PAYLOAD",
+                        SOCKET_ERROR_INVALID_PAYLOAD,
                         "PR target must be a positive integer",
                     );
                 }
@@ -2665,7 +2669,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         );
         return make_error_response(
             &request.request_id,
-            "INTERNAL_ERROR",
+            SOCKET_ERROR_INTERNAL_ERROR,
             &format!("Failed to persist gh monitor state: {e}"),
         );
     }
@@ -2737,7 +2741,7 @@ async fn handle_gh_monitor_control_command(
     if request.version != PROTOCOL_VERSION {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported protocol version {}; server supports {}",
                 request.version, PROTOCOL_VERSION
@@ -2750,7 +2754,7 @@ async fn handle_gh_monitor_control_command(
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INVALID_PAYLOAD",
+                SOCKET_ERROR_INVALID_PAYLOAD,
                 &format!("Failed to parse gh-monitor-control payload: {e}"),
             );
         }
@@ -2779,7 +2783,7 @@ async fn handle_gh_monitor_control_command(
             Err(e) => {
                 return make_error_response(
                     &request.request_id,
-                    "INTERNAL_ERROR",
+                    SOCKET_ERROR_INTERNAL_ERROR,
                     &format!("failed to update monitor lifecycle state: {e}"),
                 );
             }
@@ -2828,7 +2832,7 @@ async fn handle_gh_monitor_control_command(
                 Err(e) => {
                     return make_error_response(
                         &request.request_id,
-                        "INTERNAL_ERROR",
+                        SOCKET_ERROR_INTERNAL_ERROR,
                         &format!("failed to stop monitor lifecycle: {e}"),
                     );
                 }
@@ -2899,7 +2903,7 @@ async fn handle_gh_monitor_control_command(
                 Err(e) => {
                     return make_error_response(
                         &request.request_id,
-                        "INTERNAL_ERROR",
+                        SOCKET_ERROR_INTERNAL_ERROR,
                         &format!("failed to restart monitor lifecycle: {e}"),
                     );
                 }
@@ -2933,7 +2937,7 @@ async fn handle_gh_monitor_health_command(
     if request.version != PROTOCOL_VERSION {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported protocol version {}; server supports {}",
                 request.version, PROTOCOL_VERSION
@@ -2979,7 +2983,7 @@ async fn handle_gh_monitor_health_command(
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INTERNAL_ERROR",
+                SOCKET_ERROR_INTERNAL_ERROR,
                 &format!("Failed to read gh monitor health: {e}"),
             );
         }
@@ -3068,7 +3072,7 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
     if request.version != PROTOCOL_VERSION {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported protocol version {}; server supports {}",
                 request.version, PROTOCOL_VERSION
@@ -3081,7 +3085,7 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INVALID_PAYLOAD",
+                SOCKET_ERROR_INVALID_PAYLOAD,
                 &format!("Failed to parse gh-status payload: {e}"),
             );
         }
@@ -3102,7 +3106,7 @@ async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> 
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INTERNAL_ERROR",
+                SOCKET_ERROR_INTERNAL_ERROR,
                 &format!("Failed to read gh monitor state: {e}"),
             );
         }
@@ -4186,7 +4190,7 @@ async fn handle_control_command(
     if request.version != PROTOCOL_VERSION {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported protocol version {}; server supports {}",
                 request.version, PROTOCOL_VERSION
@@ -4199,7 +4203,7 @@ async fn handle_control_command(
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INVALID_PAYLOAD",
+                SOCKET_ERROR_INVALID_PAYLOAD,
                 &format!("Failed to parse control payload: {e}"),
             );
         }
@@ -4667,7 +4671,7 @@ fn parse_and_dispatch(
     if request.version != PROTOCOL_VERSION {
         return Ok(make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported protocol version {}; server supports {}",
                 request.version, PROTOCOL_VERSION
@@ -4689,49 +4693,49 @@ fn parse_and_dispatch(
         // If it somehow reaches here, return a clear internal error.
         "launch" => make_error_response(
             &request.request_id,
-            "INTERNAL_ERROR",
+            SOCKET_ERROR_INTERNAL_ERROR,
             "Launch command should have been handled by the async path",
         ),
         // "control" is handled asynchronously before parse_and_dispatch is called.
         "control" => make_error_response(
             &request.request_id,
-            "INTERNAL_ERROR",
+            SOCKET_ERROR_INTERNAL_ERROR,
             "Control command should have been handled by the async path",
         ),
         // "hook-event" is handled asynchronously before parse_and_dispatch is called.
         "hook-event" => make_error_response(
             &request.request_id,
-            "INTERNAL_ERROR",
+            SOCKET_ERROR_INTERNAL_ERROR,
             "hook-event command should have been handled by the async path",
         ),
         // "stream-event" is handled asynchronously before parse_and_dispatch is called.
         "stream-event" => make_error_response(
             &request.request_id,
-            "INTERNAL_ERROR",
+            SOCKET_ERROR_INTERNAL_ERROR,
             "stream-event command should have been handled by the async path",
         ),
         // "gh-monitor" is handled asynchronously before parse_and_dispatch is called.
         "gh-monitor" => make_error_response(
             &request.request_id,
-            "INTERNAL_ERROR",
+            SOCKET_ERROR_INTERNAL_ERROR,
             "gh-monitor command should have been handled by the async path",
         ),
         // "gh-status" is handled asynchronously before parse_and_dispatch is called.
         "gh-status" => make_error_response(
             &request.request_id,
-            "INTERNAL_ERROR",
+            SOCKET_ERROR_INTERNAL_ERROR,
             "gh-status command should have been handled by the async path",
         ),
         // "gh-monitor-control" is handled asynchronously before parse_and_dispatch is called.
         "gh-monitor-control" => make_error_response(
             &request.request_id,
-            "INTERNAL_ERROR",
+            SOCKET_ERROR_INTERNAL_ERROR,
             "gh-monitor-control command should have been handled by the async path",
         ),
         // "gh-monitor-health" is handled asynchronously before parse_and_dispatch is called.
         "gh-monitor-health" => make_error_response(
             &request.request_id,
-            "INTERNAL_ERROR",
+            SOCKET_ERROR_INTERNAL_ERROR,
             "gh-monitor-health command should have been handled by the async path",
         ),
         other => make_error_response(
@@ -4872,7 +4876,7 @@ fn handle_session_query_team(
             Err(_) => {
                 return make_error_response(
                     &request.request_id,
-                    "INTERNAL_ERROR",
+                    SOCKET_ERROR_INTERNAL_ERROR,
                     "Failed to resolve home directory",
                 );
             }
@@ -5032,7 +5036,7 @@ fn handle_register_hint(
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INTERNAL_ERROR",
+                SOCKET_ERROR_INTERNAL_ERROR,
                 &format!("Failed to resolve ATM home: {e}"),
             );
         }
@@ -5160,7 +5164,7 @@ fn handle_agent_state(
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INTERNAL_ERROR",
+                SOCKET_ERROR_INTERNAL_ERROR,
                 &format!("Failed to resolve ATM home: {e}"),
             );
         }
@@ -5232,7 +5236,7 @@ fn handle_list_agents(
             Err(e) => {
                 return make_error_response(
                     &request.request_id,
-                    "INTERNAL_ERROR",
+                    SOCKET_ERROR_INTERNAL_ERROR,
                     &format!("Failed to resolve ATM home: {e}"),
                 );
             }
@@ -6629,7 +6633,7 @@ poll_interval_secs = 1
             parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         // In parse_and_dispatch the "launch" arm returns INTERNAL_ERROR
         assert_eq!(resp.status, "error");
-        assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
+        assert_eq!(resp.error.unwrap().code, SOCKET_ERROR_INTERNAL_ERROR);
     }
 
     #[test]
@@ -7943,7 +7947,7 @@ exit 1
         let resp =
             parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
-        assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
+        assert_eq!(resp.error.unwrap().code, SOCKET_ERROR_VERSION_MISMATCH);
     }
 
     #[test]
@@ -8935,7 +8939,7 @@ exit 1
         let resp =
             parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
-        assert_eq!(resp.error.unwrap().code, "INTERNAL_ERROR");
+        assert_eq!(resp.error.unwrap().code, SOCKET_ERROR_INTERNAL_ERROR);
     }
 
     #[cfg(unix)]
@@ -9625,7 +9629,7 @@ exit 1
         let req_json = r#"{"version":99,"request_id":"r8","command":"hook-event","payload":{"event":"session_start","agent":"team-lead","team":"atm-dev","session_id":"s1"}}"#;
         let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "error");
-        assert_eq!(resp.error.unwrap().code, "VERSION_MISMATCH");
+        assert_eq!(resp.error.unwrap().code, SOCKET_ERROR_VERSION_MISMATCH);
     }
 
     #[cfg(unix)]
@@ -10707,7 +10711,7 @@ exit 1
         let req_str = serde_json::to_string(&req_json).unwrap();
         let resp = handle_stream_event_command(&req_str, &store, &new_stream_event_sender()).await;
         assert_eq!(resp.status, "error");
-        assert_eq!(resp.error.unwrap().code, "INVALID_PAYLOAD");
+        assert_eq!(resp.error.unwrap().code, SOCKET_ERROR_INVALID_PAYLOAD);
     }
 
     #[tokio::test]
@@ -10990,7 +10994,7 @@ exit 1
         assert_eq!(resp.status, "error");
         assert_eq!(
             resp.error.unwrap().code,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             "wrong schema version should produce VERSION_MISMATCH"
         );
     }
@@ -11006,7 +11010,7 @@ exit 1
         assert_eq!(resp.status, "error");
         assert_eq!(
             resp.error.unwrap().code,
-            "INVALID_PAYLOAD",
+            SOCKET_ERROR_INVALID_PAYLOAD,
             "malformed JSON should produce INVALID_PAYLOAD"
         );
     }
@@ -11036,7 +11040,7 @@ exit 1
         assert_eq!(resp.status, "error");
         assert_eq!(
             resp.error.unwrap().code,
-            "INVALID_PAYLOAD",
+            SOCKET_ERROR_INVALID_PAYLOAD,
             "missing required field should produce INVALID_PAYLOAD"
         );
     }
@@ -11057,7 +11061,7 @@ exit 1
         assert_eq!(resp.status, "error");
         assert_eq!(
             resp.error.unwrap().code,
-            "INVALID_PAYLOAD",
+            SOCKET_ERROR_INVALID_PAYLOAD,
             "empty action should produce INVALID_PAYLOAD"
         );
     }
